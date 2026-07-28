@@ -4,6 +4,7 @@ import { IC } from '../components/icons.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
 import { SkeletonCard } from '../components/Skeleton.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
+import useIsMobile from '../useIsMobile.js';
 import PanelChart from '../components/PanelChart.jsx';
 
 const CHART_FONT="'JetBrains Mono',monospace";
@@ -19,10 +20,11 @@ export default function AnalyticsPanel({
   loadAnalytics,
   analyticsData,
 }){
+  const isMobile=useIsMobile();
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
         <PanelHeader t={t} icon={<IC.BarChart/>} title="Statistics"
           subtitle="Overall HyprChat usage from recorded chat token telemetry."/>
-        <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+        <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
           <div style={{maxWidth:980}}>
             <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
               {[7,30,90,0].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d===0?"All":`${d}d`}</button>)}

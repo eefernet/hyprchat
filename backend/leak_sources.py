@@ -29,26 +29,56 @@ block scripted access, so those are served through SearXNG ``site:`` scoping ins
 """
 
 import asyncio
-import os
+import json
 import urllib.parse
+
+import config
 
 
 # ── Thin, monkeypatchable wrappers around research helpers (call-time import
 #    keeps this module free of an import cycle with research.py) ──
 
-async def web_get(http, url: str, **kwargs):
-    from research import web_get as _rw
-    return await _rw(http, url, **kwargs)
+class _MiniResp:
+    """Minimal response shim (.status_code / .json() / .text) over a bounded fetch."""
+
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self._body = body
+
+    @property
+    def text(self) -> str:
+        return self._body.decode("utf-8", "replace")
+
+    def json(self):
+        return json.loads(self._body)
 
 
-async def searxng_search(http, searxng_url: str, query: str, count: int = 10) -> list:
+async def web_get(http, url: str, *, timeout: float = 15.0,
+                  headers: dict | None = None, max_bytes: int = 1_500_000):
+    """Bounded fetch for the fixed-host JSON adapters via research.fetch_bytes_safely
+    (size cap + per-hop redirect safety) instead of the uncapped research.web_get.
+    Non-200s are logged — a quietly-403ing CourtListener would otherwise be
+    indistinguishable from "no results"."""
+    from research import fetch_bytes_safely
+    status, _hdrs, _final, body = await fetch_bytes_safely(
+        http, url, timeout=timeout, headers=headers, max_bytes=max_bytes)
+    if status != 200:
+        print(f"[LEAK] {url.split('?', 1)[0]} returned HTTP {status}")
+    return _MiniResp(status, body)
+
+
+async def searxng_search(http, searxng_url: str, query: str, count: int = 10,
+                         *, fallback_state: dict | None = None) -> list:
     from research import _search_searxng
-    return await _search_searxng(http, searxng_url, query, count)
+    return await _search_searxng(http, searxng_url, query, count,
+                                 fallback_state=fallback_state)
 
 
-async def wikileaks_search(http, searxng_url: str, query: str, count: int = 12) -> list:
+async def wikileaks_search(http, searxng_url: str, query: str, count: int = 12,
+                           *, fallback_state: dict | None = None) -> list:
     from research import _search_wikileaks
-    return await _search_wikileaks(http, searxng_url, query, count)
+    return await _search_wikileaks(http, searxng_url, query, count,
+                                   fallback_state=fallback_state)
 
 
 def clean_html(text: str) -> str:
@@ -122,7 +152,7 @@ async def search_courtlistener(http, query: str, limit: int) -> list[dict]:
     try:
         params = urllib.parse.urlencode({"q": query, "type": "r"})
         headers = {"User-Agent": "Mozilla/5.0"}
-        token = os.getenv("COURTLISTENER_TOKEN")
+        token = config.COURTLISTENER_TOKEN
         if token:
             headers["Authorization"] = f"Token {token}"
         r = await web_get(
@@ -185,10 +215,12 @@ async def search_archive_org(http, query: str, limit: int) -> list[dict]:
         return []
 
 
-async def search_wikileaks(http, query: str, limit: int, *, searxng_url: str = "") -> list[dict]:
+async def search_wikileaks(http, query: str, limit: int, *, searxng_url: str = "",
+                           fallback_state: dict | None = None) -> list[dict]:
     """WikiLeaks documents via the existing research helper (SearXNG-backstopped)."""
     try:
-        raw = await wikileaks_search(http, searxng_url, query, limit)
+        raw = await wikileaks_search(http, searxng_url, query, limit,
+                                     fallback_state=fallback_state)
         out = []
         for item in (raw or [])[:limit]:
             url = item.get("url") or ""
@@ -207,11 +239,13 @@ async def search_wikileaks(http, query: str, limit: int, *, searxng_url: str = "
 # ── SearXNG-scoped adapters (hosts that block scripted access) ──
 
 async def _searxng_site(http, query: str, limit: int, *, searxng_url: str,
-                        site: str, source: str, kind: str) -> list[dict]:
+                        site: str, source: str, kind: str,
+                        fallback_state: dict | None = None) -> list[dict]:
     if not searxng_url:
         return []
     try:
-        raw = await searxng_search(http, searxng_url, f"{query} site:{site}", max(limit, 6))
+        raw = await searxng_search(http, searxng_url, f"{query} site:{site}", max(limit, 6),
+                                   fallback_state=fallback_state)
         out = []
         for item in (raw or [])[:limit]:
             url = item.get("url") or ""
@@ -239,11 +273,14 @@ _SCOPED_SOURCES = [
 
 
 async def gather_leak_sources(http, query: str, *, depth: int = 4,
-                              searxng_url: str = "", deadline: float = 25.0) -> list[dict]:
+                              searxng_url: str = "", deadline: float = 25.0,
+                              fallback_state: dict | None = None) -> list[dict]:
     """Run every leak/FOIA/gov/court adapter concurrently and return a deduped,
     normalized result list. Fails open: a broken or slow adapter contributes
     nothing rather than raising; an overall-deadline overrun returns whatever
-    finished in time.
+    finished in time. `fallback_state` is the caller's shared Google-fallback
+    budget ({"remaining": N}) — without it, 8 SearXNG-backed adapters hitting a
+    dead SearXNG would each fire an unbudgeted Google scrape.
     """
     limit = _limit_for_depth(depth)
 
@@ -251,25 +288,40 @@ async def gather_leak_sources(http, query: str, *, depth: int = 4,
         search_doj(http, query, limit),
         search_courtlistener(http, query, limit),
         search_archive_org(http, query, limit),
-        search_wikileaks(http, query, limit, searxng_url=searxng_url),
+        search_wikileaks(http, query, limit, searxng_url=searxng_url,
+                         fallback_state=fallback_state),
     ]
     for site, source, kind in _SCOPED_SOURCES:
         coros.append(_searxng_site(
             http, query, limit, searxng_url=searxng_url,
             site=site, source=source, kind=kind,
+            fallback_state=fallback_state,
         ))
+
+    # Cap adapter concurrency: this wave runs alongside the caller's own
+    # SearXNG batches, so 11 simultaneous adapters would 429 the instance.
+    sem = asyncio.Semaphore(3)
+
+    async def _capped(coro):
+        async with sem:
+            return await coro
 
     # asyncio.wait (not wait_for) so adapters that finished before the deadline
     # still contribute — a slow straggler is cancelled, not the whole wave.
-    tasks = [asyncio.ensure_future(c) for c in coros]
+    tasks = [asyncio.ensure_future(_capped(c)) for c in coros]
     try:
         done, pending = await asyncio.wait(tasks, timeout=deadline)
     except Exception:
         for t in tasks:
             t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         return []
     for t in pending:
         t.cancel()
+    if pending:
+        # Reap cancelled stragglers so their sockets close deterministically
+        # (and "Task was destroyed but it is pending!" never logs).
+        await asyncio.gather(*pending, return_exceptions=True)
 
     # Iterate in submission order (direct API adapters before SearXNG-scoped
     # ones) so URL dedup is deterministic: a direct-archive hit wins over a

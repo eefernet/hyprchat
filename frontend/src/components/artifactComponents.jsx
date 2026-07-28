@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 
 import { API } from '../session.js';
+import { parseUtcishMs } from '../datetime.js';
 import useIsMobile from '../useIsMobile.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
@@ -437,11 +438,13 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     // the same composition without copy-pasting from the gallery.
     if(seedLock&&seed===""&&d.params?.seed!=null)setSeed(String(d.params.seed));
     setJob({id:jid,started:Date.now(),status:"queued",params:d.params});
+    let pollFails=0; // tolerate transient blips — the backend job keeps running
     pollRef.current=setInterval(async()=>{
       try{
         const r=await fetch(`${API}/api/images/jobs/${jid}`);
         const s=await r.json();
         if(!r.ok)throw new Error(s.detail||`HTTP ${r.status}`);
+        pollFails=0;
         if(s.status==="done"){
           stopPoll();
           setJob(null);
@@ -453,7 +456,10 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
         }else{
           setJob(p=>p?{...p,status:s.status,queuePos:s.queue_position}:p);
         }
-      }catch(e){stopPoll();setJob(null);setError(String(e.message||e));}
+      }catch(e){
+        pollFails+=1;
+        if(pollFails>=3){stopPoll();setJob(null);setError(String(e.message||e));}
+      }
     },1000);
   };
   const cancelJob=async()=>{
@@ -759,7 +765,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
         <div><span style={{color:t.mut}}>Status</span><select value={a.status||"draft"} onChange={e=>patch({status:e.target.value})} style={{width:"100%",marginTop:4,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:11}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select></div>
         <div><span style={{color:t.mut}}>Health</span><div style={{marginTop:4,color:a.exists_status==="missing"?t.err:a.exists_status==="present"?t.ok:t.warm,fontWeight:800}}>{a.exists_status||"unknown"}</div></div>
         <div><span style={{color:t.mut}}>Size</span><div style={{marginTop:4}}>{a.size_bytes?`${(a.size_bytes/1024).toFixed(a.size_bytes>1048576?1:0)} KB`:"unknown"}</div></div>
-        <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(a.created_at).toLocaleString():""}</div></div>
+        <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(parseUtcishMs(a.created_at)).toLocaleString():""}</div></div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Actions</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
@@ -795,7 +801,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       {timelineRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Timeline</div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
           {timelineRows.slice(0,40).map(ev=>{const md=ev.metadata||{};const rel=md.related_artifact_id||(Array.isArray(md.related_artifact_ids)?md.related_artifact_ids[0]:null);return <div key={ev.id} style={{display:"grid",gridTemplateColumns:"82px 1fr",gap:8,fontSize:11,color:t.dim,lineHeight:1.45}}>
-            <div style={{color:t.mut,fontSize:9}}>{ev.created_at?new Date(ev.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
+            <div style={{color:t.mut,fontSize:9}}>{ev.created_at?new Date(parseUtcishMs(ev.created_at)).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
             <div style={{borderLeft:`2px solid ${ev.source==="event"?t.acc:t.brd}55`,paddingLeft:8,minWidth:0}}>
               <div style={{color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(ev.event_type||"event").replace(/_/g," ")}</div>
               <div style={{wordBreak:"break-word"}}>{ev.summary||""}</div>
@@ -837,10 +843,10 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
   const km=artifactKindMeta(a.kind,t,meta);
   const KindIcon=km.icon;
   const title=a.title||a.filename||"Artifact";
-  const created=a.created_at?new Date(a.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
+  const created=a.created_at?new Date(parseUtcishMs(a.created_at)).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
   const rename=async()=>{
-    const next=confirmAction?await confirmAction({title:"Rename artifact",promptText:title,inputLabel:"Artifact name",confirmLabel:"Rename",tone:"info"})
-      :window.prompt("Artifact name",title);
+    if(!confirmAction)return; // themed dialog is always threaded; no native fallback
+    const next=await confirmAction({title:"Rename artifact",promptText:title,inputLabel:"Artifact name",confirmLabel:"Rename",tone:"info"});
     if(!next)return;
     const clean=String(next).trim();
     if(clean&&clean!==title)await onPatch?.(a.id,{title:clean});

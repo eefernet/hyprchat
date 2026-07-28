@@ -25,6 +25,7 @@ import {
   proxiedImageUrl,
   userScopedUrl,
 } from './session.js';
+import { apiJson } from './api.js';
 import {
   BACKGROUND_EFFECTS,
   FONTS,
@@ -102,6 +103,7 @@ import {
   _phaseFromEvent,
   _quickSearchPayloadFromEvents,
   _quickSourceForUrl,
+  _qsFaviconUrl,
   _qsHost,
   _runIdsFromEvents,
   citeOptsFor,
@@ -1512,8 +1514,8 @@ function HyprChat(){
       setPanel("chat");
       setLoadingConv(false);
     }}).catch(()=>{});
-    fetch(`${API}/api/knowledge-bases`).then(r=>r.json()).then(setKbs).catch(()=>{});
-    fetch(`${API}/api/tools`).then(r=>r.json()).then(setTools).catch(()=>{});
+    apiJson("/api/knowledge-bases").then(d=>setKbs(Array.isArray(d)?d:[])).catch(()=>{});
+    apiJson("/api/tools").then(d=>setTools(Array.isArray(d)?d:[])).catch(()=>{});
     refreshConnectors();
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(d=>setMcs((d||[]).map(mc=>({...mc,parameters:normalizeProfileParams(mc)})))).catch(()=>{});
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
@@ -1634,7 +1636,7 @@ function HyprChat(){
     return()=>clearTimeout(id);
   },[searchLoading]);
   useEffect(()=>{
-    if(!actId||!evts.some(e=>e.data?.workflow_id||e.type==="tool_end"||e.type==="tool_progress"))return;
+    if(!actId||!evts.some(e=>e.data?.workflow_id||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_progress"))return;
     const id=setTimeout(()=>refreshCoderWorkflows(actId),500);
     return()=>clearTimeout(id);
   },[evts,actId,refreshCoderWorkflows]);
@@ -1985,7 +1987,7 @@ function HyprChat(){
       metrics.pages_read?`${metrics.pages_read} pages read`:"",
       metrics.searches?`${metrics.searches} searches`:"",
       metrics.coverage_score!==undefined?`coverage ${metrics.coverage_score}/100`:"",
-      stamp?new Date(stamp).toLocaleString():new Date().toLocaleString(),
+      stamp?new Date(_parseUtcishMs(stamp)).toLocaleString():new Date().toLocaleString(),
     ].filter(Boolean);
     return <div className="research-print-page">
       <header className="report-cover">
@@ -2998,7 +3000,7 @@ function HyprChat(){
         // Stop: finalize the partial reply so it doesn't stay stuck in
         // streaming state (blinking cursor, hidden action toolbar). The
         // backend persists the partial content itself on disconnect.
-        uConv(cid,c=>{const m=[...(c.messages||[])];const last=m[m.length-1];if(last&&(last.role==="assistant"||last.isS))m[m.length-1]={...last,role:"assistant",isS:false,metadata:{...(last.metadata||{}),in_progress:false}};return{...c,messages:m};});
+        uConv(cid,c=>{const m=[...(c.messages||[])];const last=m[m.length-1];if(last&&(last.role==="assistant"||last.isS))m[m.length-1]={...last,role:"assistant",isS:false,metadata:{...(last.metadata||{}),in_progress:false},...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
       }}
     setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
@@ -4095,7 +4097,7 @@ function HyprChat(){
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
             <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:700,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-              <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+              <img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
               <span>{lt.length>45?lt.slice(0,45)+"...":lt}</span>
             </a>
             <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center"}}>👁</button>
@@ -4124,7 +4126,7 @@ function HyprChat(){
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
             <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-              <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+              <img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
               <span>{lt.length>45?lt.slice(0,45)+"...":lt}</span>
             </a>
             <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center"}}>👁</button>
@@ -4140,7 +4142,7 @@ function HyprChat(){
         const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
         const display=lu.length>60?lu.slice(0,57)+"...":lu;
         return <span key={k}><a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.warm}10`,border:`1px solid ${t.warm}28`,borderRadius:6,color:t.warm,textDecoration:"none",fontSize:11,maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",verticalAlign:"middle"}}>
-          <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:11,height:11,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+          <img src={_qsFaviconUrl(hn,16)} style={{width:11,height:11,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
           <span>{display}</span>
         </a>{trail}</span>;
       }
@@ -6691,11 +6693,11 @@ function HyprChat(){
 
       :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
-      :(panel==="tasks"||panel==="notifications")?<TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/>
+      :(panel==="tasks"||panel==="notifications")?<TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/>
 
       :panel==="email"?<EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
 
-      :panel==="notes"?<NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction}/>
+      :panel==="notes"?<NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
 
       :panel==="calendar"?<CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
 
@@ -7844,7 +7846,7 @@ function HyprChat(){
                         {personaName}
                       </span>
                       :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
-                    {msg.created_at&&<span style={{fontSize:10,color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(msg.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+                    {msg.created_at&&<span style={{fontSize:10,color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
                     {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
                   </div>}
                   <div style={{background:isU?`${t.surface}DE`:isDaedalusOutput?"transparent":`${t.surface}3D`,padding:isU?"9px 13px":isDaedalusOutput?"0":"10px 14px",borderRadius:isU?8:isDaedalusOutput?0:10,border:isU?`1px solid ${t.brd}34`:isDaedalusOutput?"none":`1px solid ${t.brd}1C`,lineHeight:1.68,fontSize:fontSize,color:isU?t.text:t.dim}}>

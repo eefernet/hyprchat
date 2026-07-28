@@ -8,6 +8,7 @@ import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
 import { colorFor } from '../components/identityColor.js';
 import useIsMobile from '../useIsMobile.js';
+import { SkeletonList } from '../components/Skeleton.jsx';
 
 const EMPTY_ACCOUNT={label:"",imap_host:"",imap_port:993,imap_ssl:true,smtp_host:"",smtp_port:587,smtp_ssl:true,username:"",password:"",from_address:""};
 // Hash the bare address (not the display-name formatting) so a sender's avatar color is stable.
@@ -23,6 +24,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   const [compose,setCompose]=useState(null);    // {to,subject,body}
   const [unreadOnly,setUnreadOnly]=useState(false);
   const [polling,setPolling]=useState(false);
+  const [loaded,setLoaded]=useState(false);
   const [err,setErr]=useState("");
 
   const loadAccounts=useCallback(async()=>{
@@ -30,6 +32,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   },[]);
   const loadMessages=useCallback(async()=>{
     try{setMessages(await apiJson(`/api/email/messages?limit=100${unreadOnly?"&unread_only=true":""}`));}catch(e){setErr(String(e.message||e));}
+    finally{setLoaded(true);}
   },[unreadOnly]);
   useEffect(()=>{loadAccounts();loadMessages();},[loadAccounts,loadMessages]);
 
@@ -54,7 +57,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       const r=await fetch(`${API}/api/email/poll`,{method:"POST"});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-      if(d.ran===false)setErr("A background poll is already running — showing its results.");
+      if(d.ran===false)notify&&notify({type:"info",text:"Poll already running",detail:"A background poll is in progress — showing its results.",duration:3000});
       await loadMessages();await loadAccounts();
     }catch(e){setErr(String(e.message||e));}
     finally{setPolling(false);}
@@ -117,14 +120,14 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
         <div style={{flex:1}}/>
         <button onClick={()=>testAccount(a.id)} style={{...btnS(t.acc),padding:"3px 8px",fontSize:9}}>Test</button>
         <button onClick={()=>setAcctForm({id:a.id,label:a.label,imap_host:a.imap_host,imap_port:a.imap_port,imap_ssl:a.imap_ssl,smtp_host:a.smtp_host,smtp_port:a.smtp_port,smtp_ssl:a.smtp_ssl,username:a.username,password:"",from_address:a.from_address})} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}><IC.Pencil/></button>
-        <button onClick={async()=>{if(await confirmAction({title:"Remove email account",body:"Remove this email account and its cached messages?",confirmLabel:"Remove",tone:"danger"})){await fetch(`${API}/api/email/accounts/${a.id}`,{method:"DELETE"});loadAccounts();loadMessages();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
+        <button onClick={async()=>{if(!await confirmAction({title:"Remove email account",body:"Remove this email account and its cached messages?",confirmLabel:"Remove",tone:"danger"}))return;try{await apiJson(`/api/email/accounts/${a.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Remove failed",detail:String(e.message||e)});}finally{loadAccounts();loadMessages();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
       </div>
       <label style={{fontSize:10,color:a.allow_autonomous_send?t.warm:t.mut,display:"flex",gap:6,alignItems:"center",marginTop:5}}>
-        <input type="checkbox" checked={!!a.allow_autonomous_send} onChange={async e=>{await fetch(`${API}/api/email/accounts/${a.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({allow_autonomous_send:e.target.checked})});loadAccounts();}}/>
+        <input type="checkbox" checked={!!a.allow_autonomous_send} onChange={async e=>{try{await apiJson(`/api/email/accounts/${a.id}`,{method:"PATCH",body:{allow_autonomous_send:e.target.checked}});}catch(err2){setErr(String(err2.message||err2));notify&&notify({type:"error",text:"Toggle failed",detail:String(err2.message||err2)});}finally{loadAccounts();}}}/>
         Allow the assistant to SEND email autonomously (off = it drafts, you review and send)
       </label>
       <label style={{fontSize:10,color:a.allow_autonomous_delete?t.err:t.mut,display:"flex",gap:6,alignItems:"center",marginTop:4}}>
-        <input type="checkbox" checked={!!a.allow_autonomous_delete} onChange={async e=>{await fetch(`${API}/api/email/accounts/${a.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({allow_autonomous_delete:e.target.checked})});loadAccounts();}}/>
+        <input type="checkbox" checked={!!a.allow_autonomous_delete} onChange={async e=>{try{await apiJson(`/api/email/accounts/${a.id}`,{method:"PATCH",body:{allow_autonomous_delete:e.target.checked}});}catch(err2){setErr(String(err2.message||err2));notify&&notify({type:"error",text:"Toggle failed",detail:String(err2.message||err2)});}finally{loadAccounts();}}}/>
         Allow the assistant to DELETE email autonomously (off = it must ask you first; deleting here in the panel always works)
       </label>
     </div>)}
@@ -215,11 +218,14 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
         </div>
       </div>
       {m.unread&&<button onClick={e=>{e.stopPropagation();msgAction(m.id,"read");}} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}>Read</button>}
-      <button onClick={e=>{e.stopPropagation();msgAction(m.id,"archive");}} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}>Archive</button>
-      <button onClick={async e=>{e.stopPropagation();if(await confirmAction({title:"Delete email",body:"Move this email to Trash?",confirmLabel:"Delete",tone:"danger"}))msgAction(m.id,"delete");}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}>Delete</button>
+      {!isMobile&&<>
+        <button onClick={e=>{e.stopPropagation();msgAction(m.id,"archive");}} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}>Archive</button>
+        <button onClick={async e=>{e.stopPropagation();if(await confirmAction({title:"Delete email",body:"Move this email to Trash?",confirmLabel:"Delete",tone:"danger"}))msgAction(m.id,"delete");}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}>Delete</button>
+      </>}
     </div>;};
 
-  const emptyList=accounts.length===0?<EmptyState t={t} icon={<IC.Send/>} title="No email account yet" hint="Add your IMAP/SMTP account (use an app password for Gmail/iCloud). The assistant can then triage, summarize, and draft replies."/>
+  const emptyList=!loaded?<SkeletonList t={t} rows={6} avatar/>
+    :accounts.length===0?<EmptyState t={t} icon={<IC.Send/>} title="No email account yet" hint="Add your IMAP/SMTP account (use an app password for Gmail/iCloud). The assistant can then triage, summarize, and draft replies."/>
     :messages.length===0?<EmptyState t={t} icon={<IC.Send/>} title="Inbox cache is empty" hint='Press "Check now" — the background poller also runs every ~5 minutes.'/>:null;
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -233,7 +239,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       <button onClick={()=>setShowSettings(s=>!s)} style={btnS(showSettings?t.acc:t.mut)}><IC.Settings/></button>
     </PanelHeader>
     {isMobile
-      ?<div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+      ?<div style={{overflowY:"auto",padding:"14px 12px",flex:1}}>
         <div style={{maxWidth:900}}>
           {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
           {settingsCard}
@@ -244,6 +250,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       </div>
       :<div style={{flex:1,display:"flex",overflow:"hidden",minHeight:0}}>
         <div style={{width:"clamp(300px,40%,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}22`,overflowY:"auto",padding:"14px 14px 20px"}}>
+          {err&&<div style={{color:t.err,fontSize:11,marginBottom:10}}>{err}</div>}
           {emptyList||messages.map(msgRow)}
         </div>
         <div style={{flex:1,minWidth:0,overflowY:"auto",padding:"14px 20px 20px"}}>

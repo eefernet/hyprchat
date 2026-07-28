@@ -6,11 +6,15 @@ import { fmtLocalMinute } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
+import { SkeletonCard } from '../components/Skeleton.jsx';
+import useIsMobile from '../useIsMobile.js';
 
 const EMPTY={kind:"todo",title:"",content:"",due_local:"",remind_local:""};
 
-export default function NotesPanel({t,btnS,cardS,inputS,confirmAction}){
+export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
+  const isMobile=useIsMobile();
   const [notes,setNotes]=useState([]);
+  const [loaded,setLoaded]=useState(false);
   const [tab,setTab]=useState("todo");
   const [form,setForm]=useState(null);
   const [showDone,setShowDone]=useState(false);
@@ -18,6 +22,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction}){
 
   const load=useCallback(async()=>{
     try{setNotes(await apiJson("/api/notes"));}catch(e){setErr(String(e.message||e));}
+    finally{setLoaded(true);}
   },[]);
   useEffect(()=>{load();},[load]);
 
@@ -34,12 +39,15 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction}){
     }catch(e){setErr(String(e.message||e));}
   };
   const toggleDone=async n=>{
-    await fetch(`${API}/api/notes/${n.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({done:!n.done})});
-    load();
+    try{await apiJson(`/api/notes/${n.id}`,{method:"PATCH",body:{done:!n.done}});}
+    catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Update failed",detail:String(e.message||e)});}
+    finally{load();} // reload either way so the checkbox reflects server truth
   };
   const remove=async id=>{
     if(!await confirmAction({title:"Delete item",body:"Delete this item?",confirmLabel:"Delete",tone:"danger"}))return;
-    await fetch(`${API}/api/notes/${id}`,{method:"DELETE"});load();
+    try{await apiJson(`/api/notes/${id}`,{method:"DELETE"});}
+    catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
+    finally{load();}
   };
 
   const shown=notes.filter(n=>n.kind===tab&&(showDone||!n.done));
@@ -58,7 +66,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction}){
       <button onClick={load} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       <button onClick={()=>setForm({...EMPTY,kind:tab})} style={btnS(t.warm)}><IC.Plus/> New</button>
     </PanelHeader>
-    <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+    <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:760}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
         {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.ok}55`}}>
@@ -80,7 +88,8 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction}){
             <button onClick={()=>setForm(null)} style={btnS(t.mut)}>Cancel</button>
           </div>
         </div>}
-        {shown.length===0&&!form?<EmptyState t={t} icon={<IC.Pencil/>} title={`No ${tab==="todo"?"todos":"notes"} yet`} hint='Add one here, or tell the assistant: "add buy milk to my todo list".'/>
+        {!loaded&&!form?Array.from({length:3},(_,i)=><SkeletonCard key={i} t={t} h={72} lines={1} style={{marginBottom:8}}/>)
+        :shown.length===0&&!form?<EmptyState t={t} icon={<IC.Pencil/>} title={`No ${tab==="todo"?"todos":"notes"} yet`} hint='Add one here, or tell the assistant: "add buy milk to my todo list".'/>
         :shown.map(n=><div key={n.id} style={{...cardS,marginBottom:8,display:"flex",gap:10,alignItems:"flex-start",opacity:n.done?.55:1}}>
           {n.kind==="todo"&&<input type="checkbox" checked={n.done} onChange={()=>toggleDone(n)} style={{marginTop:3,cursor:"pointer"}}/>}
           <div style={{flex:1,minWidth:0}}>

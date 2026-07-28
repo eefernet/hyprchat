@@ -153,13 +153,19 @@ async def poll_due_accounts(http) -> bool:
             last = account.get("last_checked_at")
             if last:
                 try:
-                    from datetime import timedelta
-                    if now - datetime.fromisoformat(str(last)) < timedelta(minutes=POLL_INTERVAL_MIN):
+                    from datetime import timedelta, timezone
+                    last_dt = datetime.fromisoformat(str(last))
+                    if last_dt.tzinfo is not None:
+                        # Aware timestamp — normalize instead of hot-looping a
+                        # full IMAP poll every tick.
+                        last_dt = last_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    if now - last_dt < timedelta(minutes=POLL_INTERVAL_MIN):
                         continue
-                except (ValueError, TypeError):
-                    # TypeError: aware timestamp vs naive utcnow — treat as due
-                    # rather than aborting the whole cross-user poll loop.
-                    pass
+                except (ValueError, TypeError) as e:
+                    # Treat as due rather than aborting the cross-user loop,
+                    # but leave a trace — silence here used to hide a
+                    # poll-every-30s hot loop.
+                    print(f"[EMAIL] unparseable last_checked_at {last!r} for {account['id']}: {e} — treating as due")
             token = db.set_current_user_id(account["user_id"])
             try:
                 last_seen = int(account.get("last_seen_uid") or 0)

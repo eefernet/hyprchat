@@ -1,4 +1,57 @@
 <details open>
+<summary>Alpha v18.1 — July 28, 2026</summary>
+
+> Pre-prod hardening release: investigative research, CalDAV correctness, and a
+> reliability + UX pass — dossier citations that actually resolve, calendar sync
+> that stops re-pulling and preserves recurrence, error-surfacing across the
+> Jarvis panels, first-load skeletons, a mobile pass on the assistant panels,
+> and a keyboard-accessible model picker.
+
+## Research
+- **Investigative Dossier** report template with a direct leak / FOIA /
+  government / court source layer (`leak_sources.py`): DOJ, CourtListener,
+  Archive.org, and WikiLeaks adapters plus SearXNG-scoped FBI Vault / CIA
+  Reading Room / ICIJ / Cryptome / MuckRock / National Security Archive /
+  GovernmentAttic sources. All results flow through the SSRF-guarded fetcher.
+- **Dossier citations now resolve** — the SOURCE INDEX is built in inline
+  citation order and never truncates a cited source, so `[n]` in the text and
+  `[n]` in the index always point at the same document (leaked-document
+  citations previously fell off the index cap).
+- **Research reliability** — a shared Google-fallback budget and a concurrency
+  cap keep the leak adapters from hammering SearXNG; direct sources are read in
+  source-tier order; the leak wave is cancel-safe (Stop no longer orphans
+  outbound requests); the report path scales its deadline by depth.
+
+## Calendar / CalDAV
+- **Recurrence survives sync** — pushed events now carry their `RRULE`, so
+  recurring events are no longer wiped on the pull-back.
+- **No more phantom conflicts** — the pushed etag round-trips through the same
+  parser the pull uses, so events without an end time (and cosmetic server
+  rewrites) stop re-pulling every sync and stop raising false "calendar
+  conflict" notifications. Legacy etags migrate silently on first sync.
+- Unparseable sync/poll timestamps are logged instead of silently forcing a
+  full re-sync every tick.
+
+## UX / reliability
+- **Jarvis panels surface errors** — task / note / calendar / email mutations
+  that fail now show why (and the security-sensitive autonomous email toggles
+  snap back to the server's true state on failure) instead of silently
+  no-oping.
+- **First-load skeletons** for Tasks / Notes / Calendar / Email — no more
+  "nothing here yet" flashing before the data loads.
+- **Mobile pass** on the assistant panels (Tasks / Notes / Calendar / Email /
+  Assistant / Analytics / Prompt Library): responsive padding, a mobile-first
+  day view for the calendar, and de-crowded row actions.
+- **Model picker** is now keyboard-accessible (Tab / arrows / Enter / Escape),
+  closes on scroll, and flips up when near the bottom of the viewport.
+- **Timestamps** on chat messages, artifacts, and research reports now render
+  in your local time correctly (naive-UTC values were being read as local).
+- Runs whose record has been deleted stop polling instead of retrying forever;
+  a transient network blip no longer tears down an in-progress image job.
+
+</details>
+
+<details>
 <summary>Alpha v18.0 — July 12, 2026</summary>
 
 > HyprChat becomes a personal assistant: scheduled agent tasks, a proactive

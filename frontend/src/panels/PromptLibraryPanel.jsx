@@ -2,6 +2,7 @@ import React from 'react';
 
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
+import useIsMobile from '../useIsMobile.js';
 import EmptyState from '../components/EmptyState.jsx';
 
 export default function PromptLibraryPanel({
@@ -17,6 +18,7 @@ export default function PromptLibraryPanel({
   insertPrompt,
   setPanel,
 }){
+  const isMobile=useIsMobile();
   const safePrompts=Array.isArray(prompts)?prompts.filter(p=>p&&typeof p==="object"):[];
   const cleanPrompt=p=>({
     id:typeof p.id==="string"&&p.id?p.id:`p-${Date.now()}`,
@@ -30,7 +32,7 @@ export default function PromptLibraryPanel({
       subtitle="Reusable prompts — insert into any chat or trigger with / in the composer.">
       <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General",is_system:false},...(Array.isArray(p)?p.filter(x=>x&&typeof x==="object"):[])]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
     </PanelHeader>
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
+    <div style={{flex:1,overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px"}}>
       {!safePrompts.length&&<EmptyState t={t} icon={<IC.Zap/>} title="No saved prompts yet"
         hint="Save reusable prompts here and insert them into any chat with one click."
         action={<button onClick={()=>{setPrompts([
@@ -64,7 +66,7 @@ export default function PromptLibraryPanel({
                 <div style={{fontSize:10,color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
               </div>
               <div style={{display:"flex",gap:4,flexShrink:0}}>
-                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
+                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:9}}><IC.Zap/> Use</button>
                 <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
                 <button onClick={()=>setPrompts(ps=>(Array.isArray(ps)?ps:[]).filter(x=>x&&typeof x==="object"&&x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
               </div>

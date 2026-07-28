@@ -2,10 +2,12 @@ import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
-import { fmtUtcToLocal } from '../datetime.js';
+import { fmtLocalMinute, fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { colorFor } from '../components/identityColor.js';
+import { SkeletonCard } from '../components/Skeleton.jsx';
+import useIsMobile from '../useIsMobile.js';
 
 const EMPTY_EVENT={title:"",start_local:"",end_local:"",location:"",description:"",remind_minutes:""};
 const EMPTY_ACCOUNT={label:"",url:"",username:"",password:"",calendar_url:""};
@@ -78,8 +80,13 @@ function TimeGrid({t,days,byDay,todayKey,nowMin,evColor,onEventClick,onSlotClick
 }
 
 export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}){
+  const isMobile=useIsMobile();
   const [events,setEvents]=useState([]);
-  const [view,setView]=useState("month");
+  const [loaded,setLoaded]=useState(false);
+  // Phones default to day view — the 7-column month grid gives ~44px cells at
+  // 360px wide. Switching back is still allowed; only week view is blocked.
+  const [view,setView]=useState(()=>(typeof window!=="undefined"&&window.innerWidth<700)?"day":"month");
+  const [nowTick,setNowTick]=useState(()=>Date.now());
   const [anchor,setAnchor]=useState(()=>new Date());
   const [form,setForm]=useState(null);
   const [accounts,setAccounts]=useState([]);
@@ -104,12 +111,16 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
     try{
       setEvents(await apiJson(`/api/calendar/events?start_local=${dkey(start)}T00:00&end_local=${dkey(end)}T23:59`));
     }catch(e){setErr(String(e.message||e));}
+    finally{setLoaded(true);}
   },[anchor,view]);
   const loadAccounts=useCallback(async()=>{
     try{setAccounts(await apiJson("/api/calendar/caldav"));}catch(e){setErr(String(e.message||e));}
   },[]);
   useEffect(()=>{load();loadAccounts();},[load,loadAccounts]);
   useEffect(()=>{apiJson("/api/assistant").then(d=>setTz(d?.profile?.timezone||"")).catch(()=>{});},[]);
+  // Keep the "now" line moving (it froze at mount time before this tick).
+  useEffect(()=>{const id=setInterval(()=>setNowTick(Date.now()),60000);return()=>clearInterval(id);},[]);
+  useEffect(()=>{if(isMobile&&view==="week")setView("day");},[isMobile,view]);
   // "Today" in the ASSISTANT timezone — events arrive bucketed by assistant-tz
   // start_local, so a browser in another tz would highlight the wrong day.
   const tzToday=()=>{try{return new Intl.DateTimeFormat("en-CA",{timeZone:tz||undefined}).format(new Date());}catch{return dkey(new Date());}};
@@ -132,7 +143,9 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   };
   const remove=async id=>{
     if(!await confirmAction({title:"Delete event",body:"Delete this event?",confirmLabel:"Delete",tone:"danger"}))return;
-    await fetch(`${API}/api/calendar/events/${id}`,{method:"DELETE"});load();
+    try{await apiJson(`/api/calendar/events/${id}`,{method:"DELETE"});}
+    catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
+    finally{load();}
   };
   const openEdit=e=>setForm({id:e.id,title:e.title,start_local:e.start_local,end_local:e.end_local||"",location:e.location||"",description:e.description||"",remind_minutes:e.remind_minutes??""});
   const saveAccount=async()=>{
@@ -183,7 +196,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   });
   const goToday=()=>{const[y,m,d]=todayKey.split("-").map(Number);setAnchor(new Date(y,m-1,d));};
   // "Now" line minute-of-day in the assistant timezone.
-  const nowMin=(()=>{try{const p=new Intl.DateTimeFormat("en-GB",{timeZone:tz||undefined,hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date());const[h,m]=p.split(":").map(Number);return h*60+m;}catch{const n=new Date();return n.getHours()*60+n.getMinutes();}})();
+  const nowMin=(()=>{try{const p=new Intl.DateTimeFormat("en-GB",{timeZone:tz||undefined,hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(nowTick));const[h,m]=p.split(":").map(Number);return h*60+m;}catch{const n=new Date(nowTick);return n.getHours()*60+n.getMinutes();}})();
   const openDay=d=>{setAnchor(new Date(d.getFullYear(),d.getMonth(),d.getDate()));setView("day");};
   const slotCreate=(k,hour)=>setForm({...EMPTY_EVENT,start_local:`${k}T${pad(hour)}:00`});
 
@@ -196,14 +209,14 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
         <button onClick={()=>step(1)} style={{...btnS(t.mut),padding:"5px 10px"}}><IC.ChevRight/></button>
         <button onClick={goToday} style={{...btnS(t.mut),padding:"5px 10px"}}>Today</button>
         <div style={{display:"flex",gap:2,marginLeft:6}}>
-          {["month","week","day"].map(v=><button key={v} onClick={()=>setView(v)} style={{...btnS(view===v?(t.f1||t.acc):t.mut),padding:"5px 10px",textTransform:"capitalize"}}>{v}</button>)}
+          {(isMobile?["month","day"]:["month","week","day"]).map(v=><button key={v} onClick={()=>setView(v)} style={{...btnS(view===v?(t.f1||t.acc):t.mut),padding:"5px 10px",textTransform:"capitalize"}}>{v}</button>)}
         </div>
       </>}>
       {accounts.length>0&&<button onClick={syncNow} disabled={syncing} style={btnS(t.acc)}>{syncing?"Syncing...":<><IC.Refresh/> Sync</>}</button>}
       <button onClick={()=>setShowAccounts(s=>!s)} style={btnS(showAccounts?t.acc:t.mut)}>CalDAV</button>
       <button onClick={()=>setForm({...EMPTY_EVENT,start_local:`${tzToday()}T09:00`})} style={btnS(t.warm)}><IC.Plus/> Event</button>
     </PanelHeader>
-    <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+    <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:980}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
 
@@ -221,7 +234,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
             <div style={{flex:1}}/>
             <button onClick={()=>testAccount(a.id)} style={{...btnS(t.acc),padding:"3px 8px",fontSize:9}}>Test</button>
             <button onClick={()=>setAcctForm({id:a.id,label:a.label,url:a.url,username:a.username,password:"",calendar_url:a.calendar_url||""})} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}><IC.Pencil/></button>
-            <button onClick={async()=>{if(await confirmAction({title:"Remove CalDAV account",body:"Remove this CalDAV account? Synced events stay and become local-only.",confirmLabel:"Remove",tone:"danger"})){await fetch(`${API}/api/calendar/caldav/${a.id}`,{method:"DELETE"});loadAccounts();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
+            <button onClick={async()=>{if(!await confirmAction({title:"Remove CalDAV account",body:"Remove this CalDAV account? Synced events stay and become local-only.",confirmLabel:"Remove",tone:"danger"}))return;try{await apiJson(`/api/calendar/caldav/${a.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Remove failed",detail:String(e.message||e)});}finally{loadAccounts();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
           </div>)}
           {acctForm&&<div style={{marginTop:10,borderTop:`1px solid ${t.brd}33`,paddingTop:10}}>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
@@ -264,7 +277,8 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
           {accounts.map(a=>{const c=colorFor(a.id,t);return <span key={a.id} style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:9,height:9,borderRadius:3,background:c}}/>{a.label||a.url}</span>;})}
         </div>}
 
-        {view==="month"?<div style={{...cardS,padding:14,marginBottom:16}}>
+        {!loaded?<div style={{marginBottom:16}}><SkeletonCard t={t} h={300} lines={4}/></div>
+        :view==="month"?<div style={{...cardS,padding:14,marginBottom:16}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>
             {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d=><div key={d} style={{fontSize:9,fontWeight:800,color:t.mut,textAlign:"center",padding:"2px 0",textTransform:"uppercase"}}>{d}</div>)}
             {cells.map((d,i)=>{
@@ -290,7 +304,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
           {upcoming.length===0?<div style={{fontSize:11,color:t.mut}}>Nothing scheduled. Try: "dentist appointment Tuesday at 3pm" in chat.</div>
           :upcoming.map(e=><div key={e.id} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 0",fontSize:12,color:t.dim,borderBottom:`1px solid ${t.brd}18`}}>
             <span style={{width:9,height:9,borderRadius:3,background:evColor(e),flexShrink:0}}/>
-            <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:11}}>{(e.start_local||"").replace("T"," ")}</span>
+            <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:11}}>{fmtLocalMinute(e.start_local)}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.title}{e.location?<span style={{color:t.mut}}> @ {e.location}</span>:null}</span>
             {e.sync_state==="synced"&&<span title="Synced via CalDAV" style={{fontSize:9,color:t.ok,display:"inline-flex"}}><IC.Refresh/></span>}
             <button onClick={()=>remove(e.id)} style={{...btnS(t.err),padding:"2px 7px",fontSize:9}}><IC.Trash/></button>

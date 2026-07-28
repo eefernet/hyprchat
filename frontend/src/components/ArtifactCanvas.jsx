@@ -124,8 +124,10 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
 
   const close=async()=>{
     if(dirty){
-      const ok=confirmAction?await confirmAction({title:"Discard changes",body:"You have unsaved changes. Discard them?",confirmLabel:"Discard",tone:"warning"})
-        :window.confirm("Discard unsaved changes?");
+      // Themed dialog is always threaded by the caller; without it, refuse to
+      // silently discard rather than falling back to an unthemed native confirm.
+      if(!confirmAction)return;
+      const ok=await confirmAction({title:"Discard changes",body:"You have unsaved changes. Discard them?",confirmLabel:"Discard",tone:"warning"});
       if(!ok)return;
     }
     onClose?.();

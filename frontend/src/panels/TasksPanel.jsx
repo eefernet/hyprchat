@@ -6,13 +6,17 @@ import { fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
+import { SkeletonCard } from '../components/Skeleton.jsx';
+import useIsMobile from '../useIsMobile.js';
 
 const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],monthly:["time","day"],cron:["cron"],event:[]};
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",event:"",every:1,notify:true,delivery:{}};
 
-export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange}){
+export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange,notify}){
+  const isMobile=useIsMobile();
   const [tasks,setTasks]=useState([]);
+  const [loaded,setLoaded]=useState(false);
   const [notifs,setNotifs]=useState([]);
   const [unseen,setUnseen]=useState(0);
   const [form,setForm]=useState(null);          // null = closed, {...EMPTY_FORM, id?} = editor open
@@ -26,6 +30,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
 
   const loadTasks=useCallback(async()=>{
     try{setTasks(await apiJson("/api/tasks"));}catch(e){setErr(String(e.message||e));}
+    finally{setLoaded(true);}
   },[]);
   const loadNotifs=useCallback(async()=>{
     try{
@@ -71,10 +76,10 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
   };
   const taskAction=async(id,action)=>{
     try{
-      if(action==="delete"){if(!await confirmAction({title:"Delete task",body:"Delete this scheduled task and its run history?",confirmLabel:"Delete",tone:"danger"}))return;await fetch(`${API}/api/tasks/${id}`,{method:"DELETE"});}
-      else await fetch(`${API}/api/tasks/${id}/${action}`,{method:"POST"});
-      loadTasks();
-    }catch(e){setErr(String(e));}
+      if(action==="delete"){if(!await confirmAction({title:"Delete task",body:"Delete this scheduled task and its run history?",confirmLabel:"Delete",tone:"danger"}))return;await apiJson(`/api/tasks/${id}`,{method:"DELETE"});}
+      else await apiJson(`/api/tasks/${id}/${action}`,{method:"POST"});
+    }catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:`Task ${action} failed`,detail:String(e.message||e)});}
+    finally{loadTasks();} // reload either way so buttons reflect server truth
   };
   const refreshRuns=useCallback(async id=>{
     try{setRuns(await apiJson(`/api/tasks/${id}/runs`));}catch{}
@@ -100,13 +105,17 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
     finally{setNlBusy(false);}
   };
   const markAllSeen=async()=>{
-    await fetch(`${API}/api/notifications/seen`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
-    loadNotifs();
+    try{await apiJson("/api/notifications/seen",{method:"POST",body:{}});}
+    catch(e){setErr(String(e.message||e));}
+    finally{loadNotifs();}
   };
   const saveNtfy=async()=>{
-    await fetch(`${API}/api/notifications/channels/ntfy`,{method:"PUT",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({url:ntfy.url,topic:ntfy.topic,token:ntfy.token,allow_private:!!ntfy.allow_private})});
-    loadNtfy();
+    try{
+      await apiJson("/api/notifications/channels/ntfy",{method:"PUT",
+        body:{url:ntfy.url,topic:ntfy.topic,token:ntfy.token,allow_private:!!ntfy.allow_private}});
+      notify&&notify({type:"success",text:"Channel saved",duration:2000});
+    }catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Channel save failed",detail:String(e.message||e)});}
+    finally{loadNtfy();}
   };
 
   const kindLabel=k=>({once:"once",daily:"daily",weekly:"weekly",monthly:"monthly",cron:"cron",event:"on event",webhook:"webhook"})[k]||k;
@@ -125,7 +134,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
       <button onClick={()=>{loadTasks();loadNotifs();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       {tab==="tasks"&&<button onClick={()=>setForm({...EMPTY_FORM})} style={btnS(t.warm)}><IC.Plus/> New Task</button>}
     </PanelHeader>
-    <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+    <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:900}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
 
@@ -178,7 +187,8 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
             </div>
           </div>}
 
-          {tasks.length===0&&!form?<EmptyState t={t} icon={<IC.Clock/>} title="No scheduled tasks yet" hint='Create one above, or just ask in chat: "remind me every morning at 8 to stretch".'/>
+          {!loaded&&!form?Array.from({length:3},(_,i)=><SkeletonCard key={i} t={t} h={84} lines={2} style={{marginBottom:10}}/>)
+          :tasks.length===0&&!form?<EmptyState t={t} icon={<IC.Clock/>} title="No scheduled tasks yet" hint='Create one above, or just ask in chat: "remind me every morning at 8 to stretch".'/>
           :tasks.map(task=><div key={task.id} style={{...cardS,marginBottom:10,opacity:task.enabled?1:.55}}>
             <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
               <div style={{flex:1,minWidth:200}}>
@@ -190,11 +200,13 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                   {task.task_type!=="llm"?` · ${task.task_type}`:""}
                 </div>
               </div>
-              <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:10}}>▶ Run</button>
-              <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:10}}>{task.enabled?"Pause":"Resume"}</button>
-              <button onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
-              <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}>History</button>
-              <button onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:10}}><IC.Trash/></button>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:10}}><IC.Play/> Run</button>
+                <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:10}}>{task.enabled?"Pause":"Resume"}</button>
+                <button onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
+                <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}>History</button>
+                <button onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:10}}><IC.Trash/></button>
+              </div>
             </div>
             {task.schedule_kind==="webhook"&&task.webhook_token&&<div style={{fontSize:10,color:t.mut,marginTop:6,wordBreak:"break-all"}}>
               Webhook: POST {API||window.location.origin}/api/hooks/{task.webhook_token}
@@ -206,7 +218,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                 <span style={{color:statusColor(r.status),fontWeight:700,minWidth:70}}>{r.status}</span>
                 <span style={{color:t.mut}}>{fmtTs(r.started_at)}</span>
                 <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.error||r.result_text||""}</span>
-                {r.status==="running"&&<button onClick={async()=>{await fetch(`${API}/api/tasks/runs/${r.id}/cancel`,{method:"POST"});refreshRuns(task.id);loadTasks();}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>Stop</button>}
+                {r.status==="running"&&<button onClick={async()=>{try{await apiJson(`/api/tasks/runs/${r.id}/cancel`,{method:"POST"});}catch(e){setErr(String(e.message||e));}finally{refreshRuns(task.id);loadTasks();}}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>Stop</button>}
               </div>)}
             </div>}
           </div>)}
@@ -225,7 +237,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               {n.body&&<div style={{fontSize:11,color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.body}</div>}
               <div style={{fontSize:9,color:t.mut,marginTop:4}}>{n.kind} · {fmtTs(n.created_at)}</div>
             </div>
-            <button onClick={async()=>{await fetch(`${API}/api/notifications/${n.id}`,{method:"DELETE"});loadNotifs();}} style={{...btnS(t.mut),padding:"3px 7px",fontSize:10}}><IC.Trash/></button>
+            <button onClick={async()=>{try{await apiJson(`/api/notifications/${n.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));}finally{loadNotifs();}}} style={{...btnS(t.mut),padding:"3px 7px",fontSize:10}}><IC.Trash/></button>
           </div>)}
 
           <div style={{...cardS,marginTop:20}}>

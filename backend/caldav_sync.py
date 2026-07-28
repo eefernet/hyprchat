@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import database as db
@@ -78,7 +78,7 @@ def _event_fields_from_vevent(vevent, tz: ZoneInfo) -> dict | None:
 
 
 def _build_ics(event: dict, tz: ZoneInfo) -> str:
-    from icalendar import Calendar, Event as IcsEvent
+    from icalendar import Calendar, Event as IcsEvent, vRecur
     cal = Calendar()
     cal.add("prodid", "-//HyprChat//Jarvis//EN")
     cal.add("version", "2.0")
@@ -89,6 +89,13 @@ def _build_ics(event: dict, tz: ZoneInfo) -> str:
         ics.add("description", event["description"])
     if event.get("location"):
         ics.add("location", event["location"])
+    if event.get("rrule"):
+        # Recurrence must survive the push: _content_hash includes rrule, so
+        # omitting it here made the pull-back wipe local recurrence.
+        try:
+            ics["RRULE"] = vRecur.from_ical(event["rrule"])
+        except Exception:
+            pass  # a malformed stored rule must not block the push
     start = datetime.fromisoformat(event["start_at"]).replace(tzinfo=ZoneInfo("UTC"))
     if event.get("all_day"):
         # Stored start is local-midnight-converted-to-UTC; convert back to the
@@ -108,24 +115,53 @@ def _build_ics(event: dict, tz: ZoneInfo) -> str:
     return cal.to_ical().decode("utf-8")
 
 
+def _canon_dt(value) -> str:
+    """Canonical datetime string for hashing: locally-created rows may store
+    minute precision ('...T15:00') while pull-back isoformat carries seconds —
+    the same instant must hash identically."""
+    if not value:
+        return ""
+    try:
+        return datetime.fromisoformat(str(value)).isoformat(timespec="seconds")
+    except (ValueError, TypeError):
+        return str(value)
+
+
 def _content_hash(fields: dict) -> str:
     """Change-detection hash over the fields we actually store (etag stand-in —
     real etags aren't uniformly exposed across servers). Deliberately NOT a
     hash of the raw resource: servers rewrite volatile fields (DTSTAMP,
     SEQUENCE) on normalization, which made every such rewrite look like a real
     change and could clobber a dirty local edit with a false conflict.
-    Normalizes both sides: all_day bool-vs-0/1, and the same caps
-    _event_fields_from_vevent applies."""
+    Normalizes both sides: all_day bool-vs-0/1, datetime second-precision, and
+    the same caps _event_fields_from_vevent applies."""
     basis = "\x1f".join((
         str(fields.get("title") or "")[:300],
         str(fields.get("description") or "")[:5000],
         str(fields.get("location") or "")[:300],
-        str(fields.get("start_at") or ""),
-        str(fields.get("end_at") or ""),
+        _canon_dt(fields.get("start_at")),
+        _canon_dt(fields.get("end_at")),
         str(int(bool(fields.get("all_day")))),
         str(fields.get("rrule") or ""),
     ))
     return hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:32]
+
+
+def _pushed_content_hash(ics_text: str, payload: dict, tz: ZoneInfo) -> str:
+    """Etag for a row we just pushed: round-trip our own generated ICS through
+    the same parser the pull uses, so the stored etag equals what the next pull
+    computes for identical content (synthesized DTEND, all-day date snapping,
+    RRULE normalization included). Without this, an event pushed with
+    end_at=None hash-mismatched forever and re-pulled on every sync."""
+    try:
+        from icalendar import Calendar
+        for comp in Calendar.from_ical(ics_text).walk("VEVENT"):
+            fields = _event_fields_from_vevent(comp, tz)
+            if fields:
+                return _content_hash(fields)
+    except Exception:
+        pass
+    return _content_hash(payload)
 
 
 def _remote_snapshot_blocking(account: dict, tz: ZoneInfo) -> list[dict]:
@@ -233,6 +269,15 @@ async def sync_account(account: dict) -> dict:
                 caldav_etag=remote["hash"], sync_state="synced", user_id=user_id)
             pulled += 1
         elif local.get("caldav_etag") != remote["hash"]:
+            if _content_hash(local) == remote["hash"]:
+                # Content is identical — the etag mismatch is a scheme change
+                # (legacy sha256(raw_ics) rows) or a cosmetic server rewrite.
+                # Backfill the etag silently: no conflict, no pull, and a dirty
+                # local edit keeps its state for the push phase below.
+                await db.update_calendar_event(local["id"], {
+                    "caldav_etag": remote["hash"],
+                    "caldav_account_id": account["id"]}, user_id=user_id)
+                continue
             if local.get("sync_state") == "dirty":
                 conflicts += 1
                 await notifications.notify(
@@ -258,12 +303,13 @@ async def sync_account(account: dict) -> dict:
             continue
         uid = event.get("caldav_uid") or f"hyprchat-{event['id']}@jarvis"
         payload = {**event, "caldav_uid": uid}
-        await asyncio.to_thread(_push_blocking, account, _build_ics(payload, tz))
+        ics_text = _build_ics(payload, tz)
+        await asyncio.to_thread(_push_blocking, account, ics_text)
         # Record the pushed content's hash as the etag so the next pull sees
         # the row as up-to-date instead of re-pulling what we just pushed.
         await db.update_calendar_event(event["id"], {
             "caldav_uid": uid, "caldav_account_id": account["id"],
-            "caldav_etag": _content_hash(payload),
+            "caldav_etag": _pushed_content_hash(ics_text, payload, tz),
             "sync_state": "synced"}, user_id=user_id)
         pushed += 1
 
@@ -294,12 +340,18 @@ async def sync_due_accounts() -> None:
             last = account.get("last_sync_at")
             if last:
                 try:
-                    if now - datetime.fromisoformat(str(last)) < timedelta(minutes=SYNC_INTERVAL_MIN):
+                    last_dt = datetime.fromisoformat(str(last))
+                    if last_dt.tzinfo is not None:
+                        # Aware timestamp (written by another code path) —
+                        # normalize instead of hot-looping a full sync per tick.
+                        last_dt = last_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    if now - last_dt < timedelta(minutes=SYNC_INTERVAL_MIN):
                         continue
-                except (ValueError, TypeError):
-                    # TypeError: aware timestamp vs naive utcnow — treat as due
-                    # rather than aborting the whole cross-user sync loop.
-                    pass
+                except (ValueError, TypeError) as e:
+                    # Treat as due rather than aborting the cross-user loop,
+                    # but say so — a silently-unparseable stamp used to mean a
+                    # full re-sync every 30s tick with no trace in the journal.
+                    print(f"[CALDAV] unparseable last_sync_at {last!r} for {account['id']}: {e} — treating as due")
             token = db.set_current_user_id(account["user_id"])
             try:
                 result = await sync_account(account)

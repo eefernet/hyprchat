@@ -5,10 +5,11 @@ import { fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { SkeletonCard } from '../components/Skeleton.jsx';
+import { isCloudModelName } from '../modelHelpers.js';
+import useIsMobile from '../useIsMobile.js';
 
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 const CADENCES=["daily","weekly","monthly","cron"];
-const isCloudModel=m=>/^(openai|anthropic|custom):/.test(m||"");
 
 function CheckInRow({t,btnS,inputS,ci,patch,confirmAction,runNow}){
   const sj=ci.schedule_json||{};
@@ -25,7 +26,7 @@ function CheckInRow({t,btnS,inputS,ci,patch,confirmAction,runNow}){
       </select>}
       {kind==="monthly"&&<input type="number" min={1} max={31} defaultValue={sj.day??1} onBlur={e=>{const v=Number(e.target.value)||1;if(v!==(sj.day??1))patch({check_ins:[{id:ci.id,day:v}]});}} style={{...inputS,width:64}}/>}
       {kind==="cron"&&<input defaultValue={sj.cron||""} placeholder="0 8 * * 1-5" onBlur={e=>{if(e.target.value&&e.target.value!==(sj.cron||""))patch({check_ins:[{id:ci.id,cron:e.target.value}]});}} style={{...inputS,width:130}}/>}
-      <button onClick={()=>runNow(ci.id)} title="Run now" style={{...btnS(t.ok),padding:"5px 10px",fontSize:10}}>▶ Run</button>
+      <button onClick={()=>runNow(ci.id)} title="Run now" style={{...btnS(t.ok),padding:"5px 10px",fontSize:10}}><IC.Play/> Run</button>
       <button onClick={()=>patch({check_ins:[{id:ci.id,enabled:!ci.enabled}]})} style={{...btnS(ci.enabled?t.ok:t.mut),padding:"5px 10px",fontSize:10}}>{ci.enabled?"On":"Off"}</button>
       <button onClick={async()=>{if(await confirmAction({title:"Delete check-in",body:"Delete this check-in?",confirmLabel:"Delete",tone:"danger"}))patch({check_ins:[{id:ci.id,delete:true}]});}} style={{...btnS(t.err),padding:"5px 8px",fontSize:10}}><IC.Trash/></button>
     </div>
@@ -38,6 +39,7 @@ function CheckInRow({t,btnS,inputS,ci,patch,confirmAction,runNow}){
 }
 
 export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models,openAssistantChat}){
+  const isMobile=useIsMobile();
   const [data,setData]=useState(null);
   const [timezones,setTimezones]=useState([]);
   const [busy,setBusy]=useState(false);
@@ -120,13 +122,14 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
       audioRef.current=new Audio(url);
       audioRef.current.onended=()=>{setSpeaking(false);URL.revokeObjectURL(url);};
       audioRef.current.onerror=()=>{setSpeaking(false);URL.revokeObjectURL(url);};
-      await audioRef.current.play();
+      try{await audioRef.current.play();}
+      catch(e){URL.revokeObjectURL(url);throw e;} // rejection never fires onended/onerror
     }catch(e){setSpeaking(false);setErr(String(e.message||e));}
   };
 
   if(!data||!draft){
     if(err)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.err,fontSize:12}}>{err}</div>;
-    return <div style={{flex:1,overflowY:"auto",padding:"20px 28px"}}>
+    return <div style={{flex:1,overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px"}}>
       <div style={{maxWidth:820,display:"flex",flexDirection:"column",gap:16}}>
         {Array.from({length:3},(_,i)=><SkeletonCard key={i} t={t} h={i===0?150:100} lines={i===0?3:2}/>)}
       </div>
@@ -142,7 +145,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
       <button onClick={()=>{load();loadBrief();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       <button onClick={()=>openAssistantChat&&openAssistantChat(data.profile?.conversation_id)} style={btnS(t.warm)}><IC.Chat/> Open Assistant Chat</button>
     </PanelHeader>
-    <div style={{overflowY:"auto",padding:"20px 28px",flex:1}}>
+    <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:820}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
 
@@ -151,7 +154,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
             <div style={{fontSize:12,fontWeight:800,color:t.warm}}>Latest brief</div>
             <div style={{fontSize:9,color:t.mut}}>{fmtUtcToLocal(brief.created_at)}</div>
             <div style={{flex:1}}/>
-            <button onClick={speakBrief} disabled={speaking} title="Read aloud" style={{...btnS(t.acc),padding:"3px 9px",fontSize:10}}>{speaking?"Speaking…":"🔊 Speak"}</button>
+            <button onClick={speakBrief} disabled={speaking} title="Read aloud" style={{...btnS(t.acc),padding:"3px 9px",fontSize:10}}>{speaking?"Speaking…":<><IC.Volume/> Speak</>}</button>
             <button onClick={()=>openAssistantChat&&openAssistantChat(data.profile?.conversation_id)} style={{...btnS(t.mut),padding:"3px 9px",fontSize:10}}>Open in chat</button>
           </div>
           <div style={{fontSize:11,color:t.dim,whiteSpace:"pre-wrap",maxHeight:220,overflowY:"auto",lineHeight:1.5}}>{brief.content}</div>
@@ -172,7 +175,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
                   {models.map(m=><option key={m} value={m}>{m}</option>)}
                 </select>
                 :<input value={draft.model} onChange={e=>setDraft(d=>({...d,model:e.target.value}))} style={inputS}/>}
-              {isCloudModel(draft.model)&&<div style={{fontSize:9,color:t.warm,marginTop:3}}>⚠ Cloud model — every scheduled check-in will spend API credits in the background.</div>}
+              {isCloudModelName(draft.model)&&<div style={{fontSize:9,color:t.warm,marginTop:3}}>⚠ Cloud model — every scheduled check-in will spend API credits in the background.</div>}
             </div>
             <div style={{flex:1,minWidth:180}}>
               <div style={{fontSize:10,color:t.mut,marginBottom:4}}>Timezone</div>
@@ -216,7 +219,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
               Urgent email still pushes
             </label>
           </div>
-          <button onClick={saveProfile} disabled={busy} style={btnS(t.ok)}>Save</button>
+          <button onClick={saveProfile} disabled={busy} style={btnS(t.ok)}>Save Quiet Hours</button>
         </div>
 
         <div style={{...cardS,marginBottom:16}}>
@@ -237,7 +240,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
               {g}
             </label>)}
           </div>
-          <button onClick={saveProfile} disabled={busy} style={btnS(t.ok)}>Save</button>
+          <button onClick={saveProfile} disabled={busy} style={btnS(t.ok)}>Save Sources</button>
         </div>
 
         <div style={{...cardS,marginBottom:16}}>

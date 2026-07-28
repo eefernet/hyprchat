@@ -15,3 +15,14 @@ export const fmtUtcToLocal = s => {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
+// naive-UTC-or-ISO timestamp → epoch ms (0 on bad input). Server rows from
+// SQLite CURRENT_TIMESTAMP / datetime.utcnow() carry no timezone suffix and
+// must be parsed as UTC — bare `new Date(s)` reads them as browser-local and
+// shifts every rendered time by the UTC offset.
+export const parseUtcishMs = (value) => {
+  if (!value) return 0;
+  if (typeof value === "number") return value > 1000000000000 ? value : value * 1000;
+  const s = String(value).trim();
+  const ms = Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : `${s}Z`);
+  return Number.isFinite(ms) ? ms : 0;
+};

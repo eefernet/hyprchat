@@ -604,7 +604,8 @@ async def _search_searxng(
     return results
 
 
-async def _search_wikileaks(http, searxng_url: str, query: str, count: int = 15) -> list:
+async def _search_wikileaks(http, searxng_url: str, query: str, count: int = 15,
+                            fallback_state: dict | None = None) -> list:
     """Search WikiLeaks directly via their search API, with SearXNG fallback."""
     results = []
     try:
@@ -661,7 +662,8 @@ async def _search_wikileaks(http, searxng_url: str, query: str, count: int = 15)
 
     if len(results) < 8:
         try:
-            wl_srx = await _search_searxng(http, searxng_url, f"{query} site:wikileaks.org", min(count, 10))
+            wl_srx = await _search_searxng(http, searxng_url, f"{query} site:wikileaks.org", min(count, 10),
+                                           fallback_state=fallback_state)
             for r in wl_srx:
                 if r.get("url") and r["url"] not in [x["url"] for x in results]:
                     r["title"] = f"🔓 {r['title']}"
@@ -2439,10 +2441,16 @@ Use the current date above as authoritative; do not infer "current real-world kn
         # into the report's direct sources so they're tiered and cited alongside
         # web results. Gated on the template's data field (not report_type) so any
         # future template can opt in. Fails open — a dead adapter contributes nothing.
+        # Shared Google-scrape budget across the whole report run (leak adapters
+        # + every search wave below draw from the same pool).
+        google_fallback_state = {"remaining": 8}
         if template.get("source_profile") == "investigative":
+            await check_cancel()
             try:
+                _leak_deadline = _CONSPIRACY_LIMITS[max(3, min(5, int(depth or 4)))]["leak_deadline"]
                 leak_items = await leak_sources.gather_leak_sources(
-                    http, query, depth=depth, searxng_url=searxng_url, deadline=25.0,
+                    http, query, depth=depth, searxng_url=searxng_url,
+                    deadline=_leak_deadline, fallback_state=google_fallback_state,
                 )
             except Exception:
                 leak_items = []
@@ -2469,10 +2477,13 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 src = _apply_source_quality(src)
                 direct_sources.append(src)
                 await _emit_report_event(events, report_id, "research_source_found", src)
-            # Read the top-N highest-tier direct-archive hits into evidence.
-            leak_read_urls = [s["url"] for s in direct_sources
-                              if s.get("type") == "leak_source"]
-            leak_read_urls = leak_read_urls[:leak_fetch_budget]
+            # Read the top-N highest-tier direct-archive hits into evidence
+            # (lower tier = better source; ties keep submission order).
+            leak_srcs = sorted(
+                (s for s in direct_sources if s.get("type") == "leak_source"),
+                key=lambda s: s.get("tier", 2),
+            )
+            leak_read_urls = [s["url"] for s in leak_srcs][:leak_fetch_budget]
             if leak_read_urls:
                 leak_pages = await asyncio.gather(
                     *[_fetch_page(http, u) for u in leak_read_urls], return_exceptions=True,
@@ -2514,8 +2525,6 @@ Use the current date above as authoritative; do not infer "current real-world kn
         adaptive_learnings: list[str] = []
         adaptive_gaps: list[str] = []
         adaptive_followups: list[str] = []
-        # Shared Google-scrape budget across the whole report run.
-        google_fallback_state = {"remaining": 8}
 
         async def run_search_queries(queries: list[str], pct_base: int, pct_span: int, detail_prefix: str):
             if not queries:
@@ -3328,22 +3337,35 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     # Depth budget — depth (3–5) finally scales real limits instead of being ignored.
     _cdepth = max(3, min(5, int(depth or 4)))
     _clim = _CONSPIRACY_LIMITS[_cdepth]
+    # Shared Google-scrape budget across wave searches AND the leak adapters.
+    _gfb = {"remaining": 8}
 
     async def _csearch(q, categories="general,news"):
         if q in searched:
             return []
         searched.add(q)
         stats["searches"] += 1
-        return await _search_searxng(http, searxng_url, q, 12, categories=categories)
+        return await _search_searxng(http, searxng_url, q, 12, categories=categories,
+                                     fallback_state=_gfb)
 
     # Launch the direct leak/FOIA/gov/court adapters CONCURRENTLY with SearXNG wave 1.
     _leak_task = asyncio.create_task(
         leak_sources.gather_leak_sources(
             http, topic, depth=_cdepth, searxng_url=searxng_url,
-            deadline=_clim["leak_deadline"],
+            deadline=_clim["leak_deadline"], fallback_state=_gfb,
         )
     )
-    await _batched_searches(base_queries, _csearch, delay=_SEARCH_BATCH_DELAY_CONSPIRACY, sink=all_findings)
+    try:
+        await _batched_searches(base_queries, _csearch, delay=_SEARCH_BATCH_DELAY_CONSPIRACY, sink=all_findings)
+    except BaseException:
+        # Cancel (user Stop) or a wave-1 failure must not orphan the leak task —
+        # it would keep firing outbound requests on the shared client.
+        _leak_task.cancel()
+        try:
+            await _leak_task
+        except (Exception, asyncio.CancelledError):
+            pass
+        raise
 
     # Fold in the direct-source hits (each carries its source-class `kind`).
     try:
@@ -3353,7 +3375,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     if _leak_hits:
         all_findings.extend(_leak_hits)
         _leak_classes = sorted({h.get("source", "") for h in _leak_hits if h.get("source")})
-        await events.emit(conv_id, "tool_start", {
+        await events.emit(conv_id, "tool_progress", {
             "tool": "conspiracy_research", "icon": "search",
             "status": f"🗄️ Direct archives: {len(_leak_hits)} hits from {', '.join(_leak_classes[:6])}",
         })
@@ -3714,6 +3736,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     seen = set()
     _counter = {"n": 0}
     _findings_cap = _clim["findings"]
+    index_rows = []  # every inline-numbered source, in citation order
 
     def _emit_section(header, kinds):
         if _counter["n"] >= _findings_cap:
@@ -3735,6 +3758,7 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
             src_label = f.get("source")
             tag = f" _({src_label})_" if src_label else ""
             rows.append(f"**[{_counter['n']}]** [{f.get('title','(no title)')}]({url}){tag}\n> {f.get('content','')[:300]}\n")
+            index_rows.append(f"[{_counter['n']}] {f.get('title','?')}{(' [' + src_label + ']') if src_label else ''} — {url}")
             if _counter["n"] >= _findings_cap:
                 break
         if rows:
@@ -3747,17 +3771,21 @@ async def run_conspiracy_research(http, ollama_url: str, default_model: str, sea
     _emit_section("\n## 🗄️ FOIA Archives\n", {"foia", "archive"})
     _emit_section("\n## 🌐 Web & Community Findings\n", None)
 
-    srcs = []
-    seen2 = set()
+    # SOURCE INDEX = the inline-cited sources first, in citation order, never
+    # truncated (an inline [n] must always resolve); remaining index budget is
+    # filled with uncited extras numbered after them.
+    srcs = list(index_rows)
+    seen2 = set(seen)
+    _index_cap = max(_clim["index"], len(index_rows))
     for f in all_findings:
+        if len(srcs) >= _index_cap:
+            break
         u = f.get("url", "")
         if u and u not in seen2:
             seen2.add(u)
             src_label = f.get("source")
             tag = f" [{src_label}]" if src_label else ""
             srcs.append(f"[{len(srcs)+1}] {f.get('title','?')}{tag} — {u}")
-        if len(srcs) >= _clim["index"]:
-            break
     if srcs:
         parts.append("\n## 📚 SOURCE INDEX\n")
         parts.extend(srcs)

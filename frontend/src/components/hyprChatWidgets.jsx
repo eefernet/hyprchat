@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
+import { parseUtcishMs } from '../datetime.js';
 import useIsMobile from '../useIsMobile.js';
 import {
   _eventsHaveDaedalus,
@@ -433,8 +434,10 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   const [autoExpanded, setAutoExpanded] = useState(false);
   const [err, setErr] = useState(null);
   const [artifacts,setArtifacts]=useState([]);
+  const runRef = useRef(null);      // latest run for the poll's terminal check
+  const failsRef = useRef(0);       // consecutive fetch failures
   useEffect(()=>{
-    if(initialRun&&initialRun.id===runId)setRun(initialRun);
+    if(initialRun&&initialRun.id===runId){runRef.current=initialRun;setRun(initialRun);}
   },[initialRun,runId]);
   // Initial fetch + when run terminal status changes, refetch for envelope.
   useEffect(()=>{
@@ -445,17 +448,23 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
         const r = await fetch(`${API}/api/runs/${runId}`);
         if(!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if(!cancelled) setRun(d);
-      }catch(e){if(!cancelled) setErr(e.message||"load failed");}
+        failsRef.current=0;
+        if(!cancelled){runRef.current=d; setRun(d);}
+      }catch(e){
+        failsRef.current+=1;
+        if(!cancelled) setErr(e.message||"load failed");
+      }
     };
     load();
     // Light poll while the run is still in flight — covers reconnect mid-run
-    // when liveEvts haven't yet filled in. Stops as soon as we see a terminal status.
+    // when liveEvts haven't yet filled in. Stops on a terminal status, or
+    // after 3 consecutive failures (a deleted run 404s forever — without the
+    // cap every stale RunCard in a long chat leaked a 4s poller for good).
+    const TERMINAL=["succeeded","failed","partial","cancelled","skipped"];
     const id = setInterval(()=>{
-      setRun(cur=>{
-        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial"||cur.status==="cancelled"||cur.status==="skipped")){clearInterval(id);return cur;}
-        load(); return cur;
-      });
+      const cur=runRef.current;
+      if((cur&&TERMINAL.includes(cur.status))||failsRef.current>=3){clearInterval(id);return;}
+      load();
     }, 4000);
     return ()=>{cancelled=true; clearInterval(id);};
   },[runId]);
@@ -489,7 +498,7 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   const status = run?.status || "loading";
   const colour = status==="succeeded" ? t.ok :
                  status==="failed" ? t.err :
-                 status==="partial" ? "#e9a45a" :
+                 status==="partial" ? t.warm :
                  (status==="cancelled"||status==="skipped") ? t.mut :
                  t.acc;
   const statusLabel = {
@@ -515,10 +524,12 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
     status === "failed" ||
     (role === "reviewer" && (env.status === "issues" || env.status === "error"))
   );
-  if (run && needsAttention && !autoExpanded) {
-    setAutoExpanded(true);
-    setExpanded(true);
-  }
+  useEffect(()=>{
+    if (run && needsAttention && !autoExpanded) {
+      setAutoExpanded(true);
+      setExpanded(true);
+    }
+  },[run,needsAttention,autoExpanded]);
   const DetailBody = ({compact=false}={}) => <div style={{padding:compact?"8px 0 0":"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:compact?360:320,overflowY:"auto",fontFamily:font}}>
     {chips.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
       {chips.map(([label,value],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:9,color:t.mut,border:`1px solid ${t.brd}2e`,background:`${t.surface}55`,borderRadius:999,padding:"2px 7px",maxWidth:compact?260:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -641,7 +652,7 @@ const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   if(!wf)return null;
   const state=wf.state||"planning";
   const artifact=wf.artifact_status||"not_ready";
-  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?"#e9a45a":t.acc;
+  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?t.warm:t.acc;
   const modeLabel=(wf.mode||"workflow").replaceAll("_"," ");
   const contract=wf.contract_json||{};
   return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
@@ -850,13 +861,7 @@ const _fmtElapsed = (start, now=Date.now())=>{
   if(s>=60)return`${Math.floor(s/60)}m ${s%60}s`;
   return`${s}s`;
 };
-const _parseUtcishMs = (value)=>{
-  if(!value)return 0;
-  if(typeof value==="number")return value>1000000000000?value:value*1000;
-  const s=String(value).trim();
-  const ms=Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)?s:`${s}Z`);
-  return Number.isFinite(ms)?ms:0;
-};
+const _parseUtcishMs = parseUtcishMs; // canonical impl lives in datetime.js
 const _stripStatusEmoji = (txt="")=>String(txt||"").replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,"").trim();
 const _phaseFromEvent = (ev)=>{
   if(!ev)return null;
@@ -1134,14 +1139,14 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
               {hasThumbnail
                 ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                 :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                  <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                  <img src={_qsFaviconUrl(hn,64)} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                   <span style={{fontSize:9,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
                 </div>}
               {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
               </div>}
               {hasThumbnail&&hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+                <img src={_qsFaviconUrl(hn,32)} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
               </div>}
             </div>
             <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
@@ -1171,7 +1176,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
           return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:0}}>
             <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:10,fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
               onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}20`} onMouseLeave={e=>e.currentTarget.style.background=`${t.warm}10`}>
-              {isPdf?<span>📄</span>:<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
+              {isPdf?<span>📄</span>:<img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
               <span>{title}</span>
             </a>
             {onPreview&&<button onClick={()=>onPreview(title,lnk.url)} title="Preview in panel"
@@ -1694,7 +1699,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <span style={{fontSize:18}}>💬</span>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(c.updated_at).toLocaleDateString():""}</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
           </div>
           <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
           <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>

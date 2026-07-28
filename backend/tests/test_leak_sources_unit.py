@@ -109,7 +109,7 @@ def test_courtlistener_token_header(monkeypatch):
         captured["headers"] = kw.get("headers", {})
         return FakeResp(200, {"results": []})
     monkeypatch.setattr(leak_sources, "web_get", _fake)
-    monkeypatch.setenv("COURTLISTENER_TOKEN", "secret123")
+    monkeypatch.setattr(leak_sources.config, "COURTLISTENER_TOKEN", "secret123")
     _run(leak_sources.search_courtlistener(object(), "x", 4))
     assert captured["headers"].get("Authorization") == "Token secret123"
 
@@ -120,7 +120,7 @@ def test_courtlistener_no_token_no_header(monkeypatch):
         captured["headers"] = kw.get("headers", {})
         return FakeResp(200, {"results": []})
     monkeypatch.setattr(leak_sources, "web_get", _fake)
-    monkeypatch.delenv("COURTLISTENER_TOKEN", raising=False)
+    monkeypatch.setattr(leak_sources.config, "COURTLISTENER_TOKEN", "")
     _run(leak_sources.search_courtlistener(object(), "x", 4))
     assert "Authorization" not in captured["headers"]
 
@@ -148,7 +148,7 @@ def test_archive_org_fail_open(monkeypatch):
 # ── WikiLeaks adapter (reuses research._search_wikileaks via wrapper) ──
 
 def test_wikileaks_adapter(monkeypatch):
-    async def _fake_wl(http, searxng_url, query, count):
+    async def _fake_wl(http, searxng_url, query, count, **kw):
         return [
             {"title": "🔓 Cable 1", "url": "https://wikileaks.org/plusd/cables/1", "content": "body", "score": 5},
             {"title": "no url", "url": "", "content": ""},
@@ -170,7 +170,7 @@ def test_wikileaks_fail_open(monkeypatch):
 # ── SearXNG-scoped adapter ──
 
 def test_searxng_site(monkeypatch):
-    async def _fake_sx(http, searxng_url, query, count):
+    async def _fake_sx(http, searxng_url, query, count, **kw):
         assert "site:vault.fbi.gov" in query
         return [{"title": "Vault doc", "url": "https://vault.fbi.gov/doc", "content": "snip"}]
     monkeypatch.setattr(leak_sources, "searxng_search", _fake_sx)
@@ -262,3 +262,116 @@ def test_dispatcher_depth_scales_limit(monkeypatch):
     monkeypatch.setattr(leak_sources, "search_doj", _capture)
     _run(leak_sources.gather_leak_sources(object(), "q", depth=5, searxng_url="http://sx"))
     assert seen["limit"] == 8
+
+
+# ── bounded web_get shim (routes through research.fetch_bytes_safely) ──
+
+def test_web_get_bounded_shim(monkeypatch, capsys):
+    import types
+    calls = {}
+
+    async def _fake_fbs(http, url, *, timeout=15, headers=None, max_bytes=0):
+        calls.update(url=url, max_bytes=max_bytes, headers=headers)
+        return 200, {}, url, b'{"ok": true}'
+
+    mod = types.ModuleType("research")
+    mod.fetch_bytes_safely = _fake_fbs
+    monkeypatch.setitem(sys.modules, "research", mod)
+    r = _run(leak_sources.web_get(object(), "https://example.test/api?q=1"))
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    assert calls["max_bytes"] == 1_500_000  # bounded — never an uncapped read
+    assert "HTTP" not in capsys.readouterr().out  # 200 is silent
+
+
+def test_web_get_logs_non_200(monkeypatch, capsys):
+    import types
+
+    async def _fake_fbs(http, url, *, timeout=15, headers=None, max_bytes=0):
+        return 403, {}, url, b"denied"
+
+    mod = types.ModuleType("research")
+    mod.fetch_bytes_safely = _fake_fbs
+    monkeypatch.setitem(sys.modules, "research", mod)
+    r = _run(leak_sources.web_get(object(), "https://www.courtlistener.com/api/rest/v4/search/?q=x"))
+    assert r.status_code == 403
+    out = capsys.readouterr().out
+    assert "[LEAK]" in out and "403" in out
+    assert "?q=x" not in out  # query string stripped from the log line
+
+
+# ── fallback_state threading ──
+
+def test_searxng_wrapper_passes_fallback_state(monkeypatch):
+    import types
+    seen = {}
+
+    async def _fake_sx(http, sx, q, count, fallback_state=None):
+        seen["fs"] = fallback_state
+        return []
+
+    mod = types.ModuleType("research")
+    mod._search_searxng = _fake_sx
+    monkeypatch.setitem(sys.modules, "research", mod)
+    fs = {"remaining": 2}
+    _run(leak_sources.searxng_search(object(), "http://sx", "q", 5, fallback_state=fs))
+    assert seen["fs"] is fs
+
+
+def test_dispatcher_threads_fallback_state(monkeypatch):
+    seen = {}
+
+    async def _wl(http, q, limit, **kw):
+        seen["wl"] = kw.get("fallback_state")
+        return []
+
+    async def _scoped(http, q, limit, **kw):
+        seen["scoped"] = kw.get("fallback_state")
+        return []
+
+    _patch_adapters(monkeypatch, scoped=[])
+    monkeypatch.setattr(leak_sources, "search_wikileaks", _wl)
+    monkeypatch.setattr(leak_sources, "_searxng_site", _scoped)
+    fs = {"remaining": 8}
+    _run(leak_sources.gather_leak_sources(object(), "q", depth=4,
+                                          searxng_url="http://sx", fallback_state=fs))
+    assert seen["wl"] is fs and seen["scoped"] is fs
+
+
+# ── straggler cleanup + concurrency cap ──
+
+def test_dispatcher_awaits_cancelled_stragglers(monkeypatch):
+    # The deadline cancels slow adapters; gather_leak_sources must AWAIT them
+    # so sockets close deterministically (no "Task was destroyed" noise).
+    # Proof: the straggler's finally block runs before the dispatcher returns.
+    state = {"finalized": False}
+
+    async def _slow(http, q, limit):
+        try:
+            await asyncio.sleep(5)
+        finally:
+            state["finalized"] = True
+        return []
+
+    _patch_adapters(monkeypatch, scoped=[])
+    monkeypatch.setattr(leak_sources, "search_doj", _slow)
+    _run(leak_sources.gather_leak_sources(object(), "q", depth=4,
+                                          searxng_url="http://sx", deadline=0.2))
+    assert state["finalized"] is True
+
+
+def test_dispatcher_concurrency_cap(monkeypatch):
+    cur = {"n": 0, "max": 0}
+
+    async def _track(http, q, limit, **kw):
+        cur["n"] += 1
+        cur["max"] = max(cur["max"], cur["n"])
+        await asyncio.sleep(0.03)
+        cur["n"] -= 1
+        return []
+
+    for name in ("search_doj", "search_courtlistener", "search_archive_org", "search_wikileaks"):
+        monkeypatch.setattr(leak_sources, name, _track)
+    monkeypatch.setattr(leak_sources, "_searxng_site", _track)
+    _run(leak_sources.gather_leak_sources(object(), "q", depth=4, searxng_url="http://sx"))
+    assert cur["max"] <= 3  # 11 adapters, but at most 3 in flight

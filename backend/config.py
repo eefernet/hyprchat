@@ -18,6 +18,8 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
 OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8586")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
+# Optional CourtListener API token for the leak_sources court adapter (empty = anonymous).
+COURTLISTENER_TOKEN = os.getenv("COURTLISTENER_TOKEN", "")
 N8N_URL = os.getenv("N8N_URL", "http://127.0.0.1:5678")
 COMFYUI_URL = os.getenv("COMFYUI_URL", "")  # empty = image generation disabled
 COMFYUI_WORKFLOW_PATH = os.getenv("COMFYUI_WORKFLOW_PATH", "")  # optional API-format workflow override
