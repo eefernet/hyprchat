@@ -1601,6 +1601,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             "growth-rate/CAGR/variance/weighted-average calculations — anything you'd get wrong by doing it "
             "in your head. LLM mental math is unreliable past trivial cases; trust the sandbox. Code tools "
             "are explicitly encouraged for computation, transformation, and fetching data you don't have. "
+            "The sandbox Python has pandas, openpyxl, and sympy installed — use sympy for symbolic math "
+            "(solve, diff, integrate, simplify) instead of deriving algebra/calculus by hand. "
             "The prohibition above is purely about saving image files, not about running code.\n"
             "\n"
             "### The compute-then-chart pattern\n"

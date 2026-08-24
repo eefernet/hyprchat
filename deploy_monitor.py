@@ -83,6 +83,7 @@ WATCHED = {
     "backend/routes/notes.py":      ("Notes Routes",     REMOTE_ROUTES,             True),
     "backend/routes/calendar.py":   ("Calendar Routes",  REMOTE_ROUTES,             True),
     "backend/routes/email.py":      ("Email Routes",     REMOTE_ROUTES,             True),
+    "backend/routes/chat_files.py": ("Chat File Routes", REMOTE_ROUTES,             True),
     "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
     "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),

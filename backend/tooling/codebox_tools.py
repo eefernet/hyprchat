@@ -55,10 +55,53 @@ async def _ensure_venv(http):
         if "VENV_OK" in result.get("stdout", ""):
             _sandbox_venv_ready = True
             print("[SANDBOX] venv ready at /root/venv")
+            await ensure_data_stack(http)
             return True
     except Exception as e:
         print(f"[SANDBOX] venv setup error: {e}")
     return False
+
+
+_data_stack_ready = False
+_data_stack_attempted = False
+_data_stack_lock: asyncio.Lock | None = None
+
+
+async def ensure_data_stack(http):
+    """One-time install of pandas/openpyxl/sympy in the sandbox venv.
+
+    Staged chat data files (/root/chat_files/...) are analyzed via
+    execute_code, which has no pip access in plain chats — so the stack must
+    already be importable. Cheap no-op once installed (import probe only);
+    the staging route pre-warms this in the background so the install usually
+    finishes before the model's first execute_code call.
+    """
+    global _data_stack_ready, _data_stack_attempted, _data_stack_lock
+    if _data_stack_ready:
+        return True
+    if _data_stack_lock is None:
+        _data_stack_lock = asyncio.Lock()
+    async with _data_stack_lock:
+        if _data_stack_ready or _data_stack_attempted:
+            return _data_stack_ready
+        _data_stack_attempted = True
+        try:
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                "command": (
+                    "/root/venv/bin/python3 -c 'import pandas, openpyxl, sympy' 2>/dev/null || "
+                    "/root/venv/bin/pip3 install -q pandas openpyxl sympy >/dev/null 2>&1; "
+                    "/root/venv/bin/python3 -c 'import pandas, openpyxl, sympy' 2>/dev/null && echo DATA_STACK_OK"
+                ),
+                "timeout": 300,
+            }, timeout=310)
+            if "DATA_STACK_OK" in r.json().get("stdout", ""):
+                _data_stack_ready = True
+                print("[SANDBOX] data stack ready (pandas, openpyxl, sympy)")
+                return True
+            print("[SANDBOX] data stack install did not complete (pandas/openpyxl/sympy unavailable)")
+        except Exception as e:
+            print(f"[SANDBOX] data stack setup error: {e}")
+        return False
 
 
 # Common import-name → pip-package mismatches for custom-tool auto-install.

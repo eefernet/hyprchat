@@ -3015,17 +3015,39 @@ function HyprChat(){
     const cv=createdConv||convs.find(c=>c.id===cid);
     // Route council chats to council sender
     if(cv?.is_council){await sendCouncil();return;}
+    // Stage data-file attachments (CSV/Excel/JSON) into the Codebox sandbox so
+    // the model analyzes the FULL file via execute_code instead of a truncated
+    // inline paste. Falls back to inline text if staging fails (Codebox down,
+    // ghost chat with no server conversation row, ...).
+    const atts=await Promise.all(attachments.map(async a=>{
+      if(a.type!=="data"||!a.file)return a;
+      try{
+        const fd=new FormData();fd.append("file",a.file);fd.append("conversation_id",cid);
+        const r=await fetch(`${API}/api/chat-files/stage`,{method:"POST",body:fd});
+        if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
+        const d=await r.json();
+        let preview="";
+        if(!/\.(xlsx|xls)$/i.test(a.name)){
+          try{const txt=await a.file.text();preview=txt.split("\n").slice(0,25).join("\n").substring(0,3000);}catch{}
+        }
+        return {...a,sandboxPath:d.sandbox_path,preview};
+      }catch(e){
+        console.warn(`File staging failed for ${a.name} — falling back to inline text:`,e);
+        try{const txt=await a.file.text();return {...a,content:txt.substring(0,20000)};}
+        catch{return {...a,content:`[Binary file: ${a.name}, ${((a.size||0)/1024).toFixed(1)}KB]`};}
+      }
+    }));
     // Build content with attachments — full text for model, display version for UI
     let displayContent = inp.trim();
     let modelContent = displayContent;
     const pdfAttachments = [];
     const imageAttachments = []; // {name, dataUrl, mime} for UI render
     const imageBase64s = [];      // raw base64 (no data: prefix) for Ollama images field
-    if(attachments.length){
+    if(atts.length){
       const pdfParts = [];
       const fileParts = [];
       const imageNames = [];
-      for(const a of attachments){
+      for(const a of atts){
         if(a.type==="image"){
           imageAttachments.push({name:a.name,dataUrl:a.dataUrl,mime:a.mime});
           // Strip "data:image/png;base64," prefix → raw base64 for Ollama
@@ -3036,6 +3058,9 @@ function HyprChat(){
           if(a.error)continue;
           pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
           pdfAttachments.push({name:a.name,pages:a.pages||0});
+        }else if(a.type==="data"&&a.sandboxPath){
+          const kb=((a.size||0)/1024).toFixed(1);
+          fileParts.push(`📎 **${a.name}** — full file staged in the sandbox at \`${a.sandboxPath}\` (${kb}KB).${a.preview?`\nPreview (first lines):\n\`\`\`\n${a.preview}\n\`\`\``:""}\nTo analyze this file, run execute_code (python) reading that path — pandas and openpyxl are installed. Never re-type the file contents into code.`);
         }else{
           fileParts.push(`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``);
         }
@@ -3219,6 +3244,7 @@ function HyprChat(){
     const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
     const isPdf=(f)=>(f.name||"").toLowerCase().endsWith(".pdf");
     const isImage=(f)=>(f.type||"").startsWith("image/")||/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name||"");
+    const isData=(f)=>/\.(csv|tsv|xlsx|xls|json|jsonl)$/i.test(f.name||"");
     const coderActive=isCoderPersonaName(act?.persona_name);
     let remaining=files;
     if(coderActive){
@@ -3256,6 +3282,13 @@ function HyprChat(){
           setAttachments(p=>p.map(a=>a.name===file.name&&a.loading?{name:file.name,content:"",type:"pdf",pages:0,loading:false,error:e.message,file}:a));
           notify({type:"error",text:"PDF extraction failed",detail:file.name});
         }
+        continue;
+      }
+      if(isData(file)){
+        if(file.size>50*1024*1024){notify({type:"warning",text:"File skipped",detail:`${file.name} is larger than 50MB.`});continue;}
+        // Keep the raw File — staged into the Codebox sandbox at send time so
+        // execute_code can read the FULL file (no 20K-char inline truncation).
+        newAttachments.push({name:file.name,file,type:"data",size:file.size});
         continue;
       }
       if(file.size>5*1024*1024){notify({type:"warning",text:"File skipped",detail:`${file.name} is larger than 5MB.`});continue;}
