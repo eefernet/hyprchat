@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta
@@ -155,6 +156,50 @@ async def recompute_next_run(schedule_kind: str, schedule_json: dict | None,
         profile = await db.get_assistant_profile(user_id=user_id)
         tz_name = (profile or {}).get("timezone") or "UTC"
     return compute_next_run(schedule_kind, schedule_json or {}, tz_name)
+
+
+def _schedule_integer(value, field: str, minimum: int, maximum: int | None = None) -> int:
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", str(value)):
+        raise ValueError(f"{field} must be an integer")
+    number = int(value)
+    if number < minimum or (maximum is not None and number > maximum):
+        bounds = f"{minimum}–{maximum}" if maximum is not None else f"at least {minimum}"
+        raise ValueError(f"{field} must be {bounds}")
+    return number
+
+
+async def validated_next_run(schedule_kind: str, schedule_json: dict | None,
+                             tz_name: str = "", user_id: str | None = None, *,
+                             event_trigger_json: dict | None = None) -> str | None:
+    """Validate user edits BEFORE writes; the tick's legacy recovery stays permissive."""
+    if schedule_kind not in db.SCHEDULE_KINDS:
+        raise ValueError(f"schedule_kind must be one of {', '.join(db.SCHEDULE_KINDS)}")
+    schedule = {} if schedule_json is None else schedule_json
+    if not isinstance(schedule, dict):
+        raise ValueError("schedule_json must be an object")
+    if schedule_kind == "event":
+        trigger = event_trigger_json or {}
+        if not isinstance(trigger, dict) or trigger.get("event") not in EVENT_NAMES:
+            raise ValueError(f"event tasks need an event from: {', '.join(EVENT_NAMES)}")
+        _schedule_integer(trigger.get("every", 1), "every", 1)
+    if schedule_kind in ("daily", "weekly", "monthly") and "time" in schedule:
+        raw_time = str(schedule["time"])
+        if not re.fullmatch(r"[0-9]{1,2}:[0-9]{2}", raw_time):
+            raise ValueError("time must be HH:MM (00:00–23:59)")
+        hh, mm = map(int, raw_time.split(":"))
+        if hh > 23 or mm > 59:
+            raise ValueError("time must be HH:MM (00:00–23:59)")
+    if schedule_kind == "weekly":
+        _schedule_integer(schedule.get("weekday", 0), "weekday", 0, 6)
+    if schedule_kind == "monthly":
+        _schedule_integer(schedule.get("day", 1), "day", 1, 31)
+    try:
+        next_run = await recompute_next_run(schedule_kind, schedule, tz_name, user_id)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError(f"Invalid {schedule_kind} schedule: {exc}") from exc
+    if schedule_kind not in ("event", "webhook") and not next_run:
+        raise ValueError("schedule_json does not produce a next run time; check run_at or cron")
+    return next_run
 
 
 # ------------------------------------------------------------------

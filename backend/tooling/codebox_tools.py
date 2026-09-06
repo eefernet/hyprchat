@@ -31,6 +31,9 @@ CODEBOX_TOOL_NAMES = {
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _sandbox_venv_ready = False
+_sandbox_venv_lock: asyncio.Lock | None = None
+_sandbox_venv_retry_at = 0.0
+_SETUP_RETRY_SECONDS = 60
 
 
 def _strip_ansi(text: str) -> str:
@@ -39,36 +42,44 @@ def _strip_ansi(text: str) -> str:
 
 async def _ensure_venv(http):
     """Lazily create a Python venv in the CodeBox sandbox."""
-    global _sandbox_venv_ready
+    global _sandbox_venv_ready, _sandbox_venv_lock, _sandbox_venv_retry_at
     if _sandbox_venv_ready:
         return True
-    try:
-        r = await http.post(f"{config.CODEBOX_URL}/command", json={
-            "command": (
-                "test -f /root/venv/bin/python3 || "
-                "(python3 -m venv /root/venv && /root/venv/bin/pip3 install --upgrade pip -q 2>/dev/null); "
-                "echo VENV_OK"
-            ),
-            "timeout": 30,
-        }, timeout=35)
-        result = r.json()
-        if "VENV_OK" in result.get("stdout", ""):
-            _sandbox_venv_ready = True
-            print("[SANDBOX] venv ready at /root/venv")
-            await ensure_data_stack(http)
+    if _sandbox_venv_lock is None:
+        _sandbox_venv_lock = asyncio.Lock()
+    async with _sandbox_venv_lock:
+        if _sandbox_venv_ready:
             return True
-    except Exception as e:
-        print(f"[SANDBOX] venv setup error: {e}")
-    return False
+        if time.monotonic() < _sandbox_venv_retry_at:
+            return False
+        try:
+            r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                "command": (
+                    "(test -x /root/venv/bin/python3 || python3 -m venv /root/venv) && "
+                    "/root/venv/bin/python3 -c 'import sys' && echo VENV_OK"
+                ),
+                "timeout": 30,
+            }, timeout=35)
+            result = r.json()
+            if (r.status_code == 200 and result.get("exit_code") == 0
+                    and "VENV_OK" in (result.get("stdout") or "").splitlines()):
+                _sandbox_venv_ready = True
+                print("[SANDBOX] venv ready at /root/venv")
+                return True
+            print("[SANDBOX] Python environment setup did not complete")
+        except Exception as e:
+            print(f"[SANDBOX] venv setup error: {e}")
+        _sandbox_venv_retry_at = time.monotonic() + _SETUP_RETRY_SECONDS
+        return False
 
 
 _data_stack_ready = False
-_data_stack_attempted = False
+_data_stack_retry_at = 0.0
 _data_stack_lock: asyncio.Lock | None = None
 
 
 async def ensure_data_stack(http):
-    """One-time install of pandas/openpyxl/sympy in the sandbox venv.
+    """Install pandas/openpyxl/sympy after the sandbox venv exists.
 
     Staged chat data files (/root/chat_files/...) are analyzed via
     execute_code, which has no pip access in plain chats — so the stack must
@@ -76,15 +87,18 @@ async def ensure_data_stack(http):
     the staging route pre-warms this in the background so the install usually
     finishes before the model's first execute_code call.
     """
-    global _data_stack_ready, _data_stack_attempted, _data_stack_lock
+    global _data_stack_ready, _data_stack_retry_at, _data_stack_lock
     if _data_stack_ready:
         return True
     if _data_stack_lock is None:
         _data_stack_lock = asyncio.Lock()
     async with _data_stack_lock:
-        if _data_stack_ready or _data_stack_attempted:
-            return _data_stack_ready
-        _data_stack_attempted = True
+        if _data_stack_ready:
+            return True
+        if time.monotonic() < _data_stack_retry_at:
+            return False
+        if not await _ensure_venv(http):
+            return False
         try:
             r = await http.post(f"{config.CODEBOX_URL}/command", json={
                 "command": (
@@ -94,13 +108,16 @@ async def ensure_data_stack(http):
                 ),
                 "timeout": 300,
             }, timeout=310)
-            if "DATA_STACK_OK" in r.json().get("stdout", ""):
+            result = r.json()
+            if (r.status_code == 200 and result.get("exit_code") == 0
+                    and "DATA_STACK_OK" in (result.get("stdout") or "").splitlines()):
                 _data_stack_ready = True
                 print("[SANDBOX] data stack ready (pandas, openpyxl, sympy)")
                 return True
             print("[SANDBOX] data stack install did not complete (pandas/openpyxl/sympy unavailable)")
         except Exception as e:
             print(f"[SANDBOX] data stack setup error: {e}")
+        _data_stack_retry_at = time.monotonic() + _SETUP_RETRY_SECONDS
         return False
 
 
@@ -153,14 +170,22 @@ def build_custom_tool_code(tool_code: str, func_name: str, args: dict) -> str:
     )
 
 
+def _script_command(code: str, interpreter: str, suffix: str) -> str:
+    """Each remote shell owns its script and removes it on exit, even on error."""
+    b64 = base64.b64encode(code.encode()).decode()
+    return (
+        f"cd /root && _hc_script=$(mktemp /tmp/hc-exec-XXXXXXXX.{suffix}) || exit 1; "
+        "trap 'rm -f -- \"$_hc_script\"' EXIT; "
+        f"printf '%s' {shlex.quote(b64)} | base64 -d > \"$_hc_script\" && "
+        f"{shlex.quote(interpreter)} \"$_hc_script\""
+    )
+
+
 async def run_custom_tool_code(http, run_code: str, timeout: int = 30) -> dict:
     """Run assembled custom-tool code through the shared sandbox venv."""
-    await _ensure_venv(http)
-    b64 = base64.b64encode(run_code.encode()).decode()
-    cmd = (
-        f"cd /root && printf '%s' {shlex.quote(b64)} | base64 -d > /tmp/_hc_custom_tool.py && "
-        f"/root/venv/bin/python3 /tmp/_hc_custom_tool.py"
-    )
+    if not await _ensure_venv(http):
+        raise RuntimeError("Sandbox Python environment is unavailable; setup will retry after 60 seconds.")
+    cmd = _script_command(run_code, "/root/venv/bin/python3", "py")
     r = await http.post(
         f"{config.CODEBOX_URL}/command",
         json={"command": cmd, "timeout": timeout},
@@ -171,7 +196,8 @@ async def run_custom_tool_code(http, run_code: str, timeout: int = 30) -> dict:
 
 async def pip_install_in_venv(http, package: str, timeout: int = 120) -> bool:
     """Best-effort pip install into the shared sandbox venv."""
-    await _ensure_venv(http)
+    if not await _ensure_venv(http):
+        return False
     try:
         r = await http.post(
             f"{config.CODEBOX_URL}/command",
@@ -198,15 +224,20 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         b64_code = base64.b64encode(code.encode()).decode()
         lang_lower = language.lower()
         if lang_lower in ("python", "python3", "py"):
-            await _ensure_venv(http)
-            exec_cmd = (
-                f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.py && "
-                f"/root/venv/bin/python3 /tmp/_hc_exec.py"
-            )
+            if not await _ensure_venv(http):
+                error = "Sandbox Python environment is unavailable; setup will retry after 60 seconds."
+                await events.emit(conv_id, "tool_end", {
+                    "tool": "execute_code", "icon": "code", "status": error,
+                })
+                return f"ERROR: {error}"
+            # Join any staging warm-up before code attempts to import its packages.
+            # Optional package failure still permits standard-library scripts.
+            await ensure_data_stack(http)
+            exec_cmd = _script_command(code, "/root/venv/bin/python3", "py")
         elif lang_lower in ("bash", "sh", "zsh"):
             exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d | bash"
         elif lang_lower in ("javascript", "js", "node"):
-            exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d > /tmp/_hc_exec.js && node /tmp/_hc_exec.js"
+            exec_cmd = _script_command(code, "node", "js")
         else:
             exec_task = asyncio.create_task(http.post(
                 f"{config.CODEBOX_URL}/execute",

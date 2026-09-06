@@ -452,6 +452,15 @@ function HyprChat(){
   const [actId,setActId]=useState(null);
   const [inp,setInp]=useState("");
   const [streaming,setStreaming]=useState(false);
+  const [preparingSend,setPreparingSend]=useState("");
+  const sendPrepRef=useRef(null);
+  const cancelSendPreparation=()=>{
+    const prep=sendPrepRef.current;
+    if(!prep?.preparing)return;
+    prep.controller.abort();
+    sendPrepRef.current=null;
+    setPreparingSend("");
+  };
   const isMobile=useIsMobile();
   const keyboardVvh=useKeyboardViewportHeight(isMobile);
   const [sidebar,setSidebar]=useState(()=>!isMobileNow());
@@ -737,6 +746,11 @@ function HyprChat(){
 
   const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),connectorPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
   actIdRef.current=actId;
+  useEffect(()=>{
+    const prep=sendPrepRef.current;
+    if(prep?.preparing&&(prep.conversationId!==actId||prep.userId!==currentUserId))cancelSendPreparation();
+  },[actId,currentUserId]);
+  useEffect(()=>()=>{sendPrepRef.current?.controller.abort();},[]);
   // ── Voice: mic recording (STT) + speech playback (TTS) ──
   const [recording,setRecording]=useState(false);
   const [transcribing,setTranscribing]=useState(false);
@@ -1290,6 +1304,7 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
+    cancelSendPreparation();
     setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
@@ -2120,6 +2135,7 @@ function HyprChat(){
 
   // Load conversation messages from backend when switching chats
   const loadConversation = useCallback(async (id, {force=false}={}) => {
+    if(id!==actIdRef.current)cancelSendPreparation();
     // If clicking the same conversation that already has messages, just switch panel
     if(id===actIdRef.current&&!force){
       // Check if messages exist — if not, fall through to reload from DB
@@ -2335,6 +2351,7 @@ function HyprChat(){
   };
 
   const newChat=async(forceBlank=false,opts={})=>{
+    if(!opts.sendPreparation)cancelSendPreparation();
     const curConv=convs.find(c=>c.id===actId);
 
     if(!forceBlank){
@@ -2370,6 +2387,7 @@ function HyprChat(){
     const pendingMemoryValue=(!useGhost&&forceBlank&&pendingUseMemories)?"1":"0";
     if(useGhost){
       const newId=`ghost-${Date.now()}-${Math.random().toString(16).slice(2,8)}`;
+      if(opts.sendPreparation)opts.sendPreparation.conversationId=newId;
       const c={id:newId,title:"Ghost Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||(opts.carryCurrent?(curConv?.system_prompt||""):""),...(persona||{}),tool_ids:pendingTools,ephemeral:true};
       modelChoiceRef.current.byConv[newId]=c.model||defaultModel;
       const firstMsg=persona?makeProfileFirstMessage(persona):null;
@@ -2381,8 +2399,10 @@ function HyprChat(){
       return opts.returnConv?c:newId;
     }
     try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel,use_memories:pendingMemoryValue})});
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel,use_memories:pendingMemoryValue}),signal:opts.sendPreparation?.controller.signal});
+      if(!r.ok)throw new Error(`Could not create conversation (HTTP ${r.status})`);
       const c=await r.json();c.messages=[];c.use_memories=c.use_memories??pendingMemoryValue;
+      if(opts.sendPreparation?.controller.signal.aborted)return null;
       modelChoiceRef.current.byConv[c.id]=c.model||defaultModel;
       // Apply persona directly to the conv object before adding to state
       if(persona){
@@ -2390,17 +2410,20 @@ function HyprChat(){
         fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(persona)}).catch(()=>{});
       }
       const firstMsg=persona?await persistProfileFirstMessage(c.id,persona):null;
+      if(opts.sendPreparation?.controller.signal.aborted)return null;
       if(firstMsg)c.messages=[firstMsg];
       if(pendingTools.length){
         c.tool_ids=pendingTools;
         fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_ids:pendingTools})}).catch(()=>{});
       }
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[c.id]:pendingEffortValue}));
+      if(opts.sendPreparation)opts.sendPreparation.conversationId=c.id;
       setPendingUseMemories(false);
       setConvs(p=>[c,...p]);setActId(c.id);
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:c.id;
-    }catch{
+    }catch(e){
+      if(opts.sendPreparation)throw e;
       const newId=`l-${Date.now()}`;
       const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{}),tool_ids:pendingTools,use_memories:pendingMemoryValue};
       modelChoiceRef.current.byConv[newId]=c.model||defaultModel;
@@ -2415,6 +2438,7 @@ function HyprChat(){
   };
 
   const startBlankChat=()=>{
+    cancelSendPreparation();
     setGhostMode(false);
     setPendingUseMemories(false);
     setConvs(p=>p.filter(c=>!isGhostConv(c)));
@@ -2436,6 +2460,7 @@ function HyprChat(){
   };
 
   const toggleGhostMode=async()=>{
+    cancelSendPreparation();
     if(streaming||councilRunning){
       notify({type:"warning",text:"Finish the current response first",detail:"Ghost mode can only change between turns."});
       return;
@@ -2821,7 +2846,7 @@ function HyprChat(){
     const q=(text||"").slice(1).toLowerCase().trim();
     return validPrompts.filter(p=>!q||(p.title||"").toLowerCase().includes(q)||(p.category||"").toLowerCase().includes(q)).slice(0,8);
   };
-  const slashMenuActive=()=>!act?.is_council&&!streaming&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&validPrompts.length>0;
+  const slashMenuActive=()=>!act?.is_council&&!streaming&&!preparingSend&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&validPrompts.length>0;
 
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
@@ -3006,100 +3031,117 @@ function HyprChat(){
   };
 
   const send=async()=>{
-    if(streaming||loadingConv||(!inp.trim()&&!attachments.length))return;
+    if(sendPrepRef.current||streaming||councilRunning||loadingConv||(!inp.trim()&&!attachments.length))return;
     if(attachments.some(a=>a.loading)){notify({type:"warning",text:"Attachment still processing",detail:"Wait for extraction to finish or remove the file."});return;}
-    let cid=actId;
-    const pendingEffortForSend=!cid&&pendingEffort!==null?pendingEffort:undefined;
-    let createdConv=null;
-    if(!cid){createdConv=await newChat(true,{returnConv:true});cid=createdConv?.id;if(!cid)return;}
-    const cv=createdConv||convs.find(c=>c.id===cid);
-    // Route council chats to council sender
-    if(cv?.is_council){await sendCouncil();return;}
-    // Stage data-file attachments (CSV/Excel/JSON) into the Codebox sandbox so
-    // the model analyzes the FULL file via execute_code instead of a truncated
-    // inline paste. Falls back to inline text if staging fails (Codebox down,
-    // ghost chat with no server conversation row, ...).
-    const atts=await Promise.all(attachments.map(async a=>{
-      if(a.type!=="data"||!a.file)return a;
-      try{
-        const fd=new FormData();fd.append("file",a.file);fd.append("conversation_id",cid);
-        const r=await fetch(`${API}/api/chat-files/stage`,{method:"POST",body:fd});
-        if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
-        const d=await r.json();
-        let preview="";
-        if(!/\.(xlsx|xls)$/i.test(a.name)){
-          try{const txt=await a.file.text();preview=txt.split("\n").slice(0,25).join("\n").substring(0,3000);}catch{}
+    const prep={controller:new AbortController(),preparing:true,conversationId:actId,userId:currentUserId};
+    sendPrepRef.current=prep;
+    setPreparingSend("Preparing message…");
+    try{
+      const hasDataFiles=attachments.some(a=>a.type==="data"&&a.file);
+      if(hasDataFiles&&(ghostMode||isGhostConv(convs.find(c=>c.id===actId)))){
+        throw new Error("Data-file uploads require a saved conversation. Switch off Ghost mode or remove the data attachment.");
+      }
+      let cid=actId;
+      const pendingEffortForSend=!cid&&pendingEffort!==null?pendingEffort:undefined;
+      let createdConv=null;
+      if(!cid){createdConv=await newChat(true,{returnConv:true,sendPreparation:prep});cid=createdConv?.id;if(!cid)return;}
+      if(prep.controller.signal.aborted)return;
+      const cv=createdConv||convs.find(c=>c.id===cid);
+      // Route council chats to council sender
+      if(cv?.is_council){prep.preparing=false;setPreparingSend("");await sendCouncil();return;}
+      // Stage data-file attachments (CSV/Excel/JSON) into the Codebox sandbox so
+      // the model analyzes the FULL file via execute_code instead of a truncated
+      // inline paste. Keep the whole draft if any attachment cannot be staged.
+      if(hasDataFiles)setPreparingSend("Uploading attachments…");
+      const atts=await Promise.all(attachments.map(async a=>{
+        if(a.type!=="data"||!a.file)return a;
+        try{
+          const fd=new FormData();fd.append("file",a.file);fd.append("conversation_id",cid);
+          const r=await fetch(`${API}/api/chat-files/stage`,{method:"POST",body:fd,signal:prep.controller.signal});
+          if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
+          const d=await r.json();
+          if(!d.sandbox_path)throw new Error("The upload returned no file path");
+          let preview="";
+          if(!/\.(xlsx|xls)$/i.test(a.name)){
+            try{const txt=await a.file.slice(0,12000).text();preview=txt.split("\n").slice(0,25).join("\n").substring(0,3000);}catch{}
+          }
+          return {...a,sandboxPath:d.sandbox_path,preview};
+        }catch(e){
+          if(prep.controller.signal.aborted)throw e;
+          throw new Error(`Could not upload ${a.name}: ${e.message||String(e)}. Your message and attachments are kept; press Send to retry.`);
         }
-        return {...a,sandboxPath:d.sandbox_path,preview};
-      }catch(e){
-        console.warn(`File staging failed for ${a.name} — falling back to inline text:`,e);
-        try{const txt=await a.file.text();return {...a,content:txt.substring(0,20000)};}
-        catch{return {...a,content:`[Binary file: ${a.name}, ${((a.size||0)/1024).toFixed(1)}KB]`};}
-      }
-    }));
-    // Build content with attachments — full text for model, display version for UI
-    let displayContent = inp.trim();
-    let modelContent = displayContent;
-    const pdfAttachments = [];
-    const imageAttachments = []; // {name, dataUrl, mime} for UI render
-    const imageBase64s = [];      // raw base64 (no data: prefix) for Ollama images field
-    if(atts.length){
-      const pdfParts = [];
-      const fileParts = [];
-      const imageNames = [];
-      for(const a of atts){
-        if(a.type==="image"){
-          imageAttachments.push({name:a.name,dataUrl:a.dataUrl,mime:a.mime});
-          // Strip "data:image/png;base64," prefix → raw base64 for Ollama
-          const b64=(a.dataUrl||"").split(",")[1]||"";
-          if(b64) imageBase64s.push(b64);
-          imageNames.push(a.name);
-        }else if(a.type==="pdf"){
-          if(a.error)continue;
-          pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
-          pdfAttachments.push({name:a.name,pages:a.pages||0});
-        }else if(a.type==="data"&&a.sandboxPath){
-          const kb=((a.size||0)/1024).toFixed(1);
-          fileParts.push(`📎 **${a.name}** — full file staged in the sandbox at \`${a.sandboxPath}\` (${kb}KB).${a.preview?`\nPreview (first lines):\n\`\`\`\n${a.preview}\n\`\`\``:""}\nTo analyze this file, run execute_code (python) reading that path — pandas and openpyxl are installed. Never re-type the file contents into code.`);
-        }else{
-          fileParts.push(`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``);
+      }));
+      if(prep.controller.signal.aborted||sendPrepRef.current!==prep)return;
+      // Build content with attachments — full text for model, display version for UI
+      let displayContent = inp.trim();
+      let modelContent = displayContent;
+      const pdfAttachments = [];
+      const imageAttachments = []; // {name, dataUrl, mime} for UI render
+      const imageBase64s = [];      // raw base64 (no data: prefix) for Ollama images field
+      if(atts.length){
+        const pdfParts = [];
+        const fileParts = [];
+        const imageNames = [];
+        for(const a of atts){
+          if(a.type==="image"){
+            imageAttachments.push({name:a.name,dataUrl:a.dataUrl,mime:a.mime});
+            // Strip "data:image/png;base64," prefix → raw base64 for Ollama
+            const b64=(a.dataUrl||"").split(",")[1]||"";
+            if(b64) imageBase64s.push(b64);
+            imageNames.push(a.name);
+          }else if(a.type==="pdf"){
+            if(a.error)continue;
+            pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
+            pdfAttachments.push({name:a.name,pages:a.pages||0});
+          }else if(a.type==="data"&&a.sandboxPath){
+            const kb=((a.size||0)/1024).toFixed(1);
+            fileParts.push(`📎 **${a.name}** — full file staged in the sandbox at \`${a.sandboxPath}\` (${kb}KB).${a.preview?`\nPreview (first lines):\n\`\`\`\n${a.preview}\n\`\`\``:""}\nTo analyze this file, run execute_code (python) reading that path — pandas and openpyxl are installed. Never re-type the file contents into code.`);
+          }else{
+            fileParts.push(`📎 **${a.name}**:\n\`\`\`\n${a.content}\n\`\`\``);
+          }
+        }
+        const allFileCtx = [...fileParts,...pdfParts].join("\n\n");
+        modelContent = modelContent ? `${modelContent}\n\n${allFileCtx}` : allFileCtx;
+        // Non-vision-capable models won't see images directly; give them a textual hint.
+        if(imageNames.length){
+          const imgHint = `[Attached ${imageNames.length} image${imageNames.length>1?"s":""}: ${imageNames.join(", ")}]`;
+          modelContent = modelContent ? `${modelContent}\n\n${imgHint}` : imgHint;
+        }
+        // Non-PDF files still show inline
+        if(fileParts.length){
+          const nonPdfCtx = fileParts.join("\n\n");
+          displayContent = displayContent ? `${displayContent}\n\n${nonPdfCtx}` : nonPdfCtx;
         }
       }
-      const allFileCtx = [...fileParts,...pdfParts].join("\n\n");
-      modelContent = modelContent ? `${modelContent}\n\n${allFileCtx}` : allFileCtx;
-      // Non-vision-capable models won't see images directly; give them a textual hint.
-      if(imageNames.length){
-        const imgHint = `[Attached ${imageNames.length} image${imageNames.length>1?"s":""}: ${imageNames.join(", ")}]`;
-        modelContent = modelContent ? `${modelContent}\n\n${imgHint}` : imgHint;
-      }
-      // Non-PDF files still show inline
-      if(fileParts.length){
-        const nonPdfCtx = fileParts.join("\n\n");
-        displayContent = displayContent ? `${displayContent}\n\n${nonPdfCtx}` : nonPdfCtx;
-      }
+      if(!modelContent.trim()&&!imageBase64s.length){notify({type:"warning",text:"No sendable content",detail:"Retry or remove failed attachments before sending."});return;}
+      // Quick search results now stream in via SSE (search_results event with
+      // source="quick_search") — same data the chat agent saw, no parallel
+      // fetch. Just clear the carousel and flip to loading; the SSE handler
+      // populates quickResults when the agent finishes its search.
+      if(quickSearch&&modelContent.trim()){
+        setSearchLoading(true);setQuickResults([]);setQuickSearchError(null);
+      }else{setQuickResults([]);setQuickSearchError(null);}
+      const _now=new Date().toISOString();
+      const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
+      uConv(cid,c=>{const existing=c.messages||[];const hasRealMessages=existing.some(m=>!(m.metadata&&m.metadata.persona_first_message));return{...c,title:!hasRealMessages?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...existing,um,{role:"assistant",content:"",isS:true,created_at:_now}]};});
+      setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
+      setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"});},0);
+      const am=[...(cv?.messages||[]),um];
+      const sendOverrides={};
+      if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
+      if(createdConv){sendOverrides.conversation=createdConv;sendOverrides.freshChat=true;}
+      prep.preparing=false;setPreparingSend("");
+      await sendMessages(cid, am, um._fullContent||um.content, Object.keys(sendOverrides).length?sendOverrides:undefined);
+    }catch(e){
+      if(!prep.controller.signal.aborted)notify({type:"error",text:"Message not sent",detail:e.message||String(e)});
+      prep.controller.abort();
+    }finally{
+      if(sendPrepRef.current===prep){sendPrepRef.current=null;setPreparingSend("");}
     }
-    if(!modelContent.trim()&&!imageBase64s.length){notify({type:"warning",text:"No sendable content",detail:"Retry or remove failed attachments before sending."});return;}
-    // Quick search results now stream in via SSE (search_results event with
-    // source="quick_search") — same data the chat agent saw, no parallel
-    // fetch. Just clear the carousel and flip to loading; the SSE handler
-    // populates quickResults when the agent finishes its search.
-    if(quickSearch&&modelContent.trim()){
-      setSearchLoading(true);setQuickResults([]);setQuickSearchError(null);
-    }else{setQuickResults([]);setQuickSearchError(null);}
-    const _now=new Date().toISOString();
-    const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
-    uConv(cid,c=>{const existing=c.messages||[];const hasRealMessages=existing.some(m=>!(m.metadata&&m.metadata.persona_first_message));return{...c,title:!hasRealMessages?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...existing,um,{role:"assistant",content:"",isS:true,created_at:_now}]};});
-    setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
-    setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"});},0);
-    const am=[...(cv?.messages||[]),um];
-    const sendOverrides={};
-    if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
-    if(createdConv){sendOverrides.conversation=createdConv;sendOverrides.freshChat=true;}
-    await sendMessages(cid, am, um._fullContent||um.content, Object.keys(sendOverrides).length?sendOverrides:undefined);
   };
 
   const regenerate=async(msgIndex, overrides)=>{
-    if(streaming)return;
+    if(streaming||sendPrepRef.current?.preparing)return;
     const cid=actId;if(!cid)return;
     const cv=convs.find(c=>c.id===cid);
     // Truncate server-side from the replaced assistant row inclusive BEFORE
@@ -3113,7 +3155,7 @@ function HyprChat(){
   };
 
   const editMessage=async(msgIndex, newContent)=>{
-    if(streaming)return;
+    if(streaming||sendPrepRef.current?.preparing)return;
     const cid=actId;if(!cid)return;
     setEditingMsg(null);
     const cv=convs.find(c=>c.id===cid);
@@ -3135,7 +3177,7 @@ function HyprChat(){
   };
 
   const saveAssistantEdit=async(msgIndex,newContent)=>{
-    if(streaming)return;
+    if(streaming||sendPrepRef.current?.preparing)return;
     const cid=actId;if(!cid)return;
     setEditingMsg(null);
     const cv=convs.find(c=>c.id===cid);
@@ -3186,7 +3228,7 @@ function HyprChat(){
   };
 
   const continueMessage=async(msgIndex)=>{
-    if(streaming)return;
+    if(streaming||sendPrepRef.current?.preparing)return;
     const cid=actId;if(!cid)return;
     const cv=convs.find(c=>c.id===cid);
     const msg=cv?.messages?.[msgIndex];
@@ -3239,6 +3281,7 @@ function HyprChat(){
 
   // File upload handler
   const handleFileUpload=async(files)=>{
+    if(sendPrepRef.current?.preparing)return;
     // If Coder Bot is active, intercept archive drops and route them to the
     // project upload endpoint instead of treating them as text attachments.
     const isArchive=(f)=>{const n=(f.name||"").toLowerCase();return n.endsWith(".zip")||n.endsWith(".tar")||n.endsWith(".tar.gz")||n.endsWith(".tgz")||n.endsWith(".tar.bz2")||n.endsWith(".tbz2");};
@@ -8112,13 +8155,14 @@ function HyprChat(){
               </button>)}
               {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
             </div>}
-          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0"}}>
+          {preparingSend&&<div role="status" aria-live="polite" style={{maxWidth:chatWidth,margin:"0 auto",padding:"6px 0",fontSize:11,color:t.warm}}>{preparingSend}</div>}
+          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0",pointerEvents:preparingSend?"none":undefined,opacity:preparingSend?0.65:1}}>
             {attachments.map((a,i)=>a.type==="image"?
               <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 6px 3px 3px",borderRadius:8,fontSize:10,fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
                 <img src={a.dataUrl} alt={a.name} style={{height:26,width:26,objectFit:"cover",borderRadius:5,border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer",flexShrink:0}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
                 <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
                 <span style={{color:t.mut,fontWeight:400,fontSize:9}}>{(a.size/1024).toFixed(0)}KB</span>
-                <button onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.acc,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.acc,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
               </span>
             :a.type==="pdf"?
               <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:a.error?`${t.err}10`:`${t.acc}10`,border:`1px solid ${a.loading?t.warm:a.error?t.err:t.acc}30`,color:a.loading?t.warm:a.error?t.err:t.acc,padding:"4px 7px",borderRadius:8,fontSize:10,fontWeight:600,transition:"all .2s",maxWidth:"100%",minHeight:30,boxSizing:"border-box"}}>
@@ -8127,13 +8171,13 @@ function HyprChat(){
                 {!a.loading&&!a.error&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
                 {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
                 {a.error&&<span style={{color:t.err,fontWeight:500,fontSize:9,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.error}</span>}
-                {a.error&&a.file&&<button onClick={()=>{const f=a.file;setAttachments(p=>p.filter((_,j)=>j!==i));handleFileUpload([f]);}} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Retry</button>}
-                <button onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:a.error?t.err:t.mut,cursor:"pointer",padding:"1px 4px",fontSize:12,opacity:.8}}>&times;</button>
+                {a.error&&a.file&&<button disabled={!!preparingSend} onClick={()=>{const f=a.file;setAttachments(p=>p.filter((_,j)=>j!==i));handleFileUpload([f]);}} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Retry</button>}
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:a.error?t.err:t.mut,cursor:"pointer",padding:"1px 4px",fontSize:12,opacity:.8}}>&times;</button>
               </span>
             :<span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.f1}10`,border:`1px solid ${t.f1}30`,color:t.f1,padding:"4px 7px",borderRadius:8,fontSize:10,fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
                 <IC.Paperclip/>
                 <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:190}}>{a.name}</span>
-                <button onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
               </span>)}
           </div>}
           <div className={isEmptyChatSurface?"empty-composer-box":""} style={{maxWidth:chatWidth,margin:"0 auto",...glass,background:composerState==="error"?`${t.err}08`:composerState==="stopped"?`${t.surface}E8`:glass.background,borderRadius:8,padding:isEmptyChatSurface?"9px 7px 9px 14px":"6px 6px 6px 12px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${composerColor}${composerActive||composerFocused?"55":"32"}`,boxShadow:composerActive?`0 0 10px ${composerColor}18`:composerFocused?`0 0 0 2px ${composerColor}12`:"none",transition:"border-color .18s, box-shadow .22s, background .18s",minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`}}>
@@ -8177,7 +8221,7 @@ function HyprChat(){
             {!act?.is_council&&<><div ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
               <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
               {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
-                <button onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
+                <button disabled={!!preparingSend} onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
                 {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
                 {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
               </div>}
@@ -8212,7 +8256,7 @@ function HyprChat(){
               }
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
-              disabled={streaming||councilRunning||loadingConv}
+              disabled={streaming||councilRunning||loadingConv||!!preparingSend}
               style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
               onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
@@ -8235,10 +8279,11 @@ function HyprChat(){
                 </div>}
               </div>}
             </div>;})()}
-            {sttUrl&&!streaming&&!councilRunning&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
+            {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
               {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
             </button>}
-            {councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            :councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>

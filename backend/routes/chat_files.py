@@ -1,7 +1,7 @@
 """Chat data-file staging routes.
 
 Uploaded data files (CSV/Excel/JSON) from the chat composer are pushed into
-the Codebox sandbox at /root/chat_files/{conversation_id}/{filename} so the
+the Codebox sandbox at /root/chat_files/{conversation_id}/{upload_id}/{filename} so the
 always-available execute_code tool can read the FULL file from disk. The
 composer then references the sandbox path in the prompt instead of inlining
 (and truncating) the file's text — which forced the model to re-type the data
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
@@ -32,6 +33,11 @@ _CONV_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 def safe_filename(name: str) -> str:
     base = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
     base = _UNSAFE_CHARS.sub("_", base).strip("._") or "file"
+    if len(base) <= 120:
+        return base
+    stem, dot, suffix = base.rpartition(".")
+    if dot and len(suffix) <= 16:
+        return stem[:119 - len(suffix)] + dot + suffix
     return base[:120]
 
 
@@ -61,14 +67,15 @@ async def stage_chat_file(file: UploadFile = File(...), conversation_id: str = F
     if not await db.get_conversation(conv_id):
         raise HTTPException(404, "Conversation not found")
 
-    data = await file.read()
+    limit = config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    data = await file.read(limit + 1)
     if not data:
         raise HTTPException(400, "Empty file")
-    if len(data) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+    if len(data) > limit:
         raise HTTPException(413, f"File too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
 
     name = safe_filename(file.filename or "")
-    remote_path = f"/root/chat_files/{conv_id}/{name}"
+    remote_path = f"/root/chat_files/{conv_id}/{uuid.uuid4().hex}/{name}"
     ctx = route_context()
     try:
         await upload_bytes_to_codebox(ctx.http, remote_path, data)

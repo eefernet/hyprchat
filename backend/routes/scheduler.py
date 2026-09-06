@@ -65,28 +65,20 @@ def _validate_task_fields(task_type: str, schedule_kind: str) -> None:
         raise HTTPException(400, f"schedule_kind must be one of {db.SCHEDULE_KINDS}")
 
 
-def _validate_event_trigger(schedule_kind: str, event_trigger_json: dict | None) -> None:
-    """Event tasks with no/unknown event name would sit enabled but never fire."""
-    if schedule_kind != "event":
-        return
-    event = str((event_trigger_json or {}).get("event") or "").strip()
-    if event not in scheduler.EVENT_NAMES:
-        raise HTTPException(400, "event tasks need event_trigger_json.event set to "
-                                 f"one of: {', '.join(scheduler.EVENT_NAMES)}")
-
-
 async def _computed_next_run(schedule_kind: str, schedule_json: dict,
-                             timezone: str) -> str | None:
-    return await scheduler.recompute_next_run(schedule_kind, schedule_json, timezone)
+                             timezone: str, event_trigger_json: dict | None = None) -> str | None:
+    try:
+        return await scheduler.validated_next_run(
+            schedule_kind, schedule_json, timezone, event_trigger_json=event_trigger_json)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/api/tasks")
 async def create_task(req: TaskCreate):
     _validate_task_fields(req.task_type, req.schedule_kind)
-    _validate_event_trigger(req.schedule_kind, req.event_trigger_json)
-    next_run = await _computed_next_run(req.schedule_kind, req.schedule_json, req.timezone)
-    if req.schedule_kind not in ("event", "webhook") and not next_run:
-        raise HTTPException(400, "schedule_json does not produce a next run time")
+    next_run = await _computed_next_run(
+        req.schedule_kind, req.schedule_json, req.timezone, req.event_trigger_json)
     task = await db.create_scheduled_task(
         f"task-{uuid.uuid4().hex[:10]}",
         title=req.title.strip()[:200] or "Untitled task",
@@ -144,14 +136,12 @@ async def update_task(task_id: str, req: TaskUpdate):
         _validate_task_fields(fields.get("task_type", task["task_type"]),
                               fields.get("schedule_kind", task["schedule_kind"]))
     kind = fields.get("schedule_kind", task["schedule_kind"])
-    if kind == "event" and ("schedule_kind" in fields or "event_trigger_json" in fields):
-        _validate_event_trigger(kind, fields.get("event_trigger_json",
-                                                 task.get("event_trigger_json")))
     # Recompute next_run whenever the schedule, tz, or enablement changes.
-    if any(k in fields for k in ("schedule_kind", "schedule_json", "timezone")) or fields.get("enabled"):
+    if any(k in fields for k in ("schedule_kind", "schedule_json", "timezone", "event_trigger_json")) or fields.get("enabled"):
         fields["next_run"] = await _computed_next_run(
             kind, fields.get("schedule_json", task["schedule_json"]),
-            fields.get("timezone", task["timezone"]))
+            fields.get("timezone", task["timezone"]),
+            fields.get("event_trigger_json", task.get("event_trigger_json")))
     if kind == "webhook" and not task.get("webhook_token"):
         fields["webhook_token"] = scheduler.new_webhook_token()
     updated = await db.update_scheduled_task(task_id, fields)
@@ -186,7 +176,8 @@ async def resume_task(task_id: str):
     task = await db.get_scheduled_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    next_run = await _computed_next_run(task["schedule_kind"], task["schedule_json"], task["timezone"])
+    next_run = await _computed_next_run(
+        task["schedule_kind"], task["schedule_json"], task["timezone"], task.get("event_trigger_json"))
     return await db.update_scheduled_task(task_id, {"enabled": True, "next_run": next_run})
 
 

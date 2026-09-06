@@ -3122,6 +3122,7 @@ async def exec_tool(
                     profile = await db.get_assistant_profile()
                     tz = (profile or {}).get("timezone") or "UTC"
                     event_trigger_json: dict = {}
+                    schedule_json: dict = {}
                     if kind == "event":
                         event_name = str(args.get("event") or "").strip().lower()
                         if event_name not in _scheduler.EVENT_NAMES:
@@ -3129,24 +3130,23 @@ async def exec_tool(
                                     f"{', '.join(_scheduler.EVENT_NAMES)}.")
                         event_trigger_json = {
                             "event": event_name,
-                            "every": max(1, int(args.get("every") or 1)),
+                            "every": args.get("every", 1),
                         }
-                        next_run = None
                     else:
-                        schedule_json: dict = {}
                         if args.get("time"):
                             schedule_json["time"] = str(args["time"]).strip()
                         if args.get("weekday") is not None:
-                            schedule_json["weekday"] = int(args["weekday"])
+                            schedule_json["weekday"] = args["weekday"]
                         if args.get("day") is not None:
-                            schedule_json["day"] = int(args["day"])
+                            schedule_json["day"] = args["day"]
                         if args.get("cron"):
                             schedule_json["cron"] = str(args["cron"]).strip()
                         if args.get("run_at"):
                             schedule_json["run_at"] = str(args["run_at"]).strip()
-                        next_run = _scheduler.compute_next_run(kind, schedule_json, tz)
-                        if not next_run:
-                            return "ERROR: that schedule doesn't produce a run time — give a concrete time (e.g. time='08:30' for daily, run_at='2026-07-10T08:30' for once)."
+                    next_run = await _scheduler.validated_next_run(
+                        kind, schedule_json, tz, event_trigger_json=event_trigger_json)
+                    if kind == "event":
+                        event_trigger_json["every"] = int(event_trigger_json["every"])
                     task = await db.create_scheduled_task(
                         f"task-{uuid.uuid4().hex[:10]}", title=title, prompt=prompt,
                         task_type="llm", schedule_kind=kind,
@@ -3180,9 +3180,9 @@ async def exec_tool(
                     await db.update_scheduled_task(task_id, {"enabled": False})
                     return f"Paused task \"{task['title']}\"."
                 if action == "resume":
-                    nxt = await _scheduler.recompute_next_run(
+                    nxt = await _scheduler.validated_next_run(
                         task["schedule_kind"], task["schedule_json"],
-                        task.get("timezone") or "")
+                        task.get("timezone") or "", event_trigger_json=task.get("event_trigger_json"))
                     await db.update_scheduled_task(task_id, {"enabled": True, "next_run": nxt})
                     return f"Resumed task \"{task['title']}\" (next run {nxt} UTC)."
                 if action == "delete":
@@ -3204,13 +3204,24 @@ async def exec_tool(
                             schedule_json[key] = args[key]
                             changed_schedule = True
                     kind = str(args.get("schedule_kind") or task["schedule_kind"]).strip().lower()
+                    event_trigger = dict(task.get("event_trigger_json") or {})
+                    if kind == "event":
+                        for key in ("event", "every"):
+                            if args.get(key) is not None:
+                                event_trigger[key] = args[key]
+                                changed_schedule = True
+                    if kind == "webhook" and task["schedule_kind"] != "webhook":
+                        return "ERROR: create webhook tasks through the Tasks API."
                     if kind != task["schedule_kind"]:
                         changed_schedule = True
                     if changed_schedule:
                         fields["schedule_kind"] = kind
                         fields["schedule_json"] = schedule_json
-                        fields["next_run"] = await _scheduler.recompute_next_run(
-                            kind, schedule_json, task.get("timezone") or "")
+                        fields["next_run"] = await _scheduler.validated_next_run(
+                            kind, schedule_json, task.get("timezone") or "",
+                            event_trigger_json=event_trigger)
+                        if kind == "event":
+                            fields["event_trigger_json"] = event_trigger
                     if not fields:
                         return "Nothing to update — pass title, prompt, or schedule fields."
                     updated = await db.update_scheduled_task(task_id, fields)
