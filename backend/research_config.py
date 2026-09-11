@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import config
+import context_policy
 
 
 REPORT_TEMPLATES = [
@@ -81,8 +82,8 @@ def research_depth_budget(depth: int) -> dict:
 
 def research_num_ctx() -> int:
     """Context window for research LLM calls (settings/env: research_num_ctx)."""
-    n = int(getattr(config, "RESEARCH_NUM_CTX", 0) or getattr(config, "DEFAULT_NUM_CTX", 0) or 16384)
-    return n if n > 0 else 16384
+    values = context_policy.runtime_settings()
+    return context_policy.positive_int(values["research_num_ctx"], "research_num_ctx")
 
 
 def effective_context_chars(budget: dict, *, reserve_tokens: int = 5200, overhead_chars: int = 24000) -> int:

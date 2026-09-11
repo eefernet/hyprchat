@@ -1105,6 +1105,8 @@ async def init_db():
         except Exception as e:
             print(f"[DB MIGRATION] Artifact backfill failed: {e}")
         await db.commit()
+        from db.coder_jobs import migrate as migrate_coder_jobs
+        await migrate_coder_jobs(db)
     finally:
         await db.close()
 
@@ -2536,9 +2538,10 @@ async def add_artifact(
     content_text: str | None = None,
     tags: list[str] | None = None,
     metadata: dict | None = None,
+    _connection=None,
 ) -> dict | None:
     user_id = _scope_user()
-    db = await get_db()
+    db = _connection or await get_db()
     try:
         conv_id = (conversation_id or "").strip() or None
         if conv_id:
@@ -2585,10 +2588,12 @@ async def add_artifact(
             workspace_ids = [workspace_id] if workspace_id else []
         await _set_artifact_workspaces_conn(db, artifact_id, workspace_ids, user_id)
         await _set_artifact_tags_conn(db, artifact_id, tags)
-        await db.commit()
+        if _connection is None:
+            await db.commit()
         return await _get_artifact_conn(db, artifact_id, user_id)
     finally:
-        await db.close()
+        if _connection is None:
+            await db.close()
 
 
 async def add_conversation_file(
@@ -5203,7 +5208,8 @@ async def reap_stale_runs() -> dict:
             )
             reports_reaped += 1
         rows = await db.execute_fetchall(
-            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running')"
+            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running') "
+            "AND COALESCE(workflow_id,'') NOT IN (SELECT id FROM coder_workflows WHERE workflow_version=3)"
         )
         for row in rows:
             try:

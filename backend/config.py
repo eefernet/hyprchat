@@ -3,6 +3,7 @@ HyprChat Configuration
 Edit these values to match your homelab setup.
 """
 import os
+from context_policy import DEFAULTS as CONTEXT_DEFAULTS
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.abspath(os.getenv("HYPRCHAT_DATA_DIR") or os.path.join(PROJECT_ROOT, "data"))
@@ -231,7 +232,7 @@ OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # 
 # than continue-pass cap). This floor covers unplanned / no-manifest builds; 20
 # was too low for a multi-file scaffold.
 OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "30"))
-OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", "32768"))
+OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", str(CONTEXT_DEFAULTS["openhands_num_ctx"])))
 AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
 AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
 AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
@@ -253,11 +254,10 @@ OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").s
 # The worker gates the flag on /api/show capabilities, so non-thinking models
 # are unaffected either way.
 OPENHANDS_DISABLE_THINKING = os.getenv("OPENHANDS_DISABLE_THINKING", "true").lower() == "true"
-MIN_NUM_CTX = int(os.getenv("MIN_NUM_CTX", "1024"))
-CODER_V2_MIN_NUM_CTX = int(os.getenv("CODER_V2_MIN_NUM_CTX", "32768"))
+MIN_NUM_CTX = 1  # Positivity validation only; no application context floor.
 
 
-def coerce_num_ctx(value, fallback=16384, minimum=None):
+def coerce_num_ctx(value, fallback=CONTEXT_DEFAULTS["default_num_ctx"], minimum=None):
     """Return a positive Ollama num_ctx, or a sane fallback for invalid values."""
     minimum = MIN_NUM_CTX if minimum is None else int(minimum)
     try:
@@ -272,7 +272,7 @@ def coerce_num_ctx(value, fallback=16384, minimum=None):
         fb = int(fallback)
     except (TypeError, ValueError):
         fb = 0
-    return fb if fb >= minimum else 16384
+    return fb if fb >= minimum else CONTEXT_DEFAULTS["default_num_ctx"]
 
 
 def coerce_int(value, fallback, *, minimum=None, maximum=None):
@@ -290,11 +290,11 @@ def coerce_int(value, fallback, *, minimum=None, maximum=None):
     return n
 
 
-DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", "16384"))
+DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", str(CONTEXT_DEFAULTS["default_num_ctx"])))
 # Context window for Deep Research LLM calls (planning, findings, audit,
 # synthesis). Defaults higher than DEFAULT_NUM_CTX because depth 3-5 evidence
 # contexts overflow a 16K window; evidence budgets scale down to fit this.
-RESEARCH_NUM_CTX = coerce_num_ctx(os.getenv("RESEARCH_NUM_CTX", "40960"))
+RESEARCH_NUM_CTX = coerce_num_ctx(os.getenv("RESEARCH_NUM_CTX", str(CONTEXT_DEFAULTS["research_num_ctx"])))
 MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).
@@ -347,3 +347,10 @@ Use execute_code for arithmetic, aggregation, statistics, parsing, and data tran
 - If you don't understand the error, use research to look it up
 - Fix the code and call execute_code again — do NOT give up after one failure
 - If a package is missing, use run_shell to install it (pip3 install X), then retry"""
+
+
+# Single source of visible, mutable context and execution defaults.
+CONTEXT_SETTINGS = {**CONTEXT_DEFAULTS, "default_num_ctx": DEFAULT_NUM_CTX,
+                    "openhands_num_ctx": OPENHANDS_NUM_CTX, "aider_num_ctx": AIDER_NUM_CTX,
+                    "research_num_ctx": RESEARCH_NUM_CTX}
+DEFAULT_SETTINGS.update(CONTEXT_SETTINGS)

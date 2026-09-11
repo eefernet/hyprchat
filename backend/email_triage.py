@@ -9,6 +9,8 @@ writes email_messages columns and fires notifications, never chat messages.
 
 from __future__ import annotations
 
+import context_policy
+
 import json
 from datetime import datetime
 
@@ -63,7 +65,7 @@ async def triage_new_messages(http, account: dict) -> int:
     today_local = datetime.now(safe_zone(tz_name)).strftime("%Y-%m-%d")
     prompt = _TRIAGE_PROMPT.format(today=today_local, emails="\n".join(blocks))
     raw = await model_providers.complete_chat(
-        http, model, prompt, num_ctx=8192, num_predict=2048, format_json=True,
+        http, model, prompt, num_ctx=context_policy.helper_context("extraction"), num_predict=2048, format_json=True,
         timeout=120, ollama_url=config.OLLAMA_URL)
     try:
         verdicts = json.loads(raw or "{}")

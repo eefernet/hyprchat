@@ -10,6 +10,8 @@ ranking, optional embedding rerank, a literal-query fallback plus an LLM
 refine round when relevance is low, selective page reads, and prompt context
 injection. Speed mode stays fully deterministic.
 """
+
+import context_policy
 import asyncio
 import json
 import re
@@ -836,7 +838,7 @@ async def _ask_ollama_json(
                     # (often 16-32K) which on a 4B can balloon to 15-20GB
                     # of VRAM and evict a co-resident chat model — turning
                     # ~1s triage into ~25s under contention.
-                    "num_ctx": 4096,
+                    "num_ctx": context_policy.helper_context("classifier"),
                 },
                 "keep_alive": "10m",
             }, timeout=timeout),

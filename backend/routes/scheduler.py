@@ -3,6 +3,8 @@ NL→draft parsing, and the unauthenticated /api/hooks/{token} webhook trigger."
 
 from __future__ import annotations
 
+import context_policy
+
 import json
 import secrets
 import uuid
@@ -231,7 +233,7 @@ async def parse_task(req: TaskParseRequest):
     now_local = datetime.now(tz).replace(tzinfo=None)
     prompt = _PARSE_PROMPT.format(now=now_local.isoformat(timespec="minutes"), text=text[:2000])
     raw = await model_providers.complete_chat(
-        ctx.http, model, prompt, num_ctx=4096, num_predict=512, format_json=True,
+        ctx.http, model, prompt, num_ctx=context_policy.helper_context("classifier"), num_predict=512, format_json=True,
         timeout=60, ollama_url=config.OLLAMA_URL)
     try:
         draft = json.loads(raw or "{}")

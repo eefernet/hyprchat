@@ -1,6 +1,8 @@
 """
 Council chat — multi-model parallel streaming with AI peer voting and debate rounds.
 """
+
+import context_policy
 import asyncio
 import json
 import re
@@ -272,7 +274,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 "messages": [{"role": "system", "content": sys_p}] + msgs,
                 "stream": True,
                 "think": False,
-                "options": {"num_ctx": 16384},
+                "options": {"num_ctx": context_policy.helper_context("extraction")},
                 "keep_alive": "30m",
             }
             full = ""
@@ -465,7 +467,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     "messages": [{"role": "user", "content": vote_prompt}],
                     "stream": False,
                     "think": False,
-                    "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 120},
+                    "options": {"temperature": 0.1, "num_ctx": context_policy.helper_context("extraction"), "num_predict": 120},
                     "keep_alive": "30m",
                 }, timeout=30)
                 text = strip_leaked_cot(r.json()["message"]["content"].strip())[0]
@@ -564,7 +566,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             {"role": "system", "content": host_system},
             {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
-        payload = {"model": host_model, "messages": host_msgs, "stream": True, "think": False, "options": {"num_ctx": 16384}, "keep_alive": "30m"}
+        payload = {"model": host_model, "messages": host_msgs, "stream": True, "think": False, "options": {"num_ctx": context_policy.helper_context("extraction")}, "keep_alive": "30m"}
         host_full = ""
         try:
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",

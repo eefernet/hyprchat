@@ -15,6 +15,8 @@ Contract:
     a paid API.
 """
 
+import context_policy
+
 import asyncio
 import json
 import re
@@ -148,7 +150,7 @@ async def rerank(query_text: str, chunks: list[dict], top_k: int) -> list[dict]:
             raw = await asyncio.wait_for(
                 model_providers.complete_chat(
                     http, model, prompt,
-                    temperature=0.0, num_ctx=8192, num_predict=256,
+                    temperature=0.0, num_ctx=context_policy.helper_context("extraction"), num_predict=256,
                     format_json=True, timeout=int(timeout_s) + 5,
                     ollama_url=config.OLLAMA_URL,
                 ),

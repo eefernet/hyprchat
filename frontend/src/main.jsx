@@ -12,6 +12,7 @@
 import './vendor.js';
 
 import React from 'react';
+import DaedalusSettings from './components/DaedalusSettings.jsx';
 import * as ReactDOMFull from 'react-dom';
 import { createRoot, hydrateRoot } from 'react-dom/client';
 import {
@@ -192,7 +193,8 @@ function HyprChat(){
   const [fixerModel,    setFixerModel]    =useState(()=>{try{return localStorage.getItem("hc-fixer-model")    ||"";}catch{return "";}});
   const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
   const [coderBotModelsOpen,setCoderBotModelsOpen]=useState(()=>{try{return localStorage.getItem("hc-coderbot-models-open")==="1";}catch{return false;}});
-  const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"8192");}catch{return 8192;}});
+  const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"0");}catch{return 0;}});
+  const [coderChatCtx,setCoderChatCtx]=useState(0);
   const [researchNumCtx,setResearchNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-research-num-ctx")||"40960");}catch{return 40960;}});
   const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
   const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
@@ -657,11 +659,13 @@ function HyprChat(){
     return id;
   },[]);
   const updateActivity=useCallback((id,upd)=>setDownloads(p=>p.map(d=>d.id===id?{...d,...upd}:d)),[]);
+  const activeCoderConversation=useRef(actId);
+  activeCoderConversation.current=actId;
   const refreshCoderWorkflows=useCallback(async(cid=actId)=>{
     if(!cid)return;
     try{
       const r=await fetch(`${API}/api/coder/workflows?conversation_id=${cid}`);
-      if(r.ok)setCoderWorkflows(await r.json());
+      if(r.ok){const rows=await r.json();if(activeCoderConversation.current===cid)setCoderWorkflows(rows);}
     }catch{}
   },[actId]);
   const uploadCoderProject=async(f)=>{
@@ -1567,6 +1571,7 @@ function HyprChat(){
       if(d.current_fixer_model!=null)hydrateServerSetting("fixer_model",setFixerModel,d.current_fixer_model,fixerModel);
       if(d.current_qa_model!=null)hydrateServerSetting("qa_model",setQaModel,d.current_qa_model,qaModel);
       if(d.current_workspace_model!=null)hydrateServerSetting("workspace_model",setWsModel,d.current_workspace_model,wsModel);
+      if(d.resolved_contexts?.chat?.num_ctx)setCoderChatCtx(d.resolved_contexts.chat.num_ctx);
       if(d.openhands_num_ctx!=null)hydrateServerSetting("openhands_num_ctx",setCoderNumCtx,d.openhands_num_ctx,coderNumCtx);
       if(d.research_num_ctx!=null)hydrateServerSetting("research_num_ctx",setResearchNumCtx,d.research_num_ctx,researchNumCtx);
       if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
@@ -2900,9 +2905,11 @@ function HyprChat(){
       const sendTopK=mp.top_k&&mp.top_k!=="default"?parseInt(mp.top_k)||undefined:undefined;
       const sendRepeatPenalty=mp.repeat_penalty&&mp.repeat_penalty!=="default"?parseFloat(mp.repeat_penalty)||undefined:undefined;
 
-      // Context window limiting — trim oldest messages to fit within num_ctx
+      // Coding history is budgeted by the backend's current Daedalus policy.
+      // A per-model browser preset must not discard it before that resolver.
       const effectiveLimit = sendNumCtx || tokenLimit;
-      if(effectiveLimit>0){
+      const codingContext=(cv?.tool_ids||[]).includes('codeagent')||isCoderPersonaName(cv?.persona_name);
+      if(effectiveLimit>0&&!codingContext){
         let est=estimateTokens(am);
         while(est>effectiveLimit && am.length>2){
           am.splice(0,1);
@@ -3351,7 +3358,11 @@ function HyprChat(){
     // run's ollama call keeps burning until its 600s timeout and the runs
     // row stays status='running' forever.
     try{
-      const rids=_runIdsFromEvents(evtsRef.current||evts);
+      const stopEvents=evtsRef.current||evts;
+      const workflowIds=new Set(stopEvents.map(event=>event.data?.workflow_id).filter(Boolean));
+      coderWorkflows.filter(workflow=>workflow.workflow_version===3&&workflow.conversation_id===actId&&!['completed','cancelled'].includes(workflow.state)).forEach(workflow=>workflowIds.add(workflow.id));
+      for(const workflowId of workflowIds)fetch(`${API}/api/coder/workflows/${workflowId}/cancel`,{method:"POST"}).catch(()=>{});
+      const rids=_runIdsFromEvents(stopEvents);
       for(const rid of rids){
         // Fire-and-forget — we don't await, the backend route is idempotent.
         fetch(`${API}/api/runs/${rid}/cancel`,{method:"POST"}).catch(()=>{});
@@ -5013,7 +5024,8 @@ function HyprChat(){
             const toks=totalCtxUsed;
             const modelName=act?.model||models[0]||"";
             const mp=modelParams[modelName]||{};
-            const maxCtx=mp.num_ctx&&mp.num_ctx!=="default"?parseInt(mp.num_ctx)||0:numCtx||tokenLimit||0;
+            const codingContext=isCoderPersonaName(act?.persona_name)||(act?.tool_ids||[]).includes("codeagent");
+            const maxCtx=codingContext?(coderChatCtx||coderNumCtx||numCtx):(mp.num_ctx&&mp.num_ctx!=="default"?parseInt(mp.num_ctx)||0:numCtx||tokenLimit||0);
             const ratio=maxCtx>0?Math.min(1,toks/maxCtx):0;
             const cc=maxCtx>0?(ratio>0.85?t.err:ratio>0.6?t.warm:t.ok):streaming?t.acc:t.warm;
             const fmtK=n=>n>=1000?`${(n/1000).toFixed(1)}k`:String(n);
@@ -5475,7 +5487,7 @@ function HyprChat(){
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={cardS}>
             <label style={{...cardHeadS,color:t.mut,display:"block"}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
-            <input type="range" min="8192" max="131072" step="2048" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
+            <input type="number" min="1" step="1" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
             <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.4}}>
               {researchNumCtx<=16384?<><b style={{color:t.acc}}>Compact (&le;16K)</b> — evidence is clamped hard; fine for depth 1–2 reports.</>
               :researchNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — full evidence budgets through depth 4 fit without truncation.</>
@@ -6295,6 +6307,7 @@ function HyprChat(){
                         {v>=1024?`${(v/1024).toFixed(0)}K`:v}
                       </button>)}
                     </div>
+                    <input aria-label="Model context tokens" type="number" min="1" step="1" value={isDefault?"":ctxVal} placeholder={`Global: ${numCtx}`} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:e.target.value}}))} style={{...inputS,marginTop:8}}/>
                     {effectiveCtx>0&&<div style={{fontSize:11,color:isDefault?t.mut:t.acc,marginTop:4,fontWeight:600}}>{effectiveCtx>=1024?`${(effectiveCtx/1024).toFixed(0)}K`:effectiveCtx} tokens{isDefault?" (from Settings)":""}</div>}
                   </div>;
                 })()}
@@ -6476,7 +6489,7 @@ function HyprChat(){
                   </div>;
                 })}
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
-                  {[["top_k","Top-K","1","200","1","Integer sample pool"],["num_ctx","Context (tokens)","2048","131072","1024","Max token window"]].map(([key,lbl,min,max,step,desc])=>{
+                  {[["top_k","Top-K","1","200","1","Integer sample pool"],["num_ctx","Context (tokens)","1",undefined,"1","Context window; blank inherits Settings"]].map(([key,lbl,min,max,step,desc])=>{
                     const val=mp[key]||"";const isEmpty=val===""||val==="default";
                     return <div key={key} style={{...mmPanelS,padding:"12px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
@@ -7037,7 +7050,8 @@ function HyprChat(){
         {settingSection("Generation Defaults",null,<>
         <div>
           <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
-          {chipRow([0,4096,8192,16384,32768,65536,131072,262144].map(v=>({v,label:v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:String(v)})),numCtx,setNumCtx)}
+          {chipRow([4096,8192,16384,32768,65536,131072,262144].map(v=>({v,label:v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:String(v)})),numCtx,setNumCtx)}
+          <input aria-label="Default context tokens" type="number" min="1" step="1" value={numCtx} onChange={e=>{if(Number(e.target.value)>0)setNumCtx(Number(e.target.value));}} style={{...inputS,marginTop:8}}/>
           {numCtx>0&&<div style={{fontSize:11,color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
           <div style={{fontSize:10,color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
         </div>
@@ -7199,7 +7213,7 @@ function HyprChat(){
             <span style={{flex:1}}/>
             <span style={{fontSize:10,color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
           </div>
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Acceptance, and ProjectQA. Reviewer and Fixer model overrides apply to legacy workflows.</div>
 
           {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`,display:"flex",flexDirection:"column",gap:14}}>
             {modelField({label:"📐 Architect Model",icon:"📐",value:architectModel,set:setArchitectModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Architect agent only"})}
@@ -7211,7 +7225,7 @@ function HyprChat(){
           </div>}
         </div>
         </>,"Coder-agent routing and model inheritance.")}
-        {settingSection("Repair Engines",null,<>
+        {settingSection("Legacy Repair Engines",null,<>
         {toggleField("OpenHands Enabled",openhandsEnabled,()=>setOpenhandsEnabled(!openhandsEnabled),openhandsEnabled?"On":"Off")}
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {toggleField("Aider Enabled",aiderEnabled,()=>setAiderEnabled(!aiderEnabled),aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer")}
@@ -7221,16 +7235,11 @@ function HyprChat(){
             Auto-run safe test command after Aider edits
           </label>
         </div>
-        </>,"Which build and repair engines Daedalus may dispatch to.")}
+        </>,"These engine switches apply to legacy workflows. Persistent jobs use OpenHands for coding and repairs.")}
 
         {settingSection("Build Limits",null,<>
-        {sliderField({label:"Daedalus Context Window",value:coderNumCtx,set:setCoderNumCtx,min:2048,max:262144,step:2048,display:coderNumCtx.toLocaleString(),hint:<>
-            {coderNumCtx<=16384?<><b style={{color:t.acc}}>Compact (≤16K)</b> — small tasks, single-function edits. Fits comfortably with 3 models warm.</>
-            :coderNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — sweet spot for most Daedalus work. Multi-file refactors fit, VRAM stays comfortable.</>
-            :coderNumCtx<=131072?<><b style={{color:t.acc}}>Large (64–128K)</b> — whole-file analysis, big refactors. Keep only 1–2 models warm or you may hit VRAM limits.</>
-            :<><b style={{color:t.err}}>Maximum (128–256K)</b> — whole-codebase context. Drop <code>OLLAMA_MAX_LOADED_MODELS</code> to 1 or expect OOM. First run after slider change reloads the model.</>}
-        </>})}
-        {sliderField({label:"Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1})}
+        <DaedalusSettings t={t} font={font} onSaved={data=>{setCoderNumCtx(data.openhands_num_ctx);setCoderChatCtx(data.resolved_contexts?.chat?.num_ctx||0);}}/>
+        {sliderField({label:"Legacy Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1})}
 
         <div>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>

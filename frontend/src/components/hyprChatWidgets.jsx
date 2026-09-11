@@ -11,6 +11,7 @@ import {
   _isDaedalusOutput,
 } from '../daedalusTimeline.js';
 import { ArtifactCard } from './artifactComponents.jsx';
+import DaedalusJobCard from './DaedalusJobCard.jsx';
 import EmptyState from './EmptyState.jsx';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
@@ -622,13 +623,22 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   </div>;
 };
 
-const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
+function WorkflowCard(props){
+  return props.workflow?.workflow_version===3 ? <DaedalusJobCard {...props}/> : <LegacyWorkflowCard {...props}/>;
+}
+function DaedalusSummary(props){
+  const jobs=(props.workflows||[]).filter(w=>w.workflow_version===3);
+  if(jobs.length)return jobs.map(workflow=><DaedalusJobCard key={workflow.id} workflow={workflow} t={props.t} font={props.font} onOpenArtifact={props.onOpenArtifact}/>);
+  return <LegacyDaedalusSummary {...props}/>;
+}
+
+const LegacyWorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   const [wf,setWf]=useState(workflow);
   const [artifacts,setArtifacts]=useState([]);
   useEffect(()=>{setWf(workflow);},[workflow?.id,workflow?.updated_at]);
   useEffect(()=>{
     if(!wf?.id)return;
-    const active=["planning","reviewing","fixing","accepting"].includes(wf.state);
+    const active=["queued","planning","building","reviewing","fixing","accepting","inspecting","coding","checking","packaging","cancelling"].includes(wf.state);
     if(!active)return;
     let stop=false;
     const tick=async()=>{
@@ -1949,7 +1959,7 @@ const _phaseKeyForRun = (run)=>{
   if(base==="qa")return"review";
   return"work";
 };
-const _lastRun = (runs=[])=>runs[runs.length-1]||null;
+const _lastRun = (runs=[])=>[...runs].sort((a,b)=>String(b.started_at||b.ended_at||"").localeCompare(String(a.started_at||a.ended_at||"")))[0]||null;
 const _phaseState = (runs=[], fallback="queued")=>{
   if(runs.some(_runIsActive))return"running";
   const latest=_lastRun(runs);
@@ -2060,14 +2070,14 @@ const _sanitizeStepDetail=(text)=>{
 
 // Unified Daedalus progress card: header + phase stepper rail + one detail
 // panel for the selected phase. Replaces the old six stacked phase cards.
-function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview,onQuickAction}){
+function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview,onQuickAction}){
   const [runs,setRuns]=useState([]);
   const [loadErr,setLoadErr]=useState("");
   const [pickedPhase,setPickedPhase]=useState("");
   const [rawPill,setRawPill]=useState(null);
   const runIdsKey=runIds.join("|");
   useEffect(()=>{
-    let stop=false;
+    let stop=false,timer=null;
     const load=async()=>{
       if(!runIds.length){setRuns([]);return;}
       try{
@@ -2085,12 +2095,12 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
             return runIds.map((rid,idx)=>rows[idx]||prevById.get(rid)).filter(Boolean);
           });
           setLoadErr("");
+          if(rows.some(r=>!r||["queued","running","pending"].includes(r.status)))timer=setTimeout(load,4000);
         }
-      }catch(e){if(!stop)setLoadErr(e.message||"run load failed");}
+      }catch(e){if(!stop){setLoadErr(e.message||"run load failed");timer=setTimeout(load,4000);}}
     };
     load();
-    const id=live&&runIds.length?setInterval(load,4000):null;
-    return()=>{stop=true;if(id)clearInterval(id);};
+    return()=>{stop=true;if(timer)clearTimeout(timer);};
   },[runIdsKey,live]);
 
   const events=useMemo(()=>{
@@ -2107,7 +2117,7 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   const latestArtifact=artifactEvents[artifactEvents.length-1]||null;
   const wf=Array.isArray(workflows)&&workflows.length?workflows[0]:null;
   const wfAccepted=(workflows||[]).some(w=>w.state==="accepted"||w.artifact_status==="delivered"||w.artifact_status==="partial_delivered");
-  const delivered=wfAccepted||tools.has("download_project")||tools.has("download_file")||artifactEvents.length>0;
+  const delivered=wf?["delivered","partial_delivered"].includes(wf.artifact_status):artifactEvents.some(a=>/\.(zip|tar\.gz|tgz)$/i.test(a.filename||""));
   const projectName=wf?.project_id
     || runs.map(r=>r.project_id||_runEnv(r).project_id||_basename(_runEnv(r).project_dir)).find(Boolean)
     || (latestArtifact?.filename||"").replace(/(\.tar\.gz|\.tgz|\.zip|\.gz)$/i,"")

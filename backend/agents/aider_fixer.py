@@ -18,6 +18,7 @@ import httpx
 
 import cancel_registry
 import config
+import context_policy
 import database as db
 from tooling.gate_decisions import (
     issue_scoped_files,
@@ -313,7 +314,8 @@ async def run_aider_fix(http, events, conv_id: str, *,
         # AIDER_NUM_CTX=0 means "inherit the Daedalus context-window slider":
         # a divergent Aider ctx forces Ollama to evict/reload the coder model
         # on every build↔fix alternation and quietly caps Aider below the UI.
-        "num_ctx": config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
+        "num_ctx": context_policy.resolve("aider").num_ctx,
+        "num_predict": context_policy.resolve("aider").num_predict,
         "test_cmd": test_cmd or contract.get("aider_test_cmd") or contract.get("test_cmd") or "",
         "lint_cmd": lint_cmd or (contract.get("aider_lint_cmd") if contract.get("safe_lint") else "") or "",
         "allowed_files": allowed_files,
@@ -481,6 +483,7 @@ async def run_aider_fix(http, events, conv_id: str, *,
             "summary": f"{type(e).__name__}: {e}",
             "project_dir": project_dir,
             "files_touched": [],
+            "changes_known": False,
             "diff": "",
             "test_exit": None,
             "test_stdout_tail": "",

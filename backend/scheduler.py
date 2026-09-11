@@ -19,6 +19,8 @@ cycle at import time.
 
 from __future__ import annotations
 
+import context_policy
+
 import asyncio
 import json
 import re
@@ -460,7 +462,7 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
     import model_providers
     model = task.get("model") or model_providers.reject_cloud(config.DEFAULT_MODEL) or config.DEFAULT_MODEL
     text = await cancel_registry.await_cancellable(
-        model_providers.complete_chat(_http, model, prompt, num_ctx=8192,
+        model_providers.complete_chat(_http, model, prompt, num_ctx=context_policy.helper_context("extraction"),
                                       num_predict=2048, timeout=config.SCHEDULED_RUN_TIMEOUT,
                                       ollama_url=config.OLLAMA_URL),
         run_id,

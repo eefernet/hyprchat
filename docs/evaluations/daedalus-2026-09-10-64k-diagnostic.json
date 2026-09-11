@@ -1,0 +1,251 @@
+{
+  "settings": {
+    "default_num_ctx": 16384,
+    "openhands_num_ctx": 65536,
+    "aider_num_ctx": 0,
+    "research_num_ctx": 40960,
+    "daedalus_role_contexts": {},
+    "generation_num_predict": 4096,
+    "context_headroom_percent": 5,
+    "daedalus_compaction": "on",
+    "context_compaction_threshold": 75,
+    "helper_contexts": {
+      "workspace": 4096,
+      "title": 2048,
+      "classifier": 2048,
+      "compaction": 8192,
+      "extraction": 8192,
+      "image": 4096
+    },
+    "daedalus_v3_enabled": true,
+    "daedalus_job_seconds": 600,
+    "daedalus_model_calls": 120,
+    "daedalus_attempt_turns": 20,
+    "daedalus_command_seconds": 600,
+    "daedalus_browser_step_seconds": 15,
+    "daedalus_upload_mb": 250,
+    "daedalus_extracted_mb": 1000,
+    "daedalus_storage_mb": 10000,
+    "daedalus_exclude_dirs": [
+      ".git",
+      "node_modules",
+      ".venv",
+      "venv",
+      "__pycache__",
+      "dist",
+      "build",
+      "target",
+      ".cache",
+      ".pytest_cache"
+    ]
+  },
+  "environment": {
+    "python": "3.13.5 (main, Jun 25 2025, 18:55:22) [GCC 14.2.0]",
+    "packages": {
+      "openhands-sdk": "1.11.4",
+      "openhands-tools": "1.11.4",
+      "litellm": "1.82.0",
+      "tree-sitter": "0.24.0",
+      "tree-sitter-javascript": "0.23.1",
+      "tree-sitter-typescript": "0.23.2",
+      "playwright": "1.62.0"
+    }
+  },
+  "source_hashes": {
+    "coder_jobs.py": "8c0b7c5c197ac71950c3c8c545a5f4e7c227044613d6af1b677702831f25ce08",
+    "coder_checks.py": "d8065fe2e06c921734df76eb91f7e238c018c5f0f8abd50189a6ce15e0b8c6e8",
+    "coder_inference.py": "4a5b4471ea9741d2818ea58630642e5c8840557df2d1c4c130b421a205563bd6",
+    "coder_sdk_runtime.py": "856b9e6daba0ff264e0a121d0cc457694d6d248ae66b51431f00659ac2e7c090",
+    "coder_repository.py": "5398a210f3f49ee82616537220f1822d3c7aa111894070073bd35d881a573a8a",
+    "coder_worker_runtime.py": "be02c6c00868b84a8e8480b65114b0f1e2ab0738205e8fb3cddb35878706bbcf",
+    "context_policy.py": "39443e63d543b6acec00041be2f731a726d97f5611b2b00b1bdfa48d60f1c8e2",
+    "openhands_worker.py": "77b2b5e36a1f59de2736549f7d19bbe610a81ee68ef68542b81cb934a2f874d2",
+    "database.py": "fa94702d5f957808db5bb021325783c2d0c4e4b87ec3610a8387aa428095eff4",
+    "config.py": "4b268ce57b1503bc30fb12451963f7e3da43b23a5899395848522e8c2b8535e4",
+    "db/coder_jobs.py": "82e0c2b79639dbc42c225a86ba32524b80ae71d9734c5b777b3c251e5bcdf5bc",
+    "db/schema.py": "99af4f6c1aca504b2c953e6b23672bca1479eba0a119ead735c5365e7ce45ab9",
+    "db/artifacts.py": "6c2f224426d37e9ed1bad0e6ea08e983cbfde7db379cf6a6a92a669ae98b78fc",
+    "evals/coder_fixtures.py": "b78fde4708d3c115d3730b3a594090480f302154176216a847b810564264a7f3",
+    "evals/run_coder_benchmark.py": "3572422edfab9bff9db1a28cca6b122f43b820c5562503cb81a9922b4d304f15"
+  },
+  "results": [
+    {
+      "fixture": "lookup",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-d2f177d4421f503c1b7d944c",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "The api.py lookup function fails to preserve falsy values (0, False, empty strings) as required. It incorrectly returns domain.constants.MISSING for these cases instead of the actual stored values. The package interface and padding remain unchanged, but the core logic needs correction to distinguish between absent keys and falsy stored values."
+      },
+      "seconds": 304.68330454826355,
+      "calls": 61,
+      "blocker": "The api.py lookup function fails to preserve falsy values (0, False, empty strings) as required. It incorrectly returns domain.constants.MISSING for these cases instead of the actual stored values. The package interface and padding remain unchanged, but the core logic needs correction to distinguish between absent keys and falsy stored values."
+    },
+    {
+      "fixture": "lookup",
+      "model": "devstral:24b",
+      "job_id": "cw3-8df083f6e766030c76d004f8",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "RuntimeError: Model-call allowance exhausted; continue from the checkpoint"
+      },
+      "seconds": 579.3039174079895,
+      "calls": 120,
+      "blocker": "RuntimeError: Model-call allowance exhausted; continue from the checkpoint"
+    },
+    {
+      "fixture": "greeting",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-a1dd90f6433ec9399a5b2d3d",
+      "state": "completed",
+      "passed": true,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": true
+      },
+      "seconds": 347.51367568969727,
+      "calls": 51,
+      "blocker": ""
+    },
+    {
+      "fixture": "greeting",
+      "model": "devstral:24b",
+      "job_id": "cw3-656c48e995e225bdc8f70888",
+      "state": "completed",
+      "passed": true,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": true
+      },
+      "seconds": 471.76133584976196,
+      "calls": 71,
+      "blocker": ""
+    },
+    {
+      "fixture": "tags",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-8b9b6634fcb796b8c4c2ca7b",
+      "state": "completed",
+      "passed": true,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": true,
+        "exit_code": 0,
+        "stderr": ""
+      },
+      "seconds": 168.420307636261,
+      "calls": 44,
+      "blocker": ""
+    },
+    {
+      "fixture": "tags",
+      "model": "devstral:24b",
+      "job_id": "cw3-1c5b379aeff8f216fa581141",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "Milestone still fails after verification and repair attempts"
+      },
+      "seconds": 384.89273595809937,
+      "calls": 61,
+      "blocker": "Milestone still fails after verification and repair attempts"
+    },
+    {
+      "fixture": "pagination",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-2c8c83e21944d6ae1d2113cb",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "The submission is missing the actual implementation of the paginate function in pagination.py and does not include tests for error conditions such as nonpositive page or page_size inputs. The README.md exists but lacks specific documentation on the function's behavior under error conditions."
+      },
+      "seconds": 214.48666644096375,
+      "calls": 54,
+      "blocker": "The submission is missing the actual implementation of the paginate function in pagination.py and does not include tests for error conditions such as nonpositive page or page_size inputs. The README.md exists but lacks specific documentation on the function's behavior under error conditions."
+    },
+    {
+      "fixture": "pagination",
+      "model": "devstral:24b",
+      "job_id": "cw3-115b80cde2c485699a2d53cd",
+      "state": "completed",
+      "passed": true,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": true,
+        "exit_code": 0,
+        "stderr": ""
+      },
+      "seconds": 292.6955602169037,
+      "calls": 36,
+      "blocker": ""
+    },
+    {
+      "fixture": "csv",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-510c866b3c068f6e35d1943b",
+      "state": "completed",
+      "passed": true,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": true,
+        "exit_code": 0,
+        "stderr": ""
+      },
+      "seconds": 256.6063847541809,
+      "calls": 60,
+      "blocker": ""
+    }
+  ],
+  "diagnostic_note": "Partial diagnostic of an earlier 64K candidate. Nine completed cases are retained; the in-progress Devstral CSV case was interrupted and is not scored. The suite was stopped after a no-inference SDK contract reproduced task-example removal and text-tool JSON stop-word handling defects. Those fixes are evaluated in the separate final matrix. This is not a controlled comparison with the earlier 32K diagnostic.",
+  "inference_environment": {
+    "ollama": {
+      "version": "0.30.7"
+    },
+    "models": [
+      {
+        "name": "devstral:24b",
+        "digest": "9bd74193e93935e9d8564d88607b220a9d341c4a36b748cffcbd9ad4f47a9ca9",
+        "size": 14333928046,
+        "details": {
+          "parent_model": "devstral:latest",
+          "format": "gguf",
+          "family": "llama",
+          "families": [
+            "llama"
+          ],
+          "parameter_size": "23.6B",
+          "quantization_level": "Q4_K_M",
+          "context_length": 131072,
+          "embedding_length": 5120
+        }
+      },
+      {
+        "name": "qwen3-coder:30b",
+        "digest": "06c1097efce0431c2045fe7b2e5108366e43bee1b4603a7aded8f21689e90bca",
+        "size": 18556700761,
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "qwen3moe",
+          "families": [
+            "qwen3moe"
+          ],
+          "parameter_size": "30.5B",
+          "quantization_level": "Q4_K_M",
+          "context_length": 262144,
+          "embedding_length": 2048
+        }
+      }
+    ]
+  }
+}

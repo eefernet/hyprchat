@@ -11,6 +11,7 @@ import traceback
 from datetime import datetime
 
 import config
+import context_policy
 import database as db
 import model_providers
 import persona_images
@@ -209,7 +210,7 @@ async def _compose_persona_photo_prompt(http, appearance: str, user_request: str
     )
     try:
         out = await model_providers.complete_chat(
-            http, model, prompt, temperature=0.8, num_ctx=4096, num_predict=250,
+            http, model, prompt, temperature=0.8, num_ctx=context_policy.helper_context("title"), num_predict=250,
             timeout=30, ollama_url=config.OLLAMA_URL)
         payload = persona_images.compose_persona_image_prompt(
             raw_prompt=user_request,
@@ -292,15 +293,8 @@ def _extract_json_array(text: str) -> list:
 
 
 def _helper_num_ctx(prompt: str, num_predict: int = 700) -> int:
-    """Bounded num_ctx for helper-model extraction calls. Scales with prompt
-    size so long turns don't silently truncate the instructions out of the
-    window, but stays hard-capped so a small helper model never reserves a
-    model-native huge KV cache."""
-    est = len(prompt) // 3 + num_predict + 256
-    for cap in (4096, 6144, 8192):
-        if est <= cap:
-            return cap
-    return 8192
+    """Use the Settings extraction profile without an implicit size cap."""
+    return context_policy.helper_context("extraction")
 
 
 def _recent_turns_context(req, max_msgs: int = 6, max_chars: int = 2400) -> str:
@@ -990,7 +984,7 @@ async def _route_auto_model(req, http):
         try:
             word = (await asyncio.wait_for(
                 model_providers.complete_chat(
-                    http, classifier, prompt, temperature=0.0, num_ctx=2048,
+                    http, classifier, prompt, temperature=0.0, num_ctx=context_policy.helper_context("classifier"),
                     num_predict=8, timeout=20, ollama_url=config.OLLAMA_URL),
                 timeout=12)).strip().lower()
         except Exception as e:
@@ -1024,8 +1018,39 @@ async def _index_history_turn_bg(conv_id, assistant_msg_id, user_text, assistant
 
 # ── Context auto-compaction ──
 _COMPACT_KEEP_RECENT = 8       # newest user/assistant messages kept verbatim
-_COMPACT_THRESHOLD = 0.75      # of num_ctx (estimated at chars/4)
 _COMPACT_TRANSCRIPT_CAP = 24000  # chars of foldable dialogue per summary pass
+
+
+async def _coder_chat_context(http, model, messages, tools, policy):
+    """Use the Settings policy before inference without silently dropping turns."""
+    parts = context_policy.compaction_segments(messages, tools, policy)
+    if parts is None:
+        return messages
+    prefix, older, tail = parts
+    serialized = json.dumps(older, ensure_ascii=False)
+    summary, offset = "", 0
+    while offset < len(serialized):
+        active = context_policy.resolve("compaction")
+        instruction = ("Summarize the coding conversation: requested behavior, decisions, file references, "
+                       "checks, failed approaches, and remaining work. Preserve uncertainty. Do not invent completion.\n")
+        available = active.input_budget - context_policy.estimate_tokens(instruction + summary) - context_policy.estimate_tokens({"messages":[{"role":"user","content":""}]})
+        end = min(len(serialized), offset + max(0, available) * 3)
+        prompt = instruction + summary + "\n" + serialized[offset:end]
+        while end > offset and context_policy.estimate_tokens({"messages":[{"role":"user","content":prompt}]}) > active.input_budget:
+            end = offset + (end - offset) // 2
+            prompt = instruction + summary + "\n" + serialized[offset:end]
+        if end <= offset:
+            raise ValueError("Compaction checkpoint cannot fit its configured context; adjust Settings")
+        summary = (await model_providers.complete_chat(http, model, prompt, temperature=0.1,
+                    num_ctx=active.num_ctx, num_predict=active.num_predict, timeout=120,
+                    ollama_url=config.OLLAMA_URL)).strip()
+        if not summary:
+            raise ValueError("Compaction returned no checkpoint; conversation history was preserved")
+        offset = end
+    rebuilt = [*prefix, {"role":"user","content":"Earlier coding conversation checkpoint:\n" + summary}, *tail]
+    if context_policy.estimate_tokens({"messages":rebuilt,"tools":tools}) > policy.input_budget:
+        raise ValueError("Current coding evidence exceeds context after compaction; adjust Settings or narrow the request")
+    return rebuilt
 
 
 async def _maybe_compact_context(req, http, messages, model_options, conv_id,
@@ -1049,7 +1074,7 @@ async def _maybe_compact_context(req, http, messages, model_options, conv_id,
         if num_ctx <= 0:
             return messages
         est_tokens = sum(len(m.get("content") or "") for m in messages) // 4
-        if est_tokens <= _COMPACT_THRESHOLD * num_ctx:
+        if est_tokens <= (context_policy.runtime_settings()['context_compaction_threshold'] / 100) * num_ctx:
             return messages
         old_summary, until_id = await db.get_conversation_summary(conv_id)
         conv = await db.get_conversation(conv_id)
@@ -1086,7 +1111,7 @@ async def _maybe_compact_context(req, http, messages, model_options, conv_id,
             try:
                 new_summary = (await asyncio.wait_for(
                     model_providers.complete_chat(
-                        http, model, prompt, temperature=0.2, num_ctx=8192,
+                        http, model, prompt, temperature=0.2, num_ctx=context_policy.helper_context("compaction"),
                         num_predict=700, timeout=60, ollama_url=config.OLLAMA_URL),
                     timeout=75)).strip()
             except Exception as e:
@@ -1117,7 +1142,7 @@ async def _maybe_compact_context(req, http, messages, model_options, conv_id,
             summary_text = _replace_persona_placeholders(summary_text, **persona_placeholder_ctx)
         out = lead_sys + [{"role": "system", "content": summary_text}] + keep
         print(f"[CHAT] Context compacted: {len(messages)}→{len(out)} msgs "
-              f"(est {est_tokens} tok > {int(_COMPACT_THRESHOLD * num_ctx)} budget, num_ctx={num_ctx})")
+              f"(est {est_tokens} tok > {int((context_policy.runtime_settings()['context_compaction_threshold'] / 100) * num_ctx)} budget, num_ctx={num_ctx})")
         return out
     except Exception as e:
         print(f"[CHAT] compaction error (fail-open): {e}")
@@ -1718,7 +1743,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         messages.append(_msg)
 
     # ── Context auto-compaction (once per request, before the round loop) ──
-    messages = await _maybe_compact_context(
+    messages = messages if _is_v2_persona else await _maybe_compact_context(
         req, http, messages, model_options, conv_id, ephemeral, persona_placeholder_ctx)
 
     # ── Build Ollama-native tool definitions ──
@@ -1862,14 +1887,40 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                     _m["content"] = (_m.get("content") or "") + _fail_note
                     break
 
+    _persistent_coder = False
+    if _is_v2_persona and "codeagent" in requested_tool_ids:
+        from coder_jobs import uses_persistent_workflow
+        _persistent_coder = await uses_persistent_workflow(conv_id)
+        if _persistent_coder:
+            if _is_cloud_provider or req.model.endswith(("-cloud", ":cloud")):
+                yield f"data: {json.dumps({'type':'error','error':'Persistent Daedalus requires a local chat model. Select one in the model picker.'})}\n\n"
+                return
+            try:
+                _local_details = await http.post(f"{config.OLLAMA_URL}/api/show",json={"model":_provider_model_name},timeout=15)
+                _local_details.raise_for_status()
+                if _local_details.json().get("remote_host") or _local_details.json().get("remote_model"):
+                    raise ValueError("The selected Ollama model uses remote inference")
+            except Exception as error:
+                yield f"data: {json.dumps({'type':'error','error':f'Unable to verify a local Daedalus model: {error}'})}\n\n"
+                return
+            gateway = {"start_coder_workflow", "get_coder_workflow", "cancel_coder_workflow", "ask_project"}
+            available_tool_names -= CODEAGENT_TOOLS_SET - gateway
+            ollama_tools = [tool for tool in ollama_tools if tool.get("function",{}).get("name") in available_tool_names]
+            ollama_tools = [{**tool,"function":{**tool["function"],"description":"Start a persistent local coding job once. The controller handles planning, coding, checks, and Acceptance in the background. Questions use ask_uploaded_project and never authorize editing."}}
+                            if tool.get("function",{}).get("name") == "start_coder_workflow" else tool for tool in ollama_tools]
+            protocol = ("Persistent Daedalus execution mode: this replaces older manual tool-sequence instructions. "
+                        "For requested code changes call start_coder_workflow once with the complete user task and appropriate mode/project. "
+                        "For source questions call ask_project or start_coder_workflow(mode=ask_uploaded_project); questions never authorize editing. "
+                        "Report that the background job has started and end your reply. The progress card handles monitoring. "
+                        "Use get_coder_workflow only for an explicit status question, and cancel_coder_workflow for Stop. "
+                        "The controller owns separate Architect and Builder model turns, verification, repair, and fresh Acceptance. "
+                        "Only the completed workflow's accepted artifact is a delivered result. Do not claim success from starting a job.")
+            messages.append({"role":"system","content":protocol})
+
     # Inject visualization hint for non-coder chats that have execute_code.
     _has_full_codeagent = bool(available_tool_names & (CODEAGENT_TOOLS_SET - {"execute_code", "download_file"}))
     if _is_v2_persona and _has_full_codeagent:
-        _current_ctx = config.coerce_num_ctx(model_options.get("num_ctx"), fallback=config.DEFAULT_NUM_CTX)
-        _v2_ctx = max(_current_ctx, config.CODER_V2_MIN_NUM_CTX)
-        if _v2_ctx != model_options.get("num_ctx"):
-            print(f"[CHAT] Coder Bot v2 num_ctx raised to {_v2_ctx} (was {model_options.get('num_ctx')})")
-        model_options["num_ctx"] = _v2_ctx
+        model_options["num_ctx"] = context_policy.resolve("chat").num_ctx
     if not _has_full_codeagent and "execute_code" in available_tool_names:
         _viz_hint = (
             "\n\n## Visualization Capability\n"
@@ -1938,7 +1989,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             messages.insert(0, {"role": "system", "content": _research_sys.strip()})
 
     # Inject tool-use system prompt when full codeagent tools are available
-    if _has_full_codeagent:
+    if _has_full_codeagent and not _persistent_coder:
         tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"
 
         if "generate_code" in available_tool_names:
@@ -2018,7 +2069,6 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     _is_coder = _has_full_codeagent
     MAX_ROUNDS = config.MAX_AGENT_ROUNDS_CODER if _is_coder else config.MAX_AGENT_ROUNDS
-    MAX_CONTEXT_CHARS = 80000  # ~20k tokens — prune old tool results beyond this
 
     # Phase 0.6: create the assistant-message stub at stream start so disconnects
     # don't lose work. The agent updates this row at every round boundary; if the
@@ -2119,7 +2169,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
         # ── Context window management: prune old tool results to stay under budget ──
         _ctx_size = sum(len(m.get("content", "")) for m in messages)
-        if _ctx_size > MAX_CONTEXT_CHARS and len(messages) > 6:
+        if not (_is_v2_persona and _has_full_codeagent) and _ctx_size > model_options["num_ctx"] * 4 and len(messages) > 6:
             # Summarize old tool results (keep system prompt + last 6 messages intact)
             for mi in range(1, len(messages) - 6):
                 m = messages[mi]
@@ -2141,6 +2191,15 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 _sep_evt = json.dumps({"type": "token", "content": "\n\n"})
                 yield f"data: {_sep_evt}\n\n"
 
+        if _is_v2_persona and _has_full_codeagent:
+            active_context = context_policy.resolve("chat")
+            model_options["num_ctx"] = active_context.num_ctx
+            model_options["num_predict"] = active_context.num_predict
+            try:
+                messages = await _coder_chat_context(http, req.model, messages, ollama_tools, active_context)
+            except Exception as error:
+                yield f"data: {json.dumps({'type':'error','error':str(error)})}\n\n"
+                return
         payload = {
             "model": _provider_model_name if _model_provider == "ollama" else req.model,
             "messages": messages,
@@ -2319,23 +2378,11 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         inject_text_tool_prompt(messages, available_tool_names, extra_tools=_extra_text_tool_defs)
                         _text_fallback_done = True
                         continue
-                    elif any(s in error_body.lower() for s in ("requires more system memory", "out of memory", "llama runner process has terminated", "failed to allocate")) and _oom_retries < 3:
-                        # OOM — halve num_ctx and retry (up to 3 times)
-                        old_ctx = model_options.get("num_ctx", 0)
-                        new_ctx = max(2048, old_ctx // 2)
-                        if new_ctx < old_ctx:
-                            _oom_retries += 1
-                            model_options["num_ctx"] = new_ctx
-                            print(f"[CHAT] OOM with num_ctx={old_ctx}, retrying with {new_ctx} (attempt {_oom_retries})")
-                            await events.emit(conv_id, "tool_start", {
-                                "tool": "processing", "icon": "activity",
-                                "status": f"Model needs too much VRAM at {old_ctx} ctx, retrying with {new_ctx}..."
-                            })
-                            continue
-                        else:
-                            await events.emit(conv_id, "error", {"status": f"Ollama OOM even at {new_ctx} ctx"})
-                            yield f"data: {json.dumps({'type': 'error', 'error': error_body[:300]})}\n\n"
-                            return
+                    elif any(s in error_body.lower() for s in ("requires more system memory", "out of memory", "llama runner process has terminated", "failed to allocate")):
+                        message = f"Ollama could not allocate the configured context ({model_options.get('num_ctx')} tokens). Adjust context or model selection in Settings and retry."
+                        await events.emit(conv_id, "error", {"status": message})
+                        yield f"data: {json.dumps({'type': 'error', 'error': message})}\n\n"
+                        return
                     else:
                         err_lower = error_body.lower()
                         print(f"[CHAT] Ollama HTTP {resp.status_code}: {error_body[:300]}")
@@ -2781,7 +2828,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         # ── Code block rescue: when model dumps code in chat instead of using tools ──
         # Skip rescue if model was just told to stop looping, or if generate_code already failed
         # (prevents infinite loop: generate_code fails -> model dumps code -> rescue -> execute -> fail -> repeat)
-        if not tool_calls and content and _has_full_codeagent and _rescue_count < 3 and _generate_code_fail_rounds < 1:
+        if not tool_calls and content and _has_full_codeagent and not _is_v2_persona and _rescue_count < 3 and _generate_code_fail_rounds < 1:
             code_blocks = re.findall(r'```(\w*)\n(.*?)```', content, re.DOTALL)
             if code_blocks and not any(cb[1].strip().startswith('{') for cb in code_blocks):
                 # Model wrote code blocks without making tool calls — rescue via write_file + run_shell

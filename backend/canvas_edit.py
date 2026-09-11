@@ -8,6 +8,8 @@ never leaves the request/response cycle — saving is a separate, explicit
 in the diff preview without touching the artifact.
 """
 
+import context_policy
+
 import re
 
 import config
@@ -90,7 +92,7 @@ async def ai_edit_selection(http, content: str, sel_start: int, sel_end: int,
     raw = await model_providers.complete_chat(
         http, model, prompt,
         temperature=0.2,
-        num_ctx=max(8192, min(32768, (len(prompt) // 4) + est_out_tokens + 1024)),
+        num_ctx=context_policy.helper_context("extraction"),
         num_predict=est_out_tokens,
         timeout=300,
         ollama_url=config.OLLAMA_URL,

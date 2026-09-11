@@ -47,9 +47,23 @@ REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
 SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
+WORKER_FILES = {
+    "backend/openhands_worker.py", "backend/coder_worker_runtime.py", "backend/coder_sdk_runtime.py",
+    "backend/coder_repository.py", "backend/coder_inference.py", "backend/coder_checks.py", "backend/worker-requirements.txt",
+}
+WORKER_SHARED = {"backend/context_policy.py"}
+
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
+    "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
+    "backend/coder_jobs.py": ("Coding Controller", REMOTE_BACKEND, True),
+    "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
+    "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
+    **{path:("Coding Worker", REMOTE_OPENHANDS_WORKER, False) for path in WORKER_FILES},
+    "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/daedalusJobs.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
@@ -192,6 +206,7 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    "frontend/src/components/DaedalusJobCard.jsx", "frontend/src/components/DaedalusSettings.jsx", "frontend/src/daedalusJobs.js",
     "frontend/src/main.jsx",
     "frontend/src/session.js",
     "frontend/src/theme.js",
@@ -763,7 +778,7 @@ def _ensure_openhands_worker_service(cb):
 
 def _deploy_target(filepath, remote_dir, hypr, cb):
     """Return (target_server, remote_dir) for a watched file."""
-    if filepath == "backend/openhands_worker.py":
+    if filepath in WORKER_FILES:
         return cb, REMOTE_OPENHANDS_WORKER
     return hypr, remote_dir
 
@@ -932,6 +947,12 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} Codebox host ready")
 
+    changed = list(changed)
+    if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
+        present = {path for path, _ in changed}
+        for path in WORKER_FILES | WORKER_SHARED:
+            if path not in present:
+                changed.append((path,WATCHED[path]))
     # Phase 1 — stage: copy every backend file to <final>.deploy-tmp. Nothing
     # in the live tree changes until the whole batch has staged cleanly.
     frontend_built = False
@@ -979,6 +1000,16 @@ def deploy_changes(changed, cfg):
             })
         else:
             stage_failed.append((label, filepath, err, target))
+
+    if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
+        for filepath in WORKER_SHARED:
+            final = REMOTE_OPENHANDS_WORKER.rstrip("/") + "/" + os.path.basename(filepath)
+            ok, err = scp(filepath, cb["ip"], final + ".deploy-tmp", cb["user"], cb["pass"])
+            if ok:
+                staged.append({"filepath":filepath,"label":"Worker Context Policy","target":cb,
+                               "tmp":final+".deploy-tmp","final":final,"digest":file_digest(filepath),"restart_flag":False})
+            else:
+                stage_failed.append(("Worker Context Policy",filepath,err,cb))
 
     if stage_failed:
         # Abort the whole backend batch: the live tree stays untouched,
@@ -1100,7 +1131,7 @@ def deploy_changes(changed, cfg):
                 print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
                 _show_journal(hypr, "hyprchat")
 
-    worker_deployed = "backend/openhands_worker.py" in pushed
+    worker_deployed = bool(set(pushed) & (WORKER_FILES | WORKER_SHARED))
     aider_ready, aider_out, _ = _aider_worker_ready(cb)
     if worker_deployed or not aider_ready:
         print()
@@ -1113,6 +1144,14 @@ def deploy_changes(changed, cfg):
             print(f"     {DIM}Worker will still run; /aider/health reports missing until this is fixed.{RST}")
 
     if worker_deployed:
+        ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
+            "/root/venv/bin/python3 -m pip install -r /opt/openhands-worker/worker-requirements.txt > /tmp/daedalus-dependencies.log 2>&1 && "
+            "/root/venv/bin/python3 -m playwright install chromium --only-shell >> /tmp/daedalus-dependencies.log 2>&1", timeout=600)
+        if not ok:
+            print(f"  {R}Worker dependencies failed; service restart skipped. Inspect /tmp/daedalus-dependencies.log. Worker files will retry.{RST}")
+            for path in WORKER_FILES | WORKER_SHARED:
+                pushed.pop(path, None)
+            return pushed
         print()
         print(f"  {Y}\u25b6{RST} Ensuring OpenHands worker service...")
         svc_ok, svc_out, svc_err = _ensure_openhands_worker_service(cb)

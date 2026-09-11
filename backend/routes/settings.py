@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 
 import comfyui
 import config
+import context_policy
 import database as db
 import hyprfit
 import model_providers
@@ -51,6 +52,7 @@ async def get_app_settings():
         file_count = 0
     return {
         **_public_settings_payload(settings),
+        **context_policy.public_settings(),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,
@@ -106,6 +108,10 @@ async def get_app_settings():
 @router.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
+    try:
+        body = {**body, **context_policy.validate_patch(body, {**context_policy.runtime_settings(), **settings})}
+    except (ValueError, TypeError) as error:
+        raise HTTPException(422, str(error)) from error
     allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
@@ -121,6 +127,7 @@ async def update_app_settings(body: dict = Body(...)):
                "ollama_scan_ssh_host", "ollama_scan_ssh_port", "ollama_scan_ssh_user",
                "ollama_scan_ssh_auth_mode", "ollama_scan_ssh_key_path", "ollama_scan_ssh_password",
                "model_hardware_profile"}
+    allowed.update(context_policy.DEFAULTS)
     for k, v in body.items():
         if k in allowed:
             settings[k] = v
@@ -265,10 +272,7 @@ async def update_app_settings(body: dict = Body(...)):
         config.OPENHANDS_MAX_ROUNDS = config.coerce_int(body["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
         print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in body:
-        config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
-            body["openhands_num_ctx"],
-            fallback=config.OPENHANDS_NUM_CTX,
-        )
+        config.OPENHANDS_NUM_CTX = body["openhands_num_ctx"]
         settings["openhands_num_ctx"] = config.OPENHANDS_NUM_CTX
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
     if "openhands_reasoning_effort" in body:
@@ -373,9 +377,14 @@ async def update_app_settings(body: dict = Body(...)):
         config.IMAGE_CHAT_AUTO_ENHANCE = str(body["image_chat_auto_enhance"]).strip().lower() in ("1", "true", "yes", "on")
         settings["image_chat_auto_enhance"] = config.IMAGE_CHAT_AUTO_ENHANCE
         print(f"[Config] Chat image auto-enhance: {'on' if config.IMAGE_CHAT_AUTO_ENHANCE else 'off'}")
+    context_policy.apply_settings(settings)
     save_settings(settings)
+    import coder_jobs
+    pending_context_jobs = await coder_jobs.sync_settings()
     return {
+        "pending_context_jobs": pending_context_jobs,
         **_public_settings_payload(settings),
+        **context_policy.public_settings(),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
         "current_searxng_url": config.SEARXNG_URL,

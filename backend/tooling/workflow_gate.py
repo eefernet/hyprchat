@@ -363,6 +363,8 @@ async def uploaded_project_aider_context(conv_id: str, *,
 
 
 UPLOADED_PROJECT_BOOTSTRAP_ALLOWED_TOOLS = {
+    "ask_project",
+    "start_coder_workflow",
     "run_aider_fix",
     "run_review",
     "run_acceptance_review",

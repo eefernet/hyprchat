@@ -25,6 +25,7 @@ import shlex
 import uuid
 
 import config
+import context_policy
 import database as db
 import cancel_registry
 import model_providers
@@ -615,7 +616,7 @@ async def run_project_qa(http, events, conv_id: str, *,
             # Streams internally so Stop aborts the Ollama runner immediately.
             coro = model_providers.complete_chat(
                 http, qa_model, prompt,
-                temperature=0.3, num_ctx=_configured_num_ctx(),
+                temperature=0.3, num_ctx=context_policy.resolve("qa").num_ctx,
                 num_predict=4096, timeout=600,
                 ollama_url=config.OLLAMA_URL,
             )

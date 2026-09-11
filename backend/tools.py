@@ -13,6 +13,7 @@ from datetime import datetime
 
 import comfyui
 import config
+import context_policy
 import database as db
 import image_prompt_enhancer
 import persona_images
@@ -388,10 +389,12 @@ async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
         text = content.strip()
         if not text or not _SHIP_ANYWAY_ACTION_RE.search(text):
             return False
-        return bool(
-            _SHIP_ANYWAY_QUALIFIER_RE.search(text)
-            or _SHIP_ANYWAY_DIRECT_RE.search(text)
-        )
+        if re.search(r"\b(?:do\s+not|don't|never|not\s+yet|before|until|only\s+after)\b", text, re.I):
+            return False
+        return bool(re.search(
+            r"\b(?:ship|package|download|deliver|export|archive)\b.{0,60}\b(?:anyway|as[- ]is|despite|regardless)\b"
+            r"|\b(?:skip|ignore)\b.{0,30}\b(?:tests?|review|acceptance)\b.{0,60}\b(?:ship|package|deliver|download)\b",
+            text, re.I))
     except Exception as _e:
         print(f"[v2-gate] ship-anyway intent check failed (non-fatal): {_e}")
         return False
@@ -1647,21 +1650,8 @@ async def _maybe_auto_redeliver(
         _rstatus = ((_latest_reviewer or {}).get("result_envelope") or {}).get("status", "")
         if str(_rstatus).lower() != "clean":
             return ""  # don't repackage a project the reviewer just flagged
-        res = await exec_tool(
-            http, events, "download_project",
-            {"directory": project_dir, "_auto_redeliver": True},
-            conv_id,
-            custom_tool_map=custom_tool_map,
-            connector_tool_name_map=connector_tool_name_map,
-            conv_model=conv_model,
-            kb_ids=kb_ids,
-            artifact_message_id=artifact_message_id,
-        )
-        return (
-            "\n\n=== AUTO-REPACKAGE — this project was already delivered, so a fresh "
-            "artifact was packaged from the updated sources. Reference the new download "
-            "below; do NOT call download_project again for this cycle ===\n" + res
-        )
+        return ("\n\nThe updated project needs a fresh Acceptance review before "
+                "a refreshed download can be packaged. Call run_acceptance_review next.")
     except Exception as e:
         print(f"[download_project] auto-redeliver skipped: {e}")
         return ""
@@ -1981,6 +1971,10 @@ async def exec_tool(
     custom_tool_map = custom_tool_map or {}
     connector_tool_name_map = connector_tool_name_map or {}
     try:
+        from coder_jobs import route_tool as route_coder_job
+        routed = await route_coder_job(name, args, conv_id, events)
+        if routed is not None:
+            return routed
         # ─── v2 workflow gate (deterministic over persuasion) ───────────────
         # Two interlocking states gate every non-meta tool call. Both fire
         # only for Daedalus/v2 personas; ordinary chat personas stay outside
@@ -2093,7 +2087,7 @@ async def exec_tool(
                 # scroll; counters below are additionally scoped to the
                 # current user request via _runs_since.
                 _runs_for_cap = (_gate_ctx.runs if _gate_ctx is not None
-                                 else await db.get_runs_by_conversation(conv_id, limit=50))
+                                 else await db.get_runs_by_conversation(conv_id, limit=-1))
                 _uts_cap = (_gate_ctx.latest_user_ts if _gate_ctx is not None
                             else await _latest_user_msg_ts(conv_id))
 
@@ -2321,7 +2315,7 @@ async def exec_tool(
             # against the bootstrap gate's "call run_aider_fix next" mandate.
             try:
                 if name == "run_fixer" and await _check_v2():
-                    _runs_pf = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                    _runs_pf = (_gate_ctx.runs if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     _latest_meaningful = None
                     _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
@@ -2340,6 +2334,13 @@ async def exec_tool(
                         _env_pf = _latest_meaningful.get("result_envelope") or {}
                         _rstatus_pf = (_env_pf.get("status") or "").lower()
                         if _rstatus_pf in ("issues", "error"):
+                            _allow_fixer = True
+
+                    if args.get("_aider_fallback"):
+                        _parent = await db.get_run(args.get("reviewer_run_id") or "")
+                        if (_parent and _parent.get("conversation_id") == conv_id
+                                and _parent.get("role") in {"reviewer", "acceptance"}
+                                and (_parent.get("result_envelope") or {}).get("status") == "issues"):
                             _allow_fixer = True
 
                     if not _allow_fixer:
@@ -2387,7 +2388,7 @@ async def exec_tool(
                 _conv_full = (_gate_ctx.conv_row if _gate_ctx is not None
                               else await db.get_conversation(conv_id))
                 if await _check_v2(cr=_conv_full):
-                    _runs_rb = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                    _runs_rb = (_gate_ctx.runs if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     for _r in _runs_rb:
                         if _builder_completion_allowed(name, args, _r):
@@ -2458,7 +2459,7 @@ async def exec_tool(
         if conv_id and name in {"run_review", "run_acceptance_review"}:
             try:
                 if await _check_v2():
-                    _runs_bi = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                    _runs_bi = (_gate_ctx.runs if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     _bi = _blocking_incomplete_builder(_runs_bi)
                     if _bi is not None:
@@ -2492,7 +2493,7 @@ async def exec_tool(
                                     "run_aider_fix", "ask_project", "get_coder_workflow",
                                     "cancel_coder_workflow"):
             try:
-                _runs_for_v2_gate = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                _runs_for_v2_gate = (_gate_ctx.runs if _gate_ctx is not None
                                      else await db.get_runs_by_conversation(conv_id, limit=20))
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
@@ -4528,7 +4529,7 @@ async def exec_tool(
             # _aider_fallback).
             if conv_id:
                 try:
-                    _esc_runs = await db.get_runs_by_conversation(conv_id, limit=50)
+                    _esc_runs = await db.get_runs_by_conversation(conv_id, limit=-1)
                     _esc_battle = compute_fix_battle(
                         _esc_runs, await _latest_user_msg_ts(conv_id))
                     if preferred_fix_editor(_esc_battle) == "fixer":
@@ -4701,7 +4702,7 @@ async def exec_tool(
             # the tree — a second editor without a Reviewer pass in between
             # would edit blind against the stale pre-Aider issue envelope, so
             # that case falls through to the run_review routing below.
-            if status in {"error", "failed"} and not (envelope.get("files_touched") or []):
+            if status in {"error", "failed"} and envelope.get("changes_known", True) and not (envelope.get("files_touched") or []):
                 return await _fallback_to_fixer(f"Aider failed: {envelope.get('summary','')[:160]}")
             return (
                 f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
@@ -4952,6 +4953,19 @@ async def exec_tool(
                 reviewer_run = await _latest_clean_reviewer()
                 if reviewer_run:
                     reviewer_run_id = reviewer_run.get("id", "")
+
+            if reviewer_run:
+                if reviewer_run.get("conversation_id") != conv_id:
+                    return "ERROR: Reviewer belongs to another conversation. Run review for this project."
+                _candidate_env = reviewer_run.get("result_envelope") or {}
+                _candidate_dir = (_candidate_env.get("project_dir") or "").rstrip("/")
+                if project_id and _candidate_env.get("project_id") and project_id != _candidate_env["project_id"]:
+                    return "ERROR: Reviewer belongs to another project. Run review for this project."
+                _project_runs = await db.get_runs_by_conversation(conv_id, limit=-1)
+                _newest_review = next((r for r in _project_runs if r.get("role") == "reviewer"
+                    and ((r.get("result_envelope") or {}).get("project_dir") or "").rstrip("/") == _candidate_dir), None)
+                if _newest_review and _newest_review.get("id") != reviewer_run.get("id"):
+                    return "ERROR: Reviewer result is stale. Use the latest clean review for the current project."
 
             review_env = (reviewer_run or {}).get("result_envelope") or {}
             _dir_override_note = ""
@@ -5679,7 +5693,7 @@ async def exec_tool(
 
             openhands_url = config.OPENHANDS_URL
             max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 20)
-            num_ctx = getattr(config, "OPENHANDS_NUM_CTX", 16384)
+            num_ctx = context_policy.resolve("builder").num_ctx
 
             # Health check with retry (3 attempts, 1s between)
             _oh_healthy = False
@@ -5981,6 +5995,7 @@ async def exec_tool(
                 "ollama_url": config.OLLAMA_URL,
                 "max_rounds": max_rounds,
                 "num_ctx": num_ctx,
+                "num_predict": context_policy.resolve("builder").num_predict,
                 "language": language,
                 "context": context,
                 "project_id": _oh_project_id,
@@ -6175,54 +6190,16 @@ async def exec_tool(
                 duration = result.get("duration_seconds", 0)
                 summary = result.get("summary", "")
 
-                # If OpenHands returned 0 files, scan CodeBox filesystem as fallback
+                # The worker owns workspace identity; never guess from recent files.
+                _project_id = result.get("project_id") or _oh_project_id
+                if not _project_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", _project_id):
+                    await _finalize_run("failed", {"error": "Worker did not return a valid project identity"})
+                    return "ERROR: Worker did not return a valid project identity."
+                project_dir = f"/root/projects/{_project_id}"
+                files = [f for f in files if f.startswith(project_dir + "/")]
                 if not files:
-                    try:
-                        scan_r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                            "command": "find /root/ -maxdepth 5 -type f -mmin -10 "
-                                       "! -path '*/node_modules/*' ! -path '*/.git/*' "
-                                       "! -path '*/__pycache__/*' ! -path '*/.cache/*' "
-                                       "! -path '*/.npm/*' ! -path '*/venv/*' "
-                                       "! -path '*/.openhands/*' ! -path '*/.bash_history' "
-                                       "! -name '*.pyc' ! -name 'package-lock.json' "
-                                       "2>/dev/null | sort",
-                            "timeout": 10
-                        }, timeout=15)
-                        scan_out = scan_r.json().get("stdout", "").strip()
-                        if scan_out:
-                            files = [f for f in scan_out.splitlines() if f.strip()]
-                            print(f"[CODEGEN:OH] Filesystem fallback found {len(files)} files")
-                    except Exception as scan_e:
-                        print(f"[CODEGEN:OH] Filesystem scan failed: {scan_e}")
+                    files = await _scan_project_files(http, project_dir)
 
-                # Determine project directory from files
-                # Prefer /root/projects/{name} workspace, then project-*, then /root
-                project_dir = "/root"
-                if files:
-                    dirs = set()
-                    workspace_dirs = set()
-                    for f in files:
-                        parts = f.split("/")
-                        # /root/projects/{name}/... → ["", "root", "projects", "name", ...]
-                        if len(parts) >= 5 and parts[2] == "projects":
-                            workspace_dirs.add("/".join(parts[:4]))
-                        # Legacy: /root/project-{id}/... → ["", "root", "project-xxx", ...]
-                        elif len(parts) >= 4 and parts[2].startswith("project-"):
-                            workspace_dirs.add("/".join(parts[:3]))
-                        elif len(parts) >= 3:
-                            dirs.add("/".join(parts[:3]))
-                    if len(workspace_dirs) == 1:
-                        project_dir = workspace_dirs.pop()
-                        files = [f for f in files if f.startswith(project_dir)]
-                    elif len(workspace_dirs) > 1:
-                        # Multiple workspace dirs — pick the one with most files
-                        best = max(workspace_dirs, key=lambda d: sum(1 for f in files if f.startswith(d)))
-                        project_dir = best
-                        files = [f for f in files if f.startswith(project_dir)]
-                    elif len(dirs) == 1:
-                        project_dir = dirs.pop()
-
-                _project_id = _oh_project_id or result.get("project_id", "")
                 if required_files and project_dir and project_dir.startswith("/root/projects/"):
                     scanned_files = await _scan_project_files(http, project_dir)
                     if scanned_files:

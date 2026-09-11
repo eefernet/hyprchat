@@ -29,6 +29,9 @@ from pydantic import BaseModel
 
 import backup as backup_svc
 import config
+import context_policy
+import coder_jobs
+from db import coder_jobs as coder_job_store
 import database as db
 import scheduler as scheduler_svc
 from council import stream_council_chat
@@ -89,8 +92,17 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict):
     os.makedirs(os.path.dirname(config.SETTINGS_PATH), exist_ok=True)
-    with open(config.SETTINGS_PATH, "w") as f:
-        json.dump(settings, f, indent=2)
+    import tempfile
+    descriptor, temporary = tempfile.mkstemp(prefix=".settings-", dir=os.path.dirname(config.SETTINGS_PATH))
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            json.dump(settings, output, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, config.SETTINGS_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _public_settings_payload(settings: dict) -> dict:
@@ -433,6 +445,7 @@ async def lifespan(app: FastAPI):
             fallback=config.RESEARCH_NUM_CTX,
         )
         print(f"[Config] Loaded research num_ctx: {config.RESEARCH_NUM_CTX}")
+    context_policy.apply_settings(_settings)
     if "quick_search_mode" in _settings:
         _qsm = (_settings["quick_search_mode"] or "balanced").strip().lower()
         if _qsm not in ("speed", "balanced", "quality"):
@@ -501,7 +514,10 @@ async def lifespan(app: FastAPI):
     # Backfill the kb_chunks_fts keyword index from existing Chroma documents
     # (no-op once populated; non-blocking)
     _track_bg(rag.backfill_fts())
+    coder_jobs.configure(http, events)
+    await coder_jobs.start()
     yield
+    await coder_jobs.shutdown()
     for task in [_cleanup_task_ref, _health_task_ref, _scheduler_task_ref]:
         if task:
             task.cancel()
@@ -626,8 +642,6 @@ register_extracted_routes(
 # Workspace helpers only do short classification/title/suggestion work. Keep
 # their KV cache small even when the user sets chat context to 128K/256K or the
 # selected helper model advertises a huge native context.
-_WORKSPACE_HELPER_NUM_CTX = 4096
-_WORKSPACE_TITLE_NUM_CTX = 2048
 
 # ============================================================
 # PYDANTIC MODELS
@@ -973,8 +987,10 @@ def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
     import zipfile
 
     staging_abs = os.path.abspath(staging_root)
-    budget = 4 * config.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    budget = context_policy.runtime_settings()["daedalus_extracted_mb"] * 1024 * 1024
     written = 0
+    archive_source = _io.BytesIO(content) if isinstance(content, bytes) else content
+    archive_source.seek(0)
 
     def _safe_target(member_name: str) -> Optional[str]:
         if not member_name or member_name.startswith("/") or "\x00" in member_name:
@@ -1000,7 +1016,7 @@ def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
                 dst.write(buf)
 
     if is_zip:
-        with zipfile.ZipFile(_io.BytesIO(content)) as zf:
+        with zipfile.ZipFile(archive_source) as zf:
             for info in zf.infolist():
                 target = _safe_target(info.filename)
                 if not target:
@@ -1018,7 +1034,7 @@ def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
             mode = "r:bz2"
         else:
             mode = "r:"
-        with tarfile.open(fileobj=_io.BytesIO(content), mode=mode) as tf:
+        with tarfile.open(fileobj=archive_source, mode=mode) as tf:
             for m in tf.getmembers():
                 if m.islnk() or m.issym() or m.isdev():
                     continue
@@ -1049,8 +1065,7 @@ def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
     # Walk the cleaned tree for manifest + language detection
     manifest: list[str] = []
     ext_counts: dict[str, int] = {}
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv",
-                 "dist", "build", ".next", ".cache", ".idea", ".vscode", "target"}
+    skip_dirs = set(context_policy.runtime_settings()["daedalus_exclude_dirs"]) | {".git"}
     for root, dirs, files in os.walk(staging_root):
         dirs[:] = [d for d in dirs if d not in skip_dirs]
         for fname in files:
@@ -1084,9 +1099,13 @@ async def upload_coder_project(
     if not (is_zip or is_tar):
         raise HTTPException(400, "Upload must be .zip, .tar, .tar.gz, .tgz, .tar.bz2, or .tbz2")
 
-    content = await file.read()
-    if len(content) > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"Archive too large (max {config.MAX_UPLOAD_SIZE_MB}MB)")
+    if not await db.get_conversation(conv_id):
+        raise HTTPException(404, "Conversation not found")
+    upload_settings = context_policy.runtime_settings()
+    archive_size = await asyncio.to_thread(file.file.seek, 0, 2)
+    await file.seek(0)
+    if archive_size > upload_settings["daedalus_upload_mb"] * 1024 * 1024:
+        raise HTTPException(413, f"Archive exceeds the {upload_settings['daedalus_upload_mb']}MB upload limit in Settings")
 
     # Derive project name + id
     base = safe_name
@@ -1105,7 +1124,7 @@ async def upload_coder_project(
     os.makedirs(staging_root, exist_ok=True)
     try:
         manifest, ext_counts = await asyncio.to_thread(
-            _extract_and_stage_project, content, lower, is_zip, staging_root)
+            _extract_and_stage_project, file.file, lower, is_zip, staging_root)
     except _UploadTooLarge as e:
         shutil.rmtree(staging_root, ignore_errors=True)
         raise HTTPException(413, f"Archive decompresses beyond the {e.budget_mb}MB extraction budget")
@@ -1141,12 +1160,13 @@ async def upload_coder_project(
 
     # Re-tar the sanitized tree (gzip) for transport to the sandbox — also
     # off-loop; gzipping a large tree blocks just like extracting one.
-    def _retar() -> bytes:
-        tar_buf = _io.BytesIO()
-        with tarfile.open(fileobj=tar_buf, mode="w:gz") as out_tf:
-            out_tf.add(staging_root, arcname=".")
-        return tar_buf.getvalue()
-    tar_bytes = await asyncio.to_thread(_retar)
+    transfer_path = staging_root + ".tar.gz"
+    def _retar():
+        with tarfile.open(transfer_path, mode="w:gz") as bundle:
+            for name in os.listdir(staging_root):
+                if name not in upload_settings["daedalus_exclude_dirs"]:
+                    bundle.add(os.path.join(staging_root, name), arcname=name)
+    await asyncio.to_thread(_retar)
 
     # Upload to codebox via the dedicated /upload-chunk endpoint. Sends raw
     # tarball bytes in chunks via multipart — bypasses both pitfalls of
@@ -1160,12 +1180,13 @@ async def upload_coder_project(
     remote_tmp = f"/tmp/{project_id}.tar.gz"
     git_baseline_status = "not_started"
     CHUNK = 1_000_000  # 1MB of raw bytes per multipart POST
-    total_chunks = max(1, (len(tar_bytes) + CHUNK - 1) // CHUNK)
+    total_chunks = max(1, (os.path.getsize(transfer_path) + CHUNK - 1) // CHUNK)
 
+    transfer_file = open(transfer_path, "rb")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as http_client:
             for i in range(total_chunks):
-                chunk = tar_bytes[i * CHUNK : (i + 1) * CHUNK]
+                chunk = await asyncio.to_thread(transfer_file.read, CHUNK)
                 files = {"file": (f"chunk-{i}", chunk, "application/octet-stream")}
                 # truncate=true on first chunk wipes any partial leftover from
                 # a previous failed upload; subsequent chunks append.
@@ -1229,6 +1250,9 @@ async def upload_coder_project(
         raise
     except Exception as e:
         raise HTTPException(500, f"CodeBox upload failed: {e}")
+    finally:
+        transfer_file.close()
+        os.unlink(transfer_path)
 
     # Register as the conversation's active coding project. The chat agent's
     # ACTIVE PROJECT injection (agents/chat.py) will pick this up on next turn,
@@ -1247,6 +1271,18 @@ async def upload_coder_project(
         )
     except Exception as e:
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
+
+    if upload_settings["daedalus_v3_enabled"]:
+        # Upload establishes a project; the next explicit request chooses Q&A
+        # or editing. Source inventory is built by the job worker, independently
+        # of optional embeddings.
+        return {"project_id": project_id, "workflow_id": "", "workflow_status": "awaiting_request",
+                "name": project_name, "language": language, "file_count": len(manifest), "files": manifest[:30],
+                "sandbox_path": remote_dir, "size_bytes": archive_size, "indexer_run_id": "",
+                "indexer_status": "optional", "git_baseline_status": git_baseline_status,
+                "detected_build_system": project_contract.get("build_system", "unknown"),
+                "detected_build_cmd": project_contract.get("build_cmd", ""),
+                "detected_test_cmd": project_contract.get("test_cmd", ""), "contract": project_contract}
 
     workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
     workflow_status = "created"
@@ -1319,7 +1355,7 @@ async def upload_coder_project(
         "file_count": len(manifest),
         "files": manifest[:30],
         "sandbox_path": remote_dir,
-        "size_bytes": len(content),
+        "size_bytes": archive_size,
         "indexer_run_id": indexer_run_id,
         "indexer_status": indexer_status,
         "git_baseline_status": git_baseline_status,
@@ -1811,6 +1847,11 @@ async def cancel_run(run_id: str):
     """
     import cancel_registry
 
+    row = await db.get_run(run_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    if row.get("workflow_id") and await coder_job_store.get(row["workflow_id"]):
+        return await coder_jobs.cancel(row["workflow_id"])
     signaled = cancel_registry.signal(run_id)
 
     db_marked = False
@@ -1849,6 +1890,8 @@ async def cancel_run(run_id: str):
 @app.get("/api/coder/workflows/{workflow_id}")
 async def get_coder_workflow(workflow_id: str):
     wf = await db.get_coder_workflow(workflow_id)
+    if wf and wf.get("workflow_version") == 3:
+        return await coder_job_store.get(workflow_id)
     if not wf:
         raise HTTPException(404, "Workflow not found")
     return wf
@@ -1857,11 +1900,15 @@ async def get_coder_workflow(workflow_id: str):
 @app.get("/api/coder/workflows")
 async def list_coder_workflows(conversation_id: str = Query(...),
                                limit: int = Query(50)):
-    return await db.get_coder_workflows_by_conversation(conversation_id, limit=limit)
+    rows = await db.get_coder_workflows_by_conversation(conversation_id, limit=limit)
+    return [await coder_job_store.get(row["id"]) if row.get("workflow_version") == 3 else row for row in rows]
 
 
 @app.post("/api/coder/workflows/{workflow_id}/cancel")
 async def cancel_coder_workflow(workflow_id: str):
+    version3 = await coder_job_store.get(workflow_id)
+    if version3:
+        return await coder_jobs.cancel(workflow_id)
     wf = await db.get_coder_workflow(workflow_id)
     if not wf:
         raise HTTPException(404, "Workflow not found")
@@ -3128,15 +3175,8 @@ def _looks_like_secret_memory(text: str) -> bool:
 
 
 def _memory_scan_num_ctx(prompt: str, num_predict: int = 900) -> int:
-    """Bounded num_ctx for memory-scan helper calls. The scan transcript can
-    reach ~18K chars, which silently overflows a fixed 4096 window and
-    truncates the extraction instructions. Scales up as needed but stays
-    hard-capped so the helper model never reserves a model-native KV cache."""
-    est = len(prompt) // 3 + num_predict + 256
-    for cap in (_WORKSPACE_HELPER_NUM_CTX, 6144, 8192):
-        if est <= cap:
-            return cap
-    return 8192
+    """Use the configured extraction context without hidden clamps."""
+    return context_policy.helper_context("extraction")
 
 
 def _existing_memories_scan_hint(existing: list, max_items: int = 20, max_chars: int = 2200) -> str:
@@ -3599,7 +3639,7 @@ async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
                 "think": False,
                 "options": {
                     "temperature": 0.2,
-                    "num_ctx": _WORKSPACE_HELPER_NUM_CTX,
+                    "num_ctx": context_policy.helper_context("workspace"),
                     "num_predict": 400,
                 },
             },
@@ -4014,7 +4054,7 @@ async def get_council_suggestions(council_id: str):
             "think": False,
             "options": {
                 "temperature": 0.9,
-                "num_ctx": _WORKSPACE_HELPER_NUM_CTX,
+                "num_ctx": context_policy.helper_context("workspace"),
                 "num_predict": 200,
             },
         }, timeout=30)
@@ -4321,7 +4361,7 @@ async def generate_daily_message(request: Request, body: dict = Body(default={})
             ],
             "stream": False,
             "think": False,
-            "options": {"num_ctx": 1024, "temperature": 1.15}
+            "options": {"num_ctx": context_policy.helper_context("title"), "temperature": 1.15}
         }, timeout=20)
         msg = resp.json().get("message", {}).get("content", "").strip()
         msg = re.sub(r"^[\"'`“”]+|[\"'`“”]+$", "", msg)
@@ -4355,7 +4395,7 @@ async def generate_title(conv_id: str, body: dict = Body(default={})):
             ],
             "stream": False,
             "think": False,
-            "options": {"num_ctx": _WORKSPACE_TITLE_NUM_CTX, "temperature": 0.3}
+            "options": {"num_ctx": context_policy.helper_context("title"), "temperature": 0.3}
         }, timeout=30)
         title = resp.json().get("message", {}).get("content", "").strip().strip('"\'')[:60]
         if title:

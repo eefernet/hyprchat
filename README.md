@@ -95,7 +95,9 @@ HyprFit's hardware-fit ranking model is adapted from the MIT-licensed llmfit/Pew
 
 ### 🏛️ Daedalus Agentic Coding
 
-Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. `plan_project` always uses the structured Architect path, so Builder receives the same manifest plus an advisory interface contract: entrypoint, dependency policy, shared constants, public signatures, and cross-file rules when the Architect can infer them. Workflow progress renders as one unified card with a phase stepper — plan, build, review, fix, acceptance, package — instead of a wall of raw tool output.
+An opt-in persistent workflow adds durable background jobs, checkpoint continuation, Settings-owned context budgets, paginated repository/evidence browsing, and delivery of the exact accepted revision. It remains disabled by default while local-model quality evaluation is completed. See the [workflow and settings guide](docs/daedalus-workflows.md) for operation, deployment, and evaluation details.
+
+Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. In the default legacy workflow, `plan_project` uses the structured Architect path, so Builder receives the same manifest plus an advisory interface contract: entrypoint, dependency policy, shared constants, public signatures, and cross-file rules when the Architect can infer them. Workflow progress renders as one unified card with a phase stepper — plan, build, review, fix, acceptance, package — instead of a wall of raw tool output.
 
 <p align="center">
   <img src="docs/images/daedalus.png" alt="Daedalus agentic coding workflow" width="900">

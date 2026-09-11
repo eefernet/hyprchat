@@ -173,7 +173,7 @@ async def build_gate_context(
                 is_v2 = False
         if is_v2:
             try:
-                runs = await db.get_runs_by_conversation(conv_id, limit=50)
+                runs = await db.get_runs_by_conversation(conv_id, limit=-1)
             except Exception as exc:
                 print(f"[v2-gate] context runs snapshot failed (non-fatal): {exc}")
                 snapshot_partial = True
@@ -298,8 +298,8 @@ def progress_verdict(src_env: dict | None, ver_env: dict | None) -> str:
     ver_status = ((ver_env or {}).get("status") or "").lower()
     if ver_status in {"clean", "accepted"}:
         return "progress"
-    src_files = envelope_issue_files(src_env)
-    ver_files = envelope_issue_files(ver_env)
+    src_files = envelope_issue_files(src_env, src_env.get("project_dir") or "")
+    ver_files = envelope_issue_files(ver_env, (ver_env or {}).get("project_dir") or src_env.get("project_dir") or "")
     if src_files and ver_files:
         # New issues confined to new files start a fresh battle; the hard
         # ceiling backstops fix-old/create-new loops.

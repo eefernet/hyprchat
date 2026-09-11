@@ -1,0 +1,118 @@
+{
+  "settings": {
+    "default_num_ctx": 16384,
+    "openhands_num_ctx": 32768,
+    "aider_num_ctx": 0,
+    "research_num_ctx": 40960,
+    "daedalus_role_contexts": {},
+    "generation_num_predict": 4096,
+    "context_headroom_percent": 5,
+    "daedalus_compaction": "on",
+    "context_compaction_threshold": 75,
+    "helper_contexts": {
+      "workspace": 4096,
+      "title": 2048,
+      "classifier": 2048,
+      "compaction": 8192,
+      "extraction": 8192,
+      "image": 4096
+    },
+    "daedalus_v3_enabled": true,
+    "daedalus_job_seconds": 600,
+    "daedalus_model_calls": 120,
+    "daedalus_attempt_turns": 20,
+    "daedalus_command_seconds": 600,
+    "daedalus_upload_mb": 250,
+    "daedalus_extracted_mb": 1000,
+    "daedalus_storage_mb": 10000,
+    "daedalus_exclude_dirs": [
+      ".git",
+      "node_modules",
+      ".venv",
+      "venv",
+      "__pycache__",
+      "dist",
+      "build",
+      "target",
+      ".cache",
+      ".pytest_cache"
+    ]
+  },
+  "environment": {
+    "python": "3.13.5 (main, Jun 25 2025, 18:55:22) [GCC 14.2.0]",
+    "packages": {
+      "openhands-sdk": "1.11.4",
+      "openhands-tools": "1.11.4",
+      "litellm": "1.82.0",
+      "tree-sitter": "0.24.0",
+      "tree-sitter-javascript": "0.23.1",
+      "tree-sitter-typescript": "0.23.2",
+      "playwright": "1.62.0"
+    }
+  },
+  "source_hashes": {
+    "coder_jobs.py": "8c0b7c5c197ac71950c3c8c545a5f4e7c227044613d6af1b677702831f25ce08",
+    "coder_checks.py": "522015993ac4923e949476fc9fe3adfa1c95376361f324327d324ffb81dfaa4c",
+    "coder_inference.py": "4a5b4471ea9741d2818ea58630642e5c8840557df2d1c4c130b421a205563bd6",
+    "coder_sdk_runtime.py": "856b9e6daba0ff264e0a121d0cc457694d6d248ae66b51431f00659ac2e7c090",
+    "coder_repository.py": "5398a210f3f49ee82616537220f1822d3c7aa111894070073bd35d881a573a8a",
+    "coder_worker_runtime.py": "9ddb085f00541cdc6098a38c6bd35fe7c3a7067aeb6b42eba63d30912ed8519f",
+    "context_policy.py": "90ea43aee120355c54dec10484df3c15144068d2cfe84882e22b12082efd7e87",
+    "openhands_worker.py": "77b2b5e36a1f59de2736549f7d19bbe610a81ee68ef68542b81cb934a2f874d2",
+    "database.py": "fa94702d5f957808db5bb021325783c2d0c4e4b87ec3610a8387aa428095eff4",
+    "config.py": "4b268ce57b1503bc30fb12451963f7e3da43b23a5899395848522e8c2b8535e4",
+    "db/coder_jobs.py": "82e0c2b79639dbc42c225a86ba32524b80ae71d9734c5b777b3c251e5bcdf5bc",
+    "db/schema.py": "99af4f6c1aca504b2c953e6b23672bca1479eba0a119ead735c5365e7ce45ab9",
+    "db/artifacts.py": "6c2f224426d37e9ed1bad0e6ea08e983cbfde7db379cf6a6a92a669ae98b78fc",
+    "evals/coder_fixtures.py": "b78fde4708d3c115d3730b3a594090480f302154176216a847b810564264a7f3",
+    "evals/run_coder_benchmark.py": "3572422edfab9bff9db1a28cca6b122f43b820c5562503cb81a9922b4d304f15"
+  },
+  "results": [
+    {
+      "fixture": "lookup",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-b7eca446bcdcb72dc4a96afd",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "RuntimeError: ConversationRunError: Conversation run failed for id=79ea2aa8-570c-5a86-bbcf-eae2cb69972f: Model-call allowance exhausted; continue from the checkpoint\n\nConversation logs are stored at: /tmp/daedalus-bench-v14-worker/sessions/79ea2aa8570c5a86bbcfeae2cb69972f\n\nTo help debug this issue, please file a bug report at:\n  https://github.com/OpenHands/software-agent-sdk/issues/new\nand attach the conversation logs from the directory above."
+      },
+      "seconds": 489.08208441734314,
+      "calls": 120,
+      "blocker": "RuntimeError: ConversationRunError: Conversation run failed for id=79ea2aa8-570c-5a86-bbcf-eae2cb69972f: Model-call allowance exhausted; continue from the checkpoint\n\nConversation logs are stored at: /tmp/daedalus-bench-v14-worker/sessions/79ea2aa8570c5a86bbcfeae2cb69972f\n\nTo help debug this issue, please file a bug report at:\n  https://github.com/OpenHands/software-agent-sdk/issues/new\nand attach the conversation logs from the directory above."
+    },
+    {
+      "fixture": "lookup",
+      "model": "devstral:24b",
+      "job_id": "cw3-baabd2e503f95312b3721d9d",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "RuntimeError: ConversationRunError: Conversation run failed for id=75979508-91c2-56e8-b10e-4938f0b64ff7: Model-call allowance exhausted; continue from the checkpoint\n\nConversation logs are stored at: /tmp/daedalus-bench-v14-worker/sessions/7597950891c256e8b10e4938f0b64ff7\n\nTo help debug this issue, please file a bug report at:\n  https://github.com/OpenHands/software-agent-sdk/issues/new\nand attach the conversation logs from the directory above."
+      },
+      "seconds": 529.1733915805817,
+      "calls": 120,
+      "blocker": "RuntimeError: ConversationRunError: Conversation run failed for id=75979508-91c2-56e8-b10e-4938f0b64ff7: Model-call allowance exhausted; continue from the checkpoint\n\nConversation logs are stored at: /tmp/daedalus-bench-v14-worker/sessions/7597950891c256e8b10e4938f0b64ff7\n\nTo help debug this issue, please file a bug report at:\n  https://github.com/OpenHands/software-agent-sdk/issues/new\nand attach the conversation logs from the directory above."
+    },
+    {
+      "fixture": "greeting",
+      "model": "qwen3-coder:30b",
+      "job_id": "cw3-2ddd3b4925c3cdc80dcd46ca",
+      "state": "blocked",
+      "passed": false,
+      "false_acceptance": false,
+      "evidence": {
+        "passed": false,
+        "error": "TimeoutError: Execution allowance exhausted. Continue from the saved checkpoint."
+      },
+      "seconds": 607.3107199668884,
+      "calls": 17,
+      "blocker": "TimeoutError: Execution allowance exhausted. Continue from the saved checkpoint."
+    }
+  ],
+  "evaluation_note": "Partial 32K diagnostic on an earlier candidate. Superseded after browser-deadline and navigation fixes; not a controlled context-size comparison with the later 64K evaluation."
+}

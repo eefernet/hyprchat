@@ -6,6 +6,8 @@ The local model is asked for strict JSON, but smaller models sometimes wrap the
 answer in explanations. This module salvages the useful SDXL prompt without
 letting assistant prose leak into the UI.
 """
+
+import context_policy
 import json
 import re
 
@@ -246,13 +248,13 @@ async def enhance_prompt(http, idea: str, *, model: str = "",
             ) as transient:
                 raw = await model_providers.complete_chat(
                     transient, model, prompt_text,
-                    temperature=0.7, num_ctx=2048, num_predict=400,
+                    temperature=0.7, num_ctx=context_policy.helper_context("image"), num_predict=400,
                     format_json=True, timeout=timeout, ollama_url=config.OLLAMA_URL,
                 )
         else:
             raw = await model_providers.complete_chat(
                 http, model, prompt_text,
-                temperature=0.7, num_ctx=2048, num_predict=400,
+                temperature=0.7, num_ctx=context_policy.helper_context("image"), num_predict=400,
                 format_json=True, timeout=timeout, ollama_url=config.OLLAMA_URL,
             )
     except Exception:
