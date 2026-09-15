@@ -11,6 +11,7 @@ SEARXNG_USER="${SEARXNG_USER:-searxng}"
 UID_NUM="$(id -u "$SEARXNG_USER")"
 TABLE="${SEARXNG_VPN_TABLE:-100}"
 MARK="${SEARXNG_VPN_MARK:-0x1}"
+BLOCK_PRIORITY="${SEARXNG_VPN_BLOCK_PRIORITY:-101}"
 CHAIN6="SEARXNG_VPN6_OUT"
 LAN_CIDR="${SEARXNG_LAN_CIDR:-192.168.1.0/24}"
 LAN_DEV="${SEARXNG_LAN_DEV:-eth0}"
@@ -44,7 +45,23 @@ cleanup_old_ipv4_filter_chain() {
     iptables -X SEARXNG_VPN_OUT 2>/dev/null || true
 }
 
+ensure_block_rule() {
+    # A missing route in table 100 otherwise falls through to the LAN gateway.
+    # Keep this rule installed even while rebuilding the VPN table/rule.
+    local existing
+    existing="$(ip -4 rule show | awk -v p="$BLOCK_PRIORITY:" '$1 == p')"
+    if [ -n "$existing" ]; then
+        if ! printf '%s\n' "$existing" | grep -q "fwmark $MARK.*prohibit"; then
+            echo "Refusing to replace unrelated routing rule at priority $BLOCK_PRIORITY" >&2
+            return 1
+        fi
+    else
+        ip -4 rule add fwmark "$MARK" priority "$BLOCK_PRIORITY" prohibit
+    fi
+}
+
 apply_ipv4() {
+    ensure_block_rule
     cleanup_old_ipv4_filter_chain
     ensure_rule mangle OUTPUT -m owner --uid-owner "$UID_NUM" -j MARK --set-mark "$MARK"
 
@@ -69,12 +86,19 @@ apply_ipv4() {
 apply_ipv6() {
     command -v ip6tables >/dev/null 2>&1 || return 0
     ip6tables -N "$CHAIN6" 2>/dev/null || true
-    ip6tables -F "$CHAIN6"
-    ip6tables -A "$CHAIN6" -o lo -j ACCEPT
-    ip6tables -A "$CHAIN6" -d "$LAN6_CIDR" -j ACCEPT 2>/dev/null || true
-    ip6tables -A "$CHAIN6" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || ip6tables -A "$CHAIN6" -j REJECT
-    while ip6tables -D OUTPUT -m owner --uid-owner "$UID_NUM" -j "$CHAIN6" 2>/dev/null; do :; done
-    ip6tables -I OUTPUT 1 -m owner --uid-owner "$UID_NUM" -j "$CHAIN6"
+    # Commit the replacement atomically; flushing a live ACCEPT-policy chain
+    # command by command briefly permits public IPv6 traffic.
+    ip6tables-restore --noflush <<EOF
+*filter
+-F $CHAIN6
+-A $CHAIN6 -o lo -j ACCEPT
+-A $CHAIN6 -d $LAN6_CIDR -j ACCEPT
+-A $CHAIN6 -j REJECT --reject-with icmp6-adm-prohibited
+COMMIT
+EOF
+    if ! ip6tables -C OUTPUT -m owner --uid-owner "$UID_NUM" -j "$CHAIN6" 2>/dev/null; then
+        ip6tables -I OUTPUT 1 -m owner --uid-owner "$UID_NUM" -j "$CHAIN6"
+    fi
 }
 
 set_vpn_dns_if_ready() {
@@ -90,6 +114,7 @@ case "$ACTION" in
         set_vpn_dns_if_ready
         ;;
     down)
+        ensure_block_rule
         cleanup_old_ipv4_filter_chain
         ensure_rule mangle OUTPUT -m owner --uid-owner "$UID_NUM" -j MARK --set-mark "$MARK"
         ip rule del fwmark "$MARK" table "$TABLE" 2>/dev/null || true

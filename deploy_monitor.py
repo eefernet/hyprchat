@@ -128,6 +128,7 @@ WATCHED = {
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
     "backend/leak_sources.py":      ("Leak Sources",     REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
+    "backend/search_runtime.py":    ("Search Runtime",   REMOTE_BACKEND,            True),
     "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
     "backend/storage_diagnostics.py": ("Storage Diagnostics", REMOTE_BACKEND,        True),
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),

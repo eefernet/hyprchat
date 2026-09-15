@@ -145,6 +145,9 @@ MAX_FETCH_CHARS = int(os.getenv("MAX_FETCH_CHARS", "8000"))
 # deterministic plan immediately and a small-LLM query planner in parallel
 # with the first search wave — the deterministic results are the guaranteed
 # floor; the LLM plan only adds/reroutes when it lands within the timeout.
+QUICK_SEARCH_TIMEOUT = float(os.getenv("QUICK_SEARCH_TIMEOUT", "12.0"))
+# Rollback switch for embedding fusion; heuristic ranking remains the floor.
+QUICK_SEARCH_RANKING = os.getenv("QUICK_SEARCH_RANKING", "hybrid").strip().lower()
 QUICK_SEARCH_MODE = os.getenv("QUICK_SEARCH_MODE", "balanced").strip().lower()
 QUICK_SEARCH_PROVIDER = os.getenv("QUICK_SEARCH_PROVIDER", "searxng").strip().lower()
 QUICK_SEARCH_SCRAPER = os.getenv("QUICK_SEARCH_SCRAPER", "local").strip().lower()

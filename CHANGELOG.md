@@ -7,6 +7,19 @@
 > Jarvis panels, first-load skeletons, a mobile pass on the assistant panels,
 > and a keyboard-accessible model picker.
 
+## Search & Daedalus
+
+- **Web search** — shared chat, research-tool and council pipeline with hybrid
+  ranking, relevant page excerpts, bounded timeouts, partial results and clearer
+  failure diagnostics.
+- **SearXNG VPN reliability** — fixed the missing gateway and stuck rotation
+  locks; hardened recovery while preserving VPN egress protection.
+- **Daedalus persistent jobs** — experimental, opt-in workflows with checkpoint
+  continuation, restart recovery, repository inspection and downloads tied to
+  verified, accepted revisions. Disabled by default; legacy workflows remain.
+- **Context settings** — shared stage overrides, configurable helper contexts
+  and compaction controls replace fixed context limits.
+
 ## Research
 - **Investigative Dossier** report template with a direct leak / FOIA /
   government / court source layer (`leak_sources.py`): DOJ, CourtListener,

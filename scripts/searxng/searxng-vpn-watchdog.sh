@@ -34,13 +34,16 @@ save_state() { printf 'fails=%s\ncooldown_until=%s\nlast=%s\nsoftfail=%s\n' "$fa
 
 # Structural liveness — robust, no external dependency.
 structural_up() {
-    pgrep -f '/usr/sbin/openvpn' >/dev/null 2>&1 || return 1
+    local pid
+    pid=$(systemctl show protonvpn-rotate.service -p MainPID --value)
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    [ "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" = /usr/sbin/openvpn ] || return 1
     ip link show tun0 >/dev/null 2>&1 || return 1
     ip route show table "$TABLE" default 2>/dev/null | grep -q 'dev tun0' || return 1
 }
 # DNS-free egress through the tunnel (does searxng actually reach the internet?).
 egress_ok() {
-    runuser -u searxng -- curl -4 -sS --connect-timeout 8 -o /dev/null https://1.1.1.1/ >/dev/null 2>&1
+    runuser -u searxng -- curl -4 -sS --connect-timeout 8 --max-time 12 -o /dev/null https://1.1.1.1/ >/dev/null 2>&1
 }
 restart_searxng() { systemctl restart --no-block searxng || true; }
 
@@ -78,8 +81,24 @@ if [ "$fails" -ge "$MAX_FAILS" ] && [ "$now" -lt "$cooldown_until" ]; then
     exit 0
 fi
 
-log "VPN down — running rotate-ovpn.sh (consecutive failures so far: $fails)"
-rotate-ovpn.sh >> "$LOG" 2>&1 || true
+# Another caller may already be bringing the service up. A skipped attempt
+# is not a failed connection and must not spend the retry budget.
+rotation_state=$(systemctl show protonvpn-rotate.service -p ActiveState --value)
+if [ "$rotation_state" = activating ] || [ "$rotation_state" = deactivating ]; then
+    log "VPN rotation service busy — deferring without increasing failures"
+    save_state
+    exit 0
+fi
+
+log "VPN down — restarting protonvpn-rotate.service (consecutive failures so far: $fails)"
+systemctl restart protonvpn-rotate.service >> "$LOG" 2>&1 || true
+# Type=forking reports launcher failures on ExecStart, not ExecMainStatus.
+rotation_result=$(systemctl show protonvpn-rotate.service -p ExecStart --value)
+if printf '%s\n' "$rotation_result" | grep -Eq 'status=75([[:space:]/;}]|$)'; then
+    log "VPN rotation lock busy — deferring without increasing failures"
+    save_state
+    exit 0
+fi
 
 if structural_up && egress_ok; then
     log "recovered — restarting searxng"

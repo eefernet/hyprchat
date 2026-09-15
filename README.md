@@ -266,7 +266,7 @@ User → HyprChat (:8000)
 | `backend/provider_tools.py` | Native cloud tool calling — tool definition/message conversion and streamed tool-call parsing |
 | `backend/connectors.py` | MCP/OpenAPI connector discovery, credential placeholders, execution guardrails |
 | `backend/research.py` | Deep research and safe URL fetch pipeline |
-| `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
+| `backend/quick_search.py` / `backend/search_agent.py` / `backend/search_runtime.py` | Shared interactive search, deadlines, partial results, ranking and context ([details](docs/web-search.md)) |
 | `backend/rag.py` / `backend/reranker.py` / `backend/ocr.py` | Hybrid RAG retrieval, smart KB reranking, scanned-PDF OCR, history recall |
 | `backend/comfyui.py` | ComfyUI workflow patching, image generation client, saved workflow library, model defaults, cleanup hooks |
 | `backend/voice.py` | Speech-to-text and text-to-speech proxy helpers for OpenAI-compatible local services |

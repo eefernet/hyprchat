@@ -2913,83 +2913,16 @@ async def exec_tool(
             )
 
         elif name == "research":
-            query = args.get("query", "")
-            await events.emit(conv_id, "tool_start", {"tool": "research", "icon": "search", "status": f'Searching: "{query[:50]}"'})
-            import urllib.parse
-            params = urllib.parse.urlencode({"q": query, "format": "json", "count": config.SEARCH_RESULTS_COUNT})
-            r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
-            if r.status_code == 429:
-                await asyncio.sleep(3.0)
-                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
-            if r.status_code >= 400:
-                await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f"⚠️ Search returned HTTP {r.status_code} — may be rate limited"})
-                return f"**Web Search: {query}**\n\n⚠️ Search engine returned HTTP {r.status_code}. Upstream engines may be rate-limiting requests. Try again in a minute."
-            data = r.json()
-            results = data.get("results", [])[:config.SEARCH_RESULTS_COUNT]
-            sr_cards = []
-            for item in results:
-                url = item.get("url", "")
-                url_lower = url.lower()
-                thumbnail = item.get("thumbnail") or item.get("img_src") or ""
-                r_type = "web"
-                if "youtube.com/watch" in url_lower or "youtu.be/" in url_lower:
-                    r_type = "youtube"
-                    vid_id = None
-                    if "youtube.com/watch" in url_lower:
-                        qs = url.split("?", 1)[1] if "?" in url else ""
-                        for part in qs.split("&"):
-                            if part.startswith("v="):
-                                vid_id = part[2:].split("&")[0]; break
-                    elif "youtu.be/" in url_lower:
-                        vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
-                    if vid_id:
-                        thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
-                elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-                    r_type = "image"
-                sr_cards.append({"title": item.get("title", ""), "url": url,
-                                 "snippet": item.get("content", "")[:200],
-                                 "thumbnail": thumbnail, "type": r_type})
-            if sr_cards:
-                await events.emit(conv_id, "search_results", {"query": query, "results": sr_cards})
-
-            # ── Fetch top 5 pages in parallel, prioritized by source tier ──
-            fetch_urls = []
-            for item in results:
-                u = item.get("url", "")
-                if u:
-                    fetch_urls.append(u)
-            fetch_urls.sort(key=_source_tier)
-            fetch_urls = fetch_urls[:5]
-
-            pages = []
-            if fetch_urls:
-                await events.emit(conv_id, "tool_status", {"tool": "research", "icon": "search", "status": f"Reading {len(fetch_urls)} pages..."})
-                fetch_tasks = [_fetch_page(http, u) for u in fetch_urls]
-                fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-                for u, fr in zip(fetch_urls, fetch_results):
-                    if isinstance(fr, dict) and fr.get("content"):
-                        pages.append(fr)
-
-            await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f'{len(results)} results, {len(pages)} pages read',
-                "detail": json.dumps({"query": query, "results": [{"title": r.get("title",""), "url": r.get("url","")} for r in results[:5]]}),
-            })
-
-            # Build result: search listing + actual page content
-            parts = [f"**Web Search: {query}**\n"]
-            parts.append("## Search Results\n")
-            for i, res in enumerate(results, 1):
-                parts.append(f"{i}. **[{res.get('title', '')}]({res.get('url', '')})**\n   {res.get('content', '')}\n")
-
-            if pages:
-                parts.append("\n## Page Content (read from top results)\n")
-                for pg in pages:
-                    # Limit each page to 4000 chars to stay within context budget
-                    content = pg["content"][:4000]
-                    parts.append(f"### Source: {pg['url']}\n{content}\n\n---\n")
-            else:
-                parts.append("\n*(Could not fetch any page content — use the snippets above.)*\n")
-
-            return "\n".join(parts)
+            from quick_search import run_quick_search_for_chat
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "ERROR: research requires a query."
+            result = await run_quick_search_for_chat(
+                http, config.OLLAMA_URL, config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+                events, conv_id, [{"role": "user", "content": query}],
+                default_model=config.DEFAULT_MODEL, force_search=True, tool_name="research",
+            )
+            return result["context"]
 
         elif name == "search_history":
             import rag  # lazy: keeps tools.py import light

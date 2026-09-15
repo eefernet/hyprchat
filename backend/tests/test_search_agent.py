@@ -507,7 +507,8 @@ def test_run_search_agent_today_event_query_uses_general_web_fallback():
     assert any(q == "wwdc 2026" and tr is None and cat == "general" for q, tr, cat in captured)
     assert all("took place" not in q for q, _, _ in captured)
     assert "WWDC 2026 announcements live updates" in out["context"]
-    assert "FRESHNESS WARNING" not in out["context"]
+    # An undated snippet saying "today" does not establish the event date.
+    assert "FRESHNESS WARNING" in out["context"]
 
 
 def test_run_search_agent_today_warns_when_sources_are_not_same_day():
@@ -565,7 +566,7 @@ def test_run_search_agent_returns_balanced_target_chat_results():
     assert search_events[-1]["freshness_mode"] == "month"
     assert "score_reason" in search_events[-1]["results"][0]
     assert done_events[-1]["status"] == f"Found {quick_search.CHAT_TARGET_RESULTS} results"
-    assert f"{quick_search.CHAT_TARGET_RESULTS}. **" in out["context"]
+    assert f"{quick_search.CHAT_TARGET_RESULTS}. [" in out["context"]
     assert f"{quick_search.CHAT_TARGET_RESULTS + 1}. **" not in out["context"]
 
 
@@ -588,7 +589,8 @@ def test_embed_dedup_backfills_to_35_when_candidates_exist():
         assert len(texts) == 41
         return embeddings
 
-    with patch.object(quick_search, "_ollama_embed_batch", new=fake_embed_batch):
+    with patch.object(config, "QUICK_SEARCH_RANKING", "legacy"), \
+         patch.object(quick_search, "_ollama_embed_batch", new=fake_embed_batch):
         out = _run(quick_search._embed_score_and_dedup(
             None, "http://ollama", "query", results,
             limit=quick_search.CHAT_MAX_RESULTS, backfill=True,

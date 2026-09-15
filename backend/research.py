@@ -527,30 +527,41 @@ async def _search_searxng(
     categories: str = "general", safesearch: str | None = None,
     time_range: str | None = None, engines: str | None = None,
     fallback_state: dict | None = None,
+    diagnostics: dict | None = None,
+    retry: bool = True,
 ) -> list:
     """Search SearXNG and return structured results. Falls back to Google scrape if SearXNG returns nothing.
 
-    `time_range`: SearXNG accepts day|week|month|year. Set to "month" for news
+    `time_range`: SearXNG accepts day|month|year. Week requests use month
+    retrieval while the interactive ranker retains its seven-day preference. Set to "month" for news
     queries with explicit time-cues so 2019 articles don't outrank current ones.
     """
+    from search_runtime import diagnose_response, classify_failure
+    diagnostics = diagnostics if diagnostics is not None else {}
     results = []
     try:
         _params = {"q": query, "format": "json", "language": "en", "categories": categories}
         if safesearch is not None:
             _params["safesearch"] = safesearch
         if time_range:
-            _params["time_range"] = time_range
+            _params["time_range"] = "month" if time_range == "week" else time_range
         if engines:
             _params["engines"] = engines
         params = urllib.parse.urlencode(_params)
         r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
-        if r.status_code == 429:
+        if r.status_code == 429 and retry:
             await asyncio.sleep(3.0)
             r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
+        diagnostics.update(diagnose_response(r.status_code))
         if r.status_code >= 400:
             return []
         data = r.json()
+        diagnostics.update(diagnose_response(r.status_code, data))
+        if diagnostics["status"] == "invalid_response":
+            return []
         for item in data.get("results", [])[:count]:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
             url = item.get("url", "")
             url_lower = url.lower()
             thumbnail = item.get("thumbnail") or item.get("img_src") or ""
@@ -576,6 +587,8 @@ async def _search_searxng(
                 "title": item.get("title", ""), "url": url,
                 "content": (item.get("content", "") or "")[:500],
                 "engine": item.get("engine", ""), "score": item.get("score", 0),
+                "engines": item.get("engines") or [item.get("engine", "")],
+                "provider_score": item.get("score", 0),
                 "thumbnail": thumbnail, "type": r_type,
                 "published_date": (
                     item.get("publishedDate") or item.get("published_date")
@@ -589,18 +602,23 @@ async def _search_searxng(
                 "content": box.get("content", ""), "engine": "infobox", "score": 100,
             })
     except Exception as e:
-        print(f"[SEARCH] SearXNG failed for {query[:60]!r}: {type(e).__name__}: {e}")
+        diagnostics.update(status="invalid_response" if isinstance(e, ValueError) else classify_failure(type(e).__name__ + ": " + str(e)), result_count=0, engines=[])
+        print(f"[SEARCH] SearXNG failed: {type(e).__name__}")
     # Fallback to Google scrape if SearXNG returned nothing. Callers can pass
     # a shared fallback_state ({"remaining": N}) to cap scrapes per run —
     # an unhealthy SearXNG at depth 5 would otherwise fire ~24 rapid Google
     # requests and get captcha'd into silently empty results.
     if not results:
+        if diagnostics.get("status") in {"connection_error", "proxy_error", "timeout", "suspended"}:
+            return results
         if fallback_state is not None:
             if fallback_state.get("remaining", 0) <= 0:
                 print(f"[SEARCH] Google fallback budget exhausted; skipping for {query[:60]!r}")
                 return results
             fallback_state["remaining"] -= 1
         results = await _search_google_fallback(http, query, count)
+        if results:
+            diagnostics.update(status="partial", fallback="google", result_count=len(results))
     return results
 
 

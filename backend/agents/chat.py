@@ -1859,6 +1859,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 default_model=config.DEFAULT_MODEL,
                 chat_model=req.model or "",
                 context_hint=_quick_search_context_hint,
+                context_budget=min(3500, model_options["num_ctx"] // 4,
+                                   context_policy.resolve("chat").input_budget // 4),
             )
             if qs.get("context"):
                 for m in reversed(messages):

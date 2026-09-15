@@ -1,0 +1,19 @@
+[Unit]
+Description=ProtonVPN OpenVPN Rotation for SearXNG
+After=network-online.target searxng-vpn-killswitch.service
+Wants=network-online.target
+Requires=searxng-vpn-killswitch.service
+
+[Service]
+Type=forking
+PIDFile=/run/openvpn-proton.pid
+Environment=SEARXNG_ROTATION_OWNER=systemd
+ExecStart=/usr/local/bin/rotate-ovpn.sh
+ExecStopPost=/usr/local/bin/ovpn-down.sh
+TimeoutStartSec=600
+TimeoutStopSec=15
+KillMode=control-group
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

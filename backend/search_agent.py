@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import config
 import quick_search as _qs
+from search_runtime import SearchRun, current_run, FAILURE_MESSAGES, classify_failure
 
 
 _VALID_CATEGORIES = ("news", "code", "recipe", "game", "general")
@@ -145,8 +146,6 @@ def _freshness_from_text(text: str, now: datetime) -> tuple[str, str | None, str
         return "month", None, "month", ""
     if re.search(r"\b(?:right\s+now|as\s+of\s+now)\b", low):
         return "month", None, "month", ""
-    if str(now.year) in low or str(now.year - 1) in low:
-        return "month", None, "month", ""
     return "none", None, None, ""
 
 
@@ -242,8 +241,19 @@ _ANCHOR_DROP = frozenset({
 })
 
 
+_ANSWER_FORMAT_RE = re.compile(
+    r"(?:[.!?;]\s+|\n+)(?:please\s+)?(?:"
+    r"(?:give|provide|write)\s+(?:me\s+)?(?:\d+|one|two|three|four|five|a few)\s+"
+    r"(?:(?:short|brief|concise)\s+)?(?:items|bullets|bullet points|sentences|paragraphs|headlines)"
+    r"|(?:answer|respond|format)\s+(?:in|as|with)"
+    r"|(?:include|cite)\s+(?:the\s+)?(?:sources|source links|citations|URLs))\b.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def _strip_search_noise(text: str) -> str:
     q = _SEARCH_CONTEXT_RE.sub(" ", text or "")
+    q = _ANSWER_FORMAT_RE.sub("", q)
     q = _MARKDOWN_IMAGE_RE.sub(" ", q)
     q = _ATTACHMENT_PLACEHOLDER_RE.sub(" ", q)
     q = re.sub(r"\s+", " ", q).strip()
@@ -385,7 +395,9 @@ def _infer_search_frame(latest: str, turns: list[str], context_hint: str = "") -
 def _clean_query_phrase(text: str) -> str:
     q = _strip_search_noise(text)
     q = re.sub(r"https?://\S+", " ", q)
+    q = re.sub(r"^(?:tell|show|give)\s+me\s+(?:the\s+)?latest\s+(?:on|about|in)\s+", "", q, flags=re.I)
     q = _QUESTION_PREFIX_RE.sub("", q)
+    q = re.sub(r"\bUS(?=\s+(?:news|politics|elections?))", "United States", q, flags=re.I)
     q = re.sub(r"\b(please|for me)\b", " ", q, flags=re.I)
     q = re.sub(r"[?!.,;:]+", " ", q)
     q = re.sub(r"\s+", " ", q).strip()
@@ -393,7 +405,7 @@ def _clean_query_phrase(text: str) -> str:
     if len(words) > 12:
         # Over budget: drop stopwords first so the subject at the tail of a
         # long question survives, instead of blind head truncation.
-        content = [w for w in words if w.lower() not in _qs._STOPWORDS]
+        content = [w for w in words if w.lower() not in _qs._STOPWORDS or re.fullmatch(r"[A-Z]{2,5}", w)]
         words = content[:12] if len(content) >= 4 else words[:12]
         q = " ".join(words)
     return q or (text or "").strip()[:120]
@@ -746,55 +758,70 @@ async def _search_provider(http, plan: SearchPlan, queries: list[str]) -> tuple[
         # like live blogs, official event pages, and tech coverage can surface.
         fallback_count = max(8, min(count, plan.min_results))
         general_engines = (getattr(config, "QUICK_SEARCH_SEARXNG_ENGINES", "") or "").strip() or None
-        for q in queries[:2]:
+        for q in queries[:1]:
             attempts.append((q, fallback_count, "day", "general", general_engines))
             attempts.append((q, fallback_count, None, "general", general_engines))
 
-    raw_lists = await asyncio.gather(
-        *[
-            _qs._cached_search(
-                http, q, count=attempt_count, time_range=time_range,
-                categories=attempt_categories, engines=attempt_engines,
-            )
-            for q, attempt_count, time_range, attempt_categories, attempt_engines in attempts
-        ],
-        return_exceptions=True,
-    )
-    errors = sum(1 for r in raw_lists if isinstance(r, Exception))
-    usable: list[list] = []
-    for attempt, result in zip(attempts, raw_lists):
-        q, _, time_range, attempt_categories, _ = attempt
-        if not isinstance(result, list):
-            continue
-        tagged = []
-        for item in result:
-            if not isinstance(item, dict):
-                continue
-            copied = dict(item)
-            copied.setdefault("query_origin", q)
-            copied.setdefault("search_time_range", time_range or "")
-            copied.setdefault("search_categories", attempt_categories)
-            tagged.append(copied)
-        usable.append(tagged)
-    return _merge_unique(usable), errors
+    run = current_run.get()
+
+    async def search(attempt):
+        q, attempt_count, time_range, attempt_categories, attempt_engines = attempt
+        result = await _qs._cached_search(
+            http, q, count=attempt_count, time_range=time_range,
+            categories=attempt_categories, engines=attempt_engines,
+        )
+        tagged = [{**item, "query_origin": q,
+                   "query_origins": [q], "search_time_range": time_range or "",
+                   "search_categories": attempt_categories}
+                  for item in result if isinstance(item, dict)]
+        # Save each completed query before waiting for slower peers.
+        if run:
+            run.raw = _merge_unique([run.raw, tagged])
+        return tagged
+
+    tasks = [(run.task(search(a)) if run else asyncio.create_task(search(a))) for a in attempts]
+    if not tasks:
+        return [], 0
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=min(8.0, run.remaining(reserve=min(2.0, run.remaining() * 0.2))) if run else 8.0)
+        if pending and run:
+            run.partial = True
+            run.diagnostics.append({"status": "timeout", "result_count": 0, "engines": []})
+        usable = [t.result() for t in tasks if t in done and not t.cancelled() and t.exception() is None]
+        errors = len(tasks) - len(usable)
+        if run:
+            for task in done:
+                if not task.cancelled() and task.exception() is not None:
+                    exc = task.exception()
+                    run.diagnostics.append({"status": classify_failure(type(exc).__name__ + ": " + str(exc)), "result_count": 0, "engines": []})
+        return _merge_unique(usable), errors
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _select_top_results(http, ollama_url: str, raw: list, primary: str, plan: SearchPlan) -> list:
     candidates = _qs._rank_for_search_plan(
         raw, primary, plan,
         category=plan.category,
-        limit=plan.max_results,
+        limit=_qs.CHAT_RANK_POOL_SIZE,
     )
     if not candidates:
         return []
-    if plan.embed_rerank:
+    run = current_run.get()
+    embed_budget = float(getattr(config, "QUICK_SEARCH_EMBED_TIMEOUT", 1.5))
+    if run:
+        embed_budget = min(embed_budget, run.remaining(reserve=min(2.0, run.remaining() * 0.3)))
+    if plan.embed_rerank and embed_budget > 0.01:
         try:
             reranked = await asyncio.wait_for(
                 _qs._embed_score_and_dedup(
                     http, ollama_url, primary, candidates,
                     limit=plan.target_results, backfill=True,
                 ),
-                timeout=float(getattr(config, "QUICK_SEARCH_EMBED_TIMEOUT", 1.5)),
+                timeout=embed_budget,
             )
             if reranked:
                 return reranked[:plan.target_results]
@@ -1021,7 +1048,7 @@ async def llm_plan(
         "month (recent developments), or none (evergreen facts). "
         "Output JSON only."
     )
-    out = await _ask_ollama_json(http, ollama_url, prompt, model, max_tokens=240, timeout=30.0)
+    out = await _ask_ollama_json(http, ollama_url, prompt, model, max_tokens=240, timeout=float(getattr(config, "QUICK_SEARCH_PLANNER_TIMEOUT", 6.0)))
     if not isinstance(out, dict):
         return None
     plan: dict = {}
@@ -1071,7 +1098,8 @@ def _merge_llm_plan(plan: SearchPlan, llm_out: dict) -> list[str]:
     if llm_out.get("category") and llm_out["category"] != plan.category:
         plan.category = llm_out["category"]
         plan.searxng_engines = _searxng_engines_for_category(plan.category)
-    if plan.freshness_mode == "none" and llm_out.get("freshness") in ("week", "month"):
+    if (plan.freshness_mode == "none" and llm_out.get("freshness") in ("week", "month")
+            and not re.search(r"\b(?:19|20)\d{2}\b", " ".join(plan.queries))):
         plan.freshness_mode = llm_out["freshness"]
         plan.time_range = llm_out["freshness"]
     existing = {q.lower() for q in plan.queries}
@@ -1079,13 +1107,14 @@ def _merge_llm_plan(plan: SearchPlan, llm_out: dict) -> list[str]:
 
 
 # ── Orchestrator ──
-async def run_search_agent(
+async def _run_search_agent(
     http, ollama_url: str, planner_model: str,
     events, conv_id: str, messages: list,
     *, default_model: str = "",
     context_hint: str = "",
     max_rounds: int = 2,
     relevance_threshold: float = _REFINE_THRESHOLD_DEFAULT,
+    force_search: bool = False,
 ) -> dict:
     """Orchestrate skip → deterministic plan + parallel LLM planner →
     multi-query search → heuristic rank → literal fallback / LLM refine on
@@ -1101,7 +1130,7 @@ async def run_search_agent(
     clean_latest, _ = _strip_online_prefix(latest)
     clean_latest = _strip_search_noise(clean_latest)
     skip, reason = _qs._should_skip(clean_latest)
-    if skip:
+    if skip and not force_search:
         await _emit(events, conv_id, "tool_done", {
             "tool": "quick_search", "icon": "search", "status": f"Skipped ({reason})",
         })
@@ -1109,28 +1138,31 @@ async def run_search_agent(
 
     mode_cfg = _mode_config()
     plan = _deterministic_plan(messages, latest, mode_cfg, context_hint=context_hint)
+    run = current_run.get()
+    run.plan = plan
     turns, prior_tokens = _build_prior_tokens(messages, clean_latest)
 
     # Start the LLM planner now so it overlaps the first search wave.
     planner_task = None
     if _planner_enabled(mode_cfg) and planner_model:
-        planner_task = asyncio.create_task(asyncio.wait_for(
+        planner_task = run.task(
             llm_plan(
                 http, ollama_url, planner_model,
                 clean_latest, turns, context_hint,
                 datetime.now().astimezone(),
                 max_queries=min(3, mode_cfg.max_queries),
             ),
-            timeout=float(getattr(config, "QUICK_SEARCH_PLANNER_TIMEOUT", 6.0)),
-        ))
+        )
 
     await _emit(events, conv_id, "tool_start", {
         "tool": "quick_search", "icon": "search",
         "status": f"Searching ({mode_cfg.mode}): {plan.canonical_question[:60]}",
     })
 
-    # Filter out queries already searched earlier in this conversation.
-    queries = _qs._filter_novel_queries(conv_id, list(plan.queries))
+    # Cache reuse preserves all query variants; a previous turn is not a freshness gate.
+    # Two initial queries cover the topic without flooding upstream engines;
+    # reserve the remaining query budget for an additive planner or refinement.
+    queries = list(plan.queries)[:3 if mode_cfg.mode == "quality" else 2]
     plan.queries = queries
 
     progress_label = " | ".join(q[:40] for q in queries[:2])
@@ -1146,18 +1178,23 @@ async def run_search_agent(
     # then run a second wave for the genuinely new queries.
     planner_outcome = "deterministic"
     if planner_task is not None:
+        await asyncio.sleep(0)  # drain already-completed HTTP callbacks; no planner wait
         llm_out = None
         try:
-            llm_out = await planner_task
-            planner_outcome = "used" if llm_out else "invalid"
+            # The planner is additive and never delays first-wave evidence.
+            if not planner_task.done():
+                planner_task.cancel()
+                await asyncio.gather(planner_task, return_exceptions=True)
+                planner_outcome = "not_ready"
+            else:
+                llm_out = planner_task.result()
+            planner_outcome = "used" if llm_out else planner_outcome
         except asyncio.TimeoutError:
             planner_outcome = "timeout"
         except Exception as e:
             planner_outcome = f"error:{type(e).__name__}"
         if llm_out:
-            new_queries = _merge_llm_plan(plan, llm_out)
-            if new_queries:
-                new_queries = _qs._filter_novel_queries(conv_id, new_queries)
+            new_queries = _merge_llm_plan(plan, llm_out)[:max(0, mode_cfg.max_queries - len(queries))]
             if new_queries:
                 await _emit(events, conv_id, "tool_progress", {
                     "tool": "quick_search", "icon": "search",
@@ -1172,13 +1209,7 @@ async def run_search_agent(
     plan.source_mode = f"{plan.source_mode};planner={planner_outcome}"
 
     if not raw:
-        reason_text = "search unavailable or no results"
-        ctx = _qs._build_unavailable_context(plan.canonical_question, plan, reason_text)
-        await _emit(events, conv_id, "tool_done", {
-            "tool": "quick_search", "icon": "search", "status": "No usable search results",
-        })
-        return {"context": ctx, "rewritten_query": plan.canonical_question,
-                "skipped": False, "reason": "no results"}
+        return await _finish_search(events, conv_id, plan, [], {}, 0, clean_latest)
 
     primary = plan.canonical_question
     top = await _select_top_results(http, ollama_url, raw, primary, plan)
@@ -1193,7 +1224,7 @@ async def run_search_agent(
     # ── Free deterministic fallback: retry the raw user message ──
     # Catches the case where anchoring/fusion/subject-stripping mangled the
     # query. No LLM cost, so it runs before spending the refine round.
-    if score < relevance_threshold and len(_qs._content_tokens(clean_latest)) >= 3:
+    if run.remaining() > 3 and score < relevance_threshold and len(_qs._content_tokens(clean_latest)) >= 3:
         literal = _clean_query_phrase(clean_latest)
         if literal and literal.lower() not in {q.lower() for q in queries}:
             try:
@@ -1208,6 +1239,7 @@ async def run_search_agent(
             if more:
                 more = [{**r, "query_origin": literal} for r in more if isinstance(r, dict)]
                 raw = _merge_unique([raw, more])
+                run.raw = raw
                 queries = queries + [literal]
                 plan.queries = queries
                 top = await _select_top_results(http, ollama_url, raw, primary, plan)
@@ -1218,7 +1250,8 @@ async def run_search_agent(
     # QUICK_SEARCH_PLANNER=deterministic is the kill switch for ALL planner-
     # model LLM calls, refine included.
     if (
-        mode_cfg.allow_refine
+        run.remaining() > 3
+        and mode_cfg.allow_refine
         and _planner_enabled(mode_cfg)
         and score < relevance_threshold
         and rounds_used < max_rounds
@@ -1242,6 +1275,7 @@ async def run_search_agent(
             if more:
                 more = [{**r, "query_origin": refined} for r in more if isinstance(r, dict)]
                 raw = _merge_unique([raw, more])
+                run.raw = raw
                 queries = queries + [refined]
                 plan.queries = queries
                 top = await _select_top_results(http, ollama_url, raw, primary, plan)
@@ -1251,10 +1285,32 @@ async def run_search_agent(
 
     # ── Page-fetch + OG-image enrichment (parallel) ──
     page_text, _ = await asyncio.gather(
-        _qs._enrich_with_pages(http, top, top_n=plan.page_reads),
-        _qs._enrich_og_images(http, top, max_fetch=4),
+        run.task(_qs._enrich_with_pages(http, top, top_n=plan.page_reads)),
+        run.task(_qs._enrich_og_images(http, top, max_fetch=4)),
         return_exceptions=False,
     )
+
+    return await _finish_search(events, conv_id, plan, top, page_text, score, clean_latest,
+                                relevance_threshold=relevance_threshold, rounds_used=rounds_used)
+
+
+async def _finish_search(events, conv_id, plan, top, page_text, score, clean_latest,
+                         *, relevance_threshold=_REFINE_THRESHOLD_DEFAULT, rounds_used=1):
+    run = current_run.get()
+    primary = plan.canonical_question
+    diagnostics = run.diagnostics if run else []
+    failure = next((d["status"] for d in diagnostics if d.get("status") not in {"ok", "partial", "no_results"}), "no_results")
+    partial = bool(run and (run.partial or any(d.get("status") not in {"ok", "no_results"} for d in diagnostics)))
+    status = ("partial" if partial else "ok") if top else failure
+    if not top:
+        reason = FAILURE_MESSAGES.get(failure, "Search failed")
+        await _emit(events, conv_id, "tool_done", {
+            "tool": "quick_search", "icon": "alert-circle" if failure != "no_results" else "search",
+            "status": reason, "search_status": status, "diagnostics": diagnostics,
+        })
+        return {"context": _qs._build_unavailable_context(primary, plan, reason),
+                "rewritten_query": primary, "skipped": False, "reason": "no results",
+                "results": [], "status": status, "diagnostics": diagnostics}
 
     allowed: set[str] = set()
     for r in top:
@@ -1281,6 +1337,9 @@ async def run_search_agent(
             "score": r.get("score", 0),
             "score_reason": r.get("score_reason", ""),
             "query_origin": r.get("query_origin", ""),
+            "query_origins": r.get("query_origins", []),
+            "engines": r.get("engines", []),
+            "semantic_score": r.get("semantic_score"),
         }
         for r in top
     ]
@@ -1291,6 +1350,7 @@ async def run_search_agent(
         "freshness_mode": plan.freshness_mode,
         "resolved_date": plan.resolved_date,
         "queries": plan.queries,
+        "status": status, "diagnostics": diagnostics,
     })
 
     low_relevance = score < relevance_threshold and len(_qs._content_tokens(clean_latest)) >= 3
@@ -1298,29 +1358,72 @@ async def run_search_agent(
 
     await _emit(events, conv_id, "tool_done", {
         "tool": "quick_search", "icon": "search",
+        "search_status": status,
         "status": f"Found {len(top)} result{'s' if len(top) != 1 else ''}"
+                  f"{' (partial)' if partial else ''}"
                   f"{' (refined)' if rounds_used > 1 else ''}",
     })
 
     print(f"[SA]   {len(top)} results, category={plan.category}, rounds={rounds_used}")
-    return {"context": ctx, "rewritten_query": primary, "skipped": False, "reason": ""}
+    return {"context": ctx, "rewritten_query": primary, "skipped": False, "reason": "",
+            "results": carousel, "status": status, "diagnostics": diagnostics,
+            "elapsed_ms": round((asyncio.get_running_loop().time() - run.started) * 1000) if run else 0}
 
 
 # ── Helpers ──
 def _merge_unique(lists: list[list]) -> list:
-    """Merge multiple result lists, dedup by URL, preserving first-seen order."""
-    seen: set[str] = set()
-    out: list = []
-    for lst in lists:
-        if not lst:
-            continue
-        for r in lst:
-            url = r.get("url") if isinstance(r, dict) else None
-            if not url or url in seen:
+    """Merge URL variants while retaining independent query/engine evidence."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    seen = {}
+    for batch in lists:
+        for result in batch or []:
+            if not isinstance(result, dict) or not result.get("url"):
                 continue
-            seen.add(url)
-            out.append(r)
-    return out
+            try:
+                url = urlsplit(result["url"])
+                if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password:
+                    continue
+                query = [(k, v) for k, v in parse_qsl(url.query, keep_blank_values=True)
+                         if not k.lower().startswith("utm_") and k.lower() not in {"fbclid", "gclid"}]
+                key = urlunsplit((url.scheme.lower(), url.netloc.lower(), url.path or "/", urlencode(query), ""))
+            except (ValueError, TypeError):
+                continue
+            item = seen.setdefault(key, dict(result))
+            for field, single in (("query_origins", "query_origin"), ("engines", "engine")):
+                values = [v for obj in (item, result) for v in (obj.get(field) or [])]
+                values += [item.get(single, ""), result.get(single, "")]
+                item[field] = list(dict.fromkeys(v for v in values if isinstance(v, str) and v))
+    return list(seen.values())
+
+
+async def run_search_agent(http, ollama_url, planner_model, events, conv_id, messages,
+                           *, context_budget=None, force_search=False, **kwargs):
+    """One wall-clock budget for planning, providers, ranking and page reads."""
+    mode = _mode_config().mode
+    seconds = float(getattr(config, "QUICK_SEARCH_TIMEOUT", 12.0))
+    seconds *= {"speed": 0.5, "balanced": 1.0, "quality": 5 / 3}[mode]
+    budget = context_budget if context_budget is not None else min(3500, context_policy.resolve("chat").input_budget // 4)
+    run = SearchRun(asyncio.get_running_loop().time() + max(0.01, seconds), max(0, int(budget)))
+    token = current_run.set(run)
+    try:
+        try:
+            return await asyncio.wait_for(
+                _run_search_agent(http, ollama_url, planner_model, events, conv_id, messages,
+                                  force_search=force_search, **kwargs), timeout=max(0.01, seconds))
+        except asyncio.TimeoutError:
+            run.partial = True
+            run.diagnostics.append({"status": "timeout", "result_count": 0, "engines": []})
+            await run.close()
+            if run.plan is None:
+                run.plan = _deterministic_plan(messages, _latest_user_message(messages), _mode_config())
+            top = _qs._rank_for_search_plan(run.raw, run.plan.canonical_question, run.plan,
+                                            limit=run.plan.target_results)
+            score = relevance_score(_latest_user_message(messages), run.plan.queries, top, set())
+            return await _finish_search(events, conv_id, run.plan, top, run.pages, score,
+                                         _latest_user_message(messages))
+    finally:
+        await run.close()
+        current_run.reset(token)
 
 
 async def _emit(events, conv_id: str, evt: str, data: dict) -> None:
