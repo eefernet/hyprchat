@@ -1,588 +1,319 @@
 #!/usr/bin/env python3
+"""Audit or incrementally refresh the shared Coder Reference Docs KB.
+
+Run from the deployed backend environment:
+  python -m seed_kb.seed_coder_kb --audit
+  python -m seed_kb.seed_coder_kb --refresh --report /tmp/coder-docs-report.json
+Only catalogued source files are managed. No whole-KB deletion or model calls
+are performed by --audit. Existing persona attachments and file IDs survive.
 """
-Seed the Daedalus knowledge base by fetching real docs from the internet.
-Run: python3 seed_coder_kb.py
-Re-run anytime to update with latest docs.
-"""
+import argparse
 import asyncio
+import hashlib
 import json
 import os
+from pathlib import Path
+import re
+import sqlite3
 import sys
+import tempfile
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 import uuid
-import hashlib
 
-# Add parent dir to path so we can import backend modules
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
-import database as db
-import rag
-
-# ── ANSI ──
-G = "\033[32m"
-Y = "\033[33m"
-C = "\033[36m"
-R = "\033[31m"
-B = "\033[1m"
-D = "\033[2m"
-RST = "\033[0m"
+import httpx
+from seed_kb.coder_sources import LEGACY_SOURCES, source_catalog
 
 KB_NAME = "Coder Reference Docs"
-KB_DESC = "Full-stack developer reference — Python, Rust, C/C++, C#, Java, JS/TS, Ruby, Go, Lua, Swift, Kotlin, Elixir, Haskell, React, Vue, Angular, Next.js, Unity3D, Unreal Engine, Docker, Kubernetes, Git, SQL, Redis, Terraform, Linux, macOS, Windows"
+KB_DESC = "Developer references across languages, frameworks, databases and tools, including Swift and SwiftUI. Source provenance and version/OS notes are recorded per document."
+SOURCES = LEGACY_SOURCES  # historical catalog retained for provenance/audits
 
-# ── Sources to fetch ──
-# Each: (filename, url, description)
-# Using raw GitHub docs, official cheatsheets, and plain-text references
-SOURCES = [
-    # Python
-    ("python_stdlib.md",
-     "https://raw.githubusercontent.com/gto76/python-cheatsheet/main/README.md",
-     "Comprehensive Python cheatsheet — stdlib, data structures, OOP, async, testing"),
 
-    # Rust
-    ("rust_reference.md",
-     "https://raw.githubusercontent.com/donbright/rust-lang-cheat-sheet/master/README.md",
-     "Rust cheatsheet — ownership, borrowing, lifetimes, traits, generics, macros, concurrency"),
-    ("rust_by_example.md",
-     "https://raw.githubusercontent.com/mre/idiomatic-rust/master/README.md",
-     "Idiomatic Rust — patterns, idioms, and clean code examples"),
+def digest(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    # C/C++
-    ("c_reference.md",
-     "https://raw.githubusercontent.com/mortennobel/cpp-cheatsheet/master/README.md",
-     "C/C++ cheatsheet — pointers, memory, structs, templates"),
 
-    # Java
-    ("java_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/languages/java.md",
-     "Java cheatsheet — OOP, collections, streams, concurrency"),
-
-    # JavaScript/TypeScript
-    ("javascript_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/languages/javascript.js",
-     "JavaScript cheatsheet — ES6+, async/await, DOM, patterns"),
-    ("typescript_reference.md",
-     "https://raw.githubusercontent.com/rmolinamir/typescript-cheatsheet/master/README.md",
-     "TypeScript cheatsheet — types, interfaces, generics, decorators, React+TS integration"),
-
-    # HTML/CSS
-    ("html_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/frontend/html5.html",
-     "HTML5 reference — elements, attributes, semantic markup"),
-    ("css_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/frontend/css3.css",
-     "CSS3 reference — flexbox, grid, animations, selectors"),
-    ("react_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/frontend/react.js",
-     "React cheatsheet — hooks, components, state, lifecycle"),
-
-    # Shell / Linux
-    ("bash_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/languages/bash.sh",
-     "Bash scripting cheatsheet — variables, loops, conditionals, builtins"),
-    ("linux_commands.md",
-     "https://raw.githubusercontent.com/jlevy/the-art-of-command-line/master/README.md",
-     "The Art of Command Line — essential Linux/macOS/Windows terminal commands"),
-
-    # Git
-    ("git_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/tools/git.sh",
-     "Git cheatsheet — staging, commits, branching, merging, rebasing, stashing, tags"),
-
-    # Docker
-    ("docker_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/tools/docker.sh",
-     "Docker cheatsheet — build, run, compose, volumes, networking"),
-
-    # SQL / Databases
-    ("sql_reference.md",
-     "https://raw.githubusercontent.com/enochtangg/quick-SQL-cheatsheet/master/README.md",
-     "SQL cheatsheet — SELECT, JOIN, GROUP BY, subqueries, indexes, transactions"),
-
-    # Node.js / Backend JS
-    ("nodejs_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/backend/node.js",
-     "Node.js cheatsheet — fs, http, path, streams, child_process"),
-    ("express_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/backend/express.js",
-     "Express.js cheatsheet — routing, middleware, error handling"),
-
-    # Django
-    ("django_reference.py",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/backend/django.py",
-     "Django cheatsheet — models, views, URLs, ORM, admin"),
-
-    # Go
-    ("go_reference.md",
-     "https://raw.githubusercontent.com/a8m/golang-cheat-sheet/master/README.md",
-     "Go cheatsheet — goroutines, channels, interfaces, error handling"),
-
-    # PHP
-    ("php_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/languages/php.php",
-     "PHP cheatsheet — arrays, strings, OOP, PDO"),
-
-    # Vim
-    ("vim_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/tools/vim.txt",
-     "Vim cheatsheet — modes, navigation, editing, macros"),
-
-    # ─── LANGUAGES ───
-
-    # C# / .NET
-    ("csharp_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/languages/C%23.txt",
-     "C# cheatsheet — LINQ, async/await, generics, delegates, properties"),
-    ("csharp_design_patterns.md",
-     "https://raw.githubusercontent.com/nemanjarogic/DesignPatternsLibrary/master/README.md",
-     "C# design patterns — creational, structural, behavioral with examples"),
-
-    # Ruby
-    ("ruby_reference.md",
-     "https://raw.githubusercontent.com/ThibaultJanBeyer/cheatsheets/master/Ruby-Cheatsheet.md",
-     "Ruby cheatsheet — blocks, procs, lambdas, classes, modules, gems"),
-
-    # C++ (modern)
-    ("cpp_modern_reference.md",
-     "https://raw.githubusercontent.com/AnthonyCalandra/modern-cpp-features/master/README.md",
-     "Modern C++ features — C++11/14/17/20/23, smart pointers, move semantics, concepts, ranges"),
-
-    # Swift
-    ("swift_reference.md",
-     "https://raw.githubusercontent.com/reinder42/SwiftCheatsheet/master/README.md",
-     "Swift cheatsheet — optionals, protocols, closures, generics, SwiftUI basics"),
-    ("swiftui_reference.md",
-     "https://raw.githubusercontent.com/SimpleBoilerplates/SwiftUI-Cheat-Sheet/master/README.md",
-     "SwiftUI cheatsheet — views, stacks, lists, navigation, gestures, UIKit bridging"),
-    ("swift_design_patterns.md",
-     "https://raw.githubusercontent.com/ochococo/Design-Patterns-In-Swift/master/README.md",
-     "Swift design patterns — creational, structural, behavioral patterns with examples"),
-
-    # Kotlin
-    ("kotlin_reference.md",
-     "https://raw.githubusercontent.com/alidehkhodaei/kotlin-cheat-sheet/master/README.md",
-     "Kotlin cheatsheet — coroutines, data classes, extensions, null safety, collections, generics"),
-
-    # Lua
-    ("lua_reference.md",
-     "https://gist.githubusercontent.com/JettIsOnTheNet/b7472ee8b1f5b324c498302b0f61957d/raw",
-     "Lua cheatsheet — tables, metatables, closures, coroutines, OOP, string operations"),
-
-    # Elixir
-    ("elixir_reference.md",
-     "https://raw.githubusercontent.com/vnegrisolo/cheat-sheet-elixir/master/README.md",
-     "Elixir cheatsheet — pattern matching, functions, modules, protocols, processes, Enum/Stream"),
-
-    # Haskell
-    ("haskell_reference.md",
-     "https://raw.githubusercontent.com/i-am-tom/learn-me-a-haskell/master/README.md",
-     "Haskell reference — types, pattern matching, higher-order functions, functional fundamentals"),
-
-    # Perl
-    ("perl_reference.md",
-     "https://raw.githubusercontent.com/lyudaio/cheatsheets/main/programming_languages/perl.md",
-     "Perl cheatsheet — variables, data types, operators, regex, subroutines, file handling"),
-
-    # Scala
-    ("scala_reference.md",
-     "https://raw.githubusercontent.com/lampepfl/dotty/main/docs/_docs/reference/overview.md",
-     "Scala reference — case classes, pattern matching, traits, implicits, futures"),
-
-    # Dart
-    ("dart_reference.md",
-     "https://raw.githubusercontent.com/Temidtech/dart-cheat-sheet/master/README.md",
-     "Dart cheatsheet — string interpolation, functions, lists, maps, null-aware operators, async/await"),
-
-    # Regex
-    ("regex_reference.md",
-     "https://raw.githubusercontent.com/lyudaio/cheatsheets/main/programming_languages/regex.md",
-     "Regex cheatsheet — character classes, quantifiers, anchors, groups, lookahead/lookbehind, flags"),
-
-    # ─── FRONTEND FRAMEWORKS ───
-
-    # React (extended)
-    ("react_hooks_reference.md",
-     "https://raw.githubusercontent.com/ohansemmanuel/react-hooks-cheatsheet/master/README.md",
-     "React Hooks cheatsheet — useState, useEffect, useContext, useReducer, useMemo, useCallback, custom hooks"),
-    ("react_patterns.md",
-     "https://raw.githubusercontent.com/krasimir/react-in-patterns/master/README.md",
-     "React patterns — composition, HOC, render props, controlled components, state management"),
-
-    # Vue.js
-    ("vue_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/frontend/vue.js",
-     "Vue.js cheatsheet — components, directives, reactivity, Vuex, Vue Router"),
-
-    # Angular
-    ("angular_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/frontend/angular.js",
-     "Angular cheatsheet — modules, directives, forms, decorators, lifecycle hooks, DI, routing"),
-
-    # Next.js
-    ("nextjs_reference.md",
-     "https://raw.githubusercontent.com/CyberT33N/next.js-cheat-sheet/main/README.md",
-     "Next.js 14 reference — routing, layouts, data fetching, API routes, middleware, rendering strategies"),
-
-    # Svelte
-    ("svelte_reference.md",
-     "https://raw.githubusercontent.com/mark7p/svelte-5-cheatsheet/main/README.md",
-     "Svelte 5 cheatsheet — reactivity with runes, props, events, bindings, stores, transitions"),
-
-    # Tailwind CSS
-    ("tailwind_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/frontend/tailwind.css",
-     "Tailwind CSS cheatsheet — utility classes, responsive, dark mode, customization"),
-
-    # Bootstrap
-    ("bootstrap_reference.md",
-     "https://raw.githubusercontent.com/matthewlean/Bootstrap-HTML-CSS-Emmet-Cheetsheet/master/cheatSheet.markdown",
-     "Bootstrap/HTML/CSS reference — grid system, typography, media queries, responsive utilities"),
-
-    # jQuery
-    ("jquery_reference.md",
-     "https://raw.githubusercontent.com/AllThingsSmitty/jquery-tips-everyone-should-know/master/README.md",
-     "jQuery tips — selectors, DOM manipulation, events, AJAX, animations, performance"),
-
-    # ─── BACKEND FRAMEWORKS ───
-
-    # Flask
-    ("flask_reference.md",
-     "https://raw.githubusercontent.com/lucrae/flask-cheat-sheet/master/README.md",
-     "Flask cheatsheet — app setup, blueprints, Jinja2, SQLAlchemy, migrations, login manager"),
-
-    # FastAPI
-    ("fastapi_reference.md",
-     "https://raw.githubusercontent.com/mjhea0/awesome-fastapi/master/README.md",
-     "FastAPI ecosystem — middleware, auth, databases, testing, deployment, extensions"),
-
-    # Ruby on Rails
-    ("rails_reference.md",
-     "https://raw.githubusercontent.com/ThibaultJanBeyer/cheatsheets/master/Ruby-on-Rails-Cheatsheet.md",
-     "Ruby on Rails cheatsheet — MVC, routing, migrations, models, controllers, views, ERB"),
-
-    # Spring Boot (Java)
-    ("spring_reference.md",
-     "https://raw.githubusercontent.com/in28minutes/spring-boot-master-class/master/README.md",
-     "Spring Boot reference — REST APIs, JPA, security, testing, microservices"),
-
-    # Laravel (PHP)
-    ("laravel_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/backend/laravel.php",
-     "Laravel cheatsheet — Eloquent ORM, routing, middleware, Blade, Artisan"),
-
-    # ASP.NET
-    ("aspnet_reference.md",
-     "https://raw.githubusercontent.com/jwill9999/ASP-DOTNET-CORE-Cheatsheet/master/README.md",
-     "ASP.NET Core cheatsheet — CLI commands, Tag Helpers, models, Entity Framework, DI"),
-
-    # Gin (Go)
-    ("gin_reference.md",
-     "https://raw.githubusercontent.com/gin-gonic/gin/master/README.md",
-     "Gin framework official docs — routing, middleware, JSON binding, file upload, grouping, rendering"),
-
-    # Actix/Axum (Rust web)
-    ("rust_web_reference.md",
-     "https://raw.githubusercontent.com/flosse/rust-web-framework-comparison/master/README.md",
-     "Rust web framework comparison — actix-web, axum, rocket, warp, templating, WebSocket"),
-
-    # ─── MOBILE ───
-
-    # Flutter / Dart
-    ("flutter_reference.md",
-     "https://raw.githubusercontent.com/Temidtech/Flutter-Cheat-Sheet/master/README.md",
-     "Flutter cheatsheet — UI components, navigation, tabs, drawers, form validation, installation"),
-
-    # React Native
-    ("react_native_reference.md",
-     "https://raw.githubusercontent.com/typescript-cheatsheets/react-native/master/README.md",
-     "React Native + TypeScript cheatsheet — component typing, hooks, navigation, platform-specific code"),
-
-    # Android (Kotlin/Java)
-    ("android_reference.md",
-     "https://raw.githubusercontent.com/anitaa1990/Android-Cheat-sheet/master/README.md",
-     "Android dev cheatsheet — activities, fragments, data structures, Jetpack Compose"),
-
-    # iOS (Swift/UIKit)
-    ("ios_reference.md",
-     "https://raw.githubusercontent.com/reinder42/SwiftCheatsheet/master/README.md",
-     "Swift/iOS cheatsheet — variables, functions, OOP, protocols, closures, generics, error handling"),
-
-    # ─── GAME ENGINES ───
-
-    # Unity3D
-    ("unity_reference.md",
-     "https://raw.githubusercontent.com/ozankasikci/unity-cheat-sheet/master/README.md",
-     "Unity3D cheatsheet — MonoBehaviour lifecycle, physics, UI, input, coroutines, ScriptableObjects"),
-
-    # Unreal Engine
-    ("unreal_reference.md",
-     "https://raw.githubusercontent.com/mikeroyal/Unreal-Engine-Guide/main/README.md",
-     "Unreal Engine 5 guide — Blueprint, Niagara VFX, MetaHuman, Lumen, Nanite, C++"),
-
-    # Godot
-    ("godot_reference.md",
-     "https://raw.githubusercontent.com/mikeroyal/Godot-Engine-Guide/main/README.md",
-     "Godot Engine guide — GDScript, 2D/3D game dev, networking, C#/Python/Lua integration"),
-
-    # ─── DATABASES ───
-
-    # SQL (extended)
-    ("sql_advanced.md",
-     "https://raw.githubusercontent.com/crescentpartha/CheatSheets-for-Developers/main/CheatSheets/sql-cheatsheets.md",
-     "SQL advanced reference — DDL, DML, joins, subqueries, views, indexes, stored procedures, transactions"),
-
-    # PostgreSQL
-    ("postgres_reference.md",
-     "https://gist.githubusercontent.com/yokawasa/3be9abf32cc86b674e3c50b7fc56fcdc/raw",
-     "PostgreSQL cheatsheet — psql commands, data types, table operations, queries, indexes, JSON"),
-
-    # MySQL
-    ("mysql_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/databases/mysql.sh",
-     "MySQL cheatsheet — queries, joins, indexes, stored procedures, transactions"),
-
-    # MongoDB
-    ("mongodb_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/databases/mongodb.sh",
-     "MongoDB cheatsheet — CRUD, aggregation, indexes, replica sets, queries"),
-
-    # Redis
-    ("redis_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/databases/redis.sh",
-     "Redis cheatsheet — strings, lists, sets, hashes, pub/sub, persistence"),
-
-    # SQLAlchemy
-    ("sqlalchemy_reference.md",
-     "https://raw.githubusercontent.com/Teemu/sqlalchemy-cheat-sheet/master/README.md",
-     "SQLAlchemy reference — connection URIs, sessions, raw SQL, ORM automap, subqueries"),
-
-    # ─── APIs & PROTOCOLS ───
-
-    # GraphQL
-    ("graphql_reference.md",
-     "https://raw.githubusercontent.com/sogko/graphql-schema-language-cheat-sheet/master/README.md",
-     "GraphQL schema language cheatsheet — types, queries, mutations, subscriptions"),
-
-    # REST API design
-    ("rest_api_reference.md",
-     "https://raw.githubusercontent.com/RestCheatSheet/api-cheat-sheet/master/README.md",
-     "REST API design cheatsheet — HTTP methods, status codes, versioning, pagination, authentication"),
-
-    # WebSocket
-    ("websocket_reference.md",
-     "https://raw.githubusercontent.com/facundofarias/awesome-websockets/master/README.md",
-     "Awesome WebSockets — libraries for all major languages, protocol specs, tutorials, tools"),
-
-    # OAuth / Auth
-    ("oauth_reference.md",
-     "https://raw.githubusercontent.com/dwyl/learn-json-web-tokens/main/README.md",
-     "JWT/OAuth reference — token structure, claims, security, session management, implementation"),
-
-    # ─── DEVOPS & INFRA ───
-
-    # Kubernetes
-    ("kubernetes_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/tools/kubernetes.md",
-     "Kubernetes cheatsheet — pods, deployments, services, configmaps, kubectl"),
-
-    # Nginx
-    ("nginx_reference.md",
-     "https://raw.githubusercontent.com/LeCoupa/awesome-cheatsheets/master/tools/nginx.sh",
-     "Nginx cheatsheet — server blocks, reverse proxy, SSL, load balancing"),
-
-    # Terraform
-    ("terraform_reference.md",
-     "https://raw.githubusercontent.com/scraly/terraform-cheat-sheet/master/README.md",
-     "Terraform cheatsheet — providers, resources, modules, state, plan, apply"),
-
-    # Ansible
-    ("ansible_reference.md",
-     "https://raw.githubusercontent.com/germainlefebvre4/ansible-cheatsheet/master/README.md",
-     "Ansible cheatsheet — configuration, inventories, tasks, playbooks, variables, roles, vault"),
-
-    # GitHub Actions / CI/CD
-    ("github_actions_reference.md",
-     "https://gist.githubusercontent.com/JonasWanke/c8bc0f90658fbfeef7da35ffe8feb7f4/raw",
-     "GitHub Actions cheatsheet — workflow YAML, triggers, environment variables, inputs/outputs"),
-
-    # CMake
-    ("cmake_reference.md",
-     "https://raw.githubusercontent.com/mortennobel/CMake-Cheatsheet/master/README.md",
-     "CMake cheatsheet — targets, libraries, find_package, install, variables"),
-
-    # ─── TOOLS ───
-
-    # PowerShell / Windows
-    ("powershell_reference.md",
-     "https://raw.githubusercontent.com/ab14jain/PowerShell/master/README.md",
-     "PowerShell guide — cmdlets, variables, strings, collections, control flow, functions, .NET integration"),
-
-    # Markdown
-    ("markdown_reference.md",
-     "https://raw.githubusercontent.com/adam-p/markdown-here/master/README.md",
-     "Markdown cheatsheet — headings, links, images, tables, code blocks"),
-
-    # NPM / Yarn
-    ("npm_reference.md",
-     "https://raw.githubusercontent.com/Sunil-Pradhan/npm-cheatsheet/master/README.md",
-     "NPM cheatsheet — package creation, installation, versioning, scripts, dependencies"),
-
-    # ─── DATA / ML ───
-
-    # Pandas
-    ("pandas_reference.md",
-     "https://raw.githubusercontent.com/crescentpartha/CheatSheets-for-Developers/main/CheatSheets/pandas-cheatsheet.md",
-     "Pandas cheatsheet — import/export, DataFrame inspection, data cleaning, filtering, grouping, joins"),
-
-    # NumPy
-    ("numpy_reference.md",
-     "https://raw.githubusercontent.com/rougier/numpy-100/master/100_Numpy_exercises.md",
-     "NumPy 100 exercises — arrays, broadcasting, slicing, linear algebra, random"),
-
-    # PyTorch
-    ("pytorch_reference.md",
-     "https://raw.githubusercontent.com/bfortuner/pytorch-cheatsheet/master/README.md",
-     "PyTorch cheatsheet — tensors, autograd, nn.Module, DataLoader, training loops, GPU"),
-
-    # ─── ARCHITECTURE & PATTERNS ───
-
-    # Design patterns
-    ("design_patterns_reference.md",
-     "https://raw.githubusercontent.com/mutasim77/design-patterns/main/README.md",
-     "Design patterns — all 23 GoF patterns (creational, structural, behavioral) + SOLID with TypeScript examples"),
-
-    # System design
-    ("system_design_reference.md",
-     "https://raw.githubusercontent.com/donnemartin/system-design-primer/master/README.md",
-     "System design primer — scalability, caching, load balancing, databases, microservices, CAP theorem"),
-
-    # Clean code
-    ("clean_code_reference.md",
-     "https://raw.githubusercontent.com/ryanmcdermott/clean-code-javascript/master/README.md",
-     "Clean code principles — SOLID, naming, functions, error handling, testing, formatting"),
-]
-
-
-async def fetch_source(client: httpx.AsyncClient, filename: str, url: str, desc: str):
-    """Fetch a single source URL. Returns (filename, content, desc) or None on failure."""
-    try:
-        r = await client.get(url, follow_redirects=True)
-        if r.status_code == 200 and len(r.text.strip()) > 100:
-            return filename, r.text, desc
-        else:
-            print(f"  {Y}!{RST} {filename}: HTTP {r.status_code} or empty ({len(r.text)} chars)")
-            return None
-    except Exception as e:
-        print(f"  {R}x{RST} {filename}: {e}")
+def read_inventory(user_id='default', kb_id=None):
+    """Audit reads SQLite in read-only mode; it never initializes or migrates it."""
+    if not Path(config.DATABASE_PATH).exists():
         return None
-
-
-def _find_daedalus_config(configs: list[dict]) -> dict | None:
-    """Return the maintained coding persona, not arbitrary "Coder" profiles."""
-    return next(
-        (
-            c for c in configs
-            if "daedalus" in (c.get("name") or "").strip().lower()
-        ),
-        None,
-    )
-
-
-async def main():
-    print()
-    print(f"  {B}{C}Daedalus KB Seeder{RST}")
-    print(f"  {D}Fetching docs from the internet...{RST}")
-    print()
-
-    # Ensure DB is initialized
-    await db.init()
-
-    # Check if KB already exists
-    kbs = await db.get_kbs()
-    existing = next((kb for kb in kbs if kb["name"] == KB_NAME), None)
-
-    if existing:
-        kb_id = existing["id"]
-        print(f"  {Y}!{RST} KB '{KB_NAME}' exists (id={kb_id}), updating...")
-        # Delete old files
-        for f in existing.get("files", []):
-            await db.delete_kb_file(f["id"])
-        # Clear RAG index
-        await rag.delete_kb_index(kb_id)
-    else:
-        kb_id = f"kb-{uuid.uuid4().hex[:12]}"
-        _db = await db.get_db()
-        try:
-            await _db.execute(
-                "INSERT INTO knowledge_bases (id, name, description) VALUES (?, ?, ?)",
-                (kb_id, KB_NAME, KB_DESC)
-            )
-            await _db.commit()
-        finally:
-            await _db.close()
-        print(f"  {G}+{RST} Created KB '{KB_NAME}' (id={kb_id})")
-
-    # Create KB directory
-    kb_dir = os.path.join(config.KB_DIR, kb_id)
-    os.makedirs(kb_dir, exist_ok=True)
-
-    # Ensure embedding model is available
-    print(f"  {D}Checking embedding model...{RST}")
-    await rag.ensure_embed_model()
-
-    # Fetch all sources in parallel
-    print(f"  {D}Fetching {len(SOURCES)} sources...{RST}")
-    async with httpx.AsyncClient(timeout=30) as client:
-        tasks = [fetch_source(client, fn, url, desc) for fn, url, desc in SOURCES]
-        results = await asyncio.gather(*tasks)
-
-    fetched = [r for r in results if r is not None]
-    print(f"  {G}{len(fetched)}/{len(SOURCES)}{RST} sources fetched successfully")
-    print()
-
-    # Save and index each file
-    total_chunks = 0
-    for i, (filename, content, desc) in enumerate(fetched):
-        filepath = os.path.join(kb_dir, filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            # Prepend description as context for RAG
-            f.write(f"# {desc}\n\n{content}")
-
-        file_size = len(content.encode("utf-8"))
-        await db.add_kb_file(kb_id, filename, filepath, file_size, "text/plain")
-
-        # Index in RAG
-        print(f"  [{i+1}/{len(fetched)}] {B}{filename}{RST} ({file_size // 1024}KB) ", end="", flush=True)
-        try:
-            result = await rag.index_file(kb_id, filename, filepath)
-            chunks = result.get("chunks", 0)
-            total_chunks += chunks
-            print(f"{G}{chunks} chunks{RST}")
-        except Exception as e:
-            print(f"{R}indexing failed: {e}{RST}")
-
-    print()
-    print(f"  {B}{G}Done!{RST} {total_chunks} total chunks indexed into '{KB_NAME}'")
-    print(f"  {D}KB ID: {kb_id}{RST}")
-    print()
-
-    # Attach to Daedalus if it exists
-    configs = await db.get_model_configs()
-    daedalus = _find_daedalus_config(configs)
-    if daedalus:
-        current_kbs = daedalus.get("kb_ids", [])
-        if kb_id not in current_kbs:
-            current_kbs.append(kb_id)
-            await db.update_model_config(daedalus["id"], kb_ids=current_kbs)
-            print(f"  {G}+{RST} Attached KB to '{daedalus['name']}'")
+    with sqlite3.connect(Path(config.DATABASE_PATH).as_uri() + '?mode=ro', uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        if kb_id:
+            row = conn.execute('SELECT * FROM knowledge_bases WHERE id=? AND user_id=?', (kb_id, user_id)).fetchone()
         else:
-            print(f"  {D}KB already attached to '{daedalus['name']}'{RST}")
-    else:
-        print(f"  {Y}!{RST} No Daedalus persona found — create one and attach KB ID: {kb_id}")
+            row = conn.execute('SELECT * FROM knowledge_bases WHERE name=? AND user_id=?', (KB_NAME, user_id)).fetchone()
+        if not row:
+            return None
+        kb = dict(row)
+        kb['files'] = [dict(r) for r in conn.execute('SELECT * FROM kb_files WHERE kb_id=?', (kb['id'],))]
+        return kb
 
-    print()
+
+def audit_inventory(kb):
+    result = []; seen = {}
+    legacy = {name.replace('django_reference.py', 'django_reference.md'): url for name, url, _ in LEGACY_SOURCES}
+    managed = {s['filename'] for s in source_catalog()}
+    for entry in (kb or {}).get('files', []):
+        name = entry['filename']; path = Path(entry['filepath']); issues = []
+        body = path.read_text(errors='replace') if path.is_file() else ''
+        if not body: issues.append('missing or empty file')
+        if not entry.get('source_url'): issues.append('missing source URL metadata')
+        normalized = '\n'.join(body.splitlines()[2:]).strip()
+        key = digest(normalized)
+        if normalized and key in seen: issues.append('duplicate content: ' + seen[key])
+        seen[key] = name
+        if re.search(r'Swift 5 Cheatsheet|SwiftUI 2\.0|Vuex|componentWillMount|NavigationView|Next\.js 14', body):
+            issues.append('legacy API/version material; review against target version')
+        if re.search(r'curated list of|repository collects resources|udemy\.com/course', body, re.I):
+            issues.append('resource list/course material; verify substantive reference coverage')
+        result.append({'filename': name, 'managed': name in managed,
+                       'previous_source': entry.get('source_url') or legacy.get(name, ''),
+                       'chars': len(body), 'issues': issues})
+    return result
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def canonical_source(url):
+    if url.startswith('https://developer.apple.com/tutorials/data/documentation/') and url.endswith('.md'):
+        return url.replace('/tutorials/data/documentation/', '/documentation/')[:-3]
+    return url
+
+
+def normalize_document(raw, content_type, source, final_url):
+    """Preserve Markdown examples; use the existing HTML extractor for web docs."""
+    text = raw.decode('utf-8-sig', errors='replace') if isinstance(raw, bytes) else raw
+    availability = []
+    # Apple Markdown embeds platform availability in its leading JSON comment.
+    first = re.match(r'\s*<!--\s*(\{[\s\S]*?\})\s*-->', text)
+    if first:
+        try: availability = json.loads(first[1]).get('availability', [])
+        except (ValueError, TypeError): pass
+    if 'html' in content_type or re.match(r'\s*<!doctype html|\s*<html', text, re.I):
+        import trafilatura
+        from lxml import html as lxml_html
+        # The prose extractor strips indentation inside <pre>. Protect code
+        # through extraction and restore only placeholders retained in the article.
+        tree = lxml_html.fromstring(text.encode('utf-8'), parser=lxml_html.HTMLParser(encoding='utf-8'))
+        examples = {}
+        for pre in tree.xpath('//pre'):
+            code = pre.text_content().strip('\n')
+            if not code.strip(): continue
+            classes = ' '.join(pre.xpath('ancestor-or-self::*/@class | .//code/@class'))
+            language = re.search(r'(?:language|highlight|lang)-([\w+-]+)', classes)
+            language = language[1] if language else ''
+            if language in {'default', 'text'}: language = ''
+            if language == 'pycon': language = 'python'
+            fence = '`' * max(3, 1 + max((len(x) for x in re.findall(r'`+', code)), default=0))
+            token = 'HYPRCHATCODE' + uuid.uuid4().hex
+            examples[token] = f'{fence}{language}\n{code}\n{fence}'
+            placeholder = lxml_html.Element('p'); placeholder.text = token
+            placeholder.tail = pre.tail
+            pre.getparent().replace(pre, placeholder)
+        text = trafilatura.extract(lxml_html.tostring(tree, encoding='unicode'), url=final_url, output_format='markdown',
+                                   include_comments=False, include_tables=True,
+                                   include_links=True, include_formatting=True) or ''
+        for token, code in examples.items(): text = text.replace(token, code)
+    elif content_type and not (content_type.startswith('text/') or 'octet-stream' in content_type):
+        raise ValueError('unsupported documentation content type: ' + content_type)
+    # Swift-book comments contain compiler-negative tests, not user examples.
+    text = re.sub(r'(^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\2[^\n]*(?:\n|$))|<!--[\s\S]*?-->',
+                  lambda match: match[1] or '', text, flags=re.M)
+    text = re.sub(r'\n{4,}', '\n\n\n', text).strip()
+    if len(text) < 250 or re.search(r'^\s*(?:404[: ]|Access Denied|Just a moment\.\.\.)', text, re.I):
+        raise ValueError('empty, blocked, or insubstantial documentation')
+    # Source repositories sometimes hold bare code cheat sheets.
+    ext = Path(urlparse(final_url).path).suffix
+    languages = {'.js':'javascript', '.py':'python', '.sh':'bash', '.css':'css', '.php':'php'}
+    if ext in languages and not re.search(r'^```', text, re.M):
+        text = f"```{languages[ext]}\n{text}\n```"
+    if availability:
+        text = 'Platform availability: ' + '; '.join(str(x) for x in availability) + '\n\n' + text
+    return text
+
+
+async def fetch_source(client, source):
+    from research import fetch_bytes_safely
+    status, headers, final_url, raw = await fetch_bytes_safely(
+        client, source['url'], timeout=25, max_bytes=5*1024*1024,
+        headers={'User-Agent':'HyprChat-CoderDocs/1.0'},
+    )
+    if status != 200:
+        raise ValueError(f'HTTP {status}')
+    text = normalize_document(raw, headers.get('content-type', ''), source, final_url)
+    return text, final_url
+
+
+def render_document(source, text, final_url):
+    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    return (f"# {source['title']}\n\nSource: {canonical_source(final_url)}\n"
+            f"Authority: {source['authority']}\nVersion: {source['version']}\n"
+            f"Fetched: {now}\nContent-SHA256: {digest(text)}\n\n{text}\n")
+
+
+def _find_daedalus_config(configs):
+    return next((c for c in configs if 'daedalus' in (c.get('name') or '').strip().lower()), None)
+
+
+async def replace_document(kb, source, text, final_url, manifest, backup_dir):
+    """Index a staged file first; only then publish bytes and file metadata."""
+    import database as db
+    import rag
+    name = source['filename']
+    if Path(name).name != name:
+        raise ValueError('source filename must be a basename')
+    matches = [f for f in kb.get('files', []) if f['filename'] == name]
+    if len(matches) > 1:
+        raise ValueError('multiple existing file rows; refusing ambiguous replacement')
+    existing = matches[0] if matches else None
+    directory = Path(config.KB_DIR)/kb['id']; directory.mkdir(parents=True, exist_ok=True)
+    target = directory/name
+    current = manifest.get(name, {})
+    checksum = digest(text)
+    source_url = canonical_source(final_url)
+    if (current and target.is_file() and current.get('file_hash')
+            and current['file_hash'] != hashlib.sha256(target.read_bytes()).hexdigest()):
+        raise ValueError('managed file was edited locally; preserved for review')
+    legacy_urls = {url for filename, url, _ in LEGACY_SOURCES if filename.replace('django_reference.py', 'django_reference.md') == name}
+    if (existing and existing.get('source_url') and not current
+            and existing['source_url'] not in legacy_urls | {source['url'], source_url}):
+        raise ValueError('filename belongs to another source; user document preserved')
+    if (target.is_file() and existing and current.get('content_hash') == checksum
+            and current.get('source') == source and current.get('source_url') == source_url
+            and current.get('file_hash') == hashlib.sha256(target.read_bytes()).hexdigest()
+            and not current.get('warnings')):
+        return {'filename': name, 'status': 'unchanged', 'chunks': current.get('chunks', 0)}
+    original = target.read_bytes() if target.is_file() else None
+    original_mode = target.stat().st_mode & 0o777 if original is not None else 0o644
+    body = render_document(source, text, final_url)
+    if original is not None:
+        backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (backup_dir/name).write_bytes(original)
+        (backup_dir/(name+'.metadata.json')).write_text(json.dumps(existing))
+    fd, staged_name = tempfile.mkstemp(prefix='.coder-docs-', suffix='.md', dir=directory)
+    staged = Path(staged_name)
+    try:
+        with os.fdopen(fd, 'w') as stream: stream.write(body)
+        result = await rag.index_file(kb['id'], name, str(staged))
+        if result.get('error') or not result.get('chunks'):
+            raise ValueError(result.get('error') or 'no indexed chunks')
+        # Publish metadata under the existing row id; saved KB references survive.
+        try:
+            staged.chmod(original_mode)
+            staged.replace(target)
+            if existing:
+                connection = await db.get_db()
+                try:
+                    await connection.execute('UPDATE kb_files SET filepath=?, file_size=?, file_type=?, source_url=? WHERE id=? AND kb_id=?',
+                        (str(target), len(body.encode()), 'text/markdown', source_url, existing['id'], kb['id']))
+                    await connection.commit()
+                finally: await connection.close()
+            else:
+                file_id = await db.add_kb_file(kb['id'], name, str(target), len(body.encode()), 'text/markdown', source_url=source_url)
+                kb.setdefault('files', []).append({'id':file_id, 'filename':name, 'filepath':str(target)})
+        except Exception:
+            # Restore searchable old content if publishing fails after indexing.
+            if original is not None:
+                staged.write_bytes(original)
+                staged.chmod(original_mode)
+                staged.replace(target)
+                restored = await rag.index_file(kb['id'], name, str(target))
+                if restored.get('error'): raise RuntimeError('publication failed and previous index restoration needs recovery')
+            else:
+                target.unlink(missing_ok=True)
+                await rag.remove_file(kb['id'], name)
+            raise
+        manifest[name] = {'source':source, 'source_url':source_url, 'content_hash':checksum,
+                          'file_hash':digest(body), 'chunks':result['chunks'],
+                          'warnings':result.get('warnings', []), 'updated_at':datetime.now(timezone.utc).isoformat()}
+        return {'filename': name, 'status':'updated' if existing else 'added',
+                'chunks':result['chunks'], 'warnings':result.get('warnings', [])}
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+async def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--audit', action='store_true', help='read-only local inventory and source validation (default)')
+    mode.add_argument('--refresh', action='store_true', help='incrementally publish validated source updates')
+    parser.add_argument('--user-id', default='default')
+    parser.add_argument('--kb-id')
+    parser.add_argument('--only', nargs='+', help='limit source filenames (inventory audit still covers the KB)')
+    parser.add_argument('--report', help='write the audit/update report to this explicit path')
+    args = parser.parse_args(argv)
+    kb = read_inventory(args.user_id, args.kb_id)
+    if args.kb_id and kb is None: raise ValueError('KB does not exist or belongs to another user')
+    report = {'mode':'refresh' if args.refresh else 'audit', 'kb_id':(kb or {}).get('id'),
+              'checked_at':datetime.now(timezone.utc).isoformat(), 'inventory':audit_inventory(kb), 'sources':[]}
+    sources = source_catalog()
+    if args.only:
+        unknown = set(args.only) - {s['filename'] for s in sources}
+        if unknown: raise ValueError('unknown source filenames: '+', '.join(sorted(unknown)))
+        sources = [s for s in sources if s['filename'] in args.only]
+    manifest = {}; manifest_path = None
+    if args.refresh:
+        import database as db
+        token = db.set_current_user_id(args.user_id)
+        if not kb:
+            # Existing initialized app DB is required. Do not migrate it from a maintenance CLI.
+            if not Path(config.DATABASE_PATH).is_file(): raise ValueError('initialize HyprChat before refreshing docs')
+            connection = await db.get_db()
+            try:
+                row = await (await connection.execute('SELECT id FROM users WHERE id=?', (args.user_id,))).fetchone()
+                if row is None: raise ValueError('unknown user')
+            finally: await connection.close()
+            kb_id = 'kb-'+uuid.uuid4().hex[:12]
+            await db.create_kb(kb_id, KB_NAME, KB_DESC)
+            kb = {'id':kb_id, 'files':[]}
+        report['kb_id'] = kb['id']
+        directory = Path(config.KB_DIR)/kb['id']; directory.mkdir(parents=True, exist_ok=True)
+        manifest_path = directory/'.coder-docs-manifest.json'
+        if manifest_path.is_file(): manifest = json.loads(manifest_path.read_text())
+        backup_dir = directory/'.coder-docs-backups'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    semaphore = asyncio.Semaphore(4)
+    async with httpx.AsyncClient(timeout=30, verify=config.HTTP_VERIFY_SSL) as client:
+        async def fetch(spec):
+            async with semaphore:
+                try:
+                    text, final = await fetch_source(client, spec)
+                    return spec, text, final, None
+                except Exception as exc: return spec, None, None, str(exc)
+        pending = [asyncio.create_task(fetch(s)) for s in sources]
+        try:
+            for finished in asyncio.as_completed(pending):
+                spec, text, final_url, error = await finished
+                item = {'filename':spec['filename'], 'authority':spec['authority'], 'url':spec['url']}
+                if error:
+                    item.update(status='error', error=error)
+                elif args.refresh:
+                    try:
+                        item.update(await replace_document(kb, spec, text, final_url, manifest, backup_dir))
+                        temporary = manifest_path.with_suffix('.tmp')
+                        temporary.write_text(json.dumps(manifest, indent=2)); temporary.replace(manifest_path)
+                    except Exception as exc: item.update(status='error', error=str(exc))
+                else:
+                    item.update(status='validated', chars=len(text), content_hash=digest(text))
+                report['sources'].append(item)
+                print(json.dumps(item), flush=True)
+        finally:
+            for task in pending: task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+    if args.refresh:
+        await db.update_kb(kb['id'], description=KB_DESC)
+        # Keep the established Daedalus attachment behavior; other personas are
+        # attached by their existing seed endpoints, never matched by "coder".
+        daedalus = _find_daedalus_config(await db.get_model_configs())
+        if daedalus and kb['id'] not in daedalus.get('kb_ids', []):
+            await db.update_model_config(daedalus['id'], kb_ids=[*daedalus.get('kb_ids', []), kb['id']])
+        db.reset_current_user_id(token)
+    if args.report:
+        Path(args.report).write_text(json.dumps(report, indent=2))
+    failures = [r for r in report['sources'] if r['status']=='error' or r.get('warnings')]
+    print(json.dumps({'documents':len(report['sources']), 'failures':len(failures), 'kb_id':report['kb_id']}))
+    return 1 if failures else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(asyncio.run(main()))

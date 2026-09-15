@@ -10,6 +10,7 @@
 // component code below — which references window.Prism / window.katex etc. —
 // keeps working untouched.
 import './vendor.js';
+import { parseCodeFence } from './syntaxHighlight.js';
 
 import React from 'react';
 import DaedalusSettings from './components/DaedalusSettings.jsx';
@@ -4312,9 +4313,9 @@ function HyprChat(){
         return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,opts)}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
-        const m=p.match(/^[ \t]*```(\w*)\n?([\s\S]*?)\n?[ \t]*```[ \t]*$/);
-        const lang=m?.[1]||"";
-        let code=m?.[2]||p.replace(/^[ \t]*```[^\n]*\n?/,"").replace(/\n?[ \t]*```[ \t]*$/,"");
+        const parsed=parseCodeFence(p);
+        const lang=parsed?.lang||"";
+        let code=parsed?.code??p.replace(/^[ \t]*```[^\n]*\n?/,"").replace(/\n?[ \t]*```[ \t]*$/,"");
         // Dedent: strip common leading whitespace (LLMs often indent fences inside list items)
         const _codeLines=code.split("\n");
         const _indents=_codeLines.filter(l=>l.trim()).map(l=>(l.match(/^[ \t]*/)?.[0].length)||0);

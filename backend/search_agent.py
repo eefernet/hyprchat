@@ -12,6 +12,7 @@ injection. Speed mode stays fully deterministic.
 """
 
 import context_policy
+from coding_search import extract_coding_context
 import asyncio
 import json
 import re
@@ -256,6 +257,9 @@ def _strip_search_noise(text: str) -> str:
     q = _ANSWER_FORMAT_RE.sub("", q)
     q = _MARKDOWN_IMAGE_RE.sub(" ", q)
     q = _ATTACHMENT_PLACEHOLDER_RE.sub(" ", q)
+    coding = extract_coding_context(q)
+    if coding and coding.has_code:
+        q = coding.query
     q = re.sub(r"\s+", " ", q).strip()
     return q
 
@@ -320,7 +324,7 @@ def _extract_context_anchors(text: str, category: str | None) -> list[str]:
         for token in re.findall(
             r"\b(?:React|Vue|Angular|FastAPI|Django|Flask|SQLite|Postgres|"
             r"PostgreSQL|MySQL|Redis|Docker|Kubernetes|Node\.?js|TypeScript|"
-            r"JavaScript|Python|Rust|Go|Golang|HyprChat)\b",
+            r"JavaScript|Python|Swift|Kotlin|Ruby|Java|Rust|Go|Golang|HyprChat)\b",
             cleaned,
             flags=re.IGNORECASE,
         ):
@@ -399,7 +403,8 @@ def _clean_query_phrase(text: str) -> str:
     q = _QUESTION_PREFIX_RE.sub("", q)
     q = re.sub(r"\bUS(?=\s+(?:news|politics|elections?))", "United States", q, flags=re.I)
     q = re.sub(r"\b(please|for me)\b", " ", q, flags=re.I)
-    q = re.sub(r"[?!.,;:]+", " ", q)
+    # Qualified API names are useful exact search terms, not sentence punctuation.
+    q = re.sub(r"[?!,;:]+|(?<!\w)\.|\.(?!\w)", " ", q)
     q = re.sub(r"\s+", " ", q).strip()
     words = q.split()
     if len(words) > 12:
@@ -500,7 +505,7 @@ def _subject_for_frame(text: str, frame: SearchFrame) -> str:
     q = re.sub(r"\b(?:currently|current|already|just|really|please|for me)\b", " ", q, flags=re.I)
     q = re.sub(r"\b(?:won'?t|will not|refusing|refuse)\b", " refuses ", q, flags=re.I)
     q = re.sub(r"\b\d+\+?", " ", q)
-    q = re.sub(r"[?!.,;:]+", " ", q)
+    q = re.sub(r"[?!,;:]+|(?<!\w)\.|\.(?!\w)", " ", q)
     q = re.sub(r"\s+", " ", q).strip()
     words = [
         w for w in q.split()

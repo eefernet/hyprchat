@@ -23,4 +23,4 @@ Each directory contains `manifest.json`, `originals.json`, the previous files un
 
 For code rollback, stop the affected service, restore existing files from `backup/` with their recorded ownership/modes, remove only files recorded as newly added in `originals.json`, and start the service again. The migration is additive; restoring the database is not necessary for an ordinary code rollback. Restoring an older database would discard later writes and requires a separate recovery decision.
 
-The [deployment evidence](evaluations/daedalus-2026-09-10-deployment.json) records file hashes, service verification, and browser results without credentials.
+The local evidence file `evaluations/daedalus-2026-09-10-deployment.json` records file hashes, service verification, and browser results. Raw run and deployment reports are excluded from Git.

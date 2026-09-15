@@ -34,6 +34,7 @@ import config
 from research import _search_searxng, _rank_urls, fetch_bytes_safely
 from search_runtime import current_run
 import context_policy
+from coding_search import extract_coding_context
 from copy import deepcopy
 
 
@@ -150,7 +151,12 @@ def _should_skip(query: str) -> tuple[bool, str]:
     if len(q) < 80 and not re.search(r"[a-zA-Z]", q) and _PURE_ARITH_RE.match(q):
         return True, "arithmetic"
     if _OP_ON_ATTACHED_RE.match(q):
-        return True, "operate on attached text"
+        text_target = re.match(
+            r"^\w+\s+(?:this|that|the(?: following)?)\s+"
+            r"(?:text|paragraph|message|sentence|email|interview|article|essay|post)\b", q, re.I,
+        )
+        if text_target or not _is_code_query(q):
+            return True, "operate on attached text"
     return False, ""
 
 
@@ -288,7 +294,7 @@ _NEWS_RE = re.compile(
 # This is what keeps "Taylor Swift new album" out of `code` (bare `swift`) and
 # "who won the Celtics game last night" out of `game` (bare `game`).
 _CODE_STRONG_RE = re.compile(
-    r"\b(function|method|variable|exception|stack\s+trace|traceback|"
+    r"\b(programming|function|method|variable|exception|stack\s+trace|traceback|"
     r"compile|debug|syntax\s+error|regex|pip\b|npm\b|cargo|docker|kubernetes|k8s|"
     r"python|javascript|typescript|golang|kotlin|"
     r"vue|angular|node\.?js|django|flask|rails|fastapi|"
@@ -352,7 +358,8 @@ def _distinct_hits(pattern: re.Pattern, text: str) -> int:
 
 
 def _is_code_query(q: str) -> bool:
-    return bool(_CODE_STRONG_RE.search(q)) or _distinct_hits(_CODE_WEAK_RE, q) >= 2
+    return (bool(_CODE_STRONG_RE.search(q)) or _distinct_hits(_CODE_WEAK_RE, q) >= 2
+            or extract_coding_context(q) is not None)
 
 
 def _is_game_query(q: str) -> bool:

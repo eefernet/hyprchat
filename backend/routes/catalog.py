@@ -7,6 +7,7 @@ from agents.personas import (
     seed_coder_bot,
     seed_coder_bot_v2,
     seed_conspiracy_bot,
+    seed_master_developer,
 )
 
 
@@ -31,6 +32,11 @@ async def seed_all_defaults_ep():
 @router.post("/api/seed/coder-bot")
 async def seed_coder_bot_ep():
     return await seed_coder_bot()
+
+
+@router.post("/api/seed/master-developer")
+async def seed_master_developer_ep():
+    return await seed_master_developer()
 
 
 @router.post("/api/seed/coder-bot-v2")

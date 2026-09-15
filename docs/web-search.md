@@ -9,6 +9,10 @@ and shares the SearXNG provider and safe fetcher.
 
 A deterministic plan starts immediately. Query cleanup separates answer-format
 instructions from the subject and preserves country acronyms such as US.
+Coding questions retain language context and qualified API/error names such as
+`String.count` and `FP_INFINITE`. Pasted code becomes a compact search query;
+the answering model keeps the original code. Coding rewrites remain eligible
+for search, while ordinary text rewrites still skip it.
 Balanced mode starts with two queries;
 quality starts with three. A local planner runs concurrently and contributes
 queries only if it has finished when the first wave is collected. Total planned

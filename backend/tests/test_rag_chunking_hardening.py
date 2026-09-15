@@ -69,6 +69,9 @@ def test_index_file_upsert_is_sliced_below_chroma_cap(monkeypatch, tmp_path):
     upsert_sizes = []
 
     class _FakeCollection:
+        def get(self, **kwargs):
+            return {"ids": [], "documents": [], "metadatas": [], "embeddings": []}
+
         def upsert(self, ids, documents, metadatas, embeddings):
             assert len(ids) == len(documents) == len(metadatas) == len(embeddings)
             upsert_sizes.append(len(ids))

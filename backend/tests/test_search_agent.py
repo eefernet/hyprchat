@@ -904,6 +904,91 @@ def test_classify_strong_signals_still_classify():
     assert quick_search._classify_query("swift package manager dependency") == "code"  # 2 weak hits
 
 
+_SWIFT_QUESTION = '''Why is this wrong?
+```swift
+func getStringInfo(inputString: [String]) -> String {
+    var maxLen = -FP_INFINITE
+    var lowLen = FP_INFINITE
+    for string in inputString {
+        if string.count > maxLen { maxLen = string.count }
+        else if string.count < lowLen { lowLen = string.count }
+    }
+    return "Shortest string"
+}
+```
+'''
+
+
+def test_pasted_swift_search_uses_language_and_errors_without_raw_source():
+    messages = [{"role": "user", "content": _SWIFT_QUESTION}]
+    plan = search_agent._deterministic_plan(messages, _SWIFT_QUESTION, _balanced_mode())
+    assert plan.category == "code"
+    assert "Swift" in plan.queries[0]
+    assert "FP_INFINITE" in plan.queries[0]
+    assert any("documentation" in query for query in plan.queries)
+    assert all("```" not in query and "{" not in query and "getStringInfo(" not in query for query in plan.queries)
+    assert messages[0]["content"] == _SWIFT_QUESTION
+
+
+def test_coding_api_queries_and_followups_keep_language_and_api_names():
+    question = "Swift String.count versus utf8.count"
+    messages = [{"role": "user", "content": question}]
+    plan = search_agent._deterministic_plan(messages, question, _balanced_mode())
+    assert plan.category == "code"
+    assert "String.count" in plan.queries[0]
+    assert "utf8.count" in plan.queries[0]
+    messages += [{"role": "assistant", "content": "String.count counts characters."},
+                 {"role": "user", "content": "What about emoji?"}]
+    followup = search_agent._deterministic_plan(messages, "What about emoji?", _balanced_mode())
+    assert followup.category == "code"
+    assert "Swift" in followup.queries[0]
+    assert "emoji" in followup.queries[0]
+
+
+@pytest.mark.parametrize("question,skip", [
+    ("Rewrite this Swift function to fix the minimum length bug", False),
+    ("Rewrite this function\n" + _SWIFT_QUESTION, False),
+    ("Rewrite this paragraph to be shorter", True),
+    ("Summarize this paragraph about Python functions", True),
+    ("Summarize this Taylor Swift interview", True),
+])
+def test_coding_rewrite_remains_searchable_without_changing_text_rewrites(question, skip):
+    assert quick_search._should_skip(question)[0] is skip
+
+
+@pytest.mark.parametrize("label,body", [
+    ("", "const answer = 42;"),
+    ("C++", "std::vector<int> values;"),
+    ("python", "def example():\n    raise ValueError('wrong')"),
+])
+def test_fenced_programming_questions_use_compact_code_queries(label, body):
+    question = f"Why is this wrong?\n```{label}\n{body}\n```"
+    plan = search_agent._deterministic_plan([{"role": "user", "content": question}], question, _balanced_mode())
+    assert plan.category == "code"
+    assert all("```" not in query and "{" not in query for query in plan.queries)
+
+
+def test_pasted_code_reaches_search_and_returns_citable_context():
+    queries = []
+    async def search(http, query, **kwargs):
+        queries.append(query)
+        return [{"url": "https://docs.swift.org/swift-book/documentation/the-swift-programming-language/thebasics/",
+                 "title": "Swift integer bounds: Int.max and Int.min",
+                 "snippet": "Swift programming FP_INFINITE: use Int.max for integer bounds; string.count and else if conditions.",
+                 "type": "web"}]
+    with patch.object(config, "QUICK_SEARCH_MODE", "speed"), \
+         patch.object(quick_search, "_cached_search", new=search), \
+         patch.object(quick_search, "_enrich_with_pages", new=AsyncMock(return_value={})), \
+         patch.object(quick_search, "_enrich_og_images", new=AsyncMock(return_value=None)):
+        out = _run(search_agent.run_search_agent(
+            _FakeHTTP([]), "http://ollama", "", None, None,
+            [{"role": "user", "content": _SWIFT_QUESTION}],
+        ))
+    assert queries and not out["skipped"]
+    assert all("{" not in query and "```" not in query for query in queries)
+    assert "https://docs.swift.org/" in out["context"]
+
+
 def test_deterministic_plan_sports_query_not_game():
     latest = "who won the celtics game last night"
     plan = search_agent._deterministic_plan(
