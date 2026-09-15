@@ -19,9 +19,10 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   const [form,setForm]=useState(null);
   const [showDone,setShowDone]=useState(false);
   const [err,setErr]=useState("");
+  const [loadErr,setLoadErr]=useState("");
 
   const load=useCallback(async()=>{
-    try{setNotes(await apiJson("/api/notes"));}catch(e){setErr(String(e.message||e));}
+    try{setNotes(await apiJson("/api/notes"));setLoadErr("");}catch(e){setLoadErr(String(e.message||e));}
     finally{setLoaded(true);}
   },[]);
   useEffect(()=>{load();},[load]);
@@ -63,18 +64,18 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
           <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/> show done
         </label>
       </>}>
-      <button onClick={load} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
+      <button onClick={load} title="Refresh notes" style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       <button onClick={()=>setForm({...EMPTY,kind:tab})} style={btnS(t.warm)}><IC.Plus/> New</button>
     </PanelHeader>
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:760}}>
-        {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
+        {(err||loadErr)&&<div role="alert" style={{color:t.err,fontSize:12,marginBottom:12}}>{err||loadErr}</div>}
         {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.ok}55`}}>
           <div style={{display:"flex",gap:8,marginBottom:8}}>
             <select value={form.kind} onChange={e=>setForm(f=>({...f,kind:e.target.value}))} style={{...inputS,width:"auto"}}>
               <option value="todo">Todo</option><option value="note">Note</option>
             </select>
-            <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:1}} autoFocus/>
+            <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:1,minWidth:0}} autoFocus/>
           </div>
           <textarea value={form.content} onChange={e=>setForm(f=>({...f,content:e.target.value}))} placeholder="Details (optional)" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
@@ -92,7 +93,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
         :shown.length===0&&!form?<EmptyState t={t} icon={<IC.Pencil/>} title={`No ${tab==="todo"?"todos":"notes"} yet`} hint='Add one here, or tell the assistant: "add buy milk to my todo list".'/>
         :shown.map(n=><div key={n.id} style={{...cardS,marginBottom:8,display:"flex",gap:10,alignItems:"flex-start",opacity:n.done?.55:1}}>
           {n.kind==="todo"&&<input type="checkbox" checked={n.done} onChange={()=>toggleDone(n)} style={{marginTop:3,cursor:"pointer"}}/>}
-          <div style={{flex:1,minWidth:0}}>
+          <div style={{flex:1,minWidth:0,overflowWrap:"anywhere"}}>
             <div style={{fontSize:13,fontWeight:700,color:t.text,textDecoration:n.done?"line-through":"none"}}>{n.title}</div>
             {n.content&&<div style={{fontSize:11,color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.content.slice(0,400)}</div>}
             <div style={{fontSize:9,color:t.mut,marginTop:4}}>

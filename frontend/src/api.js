@@ -10,6 +10,15 @@ export async function apiJson(path, opts = {}) {
   if (init.body != null) init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
   const r = await fetch(`${API}${path}`, init);
   const data = await r.json().catch(() => null);
-  if (!r.ok) throw new Error((data && data.detail) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const detail = data?.detail;
+    const message = typeof detail === 'string' ? detail : Array.isArray(detail)
+      ? detail.map(item => {
+        if (typeof item === 'string') return item;
+        const field = (item?.loc || []).filter(part => part !== 'body').join('.');
+        return item?.msg ? `${field ? field + ': ' : ''}${item.msg}` : '';
+      }).filter(Boolean).join('; ') : '';
+    throw new Error(message || `HTTP ${r.status}`);
+  }
   return data;
 }

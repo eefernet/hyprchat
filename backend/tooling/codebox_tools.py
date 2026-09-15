@@ -174,8 +174,9 @@ def _script_command(code: str, interpreter: str, suffix: str) -> str:
     """Each remote shell owns its script and removes it on exit, even on error."""
     b64 = base64.b64encode(code.encode()).decode()
     return (
-        f"cd /root && _hc_script=$(mktemp /tmp/hc-exec-XXXXXXXX.{suffix}) || exit 1; "
-        "trap 'rm -f -- \"$_hc_script\"' EXIT; "
+        "cd /root && _hc_script_dir=$(mktemp -d /tmp/hc-exec-XXXXXXXX) || exit 1; "
+        f'_hc_script="$_hc_script_dir/script.{suffix}"; '
+        "trap 'rm -f -- \"$_hc_script\"; rmdir -- \"$_hc_script_dir\"' EXIT; "
         f"printf '%s' {shlex.quote(b64)} | base64 -d > \"$_hc_script\" && "
         f"{shlex.quote(interpreter)} \"$_hc_script\""
     )

@@ -172,6 +172,7 @@ def test_concurrent_scripts_keep_distinct_content_and_clean_up(tmp_path, languag
         path, result = stdout.decode().splitlines()
         assert result == label
         assert not Path(path).exists()
+        assert not Path(path).parent.exists()
         return path
 
     async def run():

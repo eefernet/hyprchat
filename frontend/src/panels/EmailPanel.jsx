@@ -1,4 +1,4 @@
-import React,{useState,useEffect,useCallback} from 'react';
+import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
@@ -26,6 +26,8 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   const [polling,setPolling]=useState(false);
   const [loaded,setLoaded]=useState(false);
   const [err,setErr]=useState("");
+  const [sending,setSending]=useState(false);
+  const sendingRef=useRef(false);
 
   const loadAccounts=useCallback(async()=>{
     try{setAccounts(await apiJson("/api/email/accounts"));}catch(e){setErr(String(e.message||e));}
@@ -39,17 +41,18 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   const saveAccount=async()=>{
     if(!acctForm)return;
     setErr("");
-    const r=await fetch(`${API}/api/email/accounts${acctForm.id?`/${acctForm.id}`:""}`,{
-      method:acctForm.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(acctForm)});
-    if(r.ok){setAcctForm(null);loadAccounts();}
-    else{const d=await r.json().catch(()=>({}));setErr(d.detail||`HTTP ${r.status}`);}
+    try{
+      await apiJson(`/api/email/accounts${acctForm.id?`/${acctForm.id}`:""}`,{
+        method:acctForm.id?"PATCH":"POST",body:acctForm});
+      setAcctForm(null);loadAccounts();
+    }catch(e){setErr(String(e.message||e));}
   };
   const testAccount=async id=>{
     setErr("");
-    const r=await fetch(`${API}/api/email/accounts/${id}/test`,{method:"POST"});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok)notify({type:"success",text:"Connected",detail:`${d.inbox_messages} messages in INBOX.`});
-    else setErr(d.detail||"Connection failed");
+    try{
+      const d=await apiJson(`/api/email/accounts/${id}/test`,{method:"POST"});
+      notify({type:"success",text:"Connected",detail:`${d.inbox_messages} messages in INBOX.`});
+    }catch(e){setErr(String(e.message||e));}
   };
   const pollNow=async()=>{
     setPolling(true);setErr("");
@@ -81,22 +84,27 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     loadMessages();
   };
   const sendReply=async()=>{
-    if(!reader?.reply?.trim())return;
-    setErr("");
-    const r=await fetch(`${API}/api/email/messages/${reader.msg.id}/reply`,{
-      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body:reader.reply})});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok){notify({type:"success",text:"Reply sent",detail:`To ${d.to||reader.msg.from_addr}`});setReader(null);loadMessages();}
-    else setErr(d.detail||"Send failed");
+    if(!reader?.reply?.trim()||sendingRef.current)return;
+    sendingRef.current=true;setSending(true);setErr("");
+    const message=reader.msg;
+    const reply=reader.reply;
+    try{
+      const d=await apiJson(`/api/email/messages/${message.id}/reply`,{method:"POST",body:{body:reply}});
+      notify({type:"success",text:"Reply sent",detail:`To ${d.to||message.from_addr}`});
+      setReader(current=>current?.msg.id===message.id&&current.reply===reply?null:current);loadMessages();
+    }catch(e){setErr(String(e.message||e));}
+    finally{sendingRef.current=false;setSending(false);}
   };
   const sendCompose=async()=>{
-    if(!compose?.to||!compose?.subject||!compose?.body)return;
-    setErr("");
-    const r=await fetch(`${API}/api/email/send`,{
-      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(compose)});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok){notify({type:"success",text:"Email sent",detail:`To ${d.to||compose.to}`});setCompose(null);}
-    else setErr(d.detail||"Send failed");
+    if(!compose?.to||!compose?.subject||!compose?.body||sendingRef.current)return;
+    sendingRef.current=true;setSending(true);setErr("");
+    const draft=compose;
+    try{
+      const d=await apiJson("/api/email/send",{method:"POST",body:draft});
+      notify({type:"success",text:"Email sent",detail:`To ${d.to||draft.to}`});
+      setCompose(current=>current===draft?null:current);
+    }catch(e){setErr(String(e.message||e));}
+    finally{sendingRef.current=false;setSending(false);}
   };
 
   const urgencyChip=u=>u==="urgent"?<span style={{fontSize:8,fontWeight:800,color:t.bg,background:t.err,borderRadius:4,padding:"1px 5px"}}>URGENT</span>
@@ -160,7 +168,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     <input value={compose.subject} onChange={e=>setCompose(c=>({...c,subject:e.target.value}))} placeholder="Subject" style={{...inputS,marginBottom:8}}/>
     <textarea value={compose.body} onChange={e=>setCompose(c=>({...c,body:e.target.value}))} rows={6} placeholder="Message" style={{...inputS,marginBottom:10,resize:"vertical"}}/>
     <div style={{display:"flex",gap:8}}>
-      <button onClick={sendCompose} style={btnS(t.ok)}><IC.Send/> Send</button>
+      <button onClick={sendCompose} disabled={sending} style={btnS(t.ok)}><IC.Send/> {sending?"Sending…":"Send"}</button>
       <button onClick={()=>setCompose(null)} style={btnS(t.mut)}>Cancel</button>
     </div>
   </div>;
@@ -200,7 +208,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     <div style={{marginTop:10}}>
       <div style={{fontSize:10,color:t.mut,marginBottom:4}}>Reply{reader.msg.draft_reply?" (AI draft loaded — edit before sending)":""}</div>
       <textarea value={reader.reply} onChange={e=>setReader(p=>({...p,reply:e.target.value}))} rows={4} style={{...inputS,resize:"vertical",marginBottom:8}}/>
-      <button onClick={sendReply} style={btnS(t.ok)}><IC.Send/> Send reply</button>
+      <button onClick={sendReply} disabled={sending} style={btnS(t.ok)}><IC.Send/> {sending?"Sending…":"Send reply"}</button>
     </div>
   </div>;
 
@@ -236,7 +244,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       </label>}>
       {accounts.length>0&&<button onClick={pollNow} disabled={polling} style={btnS(t.acc)}>{polling?"Checking...":<><IC.Refresh/> Check now</>}</button>}
       {accounts.length>0&&<button onClick={()=>setCompose({to:"",subject:"",body:""})} style={btnS(t.warm)}><IC.Plus/> Compose</button>}
-      <button onClick={()=>setShowSettings(s=>!s)} style={btnS(showSettings?t.acc:t.mut)}><IC.Settings/></button>
+      <button onClick={()=>setShowSettings(s=>!s)} title="Email accounts" style={btnS(showSettings?t.acc:t.mut)}><IC.Settings/></button>
     </PanelHeader>
     {isMobile
       ?<div style={{overflowY:"auto",padding:"14px 12px",flex:1}}>

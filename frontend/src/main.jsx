@@ -146,8 +146,8 @@ const normalizePrompts = (value) => {
 
 // ============================================================
 function HyprChat(){
-  const [tm,setTm]=useState(()=>{try{return localStorage.getItem("hc-theme")||"hyprflat";}catch{return "hyprflat";}});
-  const [fi,setFi]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font")||"0");}catch{return 0;}});
+  const [tm,setTm]=useState(()=>{try{const saved=localStorage.getItem("hc-theme");return Object.hasOwn(THEMES,saved)?saved:"hyprflat";}catch{return "hyprflat";}});
+  const [fi,setFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-font")||"0");return Number.isInteger(saved)&&FONTS[saved]?saved:0;}catch{return 0;}});
   const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
   const [defaultTemp,setDefaultTemp]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-temp")||"0.7");}catch{return 0.7;}});
@@ -1867,7 +1867,7 @@ function HyprChat(){
     out=out.replace(/`([^`]+)`/g,"<code>$1</code>");
     out=out.replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>");
     out=out.replace(/\*([^*\n]+)\*/g,"<em>$1</em>");
-    out=out.replace(/_([^_\n]+)_/g,"<em>$1</em>");
+    out=out.replace(/(?<!\w)_([^_\n]+)_(?!\w)/g,"<em>$1</em>");
     return out;
   };
 
@@ -2861,6 +2861,8 @@ function HyprChat(){
     setCurrentRunNotice(null);
     streamSaveEvtsRef.current=[];
     streamingCidRef.current=cid;
+    // Cancellation can happen before init arrives; only persist a known server row.
+    let _streamMsgId=null;
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
     // doing it from the client too would race and create duplicates.
     try{
@@ -2951,34 +2953,41 @@ function HyprChat(){
       // Continue mode: resume a length-truncated assistant message on its
       // existing row; `full` starts from the partial so tokens append.
       if(overrides.continueMessageId)body.continue_message_id=overrides.continueMessageId;
-      const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
-      if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
-      const rdr=res.body.getReader(),dec=new TextDecoder();
       let full=overrides.prefill||"",buf="",refinementsCount=0;
       // Phase 0.6: backend creates the assistant message at stream start and sends
       // its id via an `init` SSE event. We PATCH this row on stream-complete instead
       // of POSTing a duplicate, so disconnect-then-reload still leaves exactly one
       // assistant message per turn.
-      let _streamMsgId=null;
       let _doneStats=null;
       let _doneTruncated=false;
       let _routedModel=null;
-      while(true){
-        const{done,value}=await rdr.read();if(done)break;
-        buf+=dec.decode(value,{stream:true});
-        const lines=buf.split("\n");buf=lines.pop()||"";
-        for(const ln of lines){
-          if(!ln.startsWith("data: "))continue;
-          try{const d=JSON.parse(ln.slice(6));
-            if(d.type==="init"){_streamMsgId=d.message_id;}
-            else if(d.type==="token"){full+=d.content;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
-            else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
-            else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
-            else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
-            else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
-            else if(d.type==="model_routed"){_routedModel=d.model;}
-            else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
-          }catch{}}
+      let wasStopped=false;
+      try{
+        const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
+        if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
+        const rdr=res.body.getReader(),dec=new TextDecoder();
+        while(true){
+          const{done,value}=await rdr.read();if(done)break;
+          buf+=dec.decode(value,{stream:true});
+          const lines=buf.split("\n");buf=lines.pop()||"";
+          for(const ln of lines){
+            if(!ln.startsWith("data: "))continue;
+            try{const d=JSON.parse(ln.slice(6));
+              if(d.type==="init"){_streamMsgId=d.message_id;}
+              else if(d.type==="token"){full+=d.content;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
+              else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
+              else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
+              else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
+              else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
+              else if(d.type==="model_routed"){_routedModel=d.model;}
+              else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
+            }catch{}}
+        }
+      }catch(e){
+        if(e.name!=="AbortError")throw e;
+        // Finalize and persist the partial reply through the same path as a
+        // completed stream, including tool metadata and the server's row id.
+        wasStopped=true;
       }
       if(_routedModel)_doneStats={...(_doneStats||{}),routed_model:_routedModel};
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
@@ -3013,7 +3022,7 @@ function HyprChat(){
       if(_doneTruncated)_msgMeta.truncated=true;
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
       // Auto-play the reply when the Voice "Auto-play replies" toggle is on
-      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?String(_streamMsgId):`auto-${Date.now()}`);}catch{}},80);}
+      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend&&!wasStopped){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?String(_streamMsgId):`auto-${Date.now()}`);}catch{}},80);}
       uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,metadata:_msgMeta,...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
@@ -3023,18 +3032,12 @@ function HyprChat(){
         // no title generation, no workspace memory suggestion source row.
       }else if(_streamMsgId){
         persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:finalFull,metadata:_msgMeta})},{label:"Message save"});
-      }else{
+      }else if(!wasStopped){
         persistFetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:finalFull,metadata:_msgMeta})},{label:"Message save"});
       }
       // Auto-generate title after first exchange
-      if(!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
-    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}
-      else{
-        // Stop: finalize the partial reply so it doesn't stay stuck in
-        // streaming state (blinking cursor, hidden action toolbar). The
-        // backend persists the partial content itself on disconnect.
-        uConv(cid,c=>{const m=[...(c.messages||[])];const last=m[m.length-1];if(last&&(last.role==="assistant"||last.isS))m[m.length-1]={...last,role:"assistant",isS:false,metadata:{...(last.metadata||{}),in_progress:false},...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
-      }}
+      if(!wasStopped&&!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
+    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}}
     setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
 
@@ -4107,7 +4110,7 @@ function HyprChat(){
     const namedColorRe=/^(black|silver|gray|grey|white|maroon|red|purple|fuchsia|magenta|green|lime|olive|yellow|navy|blue|teal|aqua|cyan|orange|aliceblue|rebeccapurple|transparent)$/i;
     const colorish=v=>/^#[0-9a-fA-F]{3,8}$/.test(v||"")||/^(rgba?|hsla?)\(/i.test(v||"")||namedColorRe.test(v||"");
     // Split by: math, keyboard keys, inline-code, images, bold+link, bold, italic(*), italic(_), markdown link, bare URL, double-quoted strings (10+ chars)
-    return text.split(/(`\$(?=[^`\n]*?(?:\\[a-zA-Z]+|[\^_=+\-*/{}]))[^`\n]+?\$`|(?<![\\$])\$(?![\d\s])(?=[^$\n]*?(?:\\[a-zA-Z]+|[\^_=+\-*/{}]))[^$\n]+?(?<!\\)\$|<kbd>[^<]+<\/kbd>|&lt;kbd&gt;(?:(?!&lt;\/kbd&gt;).)+&lt;\/kbd&gt;|`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|_[^_\n]+_|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
+    return text.split(/(`\$(?=[^`\n]*?(?:\\[a-zA-Z]+|[\^_=+\-*/{}]))[^`\n]+?\$`|(?<![\\$])\$(?![\d\s])(?=[^$\n]*?(?:\\[a-zA-Z]+|[\^_=+\-*/{}]))[^$\n]+?(?<!\\)\$|<kbd>[^<]+<\/kbd>|&lt;kbd&gt;(?:(?!&lt;\/kbd&gt;).)+&lt;\/kbd&gt;|`[^`]+`|!\[[^\]]*\]\([^)]+\)|\*\*\[[^\]]+\]\([^)]+\)\*\*|\*\*[^*\n]+\*\*|\*[^*\n]+\*|(?<!\w)_[^_\n]+_(?!\w)|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s"'<>\])\},]+|"[^"\n]{10,}"|rgba?\([^)]+\)|hsla?\([^)]+\)|#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\b|[^]+)/g).map((s,k)=>{
       if(!s)return null;
       const imgMatch=s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
       const codeText=(s.startsWith("`")&&s.endsWith("`")&&s.length>1)?s.slice(1,-1):null;
@@ -4486,7 +4489,7 @@ function HyprChat(){
     "--nav-hover-bg":`${t.acc}12`,"--nav-hover-border":`${t.acc}42`,"--nav-hover-color":t.acc,"--nav-hover-ring":`${t.acc}18`,"--nav-hover-shadow":`${t.acc}12`,"--nav-active-hover-bg":`${t.acc}1C`,
     ...extra
   });
-  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>setPanel(p)} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
+  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{setPanel(p);if(isMobile)setSidebar(false);}} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -4707,7 +4710,7 @@ function HyprChat(){
     </div>}
 
     {/* NAV RAIL */}
-    <div style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + env(safe-area-inset-top))"}:{})}}>
+    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + env(safe-area-inset-top))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
         <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
@@ -4721,7 +4724,7 @@ function HyprChat(){
           {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>More</div>}
           {moreNavActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
         </button>
-        <div aria-hidden={!showNavMore} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?navLayout.more.length*(showNavLabels?52:50)+8:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
+        <div aria-hidden={!showNavMore} inert={showNavMore?undefined:""} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?navLayout.more.length*(showNavLabels?52:50)+8:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
           {navLayout.more.map(id=>{const it=NAV_ITEM_MAP[id];return it?<React.Fragment key={id}>{nb(id,<it.icon/>,it.label)}</React.Fragment>:null;})}
         </div>
         </>}
@@ -4742,7 +4745,7 @@ function HyprChat(){
     </div>
 
     {/* CONVERSATION LIST */}
-    <div style={{...(isMobile
+    <div inert={!sidebar?"":undefined} style={{...(isMobile
       ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
       :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}55`,overflow:"hidden",background:`${t.bgDeep}F2`,backdropFilter:"none"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
@@ -8294,7 +8297,7 @@ function HyprChat(){
             </button>}
             {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
             :councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} style={{background:t.err,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
             :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>

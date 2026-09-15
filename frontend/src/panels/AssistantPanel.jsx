@@ -1,6 +1,7 @@
 import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
+import { apiJson } from '../api.js';
 import { fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
@@ -51,9 +52,9 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
   const audioRef=useRef(null);
 
   const load=useCallback(async()=>{
+    setErr("");
     try{
-      const r=await fetch(`${API}/api/assistant`);
-      const d=await r.json();
+      const d=await apiJson("/api/assistant");
       setData(d);
       setDraft({
         name:d.persona?.name||"",
@@ -67,7 +68,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
         allow_autonomous_email:!!d.profile?.allow_autonomous_email,
         quiet_hours:{enabled:false,start:"22:00",end:"07:00",urgent_override:true,...(d.profile?.quiet_hours||{})},
       });
-    }catch(e){setErr(String(e));}
+    }catch(e){setErr(String(e.message||e));}
   },[]);
   const loadBrief=useCallback(async()=>{
     try{const r=await fetch(`${API}/api/assistant/brief`);const d=await r.json();setBrief(d.message||null);}catch{}
@@ -128,7 +129,9 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
   };
 
   if(!data||!draft){
-    if(err)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.err,fontSize:12}}>{err}</div>;
+    if(err)return <div style={{flex:1,display:"flex",flexDirection:"column",gap:12,alignItems:"center",justifyContent:"center",padding:20,color:t.err,fontSize:12}}>
+      <div role="alert">{err}</div><button onClick={load} style={btnS(t.acc)}>Retry</button>
+    </div>;
     return <div style={{flex:1,overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px"}}>
       <div style={{maxWidth:820,display:"flex",flexDirection:"column",gap:16}}>
         {Array.from({length:3},(_,i)=><SkeletonCard key={i} t={t} h={i===0?150:100} lines={i===0?3:2}/>)}
@@ -142,7 +145,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <PanelHeader t={t} color={t.warm} icon={<IC.Bot/>} title="Personal Assistant"
       subtitle="Your proactive agent: pinned chat, check-ins, and scheduled work.">
-      <button onClick={()=>{load();loadBrief();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
+      <button onClick={()=>{load();loadBrief();}} title="Refresh assistant" style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       <button onClick={()=>openAssistantChat&&openAssistantChat(data.profile?.conversation_id)} style={btnS(t.warm)}><IC.Chat/> Open Assistant Chat</button>
     </PanelHeader>
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>

@@ -150,17 +150,19 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const openEdit=e=>setForm({id:e.id,title:e.title,start_local:e.start_local,end_local:e.end_local||"",location:e.location||"",description:e.description||"",remind_minutes:e.remind_minutes??""});
   const saveAccount=async()=>{
     if(!acctForm?.url)return;
-    const r=await fetch(`${API}/api/calendar/caldav${acctForm.id?`/${acctForm.id}`:""}`,{
-      method:acctForm.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(acctForm)});
-    if(r.ok){setAcctForm(null);loadAccounts();}
-    else{const d=await r.json().catch(()=>({}));setErr(d.detail||`HTTP ${r.status}`);}
+    setErr("");
+    try{
+      await apiJson(`/api/calendar/caldav${acctForm.id?`/${acctForm.id}`:""}`,{
+        method:acctForm.id?"PATCH":"POST",body:acctForm});
+      setAcctForm(null);loadAccounts();
+    }catch(e){setErr(String(e.message||e));}
   };
   const testAccount=async id=>{
     setErr("");
-    const r=await fetch(`${API}/api/calendar/caldav/${id}/test`,{method:"POST"});
-    const d=await r.json().catch(()=>({}));
-    if(r.ok)notify({type:"success",text:"Connected",detail:`Calendars: ${(d.calendars||[]).map(c=>c.name).join(", ")||"none found"}`});
-    else setErr(d.detail||"Connection failed");
+    try{
+      const d=await apiJson(`/api/calendar/caldav/${id}/test`,{method:"POST"});
+      notify({type:"success",text:"Connected",detail:`Calendars: ${(d.calendars||[]).map(c=>c.name).join(", ")||"none found"}`});
+    }catch(e){setErr(String(e.message||e));}
   };
   const syncNow=async()=>{
     setSyncing(true);setErr("");

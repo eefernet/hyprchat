@@ -114,7 +114,7 @@ def test_execute_openapi_tool_builds_request(monkeypatch):
         assert request.method == "POST"
         assert str(request.url) == "https://example.com/items/abc?verbose=true"
         assert request.headers["X-Test"] == "yes"
-        assert request.content == b'{"name":"demo"}'
+        assert json.loads(request.content) == {"name": "demo"}
         return httpx.Response(200, json={"ok": True})
 
     async def run():
