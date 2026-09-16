@@ -7,6 +7,9 @@ DEV="${dev:-tun0}"
 /usr/local/sbin/searxng-vpn-killswitch.sh down 2>/dev/null || true
 iptables -t nat -D POSTROUTING -o "$DEV" -j MASQUERADE 2>/dev/null || true
 if [ "${script_type:-}" != "down" ]; then
-    pkill -f '/usr/sbin/openvpn' 2>/dev/null || true
+    PID=$(cat /run/openvpn-proton.pid 2>/dev/null || true)
+    if [[ "$PID" =~ ^[0-9]+$ ]] && [ "$(readlink "/proc/$PID/exe" 2>/dev/null || true)" = /usr/sbin/openvpn ]; then
+        kill -TERM "$PID" 2>/dev/null || true
+    fi
 fi
 exit 0

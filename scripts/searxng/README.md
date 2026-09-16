@@ -1,77 +1,100 @@
-# SearXNG VPN egress + self-healing rotation
+# SearXNG VPN egress and recovery
 
-Infra scripts for the SearXNG LXC (`192.168.1.120` → `192.168.1.141`, `root`).
-SearXNG's outbound engine traffic is forced through ProtonVPN (OpenVPN) with a
-fail-closed killswitch, the exit server is rotated, and a watchdog re-establishes
-the tunnel automatically if it drops.
+SearXNG is **CT 114 on pve2 (`192.168.1.101`)**, with static address
+`192.168.1.56/24` and gateway `192.168.1.1`. Access it through `pct exec 114`
+or `pct enter 114` on pve2; a separate SearXNG root login is unnecessary.
+HyprChat (`192.168.1.120`) uses search on port 8888 and the Python web proxy
+on port 8899. Both services run as the `searxng` user (currently UID 999).
 
-> These files are **version-control copies** of what runs on the box. They are
-> NOT auto-deployed by `deploy_monitor.py`. Deploy them by hand (see below).
+These are versioned copies of installed infrastructure files. They are not
+auto-deployed by `deploy_monitor.py`.
 
-## How it fits together
+| File | Installed path |
+|---|---|
+| `rotate-ovpn.sh`, `ovpn-up.sh`, `ovpn-down.sh` | `/usr/local/bin/` |
+| `searxng-vpn-killswitch.sh`, `searxng-vpn-watchdog.sh` | `/usr/local/sbin/` |
+| `protonvpn-rotate.service`, `searxng-vpn-watchdog.service`, `searxng-vpn-watchdog.timer` | `/etc/systemd/system/` |
+| `20-shutdown.conf` | `/etc/systemd/system/searxng.service.d/` |
 
+The existing `searxng-vpn-killswitch.service` must be enabled before these
+services start. Proton profiles and credentials remain in
+`/etc/openvpn/proton-ovpn/`; never copy `auth.txt` into this repository.
+
+## Routing and process ownership
+
+- Main-table traffic (including OpenVPN's connection to its server) needs the
+  LAN gateway. Persist `gw=192.168.1.1` in CT 114's `net0` configuration,
+  preserving its other attributes. Proxmox generates the guest interface file.
+- UID 999 receives mark `0x1`. Priority 100 routes it through table 100, which
+  contains the LAN route and either a VPN default or an unreachable default.
+  Priority 101 prohibits marked traffic from falling through to the main table,
+  including while the VPN table is rebuilt.
+- IPv6 public egress is rejected for the search user. The IPv6 chain is replaced
+  atomically; loopback and the configured local IPv6 subnet remain reachable.
+- `protonvpn-rotate.service` owns OpenVPN. Cron, the watchdog, and manual
+  `rotate-ovpn.sh` invocations all request a restart of that service.
+- The launcher closes lock descriptors 8 and 9 before daemonizing OpenVPN.
+  Lock contention returns 75. The watchdog reads the **ExecStart** status of the
+  forking service and does not count a skipped rotation as a connection failure.
+- Rotation tries at most eight distinct servers, with bounded connection and
+  egress probes and a 600-second service startup limit. The watchdog backs off
+  after three failed rotations, and tolerates one failed egress probe while a
+  tunnel is structurally up.
+- A working tunnel requires the service-owned process, `tun0`, the table-100
+  VPN default, and a DNS-free HTTPS probe as the search user. A public-IP lookup
+  is diagnostic only. DNS follows the VPN gateway while connected.
+- uWSGI normally treats SIGTERM as a reload. The shutdown drop-in uses SIGQUIT
+  so a service restart actually stops the workers and clears engine suspensions.
+
+Hourly root cron entry:
+
+```cron
+0 * * * * /usr/bin/systemctl restart protonvpn-rotate.service
 ```
-searxng (uid) ──fwmark policy routing (table 100)──► tun0 ──ProtonVPN──► internet
-                         │
-            searxng-vpn-killswitch.sh  (fail-closed: no tun0 ⇒ searxng egress unreachable)
-```
 
-| File | Installed path | Role |
-|---|---|---|
-| `rotate-ovpn.sh` | `/usr/local/bin/rotate-ovpn.sh` | Pick a Proton config, bring up the tunnel, apply killswitch. Hourly cron + called by the watchdog. |
-| `searxng-vpn-killswitch.sh` | `/usr/local/sbin/searxng-vpn-killswitch.sh` | `apply`/`down`/`status`: fwmark routing + iptables fail-closed for the `searxng` uid; sets VPN DNS on `apply`, restores public DNS on `down`. |
-| `ovpn-up.sh` / `ovpn-down.sh` | `/usr/local/bin/` | OpenVPN `--up`/`--down` hooks (apply / tear down the killswitch). |
-| `searxng-vpn-watchdog.sh` | `/usr/local/sbin/searxng-vpn-watchdog.sh` | Every 3 min: re-establish the tunnel if it actually dropped; restore DNS during an outage; back off if every server fails. |
-| `searxng-vpn-watchdog.service` / `.timer` | `/etc/systemd/system/` | Runs the watchdog on a 3-minute timer. |
+## Updating an existing installation
 
-ProtonVPN OpenVPN configs live in `/etc/openvpn/proton-ovpn/*.ovpn` (~112,
-`auth.txt` alongside). Their `remote` lines are literal IPs.
+Make a private backup of the CT configuration, installed files, root crontab,
+and SearXNG settings before replacing them. Transfer these files to pve2 and
+use `pct push 114 <host-file> <installed-path> --perms 0755` for shell scripts
+(`0644` for units/drop-ins). Run `bash -n` on scripts, then
+`systemd-analyze verify` on the units and `systemctl daemon-reload` inside CT 114.
 
-## Key design points (learned the hard way — see 2026-06-22 incident)
+Suspend the watchdog timer and the hourly rotation entry during maintenance.
+Install and apply the routing protection **before** adding a missing gateway.
+Stop a stale OpenVPN process only after verifying its PID and executable. Start
+`protonvpn-rotate.service`, verify the tunnel, then restore the timer and cron.
+Do not remove the lock file to work around a live descriptor holding its lock.
 
-- **VPN_UP success gate** is `tun0` + `ip route show table 100 default` via tun0 +
-  a **DNS-free** egress probe (`curl https://1.1.1.1/` by IP as the `searxng`
-  user). Do **not** use `ifconfig.me` or any DNS-dependent endpoint as a liveness
-  probe — rate-limiting / Proton-DNS timing makes it false-fail and churn healthy
-  tunnels on every tick.
-- `rotate-ovpn.sh` tries up to **8 distinct-IP servers** per run (a single dead
-  Proton exit must not blackhole search) and shares a `flock`
-  (`/run/lock/searxng-ovpn.lock`) with the watchdog so cron and watchdog never
-  kill each other's OpenVPN.
-- The **watchdog** treats a tunnel as healthy on **structural** liveness
-  (openvpn process + tun0 + route) so a transient probe blip never tears down a
-  working tunnel; the egress zombie-check only re-rolls after **2 consecutive**
-  failures. Restart of SearXNG uses `--no-block` (a plain restart takes ~85 s and
-  would otherwise hold the watchdog lock). Backoff: 3 consecutive rotate failures
-  ⇒ 30-min cooldown (likely creds/egress, not a dead exit).
-- **DNS:** `10.96.0.1` in `/etc/resolv.conf` is ProtonVPN's pushed DNS (tunnel
-  subnet `10.96.0.0/16`), set by the killswitch `apply`. The killswitch `down`
-  now restores `1.1.1.1`/`192.168.1.1` so the box keeps DNS when the tunnel is
-  down. `eth0` is DHCP; `/etc/dhcp/dhclient.conf` pins DNS with:
-  `supersede domain-name-servers 1.1.1.1, 192.168.1.1;`
+The September 2026 outage involved a missing gateway and a daemon holding the
+rotation lock for days. The existing VPN credentials worked after those repairs.
+Bing also needed explicit `disabled: false` in its existing settings block:
+with `use_default_settings: true`, merely listing an engine does not necessarily
+enable it. Enable engines based on live results; individual VPN exits can still
+receive upstream denials or rate limits.
 
-## Deploy (manual)
+## Verification (inside CT 114 unless noted)
 
 ```bash
-# from this directory, to the box (root@192.168.1.141)
-scp rotate-ovpn.sh root@192.168.1.141:/usr/local/bin/
-scp searxng-vpn-killswitch.sh ovpn-up.sh ovpn-down.sh root@192.168.1.141:/usr/local/sbin/   # ovpn-up/down go in /usr/local/bin
-scp searxng-vpn-watchdog.sh root@192.168.1.141:/usr/local/sbin/
-scp searxng-vpn-watchdog.service searxng-vpn-watchdog.timer root@192.168.1.141:/etc/systemd/system/
-ssh root@192.168.1.141 'chmod +x /usr/local/bin/rotate-ovpn.sh /usr/local/bin/ovpn-*.sh /usr/local/sbin/searxng-vpn-*.sh && systemctl daemon-reload && systemctl enable --now searxng-vpn-watchdog.timer'
+systemctl is-active protonvpn-rotate searxng searxng-web-proxy searxng-vpn-watchdog.timer
+ip -4 route get 193.37.254.66
+ip -4 rule
+ip route show table 100
+flock -n /run/lock/searxng-ovpn.lock true
+runuser -u searxng -- curl -4 -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}\n' https://1.1.1.1/
+tail -n 15 /var/log/vpn-watchdog.log
 ```
 
-Hourly rotation cron (on the box):
+When the tunnel is deliberately down during maintenance, marked public routes
+and search-user HTTPS must fail while the root LAN route still works. Never
+disable the policy rule or firewall as a search workaround.
 
-```
-0 * * * * /usr/local/bin/rotate-ovpn.sh >> /var/log/vpn-rotation.log 2>&1
-```
-
-## Verify
+From HyprChat (CT 120), verify an actual query, not only `/healthz`:
 
 ```bash
-ssh root@192.168.1.141 'ip -br addr show tun0; ip route show table 100 default; \
-  runuser -u searxng -- curl -4 -sS --connect-timeout 8 -o /dev/null -w "%{http_code}\n" https://1.1.1.1/'
-# search (from the HyprChat host, which can reach :8888):
-curl -s "http://192.168.1.141:8888/search?q=test&format=json" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["results"]),"results",d["unresponsive_engines"])'
+curl -sS --max-time 12 'http://192.168.1.56:8888/search?q=latest+US+news&format=json'
 ```
+
+An HTTP 200 response with zero results and engine connection errors is an
+upstream failure. It does not establish that SearXNG works or that credentials
+have expired.

@@ -1,6 +1,9 @@
 import React from 'react';
 
 import { IC } from '../components/icons.jsx';
+import PanelHeader from '../components/PanelHeader.jsx';
+import useIsMobile from '../useIsMobile.js';
+import EmptyState from '../components/EmptyState.jsx';
 
 export default function PromptLibraryPanel({
   t,
@@ -15,6 +18,7 @@ export default function PromptLibraryPanel({
   insertPrompt,
   setPanel,
 }){
+  const isMobile=useIsMobile();
   const safePrompts=Array.isArray(prompts)?prompts.filter(p=>p&&typeof p==="object"):[];
   const cleanPrompt=p=>({
     id:typeof p.id==="string"&&p.id?p.id:`p-${Date.now()}`,
@@ -24,22 +28,19 @@ export default function PromptLibraryPanel({
     is_system:!!p.is_system,
   });
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.f1}}><IC.Zap/></span><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.f1}}>Prompt Library</span></div>
+    <PanelHeader t={t} color={t.f1} icon={<IC.Zap/>} title="Prompt Library"
+      subtitle="Reusable prompts — insert into any chat or trigger with / in the composer.">
       <button onClick={()=>{const id=`p-${Date.now()}`;setPrompts(p=>[{id,title:"New Prompt",content:"",category:"General",is_system:false},...(Array.isArray(p)?p.filter(x=>x&&typeof x==="object"):[])]);}} style={btnS(t.f1)}><IC.Plus/> New Prompt</button>
-    </div>
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {!safePrompts.length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>
-        <div style={{fontSize:28,marginBottom:8}}>⚡</div>
-        <div style={{fontWeight:600,marginBottom:4}}>No saved prompts yet</div>
-        <div>Save reusable prompts here and insert them into any chat with one click.</div>
-        <button onClick={()=>{setPrompts([
+    </PanelHeader>
+    <div style={{flex:1,overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px"}}>
+      {!safePrompts.length&&<EmptyState t={t} icon={<IC.Zap/>} title="No saved prompts yet"
+        hint="Save reusable prompts here and insert them into any chat with one click."
+        action={<button onClick={()=>{setPrompts([
           {id:`p-${Date.now()}-1`,title:"Explain Simply",content:"Explain this as if I'm 12 years old, using simple language and analogies.",category:"Learning"},
           {id:`p-${Date.now()}-2`,title:"Code Review",content:"Review this code for bugs, performance issues, security vulnerabilities, and suggest improvements.",category:"Coding"},
           {id:`p-${Date.now()}-3`,title:"Summarize",content:"Summarize the key points from the above in bullet points.",category:"Writing"},
           {id:`p-${Date.now()}-4`,title:"Pros & Cons",content:"List the pros and cons of this in a balanced way.",category:"Analysis"},
-        ]);}} style={{...btnS(t.f1),marginTop:12,justifyContent:"center"}}>Load Starter Prompts</button>
-      </div>}
+        ]);}} style={{...btnS(t.f1),marginTop:4,justifyContent:"center"}}>Load Starter Prompts</button>}/>}
       {safePrompts.map(raw=>{
         const p=cleanPrompt(raw);
         const isEditing=editPrompt?.id===p.id;
@@ -65,7 +66,7 @@ export default function PromptLibraryPanel({
                 <div style={{fontSize:10,color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
               </div>
               <div style={{display:"flex",gap:4,flexShrink:0}}>
-                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:9}}>⚡ Use</button>
+                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:9}}><IC.Zap/> Use</button>
                 <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
                 <button onClick={()=>setPrompts(ps=>(Array.isArray(ps)?ps:[]).filter(x=>x&&typeof x==="object"&&x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
               </div>

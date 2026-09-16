@@ -6,6 +6,8 @@ The local model is asked for strict JSON, but smaller models sometimes wrap the
 answer in explanations. This module salvages the useful SDXL prompt without
 letting assistant prose leak into the UI.
 """
+
+import context_policy
 import json
 import re
 
@@ -87,7 +89,7 @@ def _json_fields(parsed) -> tuple[str, str] | None:
 def _extract_json_fields(raw: str) -> tuple[str, str] | None:
     try:
         fields = _json_fields(json.loads(raw))
-        if fields:
+        if fields and fields[0]:
             return fields
     except (json.JSONDecodeError, TypeError):
         pass
@@ -98,7 +100,9 @@ def _extract_json_fields(raw: str) -> tuple[str, str] | None:
         except (json.JSONDecodeError, TypeError):
             continue
         fields = _json_fields(parsed)
-        if fields:
+        # A dict with no usable positive prompt (e.g. a stray {} or schema
+        # echo in prose) must not short-circuit the labeled/salvage parsers.
+        if fields and fields[0]:
             return fields
     return None
 
@@ -244,13 +248,13 @@ async def enhance_prompt(http, idea: str, *, model: str = "",
             ) as transient:
                 raw = await model_providers.complete_chat(
                     transient, model, prompt_text,
-                    temperature=0.7, num_ctx=2048, num_predict=400,
+                    temperature=0.7, num_ctx=context_policy.helper_context("image"), num_predict=400,
                     format_json=True, timeout=timeout, ollama_url=config.OLLAMA_URL,
                 )
         else:
             raw = await model_providers.complete_chat(
                 http, model, prompt_text,
-                temperature=0.7, num_ctx=2048, num_predict=400,
+                temperature=0.7, num_ctx=context_policy.helper_context("image"), num_predict=400,
                 format_json=True, timeout=timeout, ollama_url=config.OLLAMA_URL,
             )
     except Exception:

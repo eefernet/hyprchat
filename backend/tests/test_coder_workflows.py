@@ -54,7 +54,12 @@ def test_python_adapter_catches_cli_package_contract():
     assert "./.venv/bin/python3 -m pip install -e ." in contract["build_cmd"]
     assert contract["test_cmd"].endswith("./.venv/bin/python3 -m pytest -q")
     assert contract["test_cmd"].startswith(language_adapters.PY_VENV_GUARD)
-    assert contract["aider_test_cmd"] == contract["test_cmd"]
+    # Aider runs its test cmd standalone (possibly before any build created
+    # ./.venv), so it must self-bootstrap pytest into the guarded venv.
+    assert contract["aider_test_cmd"].startswith(language_adapters.PY_VENV_GUARD)
+    assert "pip install -q pytest" in contract["aider_test_cmd"]
+    assert contract["aider_test_cmd"].endswith("./.venv/bin/python3 -m pytest -q")
+    assert contract["aider_lint_cmd"].startswith(language_adapters.PY_VENV_GUARD)
     assert "./.venv/bin/python3 -m taskforge --help" in contract["smoke_cmds"]
     assert contract["safe_lint"] is True
     assert "__main__.py" in " ".join(contract["package_rules"])
@@ -342,7 +347,7 @@ def _import_openhands_worker_for_prompt_tests(monkeypatch):
 
 def test_aider_prompt_includes_known_test_root(tmp_path, monkeypatch):
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
-    req = worker.AiderRunRequest(
+    req = worker.AiderRunRequest(num_ctx=32768,
         project_dir="/root/projects/proj-abc",
         task="Fix the import mismatch",
         test_cmd="/root/venv/bin/python3 -m pytest -q",
@@ -390,7 +395,7 @@ def test_aider_scope_and_prompt_include_test_state_isolation(tmp_path, monkeypat
     assert "test_cli.py" in files
 
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
-    req = worker.AiderRunRequest(
+    req = worker.AiderRunRequest(num_ctx=32768,
         project_dir="/root/projects/proj-abc",
         task="Fix database schema test failures",
         test_cmd="/root/venv/bin/python3 -m pytest -q",
@@ -413,7 +418,7 @@ def test_openhands_worker_fresh_build_ignores_nonexistent_project_id(tmp_path, m
     # write a single file into a colliding/stale project directory.
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
     monkeypatch.setattr(worker, "PROJECTS_DIR", tmp_path)
-    req = worker.RunRequest(
+    req = worker.RunRequest(num_ctx=32768,
         task="Build a neon pong game",
         language="python",
         project_id="neon-pong-game",  # does not exist yet
@@ -432,7 +437,7 @@ def test_openhands_worker_reuses_existing_project_id(tmp_path, monkeypatch):
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
     monkeypatch.setattr(worker, "PROJECTS_DIR", tmp_path)
     (tmp_path / "neon-pong-game").mkdir()
-    req = worker.RunRequest(
+    req = worker.RunRequest(num_ctx=32768,
         task="Add a scoreboard",
         language="python",
         project_id="neon-pong-game",
@@ -450,7 +455,7 @@ def test_openhands_worker_prompt_has_no_required_file_manifest(tmp_path, monkeyp
     # Reverted builder prompt: the Architect manifest rides in plan CONTEXT, not
     # a separate REQUIRED FILE MANIFEST / PROJECT COMMANDS gate.
     worker = _import_openhands_worker_for_prompt_tests(monkeypatch)
-    req = worker.RunRequest(task="Build neon pong", language="python")
+    req = worker.RunRequest(num_ctx=32768, task="Build neon pong", language="python")
 
     prompt = worker._build_task_prompt(req, str(tmp_path), continuing=False)
 
@@ -1209,6 +1214,7 @@ def test_acceptance_review_allows_docs_only_aider_acceptance_fix(monkeypatch):
             pass
 
     reviewer_run = {
+        "conversation_id": "conv-accept-docs",
         "id": "run-review",
         "role": "reviewer",
         "status": "succeeded",
@@ -3053,6 +3059,7 @@ def test_acceptance_dispatch_overrides_mismatched_project_dir(monkeypatch):
             self.items.append((conv_id, event_type, data))
 
     reviewer_run = {
+        "conversation_id": "conv-x",
         "id": "run-review", "role": "reviewer", "status": "succeeded",
         "result_envelope": {
             "status": "clean",
@@ -3125,6 +3132,7 @@ def test_acceptance_dispatch_env_fault_envelope_skips_fix_routing(monkeypatch):
             self.items.append((conv_id, event_type, data))
 
     reviewer_run = {
+        "conversation_id": "conv-x",
         "id": "run-review", "role": "reviewer", "status": "succeeded",
         "result_envelope": {
             "status": "clean",

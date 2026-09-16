@@ -5,6 +5,7 @@ These mock Codebox, Ollama, and the run database. No network or live HyprChat
 service is required.
 """
 import asyncio
+import pytest
 import importlib.util
 import json
 import sys
@@ -264,12 +265,12 @@ def test_section_caps_fit_configured_ctx():
     for ctx in (16384, 65536):
         budgets = acceptance._section_budgets(ctx)
         assert sum(budgets.values()) <= ctx * 3
-    # Source budget grows with ctx but never exceeds the absolute ceiling.
-    assert (acceptance._section_budgets(262144)["source"]
-            == acceptance._SOURCE_SECTION_CAP_MAX)
-    # Auto/0 and garbage fall back to the 16384 default.
-    assert acceptance._section_budgets(0) == acceptance._section_budgets(16384)
-    assert acceptance._section_budgets("x") == acceptance._section_budgets(16384)
+    # Source budget scales with configured context without a hidden ceiling.
+    assert acceptance._section_budgets(262144)["source"] > acceptance._section_budgets(131072)["source"]
+    # Invalid explicit context cannot quietly select another window.
+    for invalid in (0, "x"):
+        with pytest.raises(ValueError):
+            acceptance._section_budgets(invalid)
 
 
 def _acceptance_config_patches(stack, *, acceptance_model="", planning_model="",

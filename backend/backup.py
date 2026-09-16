@@ -40,6 +40,8 @@ _SCRUB_STATEMENTS = (
     "UPDATE mcp_servers SET env_json='{}'",
     "UPDATE openapi_connectors SET headers_json='{}'",
     "UPDATE openapi_connectors SET auth_json='{}'",
+    "UPDATE caldav_accounts SET password=''",
+    "UPDATE email_accounts SET password=''",
 )
 
 

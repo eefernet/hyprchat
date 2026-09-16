@@ -388,7 +388,7 @@ def test_build_gate_context_fetches_each_shared_snapshot_once(monkeypatch):
     async def get_runs_by_conversation(conv_id, limit=0):
         calls["runs"] += 1
         assert conv_id == "conv-1"
-        assert limit == 50
+        assert limit == -1
         return [_run_row("run-1", "reviewer")]
 
     async def get_latest_coder_workflow(conv_id):
@@ -462,7 +462,7 @@ def test_build_gate_context_returns_partial_v2_context_on_snapshot_failure(monke
 
     async def get_runs_by_conversation(_conv_id, limit=0):
         calls["runs"] += 1
-        assert limit == 50
+        assert limit == -1
         raise RuntimeError("db unavailable")
 
     async def get_latest_coder_workflow(conv_id):

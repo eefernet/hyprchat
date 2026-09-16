@@ -1,6 +1,8 @@
 """
 Council chat — multi-model parallel streaming with AI peer voting and debate rounds.
 """
+
+import context_policy
 import asyncio
 import json
 import re
@@ -167,48 +169,17 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             except Exception as e:
                 print(f"[COUNCIL RAG] KB query failed: {e}")
 
-    # Quick search augmentation. The same fetch also feeds the frontend's
-    # QUICK SEARCH carousel via the conversation EventBus (search_results,
-    # source=quick_search) — the frontend no longer fires a parallel
-    # /api/quick-search POST for council sends, so members and carousel see
-    # one SearXNG hit per message.
+    # All members and the carousel share the same bounded evidence bundle.
     search_context = ""
     if quick_search and messages:
-        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-        if last_user:
-            carousel = []
-            try:
-                params = urllib.parse.urlencode({"q": last_user[:200], "format": "json", "language": "en"})
-                sr = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=8)
-                sdata = sr.json()
-                snippets = []
-                for item in sdata.get("results", [])[:4]:
-                    title = item.get("title", "")
-                    snippet = item.get("content", "")[:200]
-                    url = item.get("url", "")
-                    if title or snippet:
-                        snippets.append(f"- {title}: {snippet} ({url})")
-                        carousel.append({"title": title, "url": url,
-                                         "snippet": snippet, "type": "web"})
-                if snippets:
-                    search_context = "\n\n[Current web context:\n" + "\n".join(snippets) + "\n]"
-            except Exception:
-                pass
-            try:
-                if carousel:
-                    await events.emit(conv_id, "search_results", {
-                        "query": last_user[:200], "results": carousel,
-                        "source": "quick_search",
-                    })
-                else:
-                    # Clears the carousel loading state even when search
-                    # failed or returned nothing.
-                    await events.emit(conv_id, "tool_done", {
-                        "tool": "quick_search", "icon": "search",
-                        "status": "Search returned no results",
-                    })
-            except Exception:
-                pass
+        from quick_search import run_quick_search_for_chat
+        result = await run_quick_search_for_chat(
+            http, config.OLLAMA_URL, config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+            events, conv_id, messages, default_model=config.DEFAULT_MODEL,
+            context_budget=min(1500, context_policy.helper_context("extraction") // 4,
+                               context_policy.resolve("chat").input_budget // 4),
+        )
+        search_context = "\n\n" + result["context"] if result.get("context") else ""
 
     member_responses = {}  # mid -> latest response
     all_round_responses = {}  # mid -> [round0, round1, ...]
@@ -272,7 +243,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 "messages": [{"role": "system", "content": sys_p}] + msgs,
                 "stream": True,
                 "think": False,
-                "options": {"num_ctx": 16384},
+                "options": {"num_ctx": context_policy.helper_context("extraction")},
                 "keep_alive": "30m",
             }
             full = ""
@@ -465,7 +436,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                     "messages": [{"role": "user", "content": vote_prompt}],
                     "stream": False,
                     "think": False,
-                    "options": {"temperature": 0.1, "num_ctx": 8192, "num_predict": 120},
+                    "options": {"temperature": 0.1, "num_ctx": context_policy.helper_context("extraction"), "num_predict": 120},
                     "keep_alive": "30m",
                 }, timeout=30)
                 text = strip_leaked_cot(r.json()["message"]["content"].strip())[0]
@@ -564,7 +535,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             {"role": "system", "content": host_system},
             {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
-        payload = {"model": host_model, "messages": host_msgs, "stream": True, "think": False, "options": {"num_ctx": 16384}, "keep_alive": "30m"}
+        payload = {"model": host_model, "messages": host_msgs, "stream": True, "think": False, "options": {"num_ctx": context_policy.helper_context("extraction")}, "keep_alive": "30m"}
         host_full = ""
         try:
             async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",

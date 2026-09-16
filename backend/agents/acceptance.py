@@ -17,6 +17,7 @@ import shlex
 import uuid
 
 import config
+import context_policy
 import database as db
 import cancel_registry
 import model_providers
@@ -54,7 +55,6 @@ _README_CONTEXT_BYTES = 12000
 _MANIFEST_CONTEXT_BYTES = 12000
 _TEST_CONTEXT_BYTES = 12000
 _SOURCE_CONTEXT_BYTES = 128000
-_SOURCE_SECTION_CAP_MAX = 220000
 
 
 async def _run_command(http, command: str, timeout: int = 15,
@@ -251,13 +251,7 @@ def _try_parse_json(text: str) -> dict | None:
 
 def _configured_num_ctx() -> int:
     """Use HyprChat's configured context window, never Ollama's model default."""
-    try:
-        n = int(getattr(config, "DEFAULT_NUM_CTX", 0) or 0)
-    except Exception:
-        n = 0
-    # "Auto" in the UI stores 0. For agent calls, still pass an explicit
-    # bounded context so Ollama does not allocate a model-level default KV cache.
-    return n if n > 0 else 16384
+    return context_policy.resolve("acceptance").num_ctx
 
 
 def _section_budgets(num_ctx: int) -> dict:
@@ -269,13 +263,13 @@ def _section_budgets(num_ctx: int) -> dict:
     a 16K-token window several times over and Ollama silently truncated the
     prompt — usually dropping the instructions at one end.
     """
-    n = config.coerce_num_ctx(num_ctx, fallback=16384)
+    n = context_policy.positive_int(num_ctx, "acceptance context")
     budget = n * 3
     return {
-        "readme": max(4000, int(budget * 0.10)),
-        "manifest": max(4000, int(budget * 0.10)),
-        "tests": max(4000, int(budget * 0.15)),
-        "source": max(4000, min(_SOURCE_SECTION_CAP_MAX, int(budget * 0.50))),
+        "readme": max(1, int(budget * 0.10)),
+        "manifest": max(1, int(budget * 0.10)),
+        "tests": max(1, int(budget * 0.15)),
+        "source": max(1, int(budget * 0.50)),
     }
 
 
@@ -593,12 +587,20 @@ async def run_acceptance_review(http, events, conv_id: str, *,
 
         def _sections(title_map: dict[str, str], cap: int = 18000,
                       per_file_cap: int = 5000) -> str:
+            # A single file larger than the ctx-derived cap must be truncated
+            # to fit, not dropped — dropping it blanked the whole section
+            # ("(none)") and hid every file after it.
             parts = []
             used = 0
             for p, content in title_map.items():
-                block = f"### {p}\n```\n{content[:per_file_cap]}\n```"
-                if used + len(block) > cap:
-                    break
+                wrapper = len(p) + 12  # "### {p}\n```\n" + "\n```"
+                remaining = cap - used - wrapper
+                if remaining <= 0:
+                    continue
+                snippet = content[:min(per_file_cap, remaining)]
+                if not snippet:
+                    continue
+                block = f"### {p}\n```\n{snippet}\n```"
                 parts.append(block)
                 used += len(block)
             return "\n\n".join(parts) if parts else "(none)"
@@ -697,7 +699,7 @@ async def run_acceptance_review(http, events, conv_id: str, *,
         try:
             coro = model_providers.complete_chat(
                 http, model, prompt,
-                temperature=0.2, num_ctx=num_ctx, num_predict=4096,
+                temperature=0.2, num_ctx=num_ctx, num_predict=context_policy.resolve("acceptance").num_predict,
                 timeout=600, ollama_url=config.OLLAMA_URL,
             )
             text = await cancel_registry.await_cancellable(coro, run_id)

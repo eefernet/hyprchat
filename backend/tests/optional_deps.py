@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import sys
 import types
+from pathlib import Path
 
 
 HAS_AIOSQLITE = importlib.util.find_spec("aiosqlite") is not None
@@ -45,3 +46,19 @@ def install_rag_stub(monkeypatch=None):
     else:
         sys.modules["rag"] = mod
     return mod
+
+
+def load_route_module(monkeypatch, name):
+    """Load a leaf router without importing unrelated RAG/image integrations."""
+    package_name = "_hc_test_routes"
+    route_dir = Path(__file__).resolve().parents[1] / "routes"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(route_dir)]
+    monkeypatch.setitem(sys.modules, package_name, package)
+    for leaf in ("context", name):
+        full_name = f"{package_name}.{leaf}"
+        spec = importlib.util.spec_from_file_location(full_name, route_dir / f"{leaf}.py")
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, full_name, module)
+        spec.loader.exec_module(module)
+    return module

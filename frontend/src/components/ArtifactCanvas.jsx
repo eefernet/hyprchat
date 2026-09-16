@@ -2,13 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { API } from '../session.js';
+import { SkeletonText } from './Skeleton.jsx';
 
 // Artifact Canvas — full-screen CodeMirror editor overlay for text-like
 // artifacts. Select text → "AI Edit" → instruction → diff preview →
 // apply/reject; Save creates a revision through the existing /revise
 // endpoint (never overwrites the original file). CodeMirror itself is
 // lazy-loaded via canvasEditorSetup.js so it stays out of the main bundle.
-export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised}){
+export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAction,onRevised}){
   const a=artifact||{};
   const hostRef=useRef(null);
   const edRef=useRef(null);           // {view,getDoc,getSelection,replaceRange,destroy}
@@ -52,6 +53,22 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised
     if(!edRef.current)return;
     setSelInfo(edRef.current.getSelection());
   };
+
+  // Side-by-side merge diff for the AI-edit preview (module promise is already
+  // cached from mount). Falls back to the plain before/after panes on failure.
+  const diffHostRef=useRef(null);
+  const [diffFallback,setDiffFallback]=useState(false);
+  useEffect(()=>{
+    if(!pendingEdit)return;
+    let stop=false,dv=null;
+    setDiffFallback(false);
+    import("../canvasEditorSetup.js").then(mod=>{
+      if(stop||!diffHostRef.current||typeof mod.createDiffView!=="function"){if(!stop)setDiffFallback(true);return;}
+      diffHostRef.current.innerHTML="";
+      dv=mod.createDiffView({parent:diffHostRef.current,original:pendingEdit.original,modified:pendingEdit.replacement,t});
+    }).catch(()=>{if(!stop)setDiffFallback(true);});
+    return()=>{stop=true;try{dv?.destroy();}catch{}};
+  },[pendingEdit,t]);
 
   const runAiEdit=async()=>{
     const ed=edRef.current;
@@ -105,8 +122,14 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised
     }
   };
 
-  const close=()=>{
-    if(dirty&&!window.confirm("Discard unsaved changes?"))return;
+  const close=async()=>{
+    if(dirty){
+      // Themed dialog is always threaded by the caller; without it, refuse to
+      // silently discard rather than falling back to an unthemed native confirm.
+      if(!confirmAction)return;
+      const ok=await confirmAction({title:"Discard changes",body:"You have unsaved changes. Discard them?",confirmLabel:"Discard",tone:"warning"});
+      if(!ok)return;
+    }
     onClose?.();
   };
 
@@ -146,7 +169,7 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised
 
       {/* Editor */}
       <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",padding:"10px 16px 16px"}}>
-        {loadState==="loading"&&<div style={{color:t.mut,fontSize:12,padding:20}}>Loading editor...</div>}
+        {loadState==="loading"&&<div style={{padding:20}}><SkeletonText t={t} lines={8}/></div>}
         {loadState==="error"&&<div style={{color:t.err,fontSize:12,padding:20}}>Failed to load: {loadError}</div>}
         <div
           ref={hostRef}
@@ -164,16 +187,18 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,onRevised
           <button onClick={applyEdit} style={btn(t.ok,true)}>Apply</button>
           <button onClick={()=>setPendingEdit(null)} style={btn(t.err)}>Reject</button>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,minHeight:0,overflow:"hidden",flex:1}}>
-          <div style={{minWidth:0,display:"flex",flexDirection:"column",gap:4,minHeight:0}}>
-            <span style={{fontSize:9,color:t.err,fontWeight:800,textTransform:"uppercase"}}>Before</span>
-            <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10.5,lineHeight:1.55,color:t.dim,background:`${t.err}0C`,border:`1px solid ${t.err}25`,borderRadius:8,padding:10,fontFamily:font}}>{pendingEdit.original||"(empty)"}</pre>
+        {diffFallback
+          ?<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,minHeight:0,overflow:"hidden",flex:1}}>
+            <div style={{minWidth:0,display:"flex",flexDirection:"column",gap:4,minHeight:0}}>
+              <span style={{fontSize:9,color:t.err,fontWeight:800,textTransform:"uppercase"}}>Before</span>
+              <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10.5,lineHeight:1.55,color:t.dim,background:`${t.err}0C`,border:`1px solid ${t.err}25`,borderRadius:8,padding:10,fontFamily:font}}>{pendingEdit.original||"(empty)"}</pre>
+            </div>
+            <div style={{minWidth:0,display:"flex",flexDirection:"column",gap:4,minHeight:0}}>
+              <span style={{fontSize:9,color:t.ok,fontWeight:800,textTransform:"uppercase"}}>After</span>
+              <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10.5,lineHeight:1.55,color:t.text,background:`${t.ok}0C`,border:`1px solid ${t.ok}25`,borderRadius:8,padding:10,fontFamily:font}}>{pendingEdit.replacement||"(empty)"}</pre>
+            </div>
           </div>
-          <div style={{minWidth:0,display:"flex",flexDirection:"column",gap:4,minHeight:0}}>
-            <span style={{fontSize:9,color:t.ok,fontWeight:800,textTransform:"uppercase"}}>After</span>
-            <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10.5,lineHeight:1.55,color:t.text,background:`${t.ok}0C`,border:`1px solid ${t.ok}25`,borderRadius:8,padding:10,fontFamily:font}}>{pendingEdit.replacement||"(empty)"}</pre>
-          </div>
-        </div>
+          :<div ref={diffHostRef} style={{flex:1,minHeight:0,overflow:"auto",border:`1px solid ${t.brd}30`,borderRadius:8,background:`${t.bgDeep}66`,fontFamily:font}}/>}
       </div>}
     </div>,
     document.body,

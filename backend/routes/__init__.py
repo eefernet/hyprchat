@@ -2,7 +2,8 @@
 from fastapi import FastAPI
 
 from .context import configure_context
-from . import artifacts, audio, backup, catalog, downloads, health, hf, model_configs, model_providers, ollama_models, settings, tools_connectors, users
+from . import coder_workflows
+from . import artifacts, assistant, audio, backup, calendar, catalog, chat_files, downloads, email, health, hf, model_configs, model_providers, notes, notifications, ollama_models, scheduler, settings, tools_connectors, users
 
 
 def register_extracted_routes(
@@ -43,6 +44,7 @@ def register_extracted_routes(
     )
     app.include_router(health.router)
     app.include_router(settings.router)
+    app.include_router(coder_workflows.router)
     app.include_router(users.router)
     app.include_router(audio.router)
     app.include_router(model_providers.router)
@@ -54,3 +56,10 @@ def register_extracted_routes(
     app.include_router(catalog.router)
     app.include_router(artifacts.router)
     app.include_router(backup.router)
+    app.include_router(scheduler.router)
+    app.include_router(notifications.router)
+    app.include_router(assistant.router)
+    app.include_router(notes.router)
+    app.include_router(calendar.router)
+    app.include_router(email.router)
+    app.include_router(chat_files.router)

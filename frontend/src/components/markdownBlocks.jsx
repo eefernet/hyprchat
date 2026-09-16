@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { codeTokenStyle, highlightCode, normalizeCodeLanguage } from '../syntaxHighlight.js';
+import '../codeBlocks.css';
 
 export function sanitizeMermaidCode(src){
   let out=String(src||"").replace(/\r\n/g,"\n");
@@ -371,13 +373,12 @@ export function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,s
 
 // Syntax-highlighted code block (Prism)
 export function CodeBlock({code,lang,t,font}){
-  const ref=useRef(null);
-  useEffect(()=>{
-    if(!ref.current||!window.Prism)return;
-    try{window.Prism.highlightElement(ref.current);}catch{}
-  },[code,lang]);
-  const cls=lang?`language-${lang}`:"language-none";
-  return <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,background:"transparent"}}><code ref={ref} className={cls} style={{fontFamily:font,background:"transparent",color:t.dim,padding:0,textShadow:"none"}}>{code}</code></pre>;
+  const language=normalizeCodeLanguage(lang);
+  const html=useMemo(()=>highlightCode(code,language,window.Prism),[code,language]);
+  const props={className:`language-${html===null?'none':language}`,style:{fontFamily:font,background:"transparent",color:t.text,padding:0,textShadow:"none"}};
+  return <pre className="hc-code" style={{...codeTokenStyle(t.bgDeep),margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,background:"transparent"}}>
+    {html===null?<code {...props}>{code}</code>:<code {...props} dangerouslySetInnerHTML={{__html:html}}/>}
+  </pre>;
 }
 
 export function InlineMath({code,raw,theme,font,printMode=false}){

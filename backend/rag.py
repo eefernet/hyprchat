@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 from typing import Optional
+from weakref import WeakValueDictionary
 
 import chromadb
 import httpx
@@ -26,6 +27,7 @@ CHUNK_SIZE = 500       # target tokens per chunk (~2000 chars)
 CHUNK_OVERLAP = 50     # overlap tokens between chunks
 CHROMA_UPSERT_BATCH = 5000  # Chroma rejects single upserts above ~5461 records
 CHARS_PER_TOKEN = 4    # rough estimate
+_index_locks = WeakValueDictionary()
 
 
 def get_chroma() -> chromadb.ClientAPI:
@@ -196,6 +198,56 @@ def chunk_code(text: str, filename: str = "") -> list[dict]:
     return chunk_text(text, filename)
 
 
+def chunk_markdown(text: str, filename: str = "") -> list[dict]:
+    """Keep reference code indentation/fences intact instead of joining lines."""
+    target = max(400, CHUNK_SIZE * CHARS_PER_TOKEN)
+    blocks = []; lines = []; fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        if marker:
+            token = marker[1]
+            if fence is None: fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence): fence = None
+        if not fence and (not line.strip() or re.match(r'^#{1,6} ', line)):
+            if lines: blocks.append(''.join(lines)); lines = []
+        lines.append(line)
+    if lines: blocks.append(''.join(lines))
+    # Long cheat sheets can be one enormous fence. Split only these oversized
+    # examples at line boundaries, reopening the language fence for each excerpt
+    # so embedding truncation does not discard the rest of the reference.
+    bounded = []
+    for block in blocks:
+        match = re.fullmatch(r'\s*(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n\1\s*', block)
+        if match and len(block) > target * 2:
+            opening = match[1] + match[2] + '\n'; fragment = ''
+            for line in match[3].splitlines(keepends=True):
+                if fragment and len(fragment) + len(line) > target:
+                    bounded.append(opening + fragment.rstrip('\n') + '\n' + match[1] + '\n\n')
+                    fragment = ''
+                fragment += line
+            if fragment: bounded.append(opening + fragment.rstrip('\n') + '\n' + match[1] + '\n\n')
+        else:
+            bounded.append(block)
+    blocks = bounded
+    # Seeder provenance is short and useful on every independently retrieved
+    # excerpt, especially API version and OS availability notes.
+    header = ''
+    if re.search(r'^Content-SHA256: [a-f0-9]{64}$', text[:1500], re.M):
+        header = '\n'.join(line for line in text[:1500].splitlines()
+                           if line.startswith(('Source:', 'Authority:', 'Version:', 'Platform availability:'))) + '\n\n'
+    chunks = []; current = ''; heading = ''
+    for block in blocks:
+        if current and len(header) + len(current) + len(block) > target:
+            chunks.append({'text':header + current.strip(), 'filename':filename, 'chunk_index':len(chunks)})
+            current = heading + '\n\n' if heading else ''
+        match = re.match(r'\s*(#{1,6} .+)', block)
+        if match: heading = match[1]
+        current += block
+    if current.strip():
+        chunks.append({'text':header + current.strip(), 'filename':filename, 'chunk_index':len(chunks)})
+    return chunks
+
+
 def chunk_document(text: str, filename: str) -> list[dict]:
     """Route to appropriate chunker based on file type."""
     ext = os.path.splitext(filename)[1].lower()
@@ -203,6 +255,8 @@ def chunk_document(text: str, filename: str) -> list[dict]:
                  ".rs", ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".sh", ".bash"}
     if ext in code_exts:
         return chunk_code(text, filename)
+    if ext in {".md", ".markdown"}:
+        return chunk_markdown(text, filename)
     return chunk_text(text, filename)
 
 
@@ -260,6 +314,14 @@ async def embed_single(text: str) -> Optional[list[float]]:
 # ── Index & Query ──
 
 async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
+    """Replace one document, retaining the previous index on preparation failure."""
+    key = (kb_id, filename)
+    lock = _index_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        return await _index_file(kb_id, filename, filepath)
+
+
+async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
     """Parse, chunk, embed, and store a file in ChromaDB.
 
     Returns stats about the indexing operation.
@@ -274,11 +336,6 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
     chunks = chunk_document(text, filename)
     if not chunks:
         return {"filename": filename, "chunks": 0, "error": "no chunks produced"}
-
-    # Clear any prior chunks for this filename first. Chunk IDs are
-    # md5(kb_id:filename:index); without this, re-indexing a SHORTER version of
-    # a file leaves the old higher-index chunks orphaned and still retrievable.
-    await remove_file(kb_id, filename)
 
     # Generate stable IDs based on kb_id + filename + chunk_index
     ids = []
@@ -300,26 +357,52 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
     # Embed all chunks
     embeddings = await embed_texts(texts)
 
-    # Filter out any failed embeddings
+    # A partial replacement would silently lose reference sections. Keep the
+    # existing vector AND keyword index until every new chunk is ready.
+    if len(embeddings) != len(texts) or any(e is None for e in embeddings):
+        return {"filename": filename, "chunks": 0, "error": "incomplete embeddings; previous index retained"}
     valid = [(i, t, m, e) for i, t, m, e in zip(ids, texts, metadatas, embeddings) if e is not None]
     if not valid:
-        return {"filename": filename, "chunks": len(chunks), "error": "all embeddings failed"}
+        return {"filename": filename, "chunks": 0, "error": "all embeddings failed; previous index retained"}
 
     v_ids, v_texts, v_metas, v_embeds = zip(*valid)
 
     # Upsert into ChromaDB (idempotent — same IDs overwrite). Sliced because
     # Chroma hard-caps a single upsert at ~5461 records.
     collection = _get_collection(kb_id)
-    for s in range(0, len(v_ids), CHROMA_UPSERT_BATCH):
-        collection.upsert(
-            ids=list(v_ids[s:s + CHROMA_UPSERT_BATCH]),
-            documents=list(v_texts[s:s + CHROMA_UPSERT_BATCH]),
-            metadatas=list(v_metas[s:s + CHROMA_UPSERT_BATCH]),
-            embeddings=list(v_embeds[s:s + CHROMA_UPSERT_BATCH]),
-        )
+    previous = await asyncio.to_thread(collection.get, where={"filename": filename},
+                                      include=["documents", "metadatas", "embeddings"])
+
+    def _upsert_rows(row_ids, documents, metadata, vectors):
+        for s in range(0, len(row_ids), CHROMA_UPSERT_BATCH):
+            collection.upsert(ids=list(row_ids[s:s + CHROMA_UPSERT_BATCH]),
+                              documents=list(documents[s:s + CHROMA_UPSERT_BATCH]),
+                              metadatas=list(metadata[s:s + CHROMA_UPSERT_BATCH]),
+                              embeddings=list(vectors[s:s + CHROMA_UPSERT_BATCH]))
+
+    def _replace_vectors():
+        old_ids = set(previous["ids"])
+        try:
+            _upsert_rows(v_ids, v_texts, v_metas, v_embeds)
+            obsolete = list(old_ids - set(v_ids))
+            if obsolete:
+                collection.delete(ids=obsolete)
+        except Exception:
+            # Upserts can fail after an earlier batch succeeded. Restore the
+            # old vectors rather than leave a mix of document versions.
+            added = list(set(v_ids) - old_ids)
+            if added:
+                collection.delete(ids=added)
+            if previous["ids"]:
+                _upsert_rows(previous["ids"], previous["documents"],
+                             previous["metadatas"], previous["embeddings"])
+            raise
+
+    await asyncio.to_thread(_replace_vectors)
 
     # Mirror into the SQLite FTS5 keyword index (hybrid retrieval). FTS failure
     # must never fail indexing — vector search still works without it.
+    warnings = []
     try:
         await db.kb_fts_replace_file(kb_id, filename, [
             {"chunk_id": cid, "text": txt, "chunk_index": meta["chunk_index"]}
@@ -327,9 +410,11 @@ async def index_file(kb_id: str, filename: str, filepath: str) -> dict:
         ])
     except Exception as e:
         print(f"[RAG] FTS index error for {filename} in {kb_id}: {e}")
+        warnings.append("keyword index update failed; vector index is available")
 
     print(f"[RAG] Indexed {filename} → {len(v_ids)} chunks in {kb_id}")
-    return {"filename": filename, "chunks": len(v_ids), "total_chars": sum(len(t) for t in v_texts)}
+    return {"filename": filename, "chunks": len(v_ids), "total_chars": sum(len(t) for t in v_texts),
+            **({"warnings": warnings} if warnings else {})}
 
 
 async def remove_file(kb_id: str, filename: str):
@@ -337,9 +422,9 @@ async def remove_file(kb_id: str, filename: str):
     try:
         collection = _get_collection(kb_id)
         # Query for all chunks with this filename
-        results = collection.get(where={"filename": filename})
+        results = await asyncio.to_thread(collection.get, where={"filename": filename})
         if results["ids"]:
-            collection.delete(ids=results["ids"])
+            await asyncio.to_thread(collection.delete, ids=results["ids"])
             print(f"[RAG] Removed {len(results['ids'])} chunks for {filename} from {kb_id}")
     except Exception as e:
         print(f"[RAG] Error removing {filename} from {kb_id}: {e}")
@@ -353,7 +438,7 @@ async def delete_kb_index(kb_id: str):
     """Delete the entire ChromaDB collection for a KB."""
     try:
         client = get_chroma()
-        client.delete_collection(_collection_name(kb_id))
+        await asyncio.to_thread(client.delete_collection, _collection_name(kb_id))
         print(f"[RAG] Deleted collection for {kb_id}")
     except Exception as e:
         print(f"[RAG] Error deleting collection {kb_id}: {e}")
@@ -393,7 +478,9 @@ async def query(kb_ids: list[str], query_text: str, top_k: int = 6,
     # When biasing by filename hints, over-fetch so we have headroom to re-rank.
     fetch_k = top_k * 3 if prefer_filename_hints else top_k
 
-    all_results = _vector_query(kb_ids, query_embedding, fetch_k)
+    # Chroma is synchronous — thread it so KB queries don't stall the single
+    # event loop (SSE token streams hitch during large collection scans).
+    all_results = await asyncio.to_thread(_vector_query, kb_ids, query_embedding, fetch_k)
     all_results.sort(key=lambda x: x["score"], reverse=True)
 
     if prefer_filename_hints:
@@ -465,7 +552,7 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
     vector_results: list[dict] = []
     query_embedding = await embed_single(query_text)
     if query_embedding is not None:
-        vector_results = _vector_query(kb_ids, query_embedding, fetch_k)
+        vector_results = await asyncio.to_thread(_vector_query, kb_ids, query_embedding, fetch_k)
         vector_results.sort(key=lambda x: x["score"], reverse=True)
     else:
         print("[RAG] Query embedding failed — keyword-only retrieval")
@@ -540,7 +627,7 @@ async def backfill_fts():
             if await db.kb_fts_count(kb_id) > 0:
                 continue
             collection = _get_collection(kb_id)
-            total = collection.count()
+            total = await asyncio.to_thread(collection.count)
             if total == 0:
                 continue
             offset = 0
@@ -550,7 +637,8 @@ async def backfill_fts():
             # stays correct (one file's chunks can span pages — accumulate first).
             by_file: dict[str, list[dict]] = {}
             while offset < total:
-                got = collection.get(include=["documents", "metadatas"], limit=page, offset=offset)
+                got = await asyncio.to_thread(
+                    collection.get, include=["documents", "metadatas"], limit=page, offset=offset)
                 ids = got.get("ids") or []
                 if not ids:
                     break

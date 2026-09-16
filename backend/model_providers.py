@@ -5,6 +5,8 @@ Ollama remains the default provider. Cloud model IDs are prefixed:
 `openai:<model>` or `anthropic:<model>`. Unprefixed IDs are treated as
 Ollama for backward compatibility with existing conversations and personas.
 """
+
+import context_policy
 import base64
 import json
 import os
@@ -681,7 +683,7 @@ def strip_leaked_cot(text: str) -> tuple[str, str]:
 
 
 async def complete_chat(http, model_id: str, prompt: str, *,
-                        temperature: float = 0.2, num_ctx: int = 16384,
+                        temperature: float = 0.2, num_ctx: int | None = None,
                         num_predict: int | None = None,
                         format_json: bool = False,
                         timeout: int = 600, ollama_url: str = "") -> str:
@@ -700,6 +702,8 @@ async def complete_chat(http, model_id: str, prompt: str, *,
     (plan/review/acceptance JSON) should cap it so a rambling model can't
     hold the inference slot indefinitely.
     """
+    if num_ctx is None:
+        num_ctx = context_policy.runtime_settings()["default_num_ctx"]
     provider, _ = split_model_id(model_id)
     if provider in CLOUD_PROVIDERS:
         options: dict = {"temperature": temperature}

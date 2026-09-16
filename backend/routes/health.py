@@ -49,36 +49,24 @@ async def _check_searxng() -> dict:
     except Exception as e:
         ms = int((time.time() - t0) * 1000)
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
-    # Service is up — now check if rate-limited by doing a real search
-    # Use a specific-enough query that won't be trivially cached but should always have results
+    from search_runtime import diagnose_response, classify_failure
     try:
-        r2 = await _http().get(
+        search = await _http().get(
             f"{config.SEARXNG_URL}/search",
-            params={"q": "united states population 2024", "format": "json"},
-            timeout=10,
+            params={"q": "united states population 2024", "format": "json"}, timeout=10,
         )
-        if r2.status_code == 429:
-            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
-        if r2.status_code >= 400:
-            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
-        data = r2.json()
-        results = data.get("results", [])
-        unresponsive = data.get("unresponsive_engines", [])
-        # Rate-limited: no results at all
-        if not results:
-            return {"status": "degraded", "response_ms": ms, "rate_limited": True}
-        # Filter out permanently suspended engines (SearXNG auto-disables these — not rate limiting)
-        active_unresponsive = [e for e in unresponsive
-                               if not (isinstance(e, (list, tuple)) and len(e) > 1
-                                       and "Suspended" in str(e[1]))]
-        # Only flag rate-limited if many active engines are failing or results are very thin
-        if len(active_unresponsive) >= 3 or len(results) < 5:
-            return {"status": "degraded", "response_ms": ms, "rate_limited": True,
-                    "unresponsive_engines": [e[0] if isinstance(e, (list, tuple)) else str(e) for e in unresponsive[:5]]}
-        return {"status": "ok", "response_ms": ms, "rate_limited": False}
-    except Exception:
-        # Search failed but healthz was ok — mark as degraded
-        return {"status": "degraded", "response_ms": ms, "rate_limited": True}
+        diagnosis = diagnose_response(search.status_code, search.json() if search.status_code < 400 else None)
+    except Exception as exc:
+        diagnosis = {"status": "invalid_response" if isinstance(exc, ValueError) else classify_failure(type(exc).__name__ + ": " + str(exc)),
+                     "result_count": 0, "engines": []}
+    return {
+        "status": "ok" if diagnosis["status"] == "ok" else "degraded",
+        "response_ms": int((time.time() - t0) * 1000),
+        "rate_limited": diagnosis["status"] == "rate_limited" or any(e["kind"] == "rate_limited" for e in diagnosis["engines"]),
+        "search_status": diagnosis["status"], "result_count": diagnosis["result_count"],
+        "unresponsive_engines": [e["engine"] for e in diagnosis["engines"]],
+        "engine_errors": diagnosis["engines"],
+    }
 
 
 _HEALTH_ENDPOINTS = {

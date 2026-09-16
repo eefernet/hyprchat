@@ -91,6 +91,17 @@ async def await_cancellable(coro: Awaitable, run_id: str):
         done, _pending = await asyncio.wait(
             {work, waiter}, return_when=asyncio.FIRST_COMPLETED,
         )
+    except BaseException:
+        # External cancellation (asyncio.wait_for timeout, shutdown) lands
+        # here — the work task must die WITH us, or a timed-out scheduled run
+        # keeps generating detached while its serial slot is already released.
+        if not work.done():
+            work.cancel()
+            try:
+                await work
+            except BaseException:
+                pass
+        raise
     finally:
         if not waiter.done():
             waiter.cancel()

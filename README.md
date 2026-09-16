@@ -5,7 +5,7 @@
 <h1 align="center">HyprChat</h1>
 
 <p align="center">
-  <strong>Self-hosted AI chat platform</strong> — tool calling, Daedalus agentic coding, deep research, image generation, voice, multi-model councils, artifact editing, and full model management. All running on your own hardware.
+  <strong>Self-hosted AI chat platform</strong> — conversational coding, Daedalus project workflows, web research, a personal assistant, image generation, voice, councils, and model management.
 </p>
 
 <p align="center">
@@ -16,7 +16,9 @@
   <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>ComfyUI</code> · <code>Codebox</code> · <code>PWA</code>
 </p>
 
-> ⚠️ Alpha software — actively developed, expect rough edges. Check [releases](https://github.com/eefernet/hyprchat/releases) for stable builds.
+> ⚠️ Alpha software — actively developed, expect rough edges. See the [changelog](CHANGELOG.md) for changes and [releases](https://github.com/eefernet/hyprchat/releases) for published versions. Experimental Daedalus persistent jobs remain disabled by default.
+
+[Quick Start](#quick-start) · [Feature Tour](#feature-tour) · [Configuration](#configuration) · [Deployment](#deployment) · [Operations](#operations-and-verification) · [Development](#development) · [Documentation](#documentation)
 
 ---
 
@@ -28,7 +30,7 @@ HyprChat can execute code, upload files, call local services, and drive coding a
 
 ## What It Is
 
-HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. It combines chat, model management, web research, RAG, image generation, voice input/output, agent profiles, project workspaces, an artifact library with a built-in editor, and a coding-agent workflow into one FastAPI service and one Vite-built React app. Install it to your home screen as a PWA and it feels like a native app.
+HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-style dashboards. One FastAPI service and one Vite-built React app bring together chat, model management, research, knowledge bases, coding help, project workflows, and personal-assistant tools. Optional services add code execution, images, and voice. Install it to your home screen as a PWA for mobile access.
 
 <p align="center">
   <img src="docs/images/mainScreen.png" alt="HyprChat main chat screen" width="900">
@@ -38,23 +40,83 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 
 | Area | What you get |
 |---|---|
-| 💬 Chat | SSE streaming, Markdown/code rendering, thinking tokens, live tok/s stats, ▶ continue for cut-off replies, 👍/👎 ratings, slash commands, forks, search, tags, exports |
+| 💬 Chat | SSE streaming, syntax-highlighted code, diagrams/charts/math, thinking tokens, live tok/s stats, continue, ratings, slash commands, forks, search, tags, exports |
 | 🧭 Routing | Optional Auto model — each message is classified locally and routed to the model you configured per category (chat / code / reasoning / long-context) |
-| ☁️ Cloud models | OpenAI, Anthropic, and any OpenAI-compatible endpoint (OpenRouter, Groq, vLLM, llama.cpp, LiteLLM) with **native tool calling** and estimated spend tracking |
+| ☁️ Cloud models | OpenAI/Anthropic with native tool calling and estimated spend; custom OpenAI-compatible endpoints with text-based tool fallback |
+| 🧑‍💻 Master Developer | Coding explanations, debugging, reviews, and examples across languages, using Coder Docs and Quick Search |
 | 🏛️ Daedalus | Architect → Builder → Reviewer → Acceptance workflow for building and fixing projects, with server-enforced gates |
-| 🔎 Research | Quick Search on every turn, deep research reports with a dedicated composer, source cards, durable report history |
+| 🔎 Research | Optional Quick Search for relevant turns, source cards, and Deep Research with investigative reports and durable history |
+| 🤖 Jarvis | Personal assistant, scheduled briefs/tasks, notifications, notes, calendar/CalDAV, email, and event automations |
 | 🧰 Tools | Code execution, shell/file tools, URL fetch, custom Python tools, uploaded project awareness |
 | 🎨 Images | Local ComfyUI generation from chat or Image Studio — LoRAs, saved workflows, persona selfies, prompt enhancement |
 | 🎙️ Voice | Browser microphone transcription and assistant reply playback through proxied STT/TTS services |
 | 🔌 Connectors | MCP servers and OpenAPI specs discovered into chat-usable tools, with credential placeholders and private-URL guards |
-| 📚 Knowledge | RAG knowledge bases with hybrid retrieval, inline `[n]` citations, smart reranking, URL ingestion, and scanned-PDF OCR |
+| 📚 Knowledge | Hybrid RAG, inline `[n]` citations, optional reranking, URL ingestion, scanned-PDF OCR, and maintained coding references |
 | 🧠 Memory | Global user memory, workspace memory with reviewed suggestions, cross-chat history recall, and Ghost Mode for unsaved chats |
 | 📁 Artifacts | Artifact Studio tracks delivered files, projects, and images — plus a full-screen Canvas editor with AI-assisted edits |
 | 🗳️ Councils | Run multiple models in parallel, debate answers, vote, and synthesize the result |
 | 📦 Models | Ollama model browser, HuggingFace GGUF downloads, HyprFit hardware-fit recommendations, capability badges |
-| 🧩 Profiles | Agents for tasks, Personas for style/roleplay, per-profile tools and knowledge bases |
+| 🧩 Profiles | Task agents and conversational personas, per-profile models, tools, knowledge bases, and appearance settings |
 | 📱 PWA | Installable web app with offline shell caching, served over HTTPS via Tailscale Serve |
 | 💾 Backup | One-click full data backup with secret scrubbing, and staged safe restore |
+
+## Quick Start
+
+### Prerequisites
+
+- **Python 3.11+** for the backend; local development also needs the standard `venv` module.
+- **Node.js 22+ and npm** on the machine building the frontend. The deployed server serves the generated files and does not need Node.
+- **Ollama and an installed chat model** for local chat. Choose a model that fits your hardware; cloud providers can be configured separately in Settings → Connections. Local helper and embedding features still use Ollama.
+- **Optional services** unlock search, code execution, images, and voice; see the [service table](#configuration).
+
+### Local Development
+
+From a terminal with Python and Node available:
+
+```bash
+git clone https://github.com/eefernet/hyprchat.git
+cd hyprchat
+```
+
+The clone uses the repository's default branch. To try changes awaiting merge, run `git switch dev` before installing and building. For a published snapshot, choose a version from [releases](https://github.com/eefernet/hyprchat/releases).
+
+Replace `<installed-chat-model>` below with a model already available on your Ollama server. These exports use that model for chat and local helper tasks; you can choose separate models later in Settings.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r backend/requirements.txt
+( cd frontend && npm ci && npm run build )
+
+export OLLAMA_URL='http://127.0.0.1:11434'
+export DEFAULT_MODEL='<installed-chat-model>'
+export WORKSPACE_MODEL="$DEFAULT_MODEL"
+export PLANNING_MODEL="$DEFAULT_MODEL"
+export CODER_MODEL="$DEFAULT_MODEL"
+
+( cd backend && HOST=127.0.0.1 PORT=8000 python3 main.py )
+```
+
+Open **http://127.0.0.1:8000** and select your model. Storage defaults to the checkout's `data/` directory. The local launch reads exported environment variables; it does not automatically load a `.env` file. Knowledge-base indexing also needs the configured Ollama embedding model (default `nomic-embed-text`).
+
+### Server Installation
+
+The provided installer targets a Debian/Ubuntu server at `/opt/hyprchat`:
+
+1. Clone or copy the source checkout into `/opt/hyprchat` on the server.
+2. Build the frontend on your development machine with `cd frontend && npm ci && npm run build`. Copy the **whole** resulting `frontend/dist/` directory to `/opt/hyprchat/frontend/dist/` on the server; it is not included in Git.
+3. On the server, create the environment file if absent and edit its service URLs, model names, and bind address:
+
+   ```bash
+   cd /opt/hyprchat
+   if [ ! -f .env ]; then sudo cp .env.example .env; fi
+   sudoedit .env
+   sudo bash scripts/deploy.sh
+   ```
+
+The installer preserves an existing `.env`, creates the `hyprchat` service user and data directories, installs backend dependencies, and starts systemd. The shipped unit runs `/usr/bin/python3` with **one Uvicorn worker** and loads `/opt/hyprchat/.env`. Check the installed unit before using a different Python environment for maintenance.
+
+The default bind is `127.0.0.1:8000`. Use a private bind address or authenticated proxy for remote access, then run the [verification checks](#operations-and-verification). Proxmox container creation scripts are optional helpers for the reference homelab, not prerequisites for a normal server install.
 
 ## Feature Tour
 
@@ -65,7 +127,8 @@ Use HyprChat like a normal chat app, then turn on heavier tools only when needed
 - **Continue truncated replies** — responses cut off by the output-token limit get a ▶ continue button that resumes the same message in place.
 - **Message ratings** — 👍/👎 on assistant replies, persisted per message and totaled in Statistics.
 - **Slash commands** — type `/` in the composer to search and insert Prompt Library prompts, with `{{variable}}` placeholders filled via an inline form.
-- **Auto-compaction** — optionally summarize older turns into a rolling summary when a long conversation nears its context window, so chats never lose their beginning.
+- **Syntax highlighting** — language-tagged code blocks use light/dark token colors, readable labels, and copy controls. Supported grammars include Swift, Python, JavaScript/TypeScript, JSX/TSX, SQL, and other common languages; unsupported labels retain plain code.
+- **Auto-compaction** — optionally summarize older turns when a conversation nears its context window. Summaries retain useful context but may omit details.
 - **Smart model routing** — enable the 🧭 Auto model and each message is classified locally (chat/code/reasoning, plus a deterministic long-context check) and routed to the model you configured per category. The footer shows which model answered.
 
 <p align="center">
@@ -82,9 +145,9 @@ Manage installed Ollama models, browse HuggingFace GGUF files, watch active down
 Cloud models sit alongside local ones in the same picker with prefixed IDs:
 
 - **OpenAI & Anthropic** — add API keys in Settings → Connections and the models appear as `openai:<model>` / `anthropic:<model>`.
-- **Custom (OpenAI-compatible)** — point HyprChat at any `/chat/completions` endpoint (OpenRouter, Groq, Mistral, vLLM, llama.cpp, LiteLLM) with a base URL, optional key, and display name; models appear as `custom:<model>` with full streaming, thinking, vision, and usage support.
-- **Native tool calling** — tools-enabled chats with OpenAI/Claude models send real JSON tool definitions instead of the text-parsing fallback, making multi-step tool use dramatically more reliable. Models that reject tools fall back to the text format automatically.
-- **Cost tracking** — estimated cloud spend shows in Statistics with per-model cost columns and today/30-day/all-time totals. Local models are never costed.
+- **Custom (OpenAI-compatible)** — configure a compatible endpoint (OpenRouter, Groq, Mistral, vLLM, llama.cpp, LiteLLM) with its base URL, optional key, and display name. Models appear as `custom:<model>`; thinking, vision, and usage depend on what that endpoint and model support.
+- **Tool calling** — OpenAI/Anthropic use native provider tools, with a text fallback when rejected. Ollama also retains native-to-text fallback. Custom providers use the text protocol.
+- **Cost tracking** — Statistics shows estimated spend for priced OpenAI/Anthropic models, with per-model and today/30-day/all-time totals. Local and custom models are not priced by the built-in table.
 
 HyprFit's hardware-fit ranking model is adapted from the MIT-licensed llmfit/Pewdiepie Odysseus Cookbook approach; see [docs/licenses/llmfit-MIT-LICENSE.txt](docs/licenses/llmfit-MIT-LICENSE.txt).
 
@@ -93,9 +156,17 @@ HyprFit's hardware-fit ranking model is adapted from the MIT-licensed llmfit/Pew
   <img src="docs/images/hyprfit.png" alt="HyprFit hardware-fit model recommendations" width="440">
 </p>
 
+### 🧑‍💻 Master Developer
+
+Choose **Master Developer** for explanations, debugging, code reviews, and focused examples in any language. It uses the existing chat tools, attached **Coder Reference Docs**, and Quick Search; ordinary coding questions do not start a Daedalus project.
+
+Select it in the persona picker. If it is missing, use **Restore Defaults** in the Agents/Personas panel, then choose an available model. The seed attaches your owned Coder Reference Docs KB when present; it does not download the library. Follow the [Coder Docs guide](docs/coder-docs.md) to populate or refresh it, then restore the persona again to attach a newly created KB.
+
+The library spans languages, web frameworks, mobile/game development, databases, and tooling, including **Swift and SwiftUI**. Refreshes preserve existing references when a fetch or indexing step fails, and retrieved Markdown retains code indentation and source/version notes. Small code checks use available runtimes; SwiftUI/iOS builds require an appropriate Apple development environment.
+
 ### 🏛️ Daedalus Agentic Coding
 
-Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptance-checks projects instead of sending a single giant prompt and hoping for the best. `plan_project` always uses the structured Architect path, so Builder receives the same manifest plus an advisory interface contract: entrypoint, dependency policy, shared constants, public signatures, and cross-file rules when the Architect can infer them. Workflow progress renders as one unified card with a phase stepper — plan, build, review, fix, acceptance, package — instead of a wall of raw tool output.
+Use Daedalus to plan, build, review, repair, and package projects. The default workflow runs Architect and Builder on separate turns: `plan_project` returns a structured plan, then a later `generate_code` call starts Builder with that plan and advisory interface guidance. A unified workflow card shows progress through review, repair, acceptance, and packaging.
 
 <p align="center">
   <img src="docs/images/daedalus.png" alt="Daedalus agentic coding workflow" width="900">
@@ -111,11 +182,17 @@ Daedalus is the coding workflow. It plans, builds, reviews, fixes, and acceptanc
 | ✅ Acceptance | Final gate for request fit, docs, tests, packaging, and generated artifacts |
 | ❓ ProjectQA | Answers codebase questions with grounded file references |
 
-Workflow state is enforced server-side, so Daedalus cannot skip review, ship before acceptance, or loop forever on the same blocker. Delivered project archives exclude generated/cache/build outputs plus Aider runtime metadata such as `.aider*`.
+Server-side gates manage review, acceptance, repair limits, and repeated blockers. Delivered project archives exclude generated/cache/build outputs and Aider runtime metadata.
+
+**Experimental persistent jobs** add background execution, checkpoint continuation, restart recovery, Settings-owned context budgets, repository/evidence browsing, and downloads tied to the accepted revision. This workflow is **opt-in and disabled by default**; its local-model evaluation has not met promotion requirements. See the [Daedalus workflow guide](docs/daedalus-workflows.md) for both paths and their limitations.
 
 ### 🧰 Tools & Quick Search
 
-Built-in tools cover code execution, file operations, shell commands, direct URL reading, Quick Search, deep research, and custom uploaded Python tools. Quick Search runs a hybrid planner — instant deterministic queries plus a small-LLM planner in parallel — and adds SearXNG result cards, thumbnails, and web previews directly above the chat turn.
+Built-in tools cover code execution, file operations, shell commands, direct URL reading, research, and custom uploaded Python tools. MCP and OpenAPI connectors expose enabled external operations through the same chat tool path.
+
+Enable **Quick Search** in the composer or through a profile to add current sources before the model answers. It skips turns that do not need search and recognizes pasted code, language/API names, and coding follow-ups. SearXNG result cards, thumbnails, and page excerpts appear above the answer.
+
+The shared search pipeline combines deterministic queries with optional local-model planning and embedding reranking. It keeps completed results within a time budget and distinguishes empty results from provider failures. Chat search, the model's research tool, and councils share this pipeline; Deep Research retains its iterative workflow. See [web search](docs/web-search.md) and [SearXNG operations](scripts/searxng/README.md).
 
 <p align="center">
   <img src="docs/images/toolsPanel.png" alt="HyprChat tools panel" width="900">
@@ -125,10 +202,24 @@ Built-in tools cover code execution, file operations, shell commands, direct URL
 
 Deep Research runs multi-step searches, reads pages, cross-checks sources, and writes durable reports you can revisit, export, print, or add to a workspace. Starting a report opens a dedicated full-page composer with report type, model, context, and source settings, and finished reports live in a browsable history.
 
+The **Investigative Dossier** template also draws on government, court, FOIA, and investigative-document sources, with a source index aligned to the report's inline citations.
+
 <p align="center">
   <img src="docs/images/deepresearch.png" alt="HyprChat deep research report" width="440">
   <img src="docs/images/deepresearchReports.png" alt="HyprChat deep research report history" width="440">
 </p>
+
+### 🤖 Jarvis Personal Assistant
+
+Open **Assistant** to set up a personal assistant with a pinned conversation and scheduled check-in briefs. Briefs can gather tasks, notifications, notes, calendar, email, and weather into an update you can read or play aloud.
+
+- **Tasks and automations** — run prompts once, daily, weekly, monthly, or on a cron schedule; trigger tasks from events or webhooks. Tasks use the normal chat agent and its enabled tools.
+- **Notifications** — in-app notifications plus optional ntfy and email delivery, with timezone-aware quiet hours and an urgent override.
+- **Notes and calendar** — notes/todos, reminders, month/week/day views, and two-way CalDAV sync, available through panels and chat tools.
+- **Email** — connect IMAP/SMTP accounts for triage, reading, threaded replies, and mailbox actions. HTML messages render in a sanitized, sandboxed reader.
+- **Automation controls** — autonomous sending requires both the assistant-wide and account-level permissions; autonomous deletion is controlled per account and moves messages to Trash. Configure these in Assistant and Email settings.
+
+The scheduler runs inside HyprChat. Calendar, email, push, and weather integrations are optional; n8n is not required for scheduled tasks. Briefs and tools depend on the configured services and models being available.
 
 ### 🎨 Image Generation & Image Studio
 
@@ -177,11 +268,12 @@ Councils run multiple models against the same prompt, optionally debate across r
 
 Upload documents, attach knowledge bases to profiles, index uploaded code projects, and group related chats into workspaces. Workspaces can analyze topics and generate profile prompts from accumulated context.
 
-KB answers use **hybrid retrieval** (ChromaDB vectors + SQLite FTS5 keywords, fused) and render clickable inline `[n]` citation chips. Recent additions:
+KB answers use **hybrid retrieval** (ChromaDB vectors + SQLite FTS5 keywords, fused) and render clickable inline `[n]` citation chips.
 
 - **Add URL** — paste a web page or PDF URL into a KB card; it is fetched SSRF-safely, extracted, stored as markdown with source provenance, and indexed like an upload. Re-adding the same URL updates in place.
-- **Smart KB Reranking** — retrieval candidates are re-scored for relevance by a quick local model pass before answering; any error falls back to normal ranking.
+- **Smart KB Reranking** — optional local-model scoring improves relevance before answering; errors fall back to normal ranking.
 - **Scanned-PDF OCR** — PDFs with no text layer (scans, faxes, photographed docs) are OCR'd automatically during KB upload and chat PDF extraction (RapidOCR, CPU-only, up to 50 pages).
+- **Coder Reference Docs** — a managed coding library with source/version metadata and incremental refreshes. User-added documents outside its catalog remain untouched; see the [maintenance guide](docs/coder-docs.md).
 
 <p align="center">
   <img src="docs/images/knowledgeBase.png" alt="HyprChat knowledge base manager" width="440">
@@ -190,13 +282,13 @@ KB answers use **hybrid retrieval** (ChromaDB vectors + SQLite FTS5 keywords, fu
 
 ### 🧠 Memory & History Recall
 
-Global user memory captures who you are across all chats, while workspace memory collects reviewed suggestions and pinned instruction blocks per project — only memories you accept are ever injected into prompts. Ghost Mode keeps a chat entirely unsaved.
+Global memory stores user-level context; workspace memory adds reviewed suggestions and pinned instructions for a project. Only accepted/current memories are injected, and explicit requests to remember something can save an accepted memory directly. Ghost Mode avoids saved chat history and excludes KB/memory context.
 
 **Chat-history recall** extends memory across conversations: turns from memory-enabled chats are indexed into ChromaDB, a `search_history` tool lets the model answer "what did we decide about X?" from past conversations, and the Memory panel gains a semantic + keyword Search Past Conversations box. Edits re-index and deletes clean up.
 
 ### 🧩 Agents & Personas
 
-Agents are task profiles for coding, research, automation, and tool-heavy work. Personas are voice and scenario profiles with their own model, prompt, avatar, tools, knowledge bases, generation settings, and optional image appearance context for in-character photos. Photos sent by the persona are restricted based on their age rating. Yes, you can have nsfw conversations and images sent from your persona 😉.
+Agents are task profiles for coding, research, automation, and tool-heavy work. Personas cover conversational roles such as Master Developer as well as character and roleplay profiles. Each can have its own model, prompt, avatar, tools, knowledge bases, and generation settings. Character personas also support appearance context for photos and age-rating controls for adult content.
 
 <p align="center">
   <img src="docs/images/agents.png" alt="HyprChat agents manager" width="440">
@@ -211,7 +303,7 @@ Installation requires HTTPS. The reference setup uses **Tailscale Serve** to pro
 
 ### ⚙️ Settings, Analytics, Backup
 
-Every settings tab uses one titled-card design system: appearance, generation defaults, chat image defaults, RAG, Daedalus, voice, animated backgrounds, and service connections. Statistics tracks token usage, tokens/sec, estimated cloud spend, message ratings, and service health history, and the activity monitor watches downloads and long-running jobs.
+Settings covers appearance, generation defaults, RAG, Daedalus, images, voice, backgrounds, and service connections. The navigation rail can be reordered or customized per profile. Statistics tracks token usage, tokens/sec, estimated cloud spend, message ratings, and service health history; the activity monitor watches downloads and long-running jobs.
 
 **Backup & Restore** (Settings → Danger Zone) produces a one-click full data backup — a consistent SQLite copy with provider keys and connector secrets scrubbed, plus uploads, knowledge bases, and settings. Restores stage safely and apply on the next service restart, keeping the previous database as a `.pre-restore` copy.
 
@@ -220,7 +312,142 @@ Every settings tab uses one titled-card design system: appearance, generation de
   <img src="docs/images/activityMonitor.png" alt="HyprChat activity monitor" width="440">
 </p>
 
-## Architecture
+## Configuration
+
+Configure service connections and models in **Settings**. Environment variables supply startup defaults; [`.env.example`](.env.example) is the server-install template, and [`backend/config.py`](backend/config.py) defines source defaults.
+
+| Capability | Service / configuration | Typical port |
+|---|---|---|
+| Local chat and helpers | Ollama — `OLLAMA_URL`; choose installed chat/helper models | `11434` |
+| Knowledge bases | Ollama embeddings — `EMBED_MODEL`, default `nomic-embed-text` | Same Ollama service |
+| Cloud chat | OpenAI/Anthropic keys or a custom provider URL/key in Settings → Connections | Provider-specific |
+| Quick Search and web research | SearXNG — `SEARXNG_URL`; enable its JSON search format | `8888` |
+| Code execution | Codebox — `CODEBOX_URL` | `8585` |
+| Daedalus project work | OpenHands/Aider worker — `OPENHANDS_URL`, `AIDER_WORKER_URL` | `8586` |
+| Images | ComfyUI — `COMFYUI_URL`, checkpoint or saved workflow | `8188` |
+| Speech-to-text | OpenAI-compatible STT — `STT_URL`, `STT_MODEL` | `8001` in the reference setup |
+| Text-to-speech | OpenAI-compatible TTS — `TTS_URL`, `TTS_VOICE` | `8880` in the reference setup |
+| External automation | n8n — `N8N_URL`, `N8N_WEBHOOK_PATH` | `5678` |
+| Personal-assistant integrations | Email/CalDAV account settings, notification delivery, weather location | Service-specific |
+
+Use URLs reachable **from the backend**. `127.0.0.1` refers to that machine, not to another container or your browser. Empty ComfyUI/STT/TTS URLs leave the corresponding feature disabled.
+
+### Storage and Models
+
+Local storage defaults to `data/` beside the source. Set `HYPRCHAT_DATA_DIR` to choose another base, or override individual paths with `DATABASE_PATH`, `UPLOAD_DIR`, `KB_DIR`, `TOOLS_DIR`, `SANDBOX_DIR`, `SETTINGS_PATH`, and `CONNECTOR_SECRETS_PATH`. Individual paths take precedence, so remove the template's `/opt/hyprchat/data/...` overrides before using a different base.
+
+`DEFAULT_MODEL`, `WORKSPACE_MODEL`, `PLANNING_MODEL`, and `CODER_MODEL` supply model defaults. Use Settings for context budgets, helper models, and Daedalus stage overrides; persistent jobs remain disabled unless explicitly enabled. OpenAI/Anthropic credentials can also come from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+
+OCR is controlled by `PDF_OCR`; its CPU dependencies are included in the backend requirements. If they are unavailable, text-layer PDFs still work and OCR is skipped. Optional KB reranking and history recall have separate controls; see the environment template.
+
+### Search, Images, and Voice
+
+- **Search:** configure SearXNG and optional local planning/reranking as described in the [search guide](docs/web-search.md). `HYPRCHAT_OUTBOUND_PROXY` routes supported public fetches through an optional proxy; it is not required for an ordinary SearXNG connection. For the ProtonVPN setup, follow [SearXNG operations](scripts/searxng/README.md).
+- **Images:** connect an existing ComfyUI or use the optional companion-LXC helper. Choose a checkpoint/workflow in Settings or Image Studio; see [image generation setup](docs/image-generation-setup.md).
+- **Voice:** connect compatible STT/TTS services in Settings. Microphone access requires a secure browser context, such as localhost or HTTPS. The browser uses HyprChat's proxy, not the speech services directly.
+
+## Deployment
+
+### Deploy Monitor
+
+For the reference homelab, run from the checkout:
+
+```bash
+python3 deploy_monitor.py
+```
+
+The monitor reads the ignored `.deploy_config.json`, stages backend updates before activation, installs changed dependencies, and restarts affected services. Frontend changes trigger a build and deployment of the complete `dist/`. It also deploys the OpenHands/Aider worker bundle and Coder Docs maintenance modules. Review its first-time setup prompts before using it against existing hosts.
+
+Example configuration using SSH keys (replace the host placeholders). If using password authentication, set `password` locally and install `sshpass` on the deployment machine:
+
+```json
+{
+  "hyprchat": {"host": "<HYPRCHAT_SSH_HOST>", "user": "root", "password": ""},
+  "codebox": {"host": "<CODEBOX_SSH_HOST>", "user": "root", "password": ""}
+}
+```
+
+An optional `searxng` entry accepts the same fields plus `dev_ip`. First-time setup hardens an existing SearXNG installation; it does not install SearXNG or create Proton credentials. VPN activation requires existing OpenVPN profiles and credentials on that host. Omit the entry if access is through a Proxmox console, and follow the [SearXNG runbook](scripts/searxng/README.md) for manual maintenance. VPN scripts and systemd units are not part of the regular watched application deploy.
+
+### Manual Application Update
+
+For an **existing HyprChat installation**, run from the checkout on your development machine. Set the SSH destination first:
+
+```bash
+export HYPRCHAT_SSH='root@<SERVER_IP>'
+( cd frontend && npm ci && npm run build )
+
+ssh "$HYPRCHAT_SSH" 'mkdir -p /opt/hyprchat/backend/{agents,routes,db,tooling,seed_kb}'
+scp backend/*.py backend/requirements.txt "$HYPRCHAT_SSH:/opt/hyprchat/backend/"
+scp backend/agents/*.py "$HYPRCHAT_SSH:/opt/hyprchat/backend/agents/"
+scp backend/routes/*.py "$HYPRCHAT_SSH:/opt/hyprchat/backend/routes/"
+scp backend/db/*.py "$HYPRCHAT_SSH:/opt/hyprchat/backend/db/"
+scp backend/tooling/*.py "$HYPRCHAT_SSH:/opt/hyprchat/backend/tooling/"
+scp backend/seed_kb/*.py "$HYPRCHAT_SSH:/opt/hyprchat/backend/seed_kb/"
+scp CHANGELOG.md "$HYPRCHAT_SSH:/opt/hyprchat/"
+```
+
+If dependencies changed, install `backend/requirements.txt` using the interpreter shown in `systemctl cat hyprchat`. For the stock system-Python installer, this is `python3 -m pip install -r /opt/hyprchat/backend/requirements.txt --break-system-packages`; custom virtualenv deployments must use their own interpreter.
+
+Then replace the generated frontend directory on the server and restart. The incoming directory keeps the current UI available during transfer:
+
+```bash
+ssh "$HYPRCHAT_SSH" 'mkdir -p /opt/hyprchat/frontend/dist.incoming'
+scp -r frontend/dist/. "$HYPRCHAT_SSH:/opt/hyprchat/frontend/dist.incoming/"
+ssh "$HYPRCHAT_SSH" 'set -e
+  cd /opt/hyprchat/frontend
+  rm -rf dist.previous
+  if [ -d dist ]; then mv dist dist.previous; fi
+  mv dist.incoming dist
+  systemctl restart hyprchat'
+```
+
+Use a fresh `dist.incoming` directory for each update; remove a leftover staging directory before retrying a failed transfer. This copies the application and Coder Docs tooling, not KB data or worker dependencies. For Daedalus worker changes, use the deploy monitor's complete worker bundle or follow the [workflow guide](docs/daedalus-workflows.md). Finish with the checks below.
+
+## Operations and Verification
+
+On the server:
+
+```bash
+systemctl status hyprchat
+journalctl -u hyprchat -n 50 --no-pager
+# Follow logs or restart after backend/configuration changes:
+journalctl -u hyprchat -f
+# systemctl restart hyprchat
+```
+
+Run HTTP checks against the interface where HyprChat actually listens. Change the URL below for a private bind address or HTTPS proxy; the SSH address may be different.
+
+```bash
+export HYPRCHAT_URL='http://127.0.0.1:8000'
+curl -fsS "$HYPRCHAT_URL/api/health" | python3 -m json.tool
+curl -fsS "$HYPRCHAT_URL/api/models" | python3 -m json.tool
+```
+
+Open the UI, select an available model, and send a simple message. Optional integrations can report unavailable until configured; distinguish those from a backend startup failure. After frontend updates, refresh the browser and check its console and network requests if the UI is blank or assets fail to load.
+
+### Optional Feature Checks
+
+- **Search:** enable Quick Search for a current-information or coding question; check source cards and diagnostics. A responding SearXNG listener with failing engines can still be degraded.
+- **Coding:** restore/select Master Developer, attach the Coder Docs KB, and ask about an API with a short code sample. Confirm citations and syntax colors. Verify code execution only for installed runtimes.
+- **Images:** with ComfyUI configured, `GET /api/images/checkpoints` should return a list; it returns `503` while unconfigured. Try one Image Studio generation and one chat image request. Prompt enhancement also requires a reachable model.
+- **Voice:** test microphone transcription and reply playback from localhost or HTTPS after connecting STT/TTS.
+- **Assistant:** configure a check-in and use Run Now; inspect the brief and task status. Test email/calendar actions only with accounts you intend to use.
+
+### HTTPS and PWA
+
+Tailscale Serve is the reference HTTPS setup. Enable Serve for your tailnet, then run on the HyprChat host, using the backend's actual bind address:
+
+```bash
+tailscale serve --bg 'http://<HYPRCHAT_BIND_IP>:8000'
+tailscale serve status
+```
+
+Open the resulting HTTPS URL to install the PWA and use the microphone remotely. The service worker caches the app shell, not API responses or conversations.
+
+## Development
+
+### Architecture
 
 ```text
 User → HyprChat (:8000)
@@ -229,18 +456,19 @@ User → HyprChat (:8000)
          ├── Backend: FastAPI + SSE streaming + SQLite
          │    ├── backend.main:app entrypoint + extracted routers in backend/routes/
          │    ├── Chat/tool loop + smart model routing + auto-compaction
-         │    ├── Daedalus workflow router
+         │    ├── Daedalus legacy workflows + opt-in persistent jobs
          │    ├── Research + Quick Search
          │    ├── RAG + ChromaDB (hybrid retrieval, reranking, OCR)
          │    ├── MCP/OpenAPI connector tools
          │    ├── Image generation proxy + artifact-backed gallery
          │    ├── Voice STT/TTS proxy
          │    ├── Artifact Studio + Canvas AI edits + global/workspace memory
+         │    ├── Jarvis scheduler, assistant briefs, notes/calendar/email
          │    ├── Backup/restore engine
          │    └── Model, profile, workspace, council APIs
          ├── Ollama (:11434) - local LLM inference
          ├── OpenAI / Anthropic / Custom OpenAI-compatible (optional)
-         │    - cloud models via API keys, native tool calling
+         │    - native tools for OpenAI/Anthropic; text tools for custom
          ├── Codebox (:8585) - sandboxed execution
          ├── OpenHands Worker (:8586) - OpenHands + Aider bridge
          ├── SearXNG (:8888) - private web search
@@ -250,7 +478,7 @@ User → HyprChat (:8000)
          └── n8n (:5678) - external automation integration
 ```
 
-### Important Files
+### Source Map
 
 | Path | Purpose |
 |---|---|
@@ -258,246 +486,88 @@ User → HyprChat (:8000)
 | `backend/routes/` | Extracted FastAPI routers for health, settings/analytics, users, audio, cloud providers, HF, tools/connectors, model configs, Ollama model actions, artifacts, and backup |
 | `backend/agents/chat.py` | Streaming chat loop, tool calling, quick search injection, model routing, compaction, project-aware chat |
 | `backend/tools.py` | Tool execution, Daedalus routing/gates, OpenHands/Aider dispatch |
-| `backend/agents/*.py` | Daedalus agents, personas, reviewer, acceptance, project QA, indexer |
+| `backend/agents/*.py` | Chat agents, default personas including Master Developer, Daedalus review/repair/QA |
+| `backend/coder_*.py` / `backend/context_policy.py` | Persistent Daedalus jobs, worker operations, storage, and shared context settings |
+| `backend/seed_kb/` | Coder Docs source catalog, audit, and incremental refresh |
 | `backend/database.py` | SQLite schema, migrations, conversations, runs, workflows, reports |
 | `backend/model_providers.py` | OpenAI/Anthropic/Custom cloud model adapters, key storage, streaming bridges, price table |
 | `backend/provider_tools.py` | Native cloud tool calling — tool definition/message conversion and streamed tool-call parsing |
 | `backend/connectors.py` | MCP/OpenAPI connector discovery, credential placeholders, execution guardrails |
 | `backend/research.py` | Deep research and safe URL fetch pipeline |
-| `backend/quick_search.py` / `backend/search_agent.py` | Per-turn SearXNG search planning, ranking, page fetch, result cards |
+| `backend/quick_search.py` / `backend/search_agent.py` / `backend/search_runtime.py` | Shared interactive search, deadlines, partial results, ranking and context ([details](docs/web-search.md)) |
 | `backend/rag.py` / `backend/reranker.py` / `backend/ocr.py` | Hybrid RAG retrieval, smart KB reranking, scanned-PDF OCR, history recall |
 | `backend/comfyui.py` | ComfyUI workflow patching, image generation client, saved workflow library, model defaults, cleanup hooks |
 | `backend/voice.py` | Speech-to-text and text-to-speech proxy helpers for OpenAI-compatible local services |
 | `backend/canvas_edit.py` | Artifact Canvas AI selection edits |
 | `backend/backup.py` | Backup archive build, secret scrubbing, staged restore |
+| `backend/scheduler.py` / `backend/agents/assistant.py` | Scheduled tasks, event automations, and personal-assistant briefs |
+| `backend/pim.py` / `backend/caldav_sync.py` / `backend/email_client.py` | Notes, reminders, calendar sync, and email; companion modules handle triage, weather, and notifications |
 | `frontend/src/main.jsx` | React root app, root state, and chat flow |
 | `frontend/src/session.js`, `theme.js`, `modelHelpers.js` | Extracted API/session, theme, and model/render helper modules |
 | `frontend/src/ModelPicker.jsx`, `frontend/src/components/`, `frontend/src/panels/` | Extracted model picker, leaf widgets/render blocks, Artifact/Image Studio panels, Canvas editor, Analytics, and Prompt Library UI |
+| `frontend/src/syntaxHighlight.js` / `frontend/src/prism-languages.js` | Shared code-fence rendering and supported syntax grammars |
 | `frontend/public/` | PWA manifest, icons, and network-first service worker |
 | `deploy_monitor.py` | File watcher that deploys local changes to the homelab host |
 
-## Fresh Install
+### Tests and Builds
 
-HyprChat expects Python 3.11+, Ollama, and at least one pulled model. Codebox, OpenHands, SearXNG, ComfyUI, Speaches/Whisper, Kokoro TTS, and n8n are optional but unlock the heavier workflows.
-
-### Track A: Local Dev Clone
-
-Use this when you are running directly from a checkout. Backend storage defaults to repo-local `./data`, so a fresh clone does not need write access to `/opt/hyprchat`.
+Run from the repository root with the backend virtual environment active. Install the test runner alongside the backend requirements:
 
 ```bash
-git clone <repo-url> hyprchat
-cd hyprchat
-
-( cd frontend && npm install && npm run build )
-python3 -m pip install -r backend/requirements.txt
-
-( cd backend && HOST=127.0.0.1 PORT=8000 python3 main.py )
+python3 -m pip install -r backend/requirements.txt pytest
+python3 -m compileall -q backend
 ```
 
-Open `http://127.0.0.1:8000`.
-
-Override storage with `HYPRCHAT_DATA_DIR=/path/to/data` or the individual `DATABASE_PATH`, `UPLOAD_DIR`, `KB_DIR`, `TOOLS_DIR`, `SANDBOX_DIR`, `SETTINGS_PATH`, and `CONNECTOR_SECRETS_PATH` variables when needed.
-
-### Track B: Server Install (`/opt/hyprchat`)
-
-Use this for a service install on a VM/LXC/bare-metal server. The systemd unit uses `/opt/hyprchat/.env`, and `scripts/deploy.sh` creates that file from `.env.example` if it is missing.
+**Offline regression checks** for coding references and interactive search:
 
 ```bash
-# Build the frontend before deploy. frontend/dist/ is generated and not committed.
-( cd frontend && npm install && npm run build )
-
-# Copy or clone the project to /opt/hyprchat, including frontend/dist/.
-cd /opt/hyprchat
-sudo bash scripts/deploy.sh
+python3 -m pytest \
+  backend/tests/test_master_developer.py \
+  backend/tests/test_coder_docs_refresh.py \
+  backend/tests/test_rag_chunking_hardening.py \
+  backend/tests/test_search_agent.py \
+  backend/tests/test_search_runtime.py \
+  backend/tests/test_agent_research_hardening.py -q
 ```
 
-The deploy script verifies required files, creates the `hyprchat` system user/group, creates `/opt/hyprchat/data`, seeds `/opt/hyprchat/.env`, fixes ownership, installs Python dependencies, installs the systemd unit, and starts the service. The service runs one Uvicorn worker by default; keep that unless you have reviewed SQLite write behavior.
-
-The Proxmox scripts in `scripts/create-lxc.sh` and `scripts/create-comfyui-lxc.sh` are homelab helpers for this repo's reference setup. They are not required for a normal VM or bare-metal install.
-
-## Configuration
-
-Most settings can be changed in the app. Environment variables are still useful for first boot and service defaults:
+**Full backend suite**, including live integration cases when a server is available:
 
 ```bash
-HOST=127.0.0.1
-PORT=8000
-OLLAMA_URL=http://127.0.0.1:11434
-CODEBOX_URL=http://127.0.0.1:8585
-OPENHANDS_URL=http://127.0.0.1:8586
-SEARXNG_URL=http://127.0.0.1:8888
-COMFYUI_URL=
-COMFYUI_WORKFLOW_PATH=
-STT_URL=
-STT_MODEL=Systran/faster-distil-whisper-large-v3
-TTS_URL=
-TTS_VOICE=af_heart
-HYPRCHAT_OUTBOUND_PROXY=
-
-# Storage. These are server-install defaults; local dev can omit them.
-# To use HYPRCHAT_DATA_DIR as one custom base directory, remove/comment the
-# specific path overrides below.
-DATABASE_PATH=/opt/hyprchat/data/hyprchat.db
-UPLOAD_DIR=/opt/hyprchat/data/uploads
-TOOLS_DIR=/opt/hyprchat/data/tools
-KB_DIR=/opt/hyprchat/data/knowledge_bases
-SANDBOX_DIR=/opt/hyprchat/data/sandbox
-SETTINGS_PATH=/opt/hyprchat/data/settings.json
-CONNECTOR_SECRETS_PATH=/opt/hyprchat/data/connector_secrets.json
-
-IMAGE_CHAT_CHECKPOINT=
-IMAGE_CHAT_WORKFLOW=
-IMAGE_CHAT_RESOLUTION=1024x1024
-IMAGE_CHAT_VAE=
-IMAGE_CHAT_PROMPT_PREFIX=
-IMAGE_CHAT_NEGATIVE=
-IMAGE_CHAT_COMPOSE_MODEL=
-
-DEFAULT_MODEL=qwen3.5:27b
-PLANNING_MODEL=qwen3.5:27b
-CODER_MODEL=qwen2.5-coder:14b
-
-# Optional cloud model providers (or save keys per user in Settings → Connections)
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
+HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest backend/tests/ -v
 ```
 
-`HYPRCHAT_OUTBOUND_PROXY` is optional. The first-time deploy monitor can set it
-to `http://<searxng-host>:8899` after the SearXNG privacy setup verifies that a
-Proton OpenVPN tunnel and host-local proxy are active.
+Use a dedicated test instance with disposable data: integration tests create and modify resources. Endpoint tests skip when no server is reachable; missing optional dependencies can also cause skips, so a skipped test is not a verified pass. Browser and live model-evaluation cases have additional setup documented in the [Daedalus guide](docs/daedalus-workflows.md).
 
-Scanned-PDF OCR needs two optional packages on the server:
-`python3 -m pip install rapidocr-onnxruntime pypdfium2`. Without them, OCR is
-silently skipped and text-layer PDFs still work normally.
-
-Runtime settings live in the Settings overlay. Source defaults live in `backend/config.py`.
-
-## Optional Image Generation
-
-HyprChat boots cleanly without ComfyUI. When `COMFYUI_URL` is empty and no ComfyUI URL has been saved in Settings, Image Studio and chat `generate_image` are disabled rather than fatal.
-
-For setup details, see [Image Generation Setup](docs/image-generation-setup.md). It covers connecting an existing ComfyUI, the Proxmox companion LXC helper, the required checkpoint/default workflow expectations, the optional HyprChat ComfyUI control node, and the journal scrub helper used by full image-trace purge.
-
-## Deployment
-
-For this homelab setup, `deploy_monitor.py` is the fastest edit/deploy loop:
+**Frontend unit tests and production build:**
 
 ```bash
-python3 deploy_monitor.py
+( cd frontend && npm ci && npm test && npm run build )
 ```
 
-It reads `.deploy_config.json`, pushes changed backend/frontend files, restarts HyprChat after backend changes, and deploys `backend/openhands_worker.py` to Codebox when needed. The monitor watches the extracted backend route/db/tooling modules and the extracted frontend source modules, and rebuilds + ships the whole `dist/` on frontend changes.
+The frontend tests include the shared syntax-highlighting helpers. Build output belongs in `frontend/dist/`; source changes belong in `frontend/src/`.
 
-Optional `.deploy_config.json` SearXNG entry:
+### Stack and Repository Conventions
 
-```json
-{
-  "hyprchat": {"host": "192.168.1.120", "user": "root", "password": "<local-only-password>"},
-  "codebox": {"host": "192.168.1.201", "user": "root", "password": "<local-only-password>"},
-  "searxng": {
-    "host": "192.168.1.141",
-    "user": "root",
-    "password": "<local-only-password>",
-    "dev_ip": "<optional-dev-ip>"
-  }
-}
-```
-
-On first-time full deploy, a configured `searxng` host runs
-`scripts/setup-searxng-privacy.sh`. The script hardens an existing SearXNG
-install; it does not install SearXNG or create Proton credentials. To activate
-the VPN-backed proxy, place Proton OpenVPN files at
-`/etc/openvpn/proton-ovpn/*.ovpn` and credentials at
-`/etc/openvpn/proton-ovpn/auth.txt` on the SearXNG host before running setup. If
-those files are absent, deploy continues with a warning and does not set
-`HYPRCHAT_OUTBOUND_PROXY`.
-
-Manual deploy:
-
-```bash
-scp backend/*.py root@<SERVER_IP>:/opt/hyprchat/backend/
-scp backend/agents/*.py root@<SERVER_IP>:/opt/hyprchat/backend/agents/
-scp backend/routes/*.py root@<SERVER_IP>:/opt/hyprchat/backend/routes/
-scp backend/db/*.py root@<SERVER_IP>:/opt/hyprchat/backend/db/
-scp backend/tooling/*.py root@<SERVER_IP>:/opt/hyprchat/backend/tooling/
-
-# Frontend: build on the dev machine, then ship the WHOLE dist/ (the hashed
-# asset names change every build, so clear the old ones first).
-( cd frontend && npm run build )
-ssh root@<SERVER_IP> "rm -rf /opt/hyprchat/frontend/dist/assets"
-scp -r frontend/dist/. root@<SERVER_IP>:/opt/hyprchat/frontend/dist/
-
-ssh root@<SERVER_IP> "systemctl restart hyprchat"
-```
-
-## Operations
-
-```bash
-journalctl -u hyprchat -f
-systemctl restart hyprchat
-systemctl status hyprchat
-curl -s http://127.0.0.1:8000/api/health
-```
-
-If you bind HyprChat to a private Tailscale IP, use that IP for health checks and tests. For HTTPS + PWA install, enable Tailscale Serve on the host:
-
-```bash
-tailscale serve --bg http://<hyprchat-bind-ip>:8000
-tailscale serve status
-```
-
-## Post-Install Verification
-
-Run these against the interface where HyprChat is actually listening:
-
-```bash
-curl -s http://127.0.0.1:8000/api/health | python3 -m json.tool
-curl -s http://127.0.0.1:8000/api/models | python3 -m json.tool
-curl -s http://127.0.0.1:8000/api/images/checkpoints | python3 -m json.tool
-curl -s -X POST http://127.0.0.1:8000/api/images/enhance-prompt \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"a small cabin at dusk"}' | python3 -m json.tool
-```
-
-`/api/images/checkpoints` returns `503` until ComfyUI is configured; after image setup it should return a checkpoint list. Prompt enhancement requires a reachable model provider. Finish the media check in the UI by running one Image Studio generation and one chat request that calls `generate_image`.
-
-## Testing
-
-Fast syntax check:
-
-```bash
-python3 -m py_compile backend/*.py backend/agents/*.py backend/routes/*.py backend/db/*.py backend/tooling/*.py
-```
-
-Integration tests expect a live HyprChat instance:
-
-```bash
-cd backend
-python3 -m pip install -r requirements.txt pytest
-HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest tests/ -v
-```
-
-Daedalus research/fixer hardening coverage requires `aiosqlite` from
-`backend/requirements.txt`; `backend/tests/test_agent_research_hardening.py`
-is a required CI check and will skip in incomplete local test environments.
-
-## Stack
-
-| Layer | Tech |
+| Layer | Technology |
 |---|---|
-| Backend | Python 3.11+, FastAPI, httpx, aiosqlite |
-| Frontend | React 18, Vite build with npm-bundled libs; installable PWA with a network-first service worker |
-| Database | SQLite + ChromaDB |
-| LLM Runtime | Ollama with native tool calling plus text fallback; optional OpenAI/Anthropic/custom cloud models with native provider tool calling |
-| Search | SearXNG |
-| Image Generation | ComfyUI through backend-proxied Image Studio and chat `generate_image` |
-| Voice | OpenAI-compatible STT/TTS services proxied through HyprChat, e.g. Speaches and Kokoro |
-| Coding Sandbox | Codebox LXC + OpenHands + Aider |
-| Automation | External n8n integration |
+| Backend | Python, FastAPI, httpx, aiosqlite; one Uvicorn worker |
+| Frontend | React 18, Vite, Prism code highlighting, CodeMirror Canvas, installable PWA |
+| Storage | SQLite + ChromaDB; hybrid vector/keyword retrieval |
+| Models | Ollama; optional OpenAI, Anthropic, and custom compatible providers |
+| Coding | Codebox with OpenHands/Aider; optional persistent Daedalus controller |
+| Assistant | In-process scheduler, CalDAV, IMAP/SMTP, optional ntfy; external n8n integration |
+| Search and media | SearXNG, ComfyUI, compatible STT/TTS services |
 
-## Project Notes
+Keep secrets and generated state out of Git: deploy config, `.env` credentials, keys, databases, uploads, build output, IDE metadata, and raw run reports. The sanitized `.env.example`, source code, and curated documentation stay tracked. See [`.gitignore`](.gitignore).
 
-- The frontend is a Vite app. Build on the dev machine (`cd frontend && npm run build`); the server just serves `frontend/dist/` and stays Node-free.
-- SQLite is the default database.
-- Tool-call fallback stays because not every Ollama model supports native tools.
-- Keep secrets out of Git: `.deploy_config.json`, `.env*`, keys, tokens, databases, and uploaded data.
+## Documentation
+
+| Guide | What it covers |
+|---|---|
+| [Changelog](CHANGELOG.md) | Release history and recent changes |
+| [Master Developer and Coder Docs](docs/coder-docs.md) | Persona setup, reference-library auditing and incremental refresh |
+| [Interactive web search](docs/web-search.md) | Planning, ranking, deadlines, citations, and diagnostics |
+| [SearXNG operations](scripts/searxng/README.md) | VPN recovery, access rules, verification, and configuration backups |
+| [Daedalus workflows](docs/daedalus-workflows.md) | Default versus experimental execution, settings, verification, and evaluation limits |
+| [Image generation setup](docs/image-generation-setup.md) | ComfyUI, companion media services, workflows, and cleanup |
+| [Environment template](.env.example) | Server startup and optional-feature settings |

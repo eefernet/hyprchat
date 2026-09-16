@@ -29,6 +29,7 @@ import shlex
 import uuid
 
 import config
+import context_policy
 import database as db
 import cancel_registry
 import model_providers
@@ -730,6 +731,14 @@ async def run_fixer(http, events, conv_id: str, *,
             return ""
         return f"{project_dir.rstrip('/')}/{p}"
 
+    async def _cancel_before_mutation():
+        if cancel_registry.is_cancelled(run_id):
+            cancelled = {"status": "cancelled", "files_touched": sorted(files_touched),
+                         "project_dir": project_dir, "summary": "Fixer cancelled; no further writes dispatched"}
+            if run_id:
+                await db.update_run(run_id, status="cancelled", result_envelope=cancelled, ended=True)
+            raise cancel_registry.RunCancelled(run_id)
+
     # 2. Collect all scope files across all issues, dedup, then batch into
     # a single LLM call. This replaces the old per-issue sequential loop
     # that made N separate Ollama calls (one per issue).
@@ -813,7 +822,7 @@ async def run_fixer(http, events, conv_id: str, *,
     issue_block = "\n\n".join(issue_blocks)
 
     # Compute per-file character budget so the prompt fits the context window.
-    _fixer_ctx = config.DEFAULT_NUM_CTX or 16384
+    _fixer_ctx = context_policy.resolve("fixer").num_ctx
     _char_budget = _fixer_ctx * 3
     _overhead = len(issue_block) + len(research_section) + len(attempts_section) + 2000
     _file_budget = max(_char_budget - _overhead, 8000)
@@ -882,7 +891,7 @@ async def run_fixer(http, events, conv_id: str, *,
         # No num_predict cap: the Fixer emits complete files.
         coro = model_providers.complete_chat(
             http, fixer_model, prompt,
-            temperature=0.2, num_ctx=config.DEFAULT_NUM_CTX, timeout=600,
+            temperature=0.2, num_ctx=context_policy.resolve("fixer").num_ctx, timeout=600,
             ollama_url=config.OLLAMA_URL,
         )
         text = await cancel_registry.await_cancellable(coro, run_id)
@@ -1019,8 +1028,10 @@ async def run_fixer(http, events, conv_id: str, *,
                             )
 
             for path in sorted(pending_deletes):
+                await _cancel_before_mutation()
                 rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
                 await _step("deleting", rel)
+                await _cancel_before_mutation()
                 ok, err_detail = await _delete_file_sandbox(http, path)
                 if ok:
                     files_touched.add(path)
@@ -1031,12 +1042,15 @@ async def run_fixer(http, events, conv_id: str, *,
             for path, content in pending_contents.items():
                 rel = path[len(project_dir) + 1:] if path.startswith(project_dir + "/") else path
                 await _step("writing", rel)
+                await _cancel_before_mutation()
                 ok, err_detail = await _write_file_sandbox(http, path, content)
                 if ok:
                     files_touched.add(path)
                     diffs.append({"path": path, "summary": pending_summaries.get(path) or "(no summary)"})
                 else:
                     errors.append(f"Write failed for {path} — {err_detail}")
+
+    await _cancel_before_mutation()
 
     # 3. Build envelope.
     if files_touched and not errors:

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
+import { parseUtcishMs } from '../datetime.js';
+import useIsMobile from '../useIsMobile.js';
 import {
   _eventsHaveDaedalus,
   _eventsHaveDaedalusFullBuild,
@@ -9,6 +11,8 @@ import {
   _isDaedalusOutput,
 } from '../daedalusTimeline.js';
 import { ArtifactCard } from './artifactComponents.jsx';
+import DaedalusJobCard from './DaedalusJobCard.jsx';
+import EmptyState from './EmptyState.jsx';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
 
@@ -431,8 +435,10 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   const [autoExpanded, setAutoExpanded] = useState(false);
   const [err, setErr] = useState(null);
   const [artifacts,setArtifacts]=useState([]);
+  const runRef = useRef(null);      // latest run for the poll's terminal check
+  const failsRef = useRef(0);       // consecutive fetch failures
   useEffect(()=>{
-    if(initialRun&&initialRun.id===runId)setRun(initialRun);
+    if(initialRun&&initialRun.id===runId){runRef.current=initialRun;setRun(initialRun);}
   },[initialRun,runId]);
   // Initial fetch + when run terminal status changes, refetch for envelope.
   useEffect(()=>{
@@ -443,17 +449,23 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
         const r = await fetch(`${API}/api/runs/${runId}`);
         if(!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
-        if(!cancelled) setRun(d);
-      }catch(e){if(!cancelled) setErr(e.message||"load failed");}
+        failsRef.current=0;
+        if(!cancelled){runRef.current=d; setRun(d);}
+      }catch(e){
+        failsRef.current+=1;
+        if(!cancelled) setErr(e.message||"load failed");
+      }
     };
     load();
     // Light poll while the run is still in flight — covers reconnect mid-run
-    // when liveEvts haven't yet filled in. Stops as soon as we see a terminal status.
+    // when liveEvts haven't yet filled in. Stops on a terminal status, or
+    // after 3 consecutive failures (a deleted run 404s forever — without the
+    // cap every stale RunCard in a long chat leaked a 4s poller for good).
+    const TERMINAL=["succeeded","failed","partial","cancelled","skipped"];
     const id = setInterval(()=>{
-      setRun(cur=>{
-        if(cur && (cur.status==="succeeded"||cur.status==="failed"||cur.status==="partial"||cur.status==="cancelled"||cur.status==="skipped")){clearInterval(id);return cur;}
-        load(); return cur;
-      });
+      const cur=runRef.current;
+      if((cur&&TERMINAL.includes(cur.status))||failsRef.current>=3){clearInterval(id);return;}
+      load();
     }, 4000);
     return ()=>{cancelled=true; clearInterval(id);};
   },[runId]);
@@ -487,7 +499,7 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   const status = run?.status || "loading";
   const colour = status==="succeeded" ? t.ok :
                  status==="failed" ? t.err :
-                 status==="partial" ? "#e9a45a" :
+                 status==="partial" ? t.warm :
                  (status==="cancelled"||status==="skipped") ? t.mut :
                  t.acc;
   const statusLabel = {
@@ -513,10 +525,12 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
     status === "failed" ||
     (role === "reviewer" && (env.status === "issues" || env.status === "error"))
   );
-  if (run && needsAttention && !autoExpanded) {
-    setAutoExpanded(true);
-    setExpanded(true);
-  }
+  useEffect(()=>{
+    if (run && needsAttention && !autoExpanded) {
+      setAutoExpanded(true);
+      setExpanded(true);
+    }
+  },[run,needsAttention,autoExpanded]);
   const DetailBody = ({compact=false}={}) => <div style={{padding:compact?"8px 0 0":"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:compact?360:320,overflowY:"auto",fontFamily:font}}>
     {chips.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
       {chips.map(([label,value],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:9,color:t.mut,border:`1px solid ${t.brd}2e`,background:`${t.surface}55`,borderRadius:999,padding:"2px 7px",maxWidth:compact?260:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
@@ -609,13 +623,22 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   </div>;
 };
 
-const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
+function WorkflowCard(props){
+  return props.workflow?.workflow_version===3 ? <DaedalusJobCard {...props}/> : <LegacyWorkflowCard {...props}/>;
+}
+function DaedalusSummary(props){
+  const jobs=(props.workflows||[]).filter(w=>w.workflow_version===3);
+  if(jobs.length)return jobs.map(workflow=><DaedalusJobCard key={workflow.id} workflow={workflow} t={props.t} font={props.font} onOpenArtifact={props.onOpenArtifact}/>);
+  return <LegacyDaedalusSummary {...props}/>;
+}
+
+const LegacyWorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   const [wf,setWf]=useState(workflow);
   const [artifacts,setArtifacts]=useState([]);
   useEffect(()=>{setWf(workflow);},[workflow?.id,workflow?.updated_at]);
   useEffect(()=>{
     if(!wf?.id)return;
-    const active=["planning","reviewing","fixing","accepting"].includes(wf.state);
+    const active=["queued","planning","building","reviewing","fixing","accepting","inspecting","coding","checking","packaging","cancelling"].includes(wf.state);
     if(!active)return;
     let stop=false;
     const tick=async()=>{
@@ -639,7 +662,7 @@ const WorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   if(!wf)return null;
   const state=wf.state||"planning";
   const artifact=wf.artifact_status||"not_ready";
-  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?"#e9a45a":t.acc;
+  const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?t.warm:t.acc;
   const modeLabel=(wf.mode||"workflow").replaceAll("_"," ");
   const contract=wf.contract_json||{};
   return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
@@ -848,13 +871,7 @@ const _fmtElapsed = (start, now=Date.now())=>{
   if(s>=60)return`${Math.floor(s/60)}m ${s%60}s`;
   return`${s}s`;
 };
-const _parseUtcishMs = (value)=>{
-  if(!value)return 0;
-  if(typeof value==="number")return value>1000000000000?value:value*1000;
-  const s=String(value).trim();
-  const ms=Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)?s:`${s}Z`);
-  return Number.isFinite(ms)?ms:0;
-};
+const _parseUtcishMs = parseUtcishMs; // canonical impl lives in datetime.js
 const _stripStatusEmoji = (txt="")=>String(txt||"").replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,"").trim();
 const _phaseFromEvent = (ev)=>{
   if(!ev)return null;
@@ -925,6 +942,12 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
 // Inline tool status: shows latest pill, expands to show all
 const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifact,historical,md,savedEvts,msgContent})=>{
   const [showAll,setShowAll]=useState(false);
+  // Hoisted from SourceLinkCards: that component type is recreated every
+  // render (inline definition), so React remounts it constantly — local
+  // state there resets on every parent re-render, and its conditional
+  // useState after an early return only avoided crashing because of the
+  // remount. Keep its state here.
+  const [slExpanded,setSlExpanded]=useState(false);
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
@@ -1126,14 +1149,14 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
               {hasThumbnail
                 ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                 :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                  <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=64`} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                  <img src={_qsFaviconUrl(hn,64)} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                   <span style={{fontSize:9,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
                 </div>}
               {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
                 <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
               </div>}
               {hasThumbnail&&hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                <img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=32`} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+                <img src={_qsFaviconUrl(hn,32)} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
               </div>}
             </div>
             <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
@@ -1150,7 +1173,6 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   const SourceLinkCards = ()=>{
     const allLinks=sourceLinkEvts.flatMap(e=>(e.data?.links||[]));
     if(!allLinks.length)return null;
-    const [slExpanded,setSlExpanded]=useState(false);
     const shown=slExpanded?allLinks:allLinks.slice(0,8);
     return <div style={{marginTop:10}}>
       <div style={{fontSize:9,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
@@ -1164,7 +1186,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
           return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:0}}>
             <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:10,fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
               onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}20`} onMouseLeave={e=>e.currentTarget.style.background=`${t.warm}10`}>
-              {isPdf?<span>📄</span>:<img src={`https://www.google.com/s2/favicons?domain=${hn}&sz=16`} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
+              {isPdf?<span>📄</span>:<img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
               <span>{title}</span>
             </a>
             {onPreview&&<button onClick={()=>onPreview(title,lnk.url)} title="Preview in panel"
@@ -1219,17 +1241,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
 
 const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
 
-// Shared designed empty state — icon + title + hint + optional action button.
-function EmptyState({t,font,icon,title,hint,action,compact}){
-  return <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",
-    padding:compact?"18px 14px":"36px 20px",border:`1px dashed ${t.brd}44`,borderRadius:10,
-    background:`${t.surface}30`,color:t.mut,fontFamily:font}}>
-    <div style={{fontSize:compact?22:30,lineHeight:1,opacity:.9,animation:"float 4s ease-in-out infinite",display:"flex",justifyContent:"center"}}>{icon}</div>
-    <div style={{fontSize:compact?11:13,fontWeight:800,color:t.dim}}>{title}</div>
-    {hint&&<div style={{fontSize:compact?10:11,lineHeight:1.55,maxWidth:420}}>{hint}</div>}
-    {action||null}
-  </div>;
-}
+// Shared designed empty state — now lives in its own module (components/EmptyState.jsx)
+// so artifactComponents.jsx can import it without a cycle; re-exported below.
 
 const TIPS={
   chunk_size:"Characters per text chunk when indexing KB files. Smaller = more precise retrieval, larger = more context per chunk. Default: 500",
@@ -1250,6 +1263,7 @@ const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k]
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
 function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
+  const isMobile=useIsMobile();
   const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
   const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
   const emptyDraft={display_name:"",legal_name:"",birthday:"",age:"",bio:"",interestsText:"",linksText:"",notes:""};
@@ -1401,7 +1415,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
       <div style={{display:"flex",gap:8}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
+      <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
         <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
           <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7,marginBottom:12}}>User Profile</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
@@ -1423,7 +1437,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
             <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>Add Memory</div>
-            <div style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:8,alignItems:"start"}}>
+            <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"160px 1fr",gap:8,alignItems:"start"}}>
               <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
               <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             </div>
@@ -1466,7 +1480,8 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   </div>;
 }
 
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction}){
+  const isMobile=useIsMobile();
   const [tab,setTab]=React.useState("convs");
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
@@ -1679,7 +1694,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
       <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
       <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
-        {filteredAvail.length===0&&<div style={{fontSize:11,color:t.mut,padding:8,textAlign:"center"}}>All conversations are already in this workspace.</div>}
+        {filteredAvail.length===0&&<EmptyState t={t} font={font} compact icon={<IC.Chat/>} title="All conversations are already in this workspace"/>}
         {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
           <span style={{fontSize:12,flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
           <span style={{fontSize:10,color:t.mut}}>{c.model||""}</span>
@@ -1689,12 +1704,12 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     </div>}
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.conversations||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No conversations yet.<br/>Click "+ Add Chats" to add some.</div>}
+        {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint={'Click "+ Add Chats" to add some.'}/>}
         {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>💬</span>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(c.updated_at).toLocaleDateString():""}</div>
+            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
           </div>
           <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
           <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
@@ -1725,7 +1740,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
           <button onClick={refreshMemory} disabled={memLoading} style={btnS(t.acc)}>{memLoading?"Loading":"Refresh"}</button>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
+        <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Workspace Instructions</div>
             <textarea value={wsInstructions} onChange={e=>setWsInstructions(e.target.value)} placeholder="Stable project instructions, constraints, tone, or goals..." style={{...inputS,minHeight:92,lineHeight:1.5,resize:"vertical"}}/>
@@ -1762,7 +1777,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </details>}
       </div>;})()}
       {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.reports||[]).length&&<div style={{textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No reports yet.<br/>Add reports from Deep Research.</div>}
+        {!(ws.reports||[]).length&&<EmptyState t={t} font={font} icon={<IC.Research/>} title="No reports yet" hint="Add reports from Deep Research."/>}
         {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>📊</span>
           <div style={{flex:1,minWidth:0}}>
@@ -1774,8 +1789,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </div>;})}
       </div>}
       {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
-        {!(ws.files||[]).length&&<div style={{width:"100%",textAlign:"center",padding:40,color:t.mut,fontSize:12}}>No artifacts yet.<br/>Artifacts are tracked automatically when the AI downloads them in workspace chats.</div>}
-        {(ws.files||[]).map(f=><ArtifactCard key={f.id||`${f.filename}-${f.created_at}`} artifact={f} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} compact/>)}
+        {!(ws.files||[]).length&&<div style={{gridColumn:"1/-1"}}><EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Artifacts are tracked automatically when the AI downloads them in workspace chats."/></div>}
+        {(ws.files||[]).map(f=><ArtifactCard key={f.id||`${f.filename}-${f.created_at}`} artifact={f} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} confirmAction={confirmAction} compact/>)}
       </div>}
     </div>
   </div>;
@@ -1944,7 +1959,7 @@ const _phaseKeyForRun = (run)=>{
   if(base==="qa")return"review";
   return"work";
 };
-const _lastRun = (runs=[])=>runs[runs.length-1]||null;
+const _lastRun = (runs=[])=>[...runs].sort((a,b)=>String(b.started_at||b.ended_at||"").localeCompare(String(a.started_at||a.ended_at||"")))[0]||null;
 const _phaseState = (runs=[], fallback="queued")=>{
   if(runs.some(_runIsActive))return"running";
   const latest=_lastRun(runs);
@@ -2055,14 +2070,14 @@ const _sanitizeStepDetail=(text)=>{
 
 // Unified Daedalus progress card: header + phase stepper rail + one detail
 // panel for the selected phase. Replaces the old six stacked phase cards.
-function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview,onQuickAction}){
+function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,font,md,msgContent="",live=false,onOpenArtifact,onPreview,onQuickAction}){
   const [runs,setRuns]=useState([]);
   const [loadErr,setLoadErr]=useState("");
   const [pickedPhase,setPickedPhase]=useState("");
   const [rawPill,setRawPill]=useState(null);
   const runIdsKey=runIds.join("|");
   useEffect(()=>{
-    let stop=false;
+    let stop=false,timer=null;
     const load=async()=>{
       if(!runIds.length){setRuns([]);return;}
       try{
@@ -2080,12 +2095,12 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
             return runIds.map((rid,idx)=>rows[idx]||prevById.get(rid)).filter(Boolean);
           });
           setLoadErr("");
+          if(rows.some(r=>!r||["queued","running","pending"].includes(r.status)))timer=setTimeout(load,4000);
         }
-      }catch(e){if(!stop)setLoadErr(e.message||"run load failed");}
+      }catch(e){if(!stop){setLoadErr(e.message||"run load failed");timer=setTimeout(load,4000);}}
     };
     load();
-    const id=live&&runIds.length?setInterval(load,4000):null;
-    return()=>{stop=true;if(id)clearInterval(id);};
+    return()=>{stop=true;if(timer)clearTimeout(timer);};
   },[runIdsKey,live]);
 
   const events=useMemo(()=>{
@@ -2102,7 +2117,7 @@ function DaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[],t,fo
   const latestArtifact=artifactEvents[artifactEvents.length-1]||null;
   const wf=Array.isArray(workflows)&&workflows.length?workflows[0]:null;
   const wfAccepted=(workflows||[]).some(w=>w.state==="accepted"||w.artifact_status==="delivered"||w.artifact_status==="partial_delivered");
-  const delivered=wfAccepted||tools.has("download_project")||tools.has("download_file")||artifactEvents.length>0;
+  const delivered=wf?["delivered","partial_delivered"].includes(wf.artifact_status):artifactEvents.some(a=>/\.(zip|tar\.gz|tgz)$/i.test(a.filename||""));
   const projectName=wf?.project_id
     || runs.map(r=>r.project_id||_runEnv(r).project_id||_basename(_runEnv(r).project_dir)).find(Boolean)
     || (latestArtifact?.filename||"").replace(/(\.tar\.gz|\.tgz|\.zip|\.gz)$/i,"")

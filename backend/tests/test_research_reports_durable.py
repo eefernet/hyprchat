@@ -309,7 +309,7 @@ def test_research_report_routes_cancel_and_rerun_preserve_original_fields(tmp_pa
 
     async def scenario():
         rerun = await main.rerun_research_report("research-old")
-        await asyncio.sleep(0)
+        await asyncio.gather(*list(main._BG_TASKS))
         return rerun, await db.get_research_report(rerun["id"]), await db.get_research_report("research-old")
 
     rerun_response, rerun_report, old_report = _run(scenario())

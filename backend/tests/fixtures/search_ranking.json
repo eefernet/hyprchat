@@ -1,0 +1,35 @@
+[
+  {
+    "name": "dated_news", "query": "Orion launch today", "freshness": "day", "date": "2026-09-14",
+    "expected": ["https://agency.gov/new", "https://reporter.example/new"],
+    "results": [
+      {"url": "https://agency.gov/new", "title": "Orion launch today", "content": "Official flight bulletin: departure confirmed; payload successfully reached orbit.", "published_date": "2026-09-14", "vector": [0.7, 0.714142]},
+      {"url": "https://reporter.example/new", "title": "Orion launch today report", "content": "Local journalists describe spectators gathering for the latest spacecraft departure.", "published_date": "2026-09-14", "vector": [0.8, 0.6]},
+      {"url": "https://archive.example/old", "title": "Orion launch today", "content": "Orion launch today live updates from an archived flight, with launch timing and news.", "published_date": "2022-01-01", "vector": [1, 0]}
+    ]
+  },
+  {
+    "name": "independent_conflicting_accounts", "query": "Bridge closure dispute", "freshness": "none",
+    "expected": ["https://city.gov/bridge", "https://residents.example/bridge"],
+    "results": [
+      {"url": "https://city.gov/bridge", "title": "Bridge closure dispute: city statement", "content": "Engineers say structural inspection found the crossing safe and recommend reopening immediately.", "vector": [1, 0]},
+      {"url": "https://residents.example/bridge", "title": "Bridge closure dispute: residents report", "content": "Witnesses describe cracks growing overnight and demand the road remain shut pending independent review.", "vector": [0.999, 0.04471]}
+    ]
+  },
+  {
+    "name": "technical_primary_source", "query": "Python task cancellation", "freshness": "none",
+    "expected": ["https://docs.python.org/3/library/asyncio-task.html"],
+    "results": [
+      {"url": "https://docs.python.org/3/library/asyncio-task.html", "title": "Python task cancellation", "content": "Python task cancellation raises CancelledError; cleanup runs in try/finally and cancellation normally propagates.", "vector": [0.8, 0.6]},
+      {"url": "https://forum.example/topic", "title": "Unrelated discussion", "content": "A model embedding happens to match this post although the snippet is about a different language and runtime.", "vector": [1, 0]}
+    ]
+  },
+  {
+    "name": "evergreen_relevance", "query": "Skyrim factions", "freshness": "none",
+    "expected": ["https://en.uesp.net/wiki/Skyrim:Civil_War"],
+    "results": [
+      {"url": "https://en.uesp.net/wiki/Skyrim:Civil_War", "title": "Skyrim factions", "content": "Skyrim factions include the Imperial Legion and Stormcloaks in the game's civil war questline.", "vector": [1, 0]},
+      {"url": "https://history.example/article", "title": "Ancient faction systems", "content": "A discussion of historical politics unrelated to the video game.", "vector": [0, 1]}
+    ]
+  }
+]

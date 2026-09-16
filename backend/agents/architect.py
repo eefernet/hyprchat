@@ -22,6 +22,7 @@ import re
 import uuid
 
 import config
+import context_policy
 import database as db
 import cancel_registry
 import model_providers
@@ -299,11 +300,11 @@ async def _call_planning_model(http, model: str, prompt: str,
     on the 600s timeout.
     """
     if not num_ctx:
-        num_ctx = _configured_num_ctx()
+        num_ctx = context_policy.resolve("architect").num_ctx
     try:
         coro = model_providers.complete_chat(
             http, model, prompt,
-            temperature=0.2, num_ctx=num_ctx, num_predict=4096,
+            temperature=0.2, num_ctx=num_ctx, num_predict=context_policy.resolve("architect").num_predict,
             format_json=True, timeout=600,
             ollama_url=config.OLLAMA_URL,
         )
@@ -432,7 +433,7 @@ async def _run_architect_inner(http, events, conv_id: str, *, run_id: str,
     kb_section = "\n\n".join(kb_section_parts) if kb_section_parts else "(no reference docs available)"
 
     base_prompt = _ARCHITECT_PROMPT.format(
-        task=task[:2500],
+        task=task,
         language=language_hint or "(detect from task)",
         kb_section=kb_section,
     )
@@ -593,7 +594,9 @@ def _render_file_tree(manifest: list[dict], project_id: str = "project") -> str:
     # original manifest entry attached so we can render purpose/LOC in comments.
     root: dict = {}
     for entry in manifest:
-        path = (entry.get("path") or "").strip().lstrip("./")
+        # removeprefix, not lstrip: lstrip("./") eats ALL leading dots and
+        # mangles dotfiles (".gitignore" → "gitignore" in the plan tree).
+        path = (entry.get("path") or "").strip().removeprefix("./")
         if not path:
             continue
         parts = path.split("/")

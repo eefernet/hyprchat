@@ -12,6 +12,12 @@ export PATH
 #    a real searxng-uid egress probe (not tun0 alone)
 set -euo pipefail
 
+# Every entry point uses the same systemd owner. In particular a watchdog
+# oneshot must not own (and kill on exit) the long-lived OpenVPN process.
+if [ "${SEARXNG_ROTATION_OWNER:-}" != "systemd" ]; then
+    exec systemctl restart protonvpn-rotate.service
+fi
+
 CONF_DIR="/etc/openvpn/proton-ovpn"
 AUTH_FILE="$CONF_DIR/auth.txt"
 LOG_FILE="/var/log/vpn-rotation.log"
@@ -28,11 +34,10 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" | tee -a "$LOG_FILE"; }
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     log "rotation already running (lock held) — skipping"
-    exit 0
+    exit 75
 fi
 
-"$KILLSWITCH" apply || true
-ip route del default table "$TABLE" 2>/dev/null || true
+"$KILLSWITCH" apply
 
 TODAY=$(date +%Y-%m-%d)
 mkdir -p "$USAGE_DIR"
@@ -84,18 +89,32 @@ done < <(printf '%s\n' "${CONFIGS[@]}" | shuf)
 vpn_up_ip() {
     ip link show tun0 >/dev/null 2>&1 || return 1
     ip route show table "$TABLE" default 2>/dev/null | grep -q 'dev tun0' || return 1
-    runuser -u searxng -- curl -4 -sS --connect-timeout 8 -o /dev/null https://1.1.1.1/ >/dev/null 2>&1 || return 1
+    runuser -u searxng -- curl -4 -sS --connect-timeout 8 --max-time 12 -o /dev/null https://1.1.1.1/ >/dev/null 2>&1 || return 1
     local exitip=""
-    exitip=$(runuser -u searxng -- curl -4 -sS --connect-timeout 8 https://ifconfig.me/ip 2>/dev/null || true)
+    exitip=$(runuser -u searxng -- curl -4 -sS --connect-timeout 3 --max-time 5 https://ifconfig.me/ip 2>/dev/null || true)
     echo "${exitip:-unknown}"
+}
+
+stop_openvpn() {
+    local pid
+    pid=$(cat /run/openvpn-proton.pid 2>/dev/null || true)
+    if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" = /usr/sbin/openvpn ]; then
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            log "OpenVPN $pid did not stop; refusing to launch a second process"
+            return 1
+        fi
+    fi
 }
 
 launch_openvpn() {
     local cfg="$1"
-    pkill -f '/usr/sbin/openvpn' 2>/dev/null || true
-    sleep 2
-    "$KILLSWITCH" apply || true
-    ip route del default table "$TABLE" 2>/dev/null || true
+    stop_openvpn
+    "$KILLSWITCH" apply
     : > /var/log/openvpn.log
     /usr/sbin/openvpn \
         --config "$cfg" \
@@ -108,7 +127,7 @@ launch_openvpn() {
         --route-noexec \
         --connect-timeout 10 --hand-window 16 \
         --up /usr/local/bin/ovpn-up.sh \
-        --down /usr/local/bin/ovpn-down.sh
+        --down /usr/local/bin/ovpn-down.sh 8>&- 9>&-
 }
 
 CHOSEN_IP=""
@@ -127,7 +146,7 @@ for cfg in "${CANDIDATES[@]}"; do
         if ip link show tun0 >/dev/null 2>&1 && ip route show table "$TABLE" default 2>/dev/null | grep -q 'dev tun0'; then UP=1; break; fi
         if grep -qi "AUTH_FAILED" /var/log/openvpn.log 2>/dev/null; then
             log "AUTH_FAILED on $(basename "$cfg") — credential problem, aborting run"
-            pkill -f '/usr/sbin/openvpn' 2>/dev/null || true
+            stop_openvpn
             exit 1
         fi
         sleep 1
@@ -137,7 +156,7 @@ for cfg in "${CANDIDATES[@]}"; do
         continue
     fi
 
-    "$KILLSWITCH" apply || true
+    "$KILLSWITCH" apply
     sleep 2
 
     # full egress gate
@@ -157,9 +176,11 @@ done
 if [ -z "$EXIT_IP" ]; then
     log "FAILED — no working server in $TRIES tries (likely all-dead exits or upstream UDP block)"
     tail -20 /var/log/openvpn.log | tee -a "$LOG_FILE" || true
+    stop_openvpn
+    "$KILLSWITCH" apply
     exit 1
 fi
 
 "$KILLSWITCH" apply
-MY_IP=$(curl -4 -sS --connect-timeout 5 https://ifconfig.me/ip 2>/dev/null || echo "unknown")
+MY_IP=$(curl -4 -sS --connect-timeout 3 --max-time 5 https://ifconfig.me/ip 2>/dev/null || echo "unknown")
 log "VPN up | searxng=$EXIT_IP | root=$MY_IP | entry=$CHOSEN_IP | after $TRIES tries"

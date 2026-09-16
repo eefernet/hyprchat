@@ -5,6 +5,7 @@ __pycache__/
 
 # Deploy config (contains server credentials)
 .deploy_config.json
+.deploy_config.json.*
 
 # Internal infra inventory — homelab IPs and service map
 CLAUDE.md
@@ -14,11 +15,11 @@ AGENTS.md
 agents.md
 
 # Environment / secrets
-.idea/misc.xml
 .env
 .env.*
 !.env.example
 connector_secrets.json
+connector_secrets.json.*
 .ssh/
 id_rsa
 id_ed25519
@@ -35,6 +36,12 @@ data/
 chroma_db/
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 
 # Python
 *.egg-info/
@@ -42,6 +49,23 @@ dist/
 build/
 venv/
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# Local runtime/deployment output
+logs/
+*.log
+*.log.*
+*.deploy-tmp
+.deployments/
+
+# Raw evaluation traces stay local; keep summaries and benchmark source tracked
+/docs/evaluations/*.json
 
 # OS
 .DS_Store
@@ -50,7 +74,6 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
-.claude/
 *.swp
 *.swo
 *~
@@ -78,3 +101,6 @@ codex-output/
 codex-logs/
 claude-output/
 claude-logs/
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache*/

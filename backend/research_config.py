@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import config
+import context_policy
 
 
 REPORT_TEMPLATES = [
@@ -54,6 +55,14 @@ REPORT_TEMPLATES = [
         "default_depth": 2,
         "sections": ["Overview", "Highest-Value Sources", "Source Summaries", "Patterns", "Gaps", "Follow-up Queries"],
     },
+    {
+        "id": "investigative",
+        "label": "Investigative Dossier",
+        "description": "Leak-hunt across WikiLeaks, FOIA vaults, court dockets, and government archives — sourced, tiered, and cross-checked.",
+        "default_depth": 5,
+        "sections": ["Briefing", "Leaked Documents", "Government Records", "Court Filings", "FOIA Archives", "Named Actors and Connections", "Contradictions and Open Questions", "Source Index"],
+        "source_profile": "investigative",
+    },
 ]
 REPORT_TEMPLATE_MAP = {t["id"]: t for t in REPORT_TEMPLATES}
 
@@ -73,8 +82,8 @@ def research_depth_budget(depth: int) -> dict:
 
 def research_num_ctx() -> int:
     """Context window for research LLM calls (settings/env: research_num_ctx)."""
-    n = int(getattr(config, "RESEARCH_NUM_CTX", 0) or getattr(config, "DEFAULT_NUM_CTX", 0) or 16384)
-    return n if n > 0 else 16384
+    values = context_policy.runtime_settings()
+    return context_policy.positive_int(values["research_num_ctx"], "research_num_ctx")
 
 
 def effective_context_chars(budget: dict, *, reserve_tokens: int = 5200, overhead_chars: int = 24000) -> int:

@@ -2,8 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 
 import { API } from '../session.js';
+import { parseUtcishMs } from '../datetime.js';
+import useIsMobile from '../useIsMobile.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
+import EmptyState from './EmptyState.jsx';
+import { Skeleton, SkeletonGrid } from './Skeleton.jsx';
 
 const artifactKindMeta=(kind,t,metadata={})=>{
   const k=String(kind||"file").toLowerCase();
@@ -127,6 +131,7 @@ const IMG_FALLBACK_SAMPLERS=["euler","euler_ancestral","dpmpp_2m","dpmpp_2m_sde"
 const IMG_FALLBACK_SCHEDULERS=["normal","karras","sgm_uniform","exponential","simple","beta"];
 
 function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,inputS,fieldLabelS,sliderField}){
+  const isMobile=useIsMobile();
   const [prompt,setPrompt]=useState("");
   const [negPrompt,setNegPrompt]=useState("");
   const [size,setSize]=useState("1024x1024");
@@ -433,11 +438,13 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     // the same composition without copy-pasting from the gallery.
     if(seedLock&&seed===""&&d.params?.seed!=null)setSeed(String(d.params.seed));
     setJob({id:jid,started:Date.now(),status:"queued",params:d.params});
+    let pollFails=0; // tolerate transient blips — the backend job keeps running
     pollRef.current=setInterval(async()=>{
       try{
         const r=await fetch(`${API}/api/images/jobs/${jid}`);
         const s=await r.json();
         if(!r.ok)throw new Error(s.detail||`HTTP ${r.status}`);
+        pollFails=0;
         if(s.status==="done"){
           stopPoll();
           setJob(null);
@@ -449,7 +456,10 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
         }else{
           setJob(p=>p?{...p,status:s.status,queuePos:s.queue_position}:p);
         }
-      }catch(e){stopPoll();setJob(null);setError(String(e.message||e));}
+      }catch(e){
+        pollFails+=1;
+        if(pollFails>=3){stopPoll();setJob(null);setError(String(e.message||e));}
+      }
     },1000);
   };
   const cancelJob=async()=>{
@@ -506,9 +516,9 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
       {gallery.length>0&&<span style={{fontSize:10,color:t.mut,marginRight:6}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
       {gallery.length>0&&<button onClick={purgeAll} title="Delete every trace of generated images everywhere: Image Studio + chat images, files, records, chat-message references, ComfyUI history/copies, and server logs." style={{fontSize:10,padding:"6px 11px",borderRadius:6,background:`${t.err}10`,border:`1px solid ${t.err}30`,color:t.err,cursor:"pointer",fontFamily:font,fontWeight:600}}>Delete all</button>}
     </div>
-    <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+    <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
       {/* LEFT RAIL — prompt + all generation inputs */}
-      <div style={{width:"clamp(330px,30vw,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{width:isMobile?"100%":"clamp(330px,30vw,420px)",flexShrink:0,borderRight:isMobile?"none":`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12,...(isMobile?{maxHeight:"46%",borderBottom:`1px solid ${t.brd}28`}:{})}}>
         {section("Prompt",IC.Pencil,<>
           <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Subject, style, lighting, mood" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
           <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt" rows={1} style={{...inputS,resize:"vertical",fontSize:12,minHeight:38}}/>
@@ -651,10 +661,12 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
       {/* RIGHT VIEWER — newest/selected image large, carousel of the rest below */}
       <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",padding:16,gap:10,overflow:"hidden"}}>
         {gallery.length===0
-          ?<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
-            <span style={{fontSize:40,opacity:.4}}>🖼️</span>
-            <div style={{fontSize:12}}>{galleryLoading?"Loading gallery…":"No generations yet — describe an image on the left and hit Generate."}</div>
-          </div>
+          ?(galleryLoading
+            ?<Skeleton t={t} h="100%" r={12} style={{flex:1,minHeight:0}}/>
+            :<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
+              <span style={{fontSize:40,opacity:.4}}>🖼️</span>
+              <div style={{fontSize:12}}>No generations yet — describe an image on the left and hit Generate.</div>
+            </div>)
           :<>
             <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}99`,border:`1px solid ${t.brd}30`,borderRadius:12,overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
               {cur&&(cur.exists_status==="missing"
@@ -699,7 +711,8 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   </div>;
 }
 
-function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,onRefreshList,onOpenArtifact}){
+function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,confirmAction,onRefreshList,onOpenArtifact}){
+  const isMobile=useIsMobile();
   const [preview,setPreview]=useState(null);
   const [timeline,setTimeline]=useState([]);
   const [tagDraft,setTagDraft]=useState("");
@@ -740,7 +753,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const addTag=async()=>{const tag=tagDraft.trim();if(!tag)return;await patch({tags:[...(a.tags||[]),tag]});setTagDraft("");};
   const duplicateRows=a.duplicates||[];
   const timelineRows=timeline||[];
-  return <div style={{width:"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0}}>
+  return <div style={{width:isMobile?"auto":"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:isMobile?"none":`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0,...(isMobile?{position:"absolute",inset:0,zIndex:40}:{})}}>
     <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8}}>
       <span style={{color:km.color,display:"flex"}}>{DetailIcon?<DetailIcon/>:null}</span>
       <div style={{minWidth:0,flex:1}}><div style={{fontSize:13,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.title||a.filename}</div><div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.filename}</div></div>
@@ -752,7 +765,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
         <div><span style={{color:t.mut}}>Status</span><select value={a.status||"draft"} onChange={e=>patch({status:e.target.value})} style={{width:"100%",marginTop:4,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:11}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select></div>
         <div><span style={{color:t.mut}}>Health</span><div style={{marginTop:4,color:a.exists_status==="missing"?t.err:a.exists_status==="present"?t.ok:t.warm,fontWeight:800}}>{a.exists_status||"unknown"}</div></div>
         <div><span style={{color:t.mut}}>Size</span><div style={{marginTop:4}}>{a.size_bytes?`${(a.size_bytes/1024).toFixed(a.size_bytes>1048576?1:0)} KB`:"unknown"}</div></div>
-        <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(a.created_at).toLocaleString():""}</div></div>
+        <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(parseUtcishMs(a.created_at)).toLocaleString():""}</div></div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Actions</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
@@ -788,7 +801,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       {timelineRows.length>0&&<section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Timeline</div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
           {timelineRows.slice(0,40).map(ev=>{const md=ev.metadata||{};const rel=md.related_artifact_id||(Array.isArray(md.related_artifact_ids)?md.related_artifact_ids[0]:null);return <div key={ev.id} style={{display:"grid",gridTemplateColumns:"82px 1fr",gap:8,fontSize:11,color:t.dim,lineHeight:1.45}}>
-            <div style={{color:t.mut,fontSize:9}}>{ev.created_at?new Date(ev.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
+            <div style={{color:t.mut,fontSize:9}}>{ev.created_at?new Date(parseUtcishMs(ev.created_at)).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
             <div style={{borderLeft:`2px solid ${ev.source==="event"?t.acc:t.brd}55`,paddingLeft:8,minWidth:0}}>
               <div style={{color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(ev.event_type||"event").replace(/_/g," ")}</div>
               <div style={{wordBreak:"break-word"}}>{ev.summary||""}</div>
@@ -818,23 +831,24 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
       </section>
       {onDelete&&<button onClick={()=>onDelete(a.id)} style={{...btnS(t.err),justifyContent:"center"}}>Delete metadata</button>}
     </div>
-    {canvasOpen&&<ArtifactCanvas artifact={a} t={t} font={font} notify={notify}
+    {canvasOpen&&<ArtifactCanvas artifact={a} t={t} font={font} notify={notify} confirmAction={confirmAction}
       onClose={()=>setCanvasOpen(false)}
       onRevised={(rev)=>{setCanvasOpen(false);onRefreshList?.();if(rev?.id)onOpenArtifact?.(rev.id);}}/>}
   </div>;
 }
 
-const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onDelete,onDetails,onSelect,selected,compact})=>{
+const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onDelete,onDetails,onSelect,selected,compact,confirmAction})=>{
   const a=artifact||{};
   const meta=a.metadata||{};
   const km=artifactKindMeta(a.kind,t,meta);
   const KindIcon=km.icon;
   const title=a.title||a.filename||"Artifact";
-  const created=a.created_at?new Date(a.created_at).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
+  const created=a.created_at?new Date(parseUtcishMs(a.created_at)).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"";
   const rename=async()=>{
-    const next=window.prompt("Artifact name",title);
-    if(next===null)return;
-    const clean=String(next||"").trim();
+    if(!confirmAction)return; // themed dialog is always threaded; no native fallback
+    const next=await confirmAction({title:"Rename artifact",promptText:title,inputLabel:"Artifact name",confirmLabel:"Rename",tone:"info"});
+    if(!next)return;
+    const clean=String(next).trim();
     if(clean&&clean!==title)await onPatch?.(a.id,{title:clean});
   };
   const assign=async(e)=>{
@@ -890,7 +904,7 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
   </div>;
 };
 
-function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseInChat,focusId,onFocusConsumed,notify}){
+function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseInChat,focusId,onFocusConsumed,notify,confirmAction}){
   const [items,setItems]=useState([]);
   const [view,setView]=useState("all");
   const [q,setQ]=useState("");
@@ -968,7 +982,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     }catch(e){notify&&notify({type:"error",text:"Bundle failed",detail:e.message||String(e)});}
   };
   const toggleSelected=(id,on)=>setSelected(p=>{const n=new Set(p);if(on)n.add(id);else n.delete(id);return n;});
-  return <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+  return <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
   <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:160}}><IC.Layers/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Artifacts</span></div>
@@ -980,18 +994,14 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
       <button onClick={load} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:10,fontWeight:800}}>Refresh</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {loading&&<div style={{fontSize:12,color:t.mut,padding:18}}>Loading artifacts...</div>}
-      {!loading&&!items.length&&<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,textAlign:"center",padding:"36px 20px",border:`1px dashed ${t.brd}44`,borderRadius:10,background:`${t.surface}30`,color:t.mut,fontFamily:font}}>
-        <div style={{fontSize:30,lineHeight:1,opacity:.9,animation:"float 4s ease-in-out infinite",display:"flex",justifyContent:"center"}}><IC.Layers/></div>
-        <div style={{fontSize:13,fontWeight:800,color:t.dim}}>No artifacts yet</div>
-        <div style={{fontSize:11,lineHeight:1.55,maxWidth:420}}>Files the assistant delivers with download_file or download_project are collected here.</div>
-      </div>}
+      {loading&&<SkeletonGrid t={t} cards={6} minW={250} cardH={120}/>}
+      {!loading&&!items.length&&<EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Files the assistant delivers with download_file or download_project are collected here."/>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
-        {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)}/>)}
+        {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)} confirmAction={confirmAction}/>)}
       </div>
     </div>
   </div>
-  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} onRefreshList={load} onOpenArtifact={openDetail}/>}
+  {detail&&<ArtifactDetailPanel artifact={detail} t={t} font={font} workspaces={workspaces} kbs={kbs} onClose={()=>setDetail(null)} onPatch={patchArtifact} onDelete={deleteArtifact} onUseInChat={onUseInChat} notify={notify} confirmAction={confirmAction} onRefreshList={load} onOpenArtifact={openDetail}/>}
   </div>;
 }
 

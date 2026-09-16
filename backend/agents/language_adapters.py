@@ -328,6 +328,15 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
     build_cmd = PY_VENV_BOOTSTRAP + " && " + build_cmd
 
     test_cmd = f"{PY_VENV_GUARD}{CODEBOX_PYTHON} -m pytest -q" if has_tests else ""
+    # Aider runs its test/lint commands standalone — possibly before any build
+    # phase has created ./.venv — so they must self-bootstrap. The pytest
+    # install is conditional to avoid a pip round-trip on every Aider round.
+    aider_pytest_cmd = (
+        PY_VENV_GUARD
+        + f"{CODEBOX_PYTHON} -m pytest --version >/dev/null 2>&1"
+        + f" || {CODEBOX_PYTHON} -m pip install -q pytest; "
+        + f"{CODEBOX_PYTHON} -m pytest -q"
+    ) if has_tests else ""
     smoke_cmds = []
     for pkg in packages[:3]:
         if any(p == f"{pkg}/__main__.py" or p == f"src/{pkg}/__main__.py" for p in manifest):
@@ -398,8 +407,8 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
         ],
         source_extensions=[".py"],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd=test_cmd,
-        aider_lint_cmd=build_cmd if not has_pyproject and not has_requirements else py_compile,
+        aider_test_cmd=aider_pytest_cmd,
+        aider_lint_cmd=build_cmd if not has_pyproject and not has_requirements else PY_VENV_GUARD + py_compile,
         safe_lint=True,
         isolated_verification=_isolated_contract(
             applicable=isolated_applicable,
@@ -757,23 +766,27 @@ def generic_adapter(manifest: list[str], language: str = "generic") -> LanguageA
 def detect_adapter(manifest: list[str], language_hint: str = "") -> LanguageAdapter:
     manifest = manifest or []
     language = _detect_language(manifest, language_hint)
-    if language == "html" or _has(manifest, "index.html"):
+    hint = (language_hint or "").strip().lower()
+    # Marker fallbacks match TOP-LEVEL files only: a Flask app's
+    # templates/index.html or a JS monorepo's nested backend/requirements.txt
+    # must not hijack routing away from the hint/count-detected language.
+    if language == "html" or (not hint and _top_level_has(manifest, "index.html")):
         return html_adapter(manifest)
-    if language == "python" or _has(manifest, "pyproject.toml") or _has(manifest, "requirements.txt"):
+    if language == "python" or _top_level_has(manifest, "pyproject.toml") or _top_level_has(manifest, "requirements.txt"):
         return python_adapter(manifest)
-    if language in {"javascript", "typescript"} or _has(manifest, "package.json"):
+    if language in {"javascript", "typescript"} or _top_level_has(manifest, "package.json"):
         return node_adapter(manifest, language)
-    if language == "rust" or _has(manifest, "Cargo.toml"):
+    if language == "rust" or _top_level_has(manifest, "Cargo.toml"):
         return rust_adapter(manifest)
-    if language == "go" or _has(manifest, "go.mod"):
+    if language == "go" or _top_level_has(manifest, "go.mod"):
         return go_adapter(manifest)
-    if language in {"java", "kotlin"} or _has(manifest, "pom.xml") or _has(manifest, "build.gradle") or _has(manifest, "build.gradle.kts"):
+    if language in {"java", "kotlin"} or _top_level_has(manifest, "pom.xml") or _top_level_has(manifest, "build.gradle") or _top_level_has(manifest, "build.gradle.kts"):
         return java_adapter(manifest)
     if language in {"csharp", "c#", "cs", "dotnet"} or any(
             p.endswith((".csproj", ".sln")) for p in manifest):
         return csharp_adapter(manifest)
-    if (language in {"c", "cpp"} or _has(manifest, "CMakeLists.txt")
-            or (_has(manifest, "Makefile")
+    if (language in {"c", "cpp"} or _top_level_has(manifest, "CMakeLists.txt")
+            or (_top_level_has(manifest, "Makefile")
                 and any(p.endswith((".c", ".cpp", ".cc", ".cxx")) for p in manifest))):
         return c_cpp_adapter(manifest, language)
     return generic_adapter(manifest, language)

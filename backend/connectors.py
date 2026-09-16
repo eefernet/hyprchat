@@ -177,9 +177,10 @@ def _parse_spec_text(text: str) -> dict:
     return data
 
 
-async def _fetch_spec(http: httpx.AsyncClient, url: str, allow_private: bool) -> dict:
+async def _fetch_spec(http: httpx.AsyncClient, url: str, allow_private: bool,
+                      headers: dict | None = None, params: dict | None = None) -> dict:
     await assert_url_allowed(url, allow_private=allow_private)
-    r = await http.get(url, timeout=20)
+    r = await http.get(url, headers=headers or None, params=params or None, timeout=20)
     r.raise_for_status()
     return _parse_spec_text(r.text)
 
@@ -208,8 +209,8 @@ def mcp_tool_to_connector(server: dict, tool: dict) -> dict:
 
 
 def _jsonrpc_message(message: dict) -> bytes:
-    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    return b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body
+    # MCP stdio transport is newline-delimited JSON (NOT LSP Content-Length framing).
+    return json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
 
 
 async def _read_mcp_message(stream: asyncio.StreamReader, timeout: float = 20) -> dict:
@@ -348,12 +349,14 @@ async def _mcp_http_exchange(http: httpx.AsyncClient, server: dict, method: str,
             raise ConnectorError(str(msg["error"]))
         return msg.get("result") or {}, r.headers
 
-    _, init_headers = await post(1, "initialize", {
+    init_result, init_headers = await post(1, "initialize", {
         "protocolVersion": "2025-06-18",
         "capabilities": {},
         "clientInfo": {"name": "HyprChat", "version": "connector-mvp"},
     })
     session_id = init_headers.get("mcp-session-id", "")
+    # Spec requires this header on every request after initialize; echo the negotiated version.
+    headers["MCP-Protocol-Version"] = str(init_result.get("protocolVersion") or "2025-06-18")
     try:
         request_headers = dict(headers)
         if session_id:
@@ -374,7 +377,13 @@ async def mcp_exchange(http: httpx.AsyncClient, server: dict, method: str, param
     transport = (server.get("transport") or "stdio").strip().lower()
     if transport == "stdio":
         return await _mcp_stdio_exchange(server, method, params)
-    if transport in {"http", "streamable_http", "sse"}:
+    if transport == "sse":
+        raise ConnectorError(
+            "Legacy HTTP+SSE MCP transport is not supported. Set the server's transport to "
+            "streamable_http and point the URL at its MCP endpoint — servers on protocol "
+            "2025-03-26 or newer all support streamable HTTP."
+        )
+    if transport in {"http", "streamable_http"}:
         return await _mcp_http_exchange(http, server, method, params)
     raise ConnectorError(f"Unsupported MCP transport: {transport}")
 
@@ -401,25 +410,45 @@ async def discover_mcp_server(http: httpx.AsyncClient, server_id: str) -> dict:
 
 
 def _resolve_ref(spec: dict, obj: Any) -> Any:
-    if not isinstance(obj, dict) or "$ref" not in obj:
-        return obj
-    ref = obj.get("$ref", "")
-    if not ref.startswith("#/"):
-        return obj
-    cur: Any = spec
-    for part in ref[2:].split("/"):
-        part = part.replace("~1", "/").replace("~0", "~")
-        if not isinstance(cur, dict) or part not in cur:
+    seen: set[str] = set()
+    while isinstance(obj, dict) and "$ref" in obj:
+        ref = obj.get("$ref", "")
+        if not ref.startswith("#/") or ref in seen or len(seen) >= 5:
             return obj
-        cur = cur[part]
-    return cur
+        seen.add(ref)
+        cur: Any = spec
+        for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
+            if not isinstance(cur, dict) or part not in cur:
+                return obj
+            cur = cur[part]
+        obj = cur
+    return obj
+
+
+def _deep_resolve(spec: dict, schema: Any, depth: int = 0) -> Any:
+    """Recursively resolve $refs inside a schema so tool defs carry concrete types."""
+    if depth > 5:
+        return schema
+    schema = _resolve_ref(spec, schema)
+    if not isinstance(schema, dict):
+        return schema
+    out = dict(schema)
+    if isinstance(out.get("properties"), dict):
+        out["properties"] = {k: _deep_resolve(spec, v, depth + 1) for k, v in out["properties"].items()}
+    if isinstance(out.get("items"), dict):
+        out["items"] = _deep_resolve(spec, out["items"], depth + 1)
+    for comb in ("allOf", "anyOf", "oneOf"):
+        if isinstance(out.get(comb), list):
+            out[comb] = [_deep_resolve(spec, s, depth + 1) for s in out[comb]]
+    return out
 
 
 def _request_body_schema(spec: dict, request_body: dict) -> tuple[dict, bool]:
     request_body = _resolve_ref(spec, request_body) or {}
     content = request_body.get("content") or {}
     media = content.get("application/json") or content.get("application/*+json") or {}
-    schema = _resolve_ref(spec, media.get("schema") or {})
+    schema = _deep_resolve(spec, media.get("schema") or {})
     if not isinstance(schema, dict):
         schema = {"type": "object"}
     return schema, bool(request_body.get("required"))
@@ -443,7 +472,7 @@ def openapi_operation_to_connector(connector: dict, spec: dict, path: str, metho
             continue
         arg_name = name if name not in seen_names else f"{loc}_{name}"
         seen_names.add(arg_name)
-        schema = _resolve_ref(spec, p.get("schema") or {"type": "string"})
+        schema = _deep_resolve(spec, p.get("schema") or {"type": "string"})
         if not isinstance(schema, dict):
             schema = {"type": "string"}
         desc = p.get("description") or f"{loc} parameter {name}"
@@ -502,8 +531,25 @@ async def load_openapi_spec(http: httpx.AsyncClient, connector: dict) -> dict:
     if (connector.get("spec_json") or "").strip():
         return _parse_spec_text(connector.get("spec_json") or "")
     if (connector.get("spec_url") or "").strip():
-        return await _fetch_spec(http, connector.get("spec_url") or "", bool(connector.get("allow_private")))
+        # Auth-gated spec URLs need the same headers/auth as execution.
+        headers = expand_placeholders(connector.get("headers") or {}, required=True)
+        params: dict = {}
+        _apply_auth(headers, params, connector.get("auth") or {})
+        return await _fetch_spec(
+            http, connector.get("spec_url") or "", bool(connector.get("allow_private")),
+            headers=headers, params=params,
+        )
     raise ConnectorError("OpenAPI connector requires spec_url or spec_json")
+
+
+def _resolve_server_url(spec_url: str, server_url: str) -> str:
+    """Resolve an OpenAPI servers[].url against the spec URL; '' if unresolvable."""
+    su = (server_url or "").strip()
+    if su.startswith(("http://", "https://")):
+        return su
+    if spec_url:
+        return urllib.parse.urljoin(spec_url, su)
+    return ""
 
 
 async def discover_openapi_connector(http: httpx.AsyncClient, connector_id: str) -> dict:
@@ -522,10 +568,19 @@ async def discover_openapi_connector(http: httpx.AsyncClient, connector_id: str)
                 if method.lower() not in _HTTP_METHODS or not isinstance(op, dict):
                     continue
                 tools.append(openapi_operation_to_connector(connector, spec, path, method.lower(), op, path_params))
+        warning = ""
         if not connector.get("base_url"):
             servers = spec.get("servers") or []
             if servers and isinstance(servers[0], dict) and servers[0].get("url"):
-                await db.update_openapi_connector(connector_id, base_url=str(servers[0]["url"]))
+                raw_server_url = str(servers[0]["url"])
+                resolved = _resolve_server_url(connector.get("spec_url") or "", raw_server_url)
+                if resolved:
+                    await db.update_openapi_connector(connector_id, base_url=resolved)
+                else:
+                    warning = (
+                        f"Spec's server URL '{raw_server_url}' is relative and no spec URL is "
+                        "available to resolve it — set an absolute Base URL on the connector."
+                    )
         await db.replace_connector_tools("openapi", connector_id, tools)
         await db.update_openapi_connector(
             connector_id,
@@ -533,7 +588,10 @@ async def discover_openapi_connector(http: httpx.AsyncClient, connector_id: str)
             last_error="",
             discovered_at=datetime.now(timezone.utc).isoformat(),
         )
-        return {"status": "ok", "tool_count": len(tools), "tools": tools}
+        out = {"status": "ok", "tool_count": len(tools), "tools": tools}
+        if warning:
+            out["warning"] = warning
+        return out
     except Exception as e:
         await db.update_openapi_connector(connector_id, health="error", last_error=str(e))
         raise
@@ -575,10 +633,14 @@ async def execute_mcp_tool(http: httpx.AsyncClient, tool: dict, args: dict) -> s
 
 def _merge_url(base_url: str, path: str) -> str:
     base = (base_url or "").rstrip("/")
-    if not base:
-        raise ConnectorError("OpenAPI connector has no base_url")
     if path.startswith("http://") or path.startswith("https://"):
         return path
+    if not base:
+        raise ConnectorError("OpenAPI connector has no base URL — set a full https:// Base URL on the connector")
+    if not base.startswith(("http://", "https://")):
+        raise ConnectorError(
+            f"OpenAPI base URL '{base}' is not absolute — set a full https:// Base URL on the connector"
+        )
     return base + "/" + path.lstrip("/")
 
 

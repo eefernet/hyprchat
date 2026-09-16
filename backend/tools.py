@@ -13,6 +13,7 @@ from datetime import datetime
 
 import comfyui
 import config
+import context_policy
 import database as db
 import image_prompt_enhancer
 import persona_images
@@ -21,7 +22,15 @@ from artifact_files import artifact_file_metadata as _artifact_file_metadata
 from artifact_files import extract_indexable_text
 from connectors import execute_connector_tool
 from research import fetch_bytes_safely, run_deep_research, run_conspiracy_research, _fetch_page, _source_tier
-from tooling.codebox_tools import CODEBOX_TOOL_NAMES, run_codebox_tool
+from tooling.codebox_tools import (
+    CODEBOX_TOOL_NAMES,
+    build_custom_tool_code,
+    pip_install_in_venv,
+    pip_name_for_import,
+    run_codebox_tool,
+    run_custom_tool_code,
+    tool_import_names,
+)
 from tooling.gate_decisions import (
     FIX_ATTEMPT_HARD_CEILING,
     NO_PROGRESS_LAST_SHOT,
@@ -29,7 +38,6 @@ from tooling.gate_decisions import (
     GateContext,
     build_gate_context,
     compute_fix_battle,
-    compute_fix_battle_ctx,
     evaluate_gate,
     issue_scoped_files,
     normalize_issue_path,
@@ -193,6 +201,16 @@ _SHIP_ANYWAY_DIRECT_RE = re.compile(
 )
 _DELIVERY_SHIP_TOOLS = {"download_project", "download_file"}
 
+
+async def _fire_artifact_created_event() -> None:
+    """artifact_created event for event-triggered scheduled tasks. Call-time
+    scheduler import (tools → scheduler is the safe direction); never raises."""
+    try:
+        import scheduler
+        await scheduler.fire_event("artifact_created", user_id=db.current_user_id())
+    except Exception as e:
+        print(f"[FileTrack] fire_event(artifact_created) failed: {e}")
+
 # Manual work tools that get AUTO-DISPATCHED to the repair path (Aider first,
 # Fixer fallback) when a reviewer/acceptance issue is pending. Local chat
 # models flail on these instead of calling run_aider_fix; converting the call
@@ -219,6 +237,17 @@ def _auto_dispatch_task(name: str, args: dict, pending_role: str,
 _CAP_RELEASE_DIAGNOSTIC_TOOLS = {"read_file", "list_files"}
 _AIDER_HEALTH_CACHE = {"url": "", "ts": 0.0, "healthy": False}
 _AIDER_HEALTH_TTL_SECONDS = 30.0
+
+# Fire-and-forget background tasks need a strong reference or the event loop
+# may GC-cancel them mid-run (same pattern as main._track_bg / chat._spawn_bg).
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro) -> "asyncio.Task":
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 def _fix_cap_releases_tool(name: str) -> bool:
@@ -360,10 +389,12 @@ async def _latest_user_requested_ship_anyway(conv_id: str) -> bool:
         text = content.strip()
         if not text or not _SHIP_ANYWAY_ACTION_RE.search(text):
             return False
-        return bool(
-            _SHIP_ANYWAY_QUALIFIER_RE.search(text)
-            or _SHIP_ANYWAY_DIRECT_RE.search(text)
-        )
+        if re.search(r"\b(?:do\s+not|don't|never|not\s+yet|before|until|only\s+after)\b", text, re.I):
+            return False
+        return bool(re.search(
+            r"\b(?:ship|package|download|deliver|export|archive)\b.{0,60}\b(?:anyway|as[- ]is|despite|regardless)\b"
+            r"|\b(?:skip|ignore)\b.{0,30}\b(?:tests?|review|acceptance)\b.{0,60}\b(?:ship|package|deliver|download)\b",
+            text, re.I))
     except Exception as _e:
         print(f"[v2-gate] ship-anyway intent check failed (non-fatal): {_e}")
         return False
@@ -1103,6 +1134,146 @@ CODEAGENT_TOOLS = {
             }, "required": ["content"]},
         },
     },
+    "manage_tasks": {
+        "type": "function",
+        "function": {
+            "name": "manage_tasks",
+            "description": "Create, list, update, pause, resume, delete, or run the user's scheduled tasks. When the user asks for anything recurring ('every morning', 'each Friday', 'remind me daily'), create a scheduled task instead of doing it once. schedule_kind=event runs the task when something happens ('when an urgent email arrives, draft a reply'). Results are delivered to this conversation plus a notification.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "description": "create, list, get, update, pause, resume, delete, or run_now"},
+                "task_id": {"type": "string", "description": "Task id (required for get/update/pause/resume/delete/run_now)"},
+                "title": {"type": "string", "description": "Short task title"},
+                "prompt": {"type": "string", "description": "What the task should do each run, phrased as an instruction"},
+                "schedule_kind": {"type": "string", "description": "once, daily, weekly, monthly, cron, or event"},
+                "time": {"type": "string", "description": "Local time HH:MM for daily/weekly/monthly"},
+                "weekday": {"type": "integer", "description": "0-6 (0=Monday) for weekly"},
+                "day": {"type": "integer", "description": "1-31 for monthly"},
+                "cron": {"type": "string", "description": "Cron expression for schedule_kind=cron"},
+                "run_at": {"type": "string", "description": "Local datetime YYYY-MM-DDTHH:MM for once"},
+                "event": {"type": "string", "description": "For schedule_kind=event: email_received, urgent_email_received, research_completed, or artifact_created"},
+                "every": {"type": "integer", "description": "For schedule_kind=event: fire on every Nth occurrence (default 1)"},
+            }, "required": ["action"]},
+        },
+    },
+    "manage_notes": {
+        "type": "function",
+        "function": {
+            "name": "manage_notes",
+            "description": "Create, list, complete, update, or delete the user's notes and todos. Use for 'note this down', 'add to my todo list', 'what's on my list', 'mark X done'. Todos support due dates and reminder times.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "description": "create, list, update, complete, or delete"},
+                "note_id": {"type": "string", "description": "Note id (for update/complete/delete)"},
+                "kind": {"type": "string", "description": "note or todo (default note; list filters by kind when given)"},
+                "title": {"type": "string", "description": "Short title"},
+                "content": {"type": "string", "description": "Body text (optional)"},
+                "due": {"type": "string", "description": "Due datetime YYYY-MM-DDTHH:MM in the user's local time (todos)"},
+                "remind": {"type": "string", "description": "Reminder datetime YYYY-MM-DDTHH:MM local — fires a notification"},
+            }, "required": ["action"]},
+        },
+    },
+    "manage_calendar": {
+        "type": "function",
+        "function": {
+            "name": "manage_calendar",
+            "description": "Create, list, update, or delete calendar events. Use when the user mentions appointments, meetings, or anything with a date/time ('dentist Tuesday 3pm'). Events sync to the user's phone via CalDAV when configured.",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "description": "create, list, update, or delete"},
+                "event_id": {"type": "string", "description": "Event id (for update/delete)"},
+                "title": {"type": "string", "description": "Event title"},
+                "start": {"type": "string", "description": "Start YYYY-MM-DDTHH:MM in the user's local time"},
+                "end": {"type": "string", "description": "End YYYY-MM-DDTHH:MM local (default: start + 1h)"},
+                "location": {"type": "string", "description": "Location (optional)"},
+                "description": {"type": "string", "description": "Details (optional)"},
+                "remind_minutes": {"type": "integer", "description": "Minutes before start to notify (optional)"},
+                "days": {"type": "integer", "description": "For list: how many days ahead (default 7)"},
+            }, "required": ["action"]},
+        },
+    },
+    "get_weather": {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Current conditions plus a today/tomorrow forecast for a location (Open-Meteo, no key). Defaults to the user's saved assistant location when no location is given.",
+            "parameters": {"type": "object", "properties": {
+                "location": {"type": "string", "description": "City or place name, e.g. 'Austin, TX' (optional — defaults to the assistant profile location)"},
+            }},
+        },
+    },
+    "list_emails": {
+        "type": "function",
+        "function": {
+            "name": "list_emails",
+            "description": "List the user's recent emails (cached inbox). Shows sender, subject, urgency, and a snippet. Use before read_email or reply_to_email.",
+            "parameters": {"type": "object", "properties": {
+                "unread_only": {"type": "boolean", "description": "Only unread (default false)"},
+                "limit": {"type": "integer", "description": "Max results (default 20)"},
+            }},
+        },
+    },
+    "read_email": {
+        "type": "function",
+        "function": {
+            "name": "read_email",
+            "description": "Fetch the full body of one email live from the mail server.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
+    "send_email": {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "Send a new email from the user's account. If autonomous sending is disabled for the account, this saves a DRAFT for the user to review instead — that is expected behavior, not an error.",
+            "parameters": {"type": "object", "properties": {
+                "to": {"type": "string", "description": "Recipient email address"},
+                "subject": {"type": "string", "description": "Subject line"},
+                "body": {"type": "string", "description": "Plain-text body"},
+                "account": {"type": "string", "description": "Which account to send from when the user has several: match by label, address, or username (default: the first account)"},
+            }, "required": ["to", "subject", "body"]},
+        },
+    },
+    "reply_to_email": {
+        "type": "function",
+        "function": {
+            "name": "reply_to_email",
+            "description": "Reply to an email from list_emails. If autonomous sending is disabled for the account, the reply is saved as a DRAFT for the user to review — expected behavior, not an error.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+                "body": {"type": "string", "description": "Plain-text reply body"},
+            }, "required": ["message_id", "body"]},
+        },
+    },
+    "archive_email": {
+        "type": "function",
+        "function": {
+            "name": "archive_email",
+            "description": "Archive an email (moves it out of the inbox).",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
+    "mark_email_read": {
+        "type": "function",
+        "function": {
+            "name": "mark_email_read",
+            "description": "Mark an email as read.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
+    "delete_email": {
+        "type": "function",
+        "function": {
+            "name": "delete_email",
+            "description": "Delete an email (moves it to the server's Trash folder). Use ONLY when the user explicitly asks to delete — prefer archive_email otherwise. If autonomous deletion is disabled for the account, this refuses and asks you to confirm with the user — expected behavior, not an error.",
+            "parameters": {"type": "object", "properties": {
+                "message_id": {"type": "string", "description": "Email id from list_emails"},
+            }, "required": ["message_id"]},
+        },
+    },
     "delete_file": {
         "type": "function",
         "function": {
@@ -1131,7 +1302,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "conspiracy_research",
-            "description": "Deep investigative research across WikiLeaks, FOIA vaults, court records, gov archives, alt-media, and leaked documents. Use for any topic where official narratives may be incomplete.",
+            "description": "Deep investigative research across direct archives — WikiLeaks/Cryptome/ICIJ (leaked docs), FBI Vault/DOJ/CIA Reading Room (gov records), CourtListener (court filings), MuckRock/National Security Archive/Archive.org (FOIA archives) — plus alt-media and the open web. Results come back grouped by source class. Use for any topic where official narratives may be incomplete.",
             "parameters": {"type": "object", "properties": {
                 "topic": {"type": "string", "description": "What to investigate — a person, event, organization, or claim"},
                 "angle": {"type": "string", "description": "Focus: evidence (default), key_players, timeline, debunk, documents, connections"},
@@ -1479,21 +1650,8 @@ async def _maybe_auto_redeliver(
         _rstatus = ((_latest_reviewer or {}).get("result_envelope") or {}).get("status", "")
         if str(_rstatus).lower() != "clean":
             return ""  # don't repackage a project the reviewer just flagged
-        res = await exec_tool(
-            http, events, "download_project",
-            {"directory": project_dir, "_auto_redeliver": True},
-            conv_id,
-            custom_tool_map=custom_tool_map,
-            connector_tool_name_map=connector_tool_name_map,
-            conv_model=conv_model,
-            kb_ids=kb_ids,
-            artifact_message_id=artifact_message_id,
-        )
-        return (
-            "\n\n=== AUTO-REPACKAGE — this project was already delivered, so a fresh "
-            "artifact was packaged from the updated sources. Reference the new download "
-            "below; do NOT call download_project again for this cycle ===\n" + res
-        )
+        return ("\n\nThe updated project needs a fresh Acceptance review before "
+                "a refreshed download can be packaged. Call run_acceptance_review next.")
     except Exception as e:
         print(f"[download_project] auto-redeliver skipped: {e}")
         return ""
@@ -1813,6 +1971,10 @@ async def exec_tool(
     custom_tool_map = custom_tool_map or {}
     connector_tool_name_map = connector_tool_name_map or {}
     try:
+        from coder_jobs import route_tool as route_coder_job
+        routed = await route_coder_job(name, args, conv_id, events)
+        if routed is not None:
+            return routed
         # ─── v2 workflow gate (deterministic over persuasion) ───────────────
         # Two interlocking states gate every non-meta tool call. Both fire
         # only for Daedalus/v2 personas; ordinary chat personas stay outside
@@ -1925,7 +2087,7 @@ async def exec_tool(
                 # scroll; counters below are additionally scoped to the
                 # current user request via _runs_since.
                 _runs_for_cap = (_gate_ctx.runs if _gate_ctx is not None
-                                 else await db.get_runs_by_conversation(conv_id, limit=50))
+                                 else await db.get_runs_by_conversation(conv_id, limit=-1))
                 _uts_cap = (_gate_ctx.latest_user_ts if _gate_ctx is not None
                             else await _latest_user_msg_ts(conv_id))
 
@@ -2147,9 +2309,13 @@ async def exec_tool(
             # happened. State 2 of the gate (PENDING_FIX) covers the
             # legitimate "reviewer just ran with issues → call run_fixer"
             # case; this guard handles every other case.
+            # run_fixer ONLY: run_aider_fix legitimately runs task-only with
+            # no issue envelope (uploaded-project bootstrap, change requests
+            # against a clean-reviewed project) — blocking it here deadlocks
+            # against the bootstrap gate's "call run_aider_fix next" mandate.
             try:
-                if await _check_v2():
-                    _runs_pf = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                if name == "run_fixer" and await _check_v2():
+                    _runs_pf = (_gate_ctx.runs if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     _latest_meaningful = None
                     _MEANINGFUL_STATUSES = {"succeeded", "issues", "clean", "partial",
@@ -2157,8 +2323,8 @@ async def exec_tool(
                     for _r in _runs_pf:
                         _role_pf = _r.get("role", "")
                         _st_pf = (_r.get("status") or "").lower()
-                        if (_role_pf in {"reviewer", "acceptance"} or _role_pf.startswith("builder")
-                                or _role_pf == "fixer") and _st_pf in _MEANINGFUL_STATUSES:
+                        if (_role_pf in {"reviewer", "acceptance", "fixer", "aider.fix"}
+                                or _role_pf.startswith("builder")) and _st_pf in _MEANINGFUL_STATUSES:
                             _latest_meaningful = _r
                             break
 
@@ -2168,6 +2334,13 @@ async def exec_tool(
                         _env_pf = _latest_meaningful.get("result_envelope") or {}
                         _rstatus_pf = (_env_pf.get("status") or "").lower()
                         if _rstatus_pf in ("issues", "error"):
+                            _allow_fixer = True
+
+                    if args.get("_aider_fallback"):
+                        _parent = await db.get_run(args.get("reviewer_run_id") or "")
+                        if (_parent and _parent.get("conversation_id") == conv_id
+                                and _parent.get("role") in {"reviewer", "acceptance"}
+                                and (_parent.get("result_envelope") or {}).get("status") == "issues"):
                             _allow_fixer = True
 
                     if not _allow_fixer:
@@ -2215,7 +2388,7 @@ async def exec_tool(
                 _conv_full = (_gate_ctx.conv_row if _gate_ctx is not None
                               else await db.get_conversation(conv_id))
                 if await _check_v2(cr=_conv_full):
-                    _runs_rb = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                    _runs_rb = (_gate_ctx.runs if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     for _r in _runs_rb:
                         if _builder_completion_allowed(name, args, _r):
@@ -2286,7 +2459,7 @@ async def exec_tool(
         if conv_id and name in {"run_review", "run_acceptance_review"}:
             try:
                 if await _check_v2():
-                    _runs_bi = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                    _runs_bi = (_gate_ctx.runs if _gate_ctx is not None
                                 else await db.get_runs_by_conversation(conv_id, limit=20))
                     _bi = _blocking_incomplete_builder(_runs_bi)
                     if _bi is not None:
@@ -2320,7 +2493,7 @@ async def exec_tool(
                                     "run_aider_fix", "ask_project", "get_coder_workflow",
                                     "cancel_coder_workflow"):
             try:
-                _runs_for_v2_gate = (_gate_ctx.runs_window(20) if _gate_ctx is not None
+                _runs_for_v2_gate = (_gate_ctx.runs if _gate_ctx is not None
                                      else await db.get_runs_by_conversation(conv_id, limit=20))
                 _pending_run = None    # state 1 trigger
                 _pending_kind = ""
@@ -2615,22 +2788,32 @@ async def exec_tool(
                             _rid,
                         )
                     elif _exhausted_after_research_gate:
-                        _gate_msg = (
-                            "state", "fix-needed-exhausted",
-                            f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
-                            f"deep_research and the full automated repair budget "
-                            f"({_streak_gate} attempt(s) without verified progress; "
-                            f"{_fixer_attempts_gate} total, Aider + Fixer combined).\n\n"
-                            f"Your VERY NEXT output MUST be plain text to the user: summarize the "
-                            f"remaining issue, say the automated repair budget is exhausted, and "
-                            f"ask whether to ship as-is or authorize manual intervention.\n\n"
-                            f"Do NOT call {name}, read_file, list_files, write_file, run_shell, "
-                            f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
-                            f"download_project, or download_file unless the latest user message "
-                            f"explicitly asks to ship/download anyway.",
-                            f"⛔ Blocked — automated repair budget exhausted for {_pending_role}",
-                            _rid,
-                        )
+                        if _fix_cap_releases_tool(name):
+                            # Cap-aware diagnostic release (see comment above):
+                            # budget exhausted → allow read-only inspection so
+                            # the model can explain the remaining issue.
+                            # Delivery/write tools stay gated below.
+                            print(f"[v2-gate] cap-release: allowing read-only "
+                                  f"{name} after exhausted repair budget", flush=True)
+                        else:
+                            _gate_msg = (
+                                "state", "fix-needed-exhausted",
+                                f"BLOCKED — {_pending_role} ({_rid}) still has issues after "
+                                f"deep_research and the full automated repair budget "
+                                f"({_streak_gate} attempt(s) without verified progress; "
+                                f"{_fixer_attempts_gate} total, Aider + Fixer combined).\n\n"
+                                f"Your VERY NEXT output MUST be plain text to the user: summarize the "
+                                f"remaining issue, say the automated repair budget is exhausted, and "
+                                f"ask whether to ship as-is or authorize manual intervention. "
+                                f"You MAY use read_file/list_files to inspect the project while "
+                                f"composing that summary.\n\n"
+                                f"Do NOT call {name}, write_file, run_shell, "
+                                f"run_review, run_acceptance_review, run_fixer, run_aider_fix, "
+                                f"download_project, or download_file unless the latest user message "
+                                f"explicitly asks to ship/download anyway.",
+                                f"⛔ Blocked — automated repair budget exhausted for {_pending_role}",
+                                _rid,
+                            )
                     elif _aider_ctx_gate:
                         _project_dir = _aider_ctx_gate.get("project_dir") or _pending_env.get("project_dir") or ""
                         # Manual work tools in fix-needed state get AUTO-DISPATCHED
@@ -2730,83 +2913,16 @@ async def exec_tool(
             )
 
         elif name == "research":
-            query = args.get("query", "")
-            await events.emit(conv_id, "tool_start", {"tool": "research", "icon": "search", "status": f'Searching: "{query[:50]}"'})
-            import urllib.parse
-            params = urllib.parse.urlencode({"q": query, "format": "json", "count": config.SEARCH_RESULTS_COUNT})
-            r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
-            if r.status_code == 429:
-                await asyncio.sleep(3.0)
-                r = await http.get(f"{config.SEARXNG_URL}/search?{params}", timeout=15)
-            if r.status_code >= 400:
-                await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f"⚠️ Search returned HTTP {r.status_code} — may be rate limited"})
-                return f"**Web Search: {query}**\n\n⚠️ Search engine returned HTTP {r.status_code}. Upstream engines may be rate-limiting requests. Try again in a minute."
-            data = r.json()
-            results = data.get("results", [])[:config.SEARCH_RESULTS_COUNT]
-            sr_cards = []
-            for item in results:
-                url = item.get("url", "")
-                url_lower = url.lower()
-                thumbnail = item.get("thumbnail") or item.get("img_src") or ""
-                r_type = "web"
-                if "youtube.com/watch" in url_lower or "youtu.be/" in url_lower:
-                    r_type = "youtube"
-                    vid_id = None
-                    if "youtube.com/watch" in url_lower:
-                        qs = url.split("?", 1)[1] if "?" in url else ""
-                        for part in qs.split("&"):
-                            if part.startswith("v="):
-                                vid_id = part[2:].split("&")[0]; break
-                    elif "youtu.be/" in url_lower:
-                        vid_id = url.split("youtu.be/")[1].split("?")[0].split("/")[0]
-                    if vid_id:
-                        thumbnail = f"https://img.youtube.com/vi/{vid_id}/mqdefault.jpg"
-                elif thumbnail or any(url_lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-                    r_type = "image"
-                sr_cards.append({"title": item.get("title", ""), "url": url,
-                                 "snippet": item.get("content", "")[:200],
-                                 "thumbnail": thumbnail, "type": r_type})
-            if sr_cards:
-                await events.emit(conv_id, "search_results", {"query": query, "results": sr_cards})
-
-            # ── Fetch top 5 pages in parallel, prioritized by source tier ──
-            fetch_urls = []
-            for item in results:
-                u = item.get("url", "")
-                if u:
-                    fetch_urls.append(u)
-            fetch_urls.sort(key=_source_tier)
-            fetch_urls = fetch_urls[:5]
-
-            pages = []
-            if fetch_urls:
-                await events.emit(conv_id, "tool_status", {"tool": "research", "icon": "search", "status": f"Reading {len(fetch_urls)} pages..."})
-                fetch_tasks = [_fetch_page(http, u) for u in fetch_urls]
-                fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-                for u, fr in zip(fetch_urls, fetch_results):
-                    if isinstance(fr, dict) and fr.get("content"):
-                        pages.append(fr)
-
-            await events.emit(conv_id, "tool_end", {"tool": "research", "icon": "search", "status": f'{len(results)} results, {len(pages)} pages read',
-                "detail": json.dumps({"query": query, "results": [{"title": r.get("title",""), "url": r.get("url","")} for r in results[:5]]}),
-            })
-
-            # Build result: search listing + actual page content
-            parts = [f"**Web Search: {query}**\n"]
-            parts.append("## Search Results\n")
-            for i, res in enumerate(results, 1):
-                parts.append(f"{i}. **[{res.get('title', '')}]({res.get('url', '')})**\n   {res.get('content', '')}\n")
-
-            if pages:
-                parts.append("\n## Page Content (read from top results)\n")
-                for pg in pages:
-                    # Limit each page to 4000 chars to stay within context budget
-                    content = pg["content"][:4000]
-                    parts.append(f"### Source: {pg['url']}\n{content}\n\n---\n")
-            else:
-                parts.append("\n*(Could not fetch any page content — use the snippets above.)*\n")
-
-            return "\n".join(parts)
+            from quick_search import run_quick_search_for_chat
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "ERROR: research requires a query."
+            result = await run_quick_search_for_chat(
+                http, config.OLLAMA_URL, config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
+                events, conv_id, [{"role": "user", "content": query}],
+                default_model=config.DEFAULT_MODEL, force_search=True, tool_name="research",
+            )
+            return result["context"]
 
         elif name == "search_history":
             import rag  # lazy: keeps tools.py import light
@@ -2909,6 +3025,422 @@ async def exec_tool(
                 })
                 return f"ERROR: could not save memory: {e}"
 
+        elif name == "manage_tasks":
+            # Lazy import: scheduler → agents.assistant → agents.chat → tools
+            # would cycle at module import time.
+            import scheduler as _scheduler
+            action = str(args.get("action") or "").strip().lower()
+            task_id = str(args.get("task_id") or "").strip()
+
+            def _fmt_task(t: dict) -> str:
+                state = "enabled" if t["enabled"] else "paused"
+                nxt = f", next run {t['next_run']} UTC" if t.get("next_run") else ""
+                last = f", last: {t['last_status']}" if t.get("last_status") else ""
+                return f"- {t['id']}: \"{t['title']}\" [{t['schedule_kind']}, {state}{nxt}{last}]"
+
+            try:
+                if action == "list":
+                    tasks = await db.list_scheduled_tasks()
+                    if not tasks:
+                        return "No scheduled tasks yet."
+                    return "Scheduled tasks:\n" + "\n".join(_fmt_task(t) for t in tasks[:30])
+
+                if action == "create":
+                    title = str(args.get("title") or "").strip()[:200]
+                    prompt = str(args.get("prompt") or "").strip()
+                    kind = str(args.get("schedule_kind") or "once").strip().lower()
+                    if not title or not prompt:
+                        return "ERROR: manage_tasks create requires 'title' and 'prompt'."
+                    if kind not in ("once", "daily", "weekly", "monthly", "cron", "event"):
+                        return "ERROR: schedule_kind must be once, daily, weekly, monthly, cron, or event."
+                    profile = await db.get_assistant_profile()
+                    tz = (profile or {}).get("timezone") or "UTC"
+                    event_trigger_json: dict = {}
+                    schedule_json: dict = {}
+                    if kind == "event":
+                        event_name = str(args.get("event") or "").strip().lower()
+                        if event_name not in _scheduler.EVENT_NAMES:
+                            return (f"ERROR: event must be one of "
+                                    f"{', '.join(_scheduler.EVENT_NAMES)}.")
+                        event_trigger_json = {
+                            "event": event_name,
+                            "every": args.get("every", 1),
+                        }
+                    else:
+                        if args.get("time"):
+                            schedule_json["time"] = str(args["time"]).strip()
+                        if args.get("weekday") is not None:
+                            schedule_json["weekday"] = args["weekday"]
+                        if args.get("day") is not None:
+                            schedule_json["day"] = args["day"]
+                        if args.get("cron"):
+                            schedule_json["cron"] = str(args["cron"]).strip()
+                        if args.get("run_at"):
+                            schedule_json["run_at"] = str(args["run_at"]).strip()
+                    next_run = await _scheduler.validated_next_run(
+                        kind, schedule_json, tz, event_trigger_json=event_trigger_json)
+                    if kind == "event":
+                        event_trigger_json["every"] = int(event_trigger_json["every"])
+                    task = await db.create_scheduled_task(
+                        f"task-{uuid.uuid4().hex[:10]}", title=title, prompt=prompt,
+                        task_type="llm", schedule_kind=kind,
+                        schedule_json=schedule_json if kind != "event" else {},
+                        event_trigger_json=event_trigger_json,
+                        timezone=tz, next_run=next_run, conversation_id=conv_id or "",
+                        delivery_json={"conversation": bool(conv_id), "notify": True},
+                    )
+                    if kind == "event":
+                        return (f"Created event-triggered task {task['id']} (\"{title}\", fires on "
+                                f"{event_trigger_json['event']}"
+                                + (f" every {event_trigger_json['every']} occurrences"
+                                   if event_trigger_json['every'] > 1 else "")
+                                + "). Results will be posted in this conversation.")
+                    return (f"Created scheduled task {task['id']} (\"{title}\", {kind}, "
+                            f"next run {task['next_run']} UTC, timezone {tz}). Results will be "
+                            f"posted in this conversation.")
+
+                if not task_id:
+                    return f"ERROR: manage_tasks {action or '?'} requires 'task_id'."
+                task = await db.get_scheduled_task(task_id)
+                if not task:
+                    return f"ERROR: no task with id {task_id}."
+
+                if action == "get":
+                    runs = await db.list_task_runs(task_id, limit=3)
+                    run_lines = "\n".join(
+                        f"  run {r['id']}: {r['status']} at {r['started_at']}" for r in runs)
+                    return _fmt_task(task) + (f"\nRecent runs:\n{run_lines}" if run_lines else "")
+                if action == "pause":
+                    await db.update_scheduled_task(task_id, {"enabled": False})
+                    return f"Paused task \"{task['title']}\"."
+                if action == "resume":
+                    nxt = await _scheduler.validated_next_run(
+                        task["schedule_kind"], task["schedule_json"],
+                        task.get("timezone") or "", event_trigger_json=task.get("event_trigger_json"))
+                    await db.update_scheduled_task(task_id, {"enabled": True, "next_run": nxt})
+                    return f"Resumed task \"{task['title']}\" (next run {nxt} UTC)."
+                if action == "delete":
+                    await db.delete_scheduled_task(task_id)
+                    return f"Deleted task \"{task['title']}\"."
+                if action == "run_now":
+                    run_id = await _scheduler.run_task_now(task_id)
+                    return f"Started task \"{task['title']}\" now (run {run_id})."
+                if action == "update":
+                    fields: dict = {}
+                    if args.get("title"):
+                        fields["title"] = str(args["title"]).strip()[:200]
+                    if args.get("prompt"):
+                        fields["prompt"] = str(args["prompt"]).strip()
+                    schedule_json = dict(task.get("schedule_json") or {})
+                    changed_schedule = False
+                    for key in ("time", "weekday", "day", "cron", "run_at"):
+                        if args.get(key) is not None and args.get(key) != "":
+                            schedule_json[key] = args[key]
+                            changed_schedule = True
+                    kind = str(args.get("schedule_kind") or task["schedule_kind"]).strip().lower()
+                    event_trigger = dict(task.get("event_trigger_json") or {})
+                    if kind == "event":
+                        for key in ("event", "every"):
+                            if args.get(key) is not None:
+                                event_trigger[key] = args[key]
+                                changed_schedule = True
+                    if kind == "webhook" and task["schedule_kind"] != "webhook":
+                        return "ERROR: create webhook tasks through the Tasks API."
+                    if kind != task["schedule_kind"]:
+                        changed_schedule = True
+                    if changed_schedule:
+                        fields["schedule_kind"] = kind
+                        fields["schedule_json"] = schedule_json
+                        fields["next_run"] = await _scheduler.validated_next_run(
+                            kind, schedule_json, task.get("timezone") or "",
+                            event_trigger_json=event_trigger)
+                        if kind == "event":
+                            fields["event_trigger_json"] = event_trigger
+                    if not fields:
+                        return "Nothing to update — pass title, prompt, or schedule fields."
+                    updated = await db.update_scheduled_task(task_id, fields)
+                    return f"Updated task:\n{_fmt_task(updated)}"
+
+                return "ERROR: action must be create, list, get, update, pause, resume, delete, or run_now."
+            except Exception as e:
+                return f"ERROR: manage_tasks failed: {e}"
+
+        elif name == "get_weather":
+            import weather as _weather
+            location = str(args.get("location") or "").strip()
+            if not location:
+                _profile = await db.get_assistant_profile()
+                location = ((_profile or {}).get("location") or "").strip()
+            if not location:
+                return ("ERROR: no location given and no assistant location saved — "
+                        "pass location, or set one in the Assistant panel.")
+            try:
+                return await _weather.get_weather_text(location)
+            except Exception as e:
+                return f"ERROR: weather lookup failed: {e}"
+
+        elif name == "manage_notes":
+            import pim as _pim
+            action = str(args.get("action") or "").strip().lower()
+            try:
+                if action == "list":
+                    kind = str(args.get("kind") or "").strip().lower()
+                    notes = await db.list_notes(kind=kind if kind in ("note", "todo") else "",
+                                                include_done=False)
+                    if not notes:
+                        return "No open notes or todos."
+                    tz = await _pim.user_timezone()
+                    lines = []
+                    for n in notes[:30]:
+                        due = f" (due {_pim.utc_to_local(n['due_at'], tz)})" if n.get("due_at") else ""
+                        body = f" — {(n.get('content') or '')[:60]}" if n.get("content") else ""
+                        lines.append(f"- [{n['kind']}] {n['id']}: {n['title']}{due}{body}")
+                    return "Notes and todos:\n" + "\n".join(lines)
+                if action == "create":
+                    title = str(args.get("title") or "").strip()
+                    if not title:
+                        return "ERROR: manage_notes create requires 'title'."
+                    note = await _pim.create_note(
+                        kind=str(args.get("kind") or "note").strip().lower(),
+                        title=title, content=str(args.get("content") or ""),
+                        due_local=str(args.get("due") or ""),
+                        remind_local=str(args.get("remind") or ""))
+                    extra = " with a reminder" if args.get("remind") else ""
+                    return f"Saved {note['kind']} {note['id']}: \"{title}\"{extra}."
+                note_id = str(args.get("note_id") or "").strip()
+                if not note_id:
+                    return f"ERROR: manage_notes {action or '?'} requires 'note_id'."
+                note = await db.get_note(note_id)
+                if not note:
+                    return f"ERROR: no note with id {note_id}."
+                if action == "complete":
+                    await db.update_note(note_id, {"done": True})
+                    return f"Marked \"{note['title']}\" done."
+                if action == "delete":
+                    await db.delete_note(note_id)
+                    return f"Deleted \"{note['title']}\"."
+                if action == "update":
+                    tz = await _pim.user_timezone()
+                    fields: dict = {}
+                    if args.get("title"):
+                        fields["title"] = str(args["title"]).strip()[:300]
+                    if args.get("content") is not None and args.get("content") != "":
+                        fields["content"] = str(args["content"])
+                    if args.get("due"):
+                        fields["due_at"] = _pim.local_to_utc(str(args["due"]), tz)
+                    if args.get("remind"):
+                        fields["remind_at"] = _pim.local_to_utc(str(args["remind"]), tz)
+                        fields["reminded"] = False
+                    if not fields:
+                        return "Nothing to update — pass title, content, due, or remind."
+                    updated = await db.update_note(note_id, fields)
+                    return f"Updated \"{updated['title']}\"."
+                return "ERROR: action must be create, list, update, complete, or delete."
+            except Exception as e:
+                return f"ERROR: manage_notes failed: {e}"
+
+        elif name == "manage_calendar":
+            import pim as _pim
+            action = str(args.get("action") or "").strip().lower()
+            try:
+                tz = await _pim.user_timezone()
+                if action == "list":
+                    days = max(1, min(90, int(args.get("days") or 7)))
+                    from datetime import datetime as _dt, timedelta as _td
+                    start = _dt.utcnow().isoformat()
+                    end = (_dt.utcnow() + _td(days=days)).isoformat()
+                    events = await db.list_calendar_events(start=start, end=end)
+                    if not events:
+                        return f"No events in the next {days} days."
+                    lines = []
+                    for e in events[:30]:
+                        when = _pim.utc_to_local(e.get("start_at") or "", tz)
+                        loc = f" @ {e['location']}" if e.get("location") else ""
+                        lines.append(f"- {e['id']}: {when} {e['title']}{loc}")
+                    return f"Events (next {days} days, local time):\n" + "\n".join(lines)
+                if action == "create":
+                    title = str(args.get("title") or "").strip()
+                    start = str(args.get("start") or "").strip()
+                    if not title or not start:
+                        return "ERROR: manage_calendar create requires 'title' and 'start' (YYYY-MM-DDTHH:MM local)."
+                    try:
+                        remind = int(args["remind_minutes"]) if args.get("remind_minutes") is not None else None
+                    except (TypeError, ValueError):
+                        remind = None
+                    event = await _pim.create_event(
+                        title=title, start_local=start,
+                        end_local=str(args.get("end") or ""),
+                        description=str(args.get("description") or ""),
+                        location=str(args.get("location") or ""),
+                        remind_minutes=remind)
+                    return (f"Added event {event['id']}: \"{title}\" at "
+                            f"{_pim.utc_to_local(event['start_at'], tz)} (local). "
+                            f"It will sync to CalDAV if configured.")
+                event_id = str(args.get("event_id") or "").strip()
+                if not event_id:
+                    return f"ERROR: manage_calendar {action or '?'} requires 'event_id'."
+                event = await db.get_calendar_event(event_id)
+                if not event:
+                    return f"ERROR: no event with id {event_id}."
+                if action == "delete":
+                    await _pim.delete_event(event_id)
+                    return f"Deleted event \"{event['title']}\"."
+                if action == "update":
+                    fields = {"title": args.get("title") or None,
+                              "description": args.get("description"),
+                              "location": args.get("location"),
+                              "start_local": args.get("start") or "",
+                              "end_local": args.get("end") or ""}
+                    if args.get("remind_minutes") is not None:
+                        try:
+                            fields["remind_minutes"] = int(args["remind_minutes"])
+                        except (TypeError, ValueError):
+                            pass
+                    updated = await _pim.update_event(event_id, fields)
+                    return f"Updated event \"{updated['title']}\" ({_pim.utc_to_local(updated['start_at'], tz)} local)."
+                return "ERROR: action must be create, list, update, or delete."
+            except ValueError as e:
+                return f"ERROR: {e}"
+            except Exception as e:
+                return f"ERROR: manage_calendar failed: {e}"
+
+        elif name in ("list_emails", "read_email", "send_email", "reply_to_email",
+                      "archive_email", "mark_email_read", "delete_email"):
+            import email_client as _email_client
+            try:
+                accounts = await db.list_email_accounts()
+                if not accounts:
+                    return "No email account is configured. The user can add one in the Email panel."
+                account_id = accounts[0]["id"]
+
+                if name == "list_emails":
+                    limit = max(1, min(50, int(args.get("limit") or 20)))
+                    msgs = await db.list_email_messages(
+                        limit=limit, unread_only=bool(args.get("unread_only")))
+                    if not msgs:
+                        return "No emails in the cached inbox yet (the poller checks every ~5 minutes)."
+                    lines = []
+                    for m in msgs:
+                        flags = []
+                        if m["unread"]:
+                            flags.append("unread")
+                        if m.get("urgency") and m["urgency"] != "normal":
+                            flags.append(m["urgency"])
+                        tag = f" [{'/'.join(flags)}]" if flags else ""
+                        lines.append(f"- {m['id']}{tag} {m['from_addr']}: {m['subject']}"
+                                     f" — {(m.get('summary') or m.get('snippet') or '')[:100]}")
+                    return "Inbox:\n" + "\n".join(lines)
+
+                if name == "send_email":
+                    to = _email_client.clean_address(str(args.get("to") or ""))
+                    subject = str(args.get("subject") or "").strip()
+                    body = str(args.get("body") or "").strip()
+                    if not to or "@" not in to or not subject or not body:
+                        return "ERROR: send_email requires a valid 'to' address, 'subject', and 'body'."
+                    # Multi-account: honor an explicit account hint (label /
+                    # address / username substring) instead of always sending
+                    # from the oldest account.
+                    wanted = str(args.get("account") or "").strip().lower()
+                    if wanted:
+                        matches = [a for a in accounts if wanted in " ".join(
+                            (a.get("label") or "", a.get("from_address") or "",
+                             a.get("username") or "")).lower()]
+                        if not matches:
+                            known = ", ".join(a.get("label") or a.get("username") or a["id"]
+                                              for a in accounts)
+                            return (f"ERROR: no email account matches '{wanted}'. "
+                                    f"Configured accounts: {known}.")
+                        account_id = matches[0]["id"]
+                    account = await db.get_email_account(account_id, with_password=True)
+                    # SERVER-SIDE autonomy gate: prompt rules alone don't count.
+                    # Per-account flag ANDed with the assistant-profile master
+                    # switch (no profile row = master on, so email works
+                    # without ever opening the Assistant panel).
+                    _profile = await db.get_assistant_profile()
+                    _master_ok = _profile is None or _profile.get("allow_autonomous_email")
+                    if not account.get("allow_autonomous_send") or not _master_ok:
+                        note = await db.create_note(
+                            f"note-{uuid.uuid4().hex[:10]}", kind="note",
+                            title=f"Email draft to {to}: {subject}"[:290],
+                            content=body, tags=["email-draft"])
+                        why = ("for this account" if not account.get("allow_autonomous_send")
+                               else "by the assistant profile's master switch (Assistant panel)")
+                        return (f"Autonomous sending is disabled {why}, so the email was "
+                                f"saved as a draft note ({note['id']}) instead. The user can review "
+                                f"and send it from the Email panel, or enable autonomous send in "
+                                f"Email settings.")
+                    await _email_client.send_mail(account, to=to, subject=subject, body=body)
+                    return f"Email sent to {to}: \"{subject}\"."
+
+                message_id = str(args.get("message_id") or "").strip()
+                if not message_id:
+                    return f"ERROR: {name} requires 'message_id' (use list_emails first)."
+                msg = await db.get_email_message(message_id)
+                if not msg:
+                    return f"ERROR: no email with id {message_id}."
+                account = await db.get_email_account(msg["account_id"], with_password=True)
+                if not account:
+                    return "ERROR: the email account for this message no longer exists."
+
+                if name == "read_email":
+                    body = await _email_client.fetch_body(account, msg["uid"])
+                    await db.update_email_message(message_id, {"unread": False})
+                    try:
+                        await _email_client.set_flags(account, msg["uid"], seen=True)
+                    except Exception:
+                        pass
+                    return (f"From: {body['from']}\nTo: {body['to']}\nDate: {body['date']}\n"
+                            f"Subject: {body['subject']}\n\n{body['body'][:12000]}")
+
+                if name == "reply_to_email":
+                    body = str(args.get("body") or "").strip()
+                    if not body:
+                        return "ERROR: reply_to_email requires 'body'."
+                    _profile = await db.get_assistant_profile()
+                    _master_ok = _profile is None or _profile.get("allow_autonomous_email")
+                    if not account.get("allow_autonomous_send") or not _master_ok:
+                        await db.update_email_message(message_id, {"draft_reply": body})
+                        return (f"Autonomous sending is disabled, so the reply to "
+                                f"\"{msg['subject']}\" was saved as a draft. The user can review "
+                                f"and send it from the Email panel.")
+                    to = _email_client.clean_address(msg["from_addr"])
+                    subject = msg["subject"] or ""
+                    if not subject.lower().startswith("re:"):
+                        subject = f"Re: {subject}"
+                    await _email_client.send_mail(
+                        account, to=to, subject=subject, body=body,
+                        in_reply_to=msg.get("message_id") or "")
+                    await db.update_email_message(message_id, {"draft_reply": ""})
+                    return f"Reply sent to {to}."
+
+                if name == "archive_email":
+                    moved = await _email_client.set_flags(account, msg["uid"], archive=True)
+                    await db.update_email_message(message_id, {"archived": True, "unread": False})
+                    if moved:
+                        return f"Archived \"{msg['subject']}\"."
+                    return (f"Archived \"{msg['subject']}\" in HyprChat, but the mail "
+                            f"server has no Archive folder — on the server it was only "
+                            f"marked read and stays in the inbox.")
+
+                if name == "mark_email_read":
+                    await _email_client.set_flags(account, msg["uid"], seen=True)
+                    await db.update_email_message(message_id, {"unread": False})
+                    return f"Marked \"{msg['subject']}\" as read."
+
+                if name == "delete_email":
+                    # SERVER-SIDE autonomy gate (like allow_autonomous_send):
+                    # prompt rules alone must not authorize destroying mail.
+                    if not account.get("allow_autonomous_delete"):
+                        return (f"Autonomous deletion is disabled for this account, so "
+                                f"\"{msg['subject']}\" was NOT deleted. Ask the user to "
+                                f"delete it from the Email panel, or to enable autonomous "
+                                f"delete in Email settings. Consider archive_email instead.")
+                    await _email_client.delete_message(account, msg["uid"])
+                    await db.delete_email_message(message_id)
+                    return f"Deleted \"{msg['subject']}\" (moved to the server's Trash folder)."
+            except Exception as e:
+                return f"ERROR: {name} failed: {e}"
+
         elif name == "fetch_url":
             url = args.get("url", "").strip()
             # Auto-prepend https:// if no protocol present
@@ -3003,6 +3535,8 @@ async def exec_tool(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if artifact:
+                    await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
                     "is_image": _ext in _IMAGE_EXTS,
@@ -3190,6 +3724,8 @@ async def exec_tool(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if artifact:
+                    await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
                     "filename": filename, "url": download_url,
                     "is_image": True,
@@ -3555,6 +4091,8 @@ async def exec_tool(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if artifact:
+                    await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
                     "filename": tarname,
                     "url": download_url,
@@ -3924,7 +4462,7 @@ async def exec_tool(
             # _aider_fallback).
             if conv_id:
                 try:
-                    _esc_runs = await db.get_runs_by_conversation(conv_id, limit=50)
+                    _esc_runs = await db.get_runs_by_conversation(conv_id, limit=-1)
                     _esc_battle = compute_fix_battle(
                         _esc_runs, await _latest_user_msg_ts(conv_id))
                     if preferred_fix_editor(_esc_battle) == "fixer":
@@ -4097,7 +4635,7 @@ async def exec_tool(
             # the tree — a second editor without a Reviewer pass in between
             # would edit blind against the stale pre-Aider issue envelope, so
             # that case falls through to the run_review routing below.
-            if status in {"error", "failed"} and not (envelope.get("files_touched") or []):
+            if status in {"error", "failed"} and envelope.get("changes_known", True) and not (envelope.get("files_touched") or []):
                 return await _fallback_to_fixer(f"Aider failed: {envelope.get('summary','')[:160]}")
             return (
                 f"AIDER FAILED ({status}): {envelope.get('summary','')}\n"
@@ -4348,6 +4886,19 @@ async def exec_tool(
                 reviewer_run = await _latest_clean_reviewer()
                 if reviewer_run:
                     reviewer_run_id = reviewer_run.get("id", "")
+
+            if reviewer_run:
+                if reviewer_run.get("conversation_id") != conv_id:
+                    return "ERROR: Reviewer belongs to another conversation. Run review for this project."
+                _candidate_env = reviewer_run.get("result_envelope") or {}
+                _candidate_dir = (_candidate_env.get("project_dir") or "").rstrip("/")
+                if project_id and _candidate_env.get("project_id") and project_id != _candidate_env["project_id"]:
+                    return "ERROR: Reviewer belongs to another project. Run review for this project."
+                _project_runs = await db.get_runs_by_conversation(conv_id, limit=-1)
+                _newest_review = next((r for r in _project_runs if r.get("role") == "reviewer"
+                    and ((r.get("result_envelope") or {}).get("project_dir") or "").rstrip("/") == _candidate_dir), None)
+                if _newest_review and _newest_review.get("id") != reviewer_run.get("id"):
+                    return "ERROR: Reviewer result is stale. Use the latest clean review for the current project."
 
             review_env = (reviewer_run or {}).get("result_envelope") or {}
             _dir_override_note = ""
@@ -5075,7 +5626,7 @@ async def exec_tool(
 
             openhands_url = config.OPENHANDS_URL
             max_rounds = getattr(config, "OPENHANDS_MAX_ROUNDS", 20)
-            num_ctx = getattr(config, "OPENHANDS_NUM_CTX", 16384)
+            num_ctx = context_policy.resolve("builder").num_ctx
 
             # Health check with retry (3 attempts, 1s between)
             _oh_healthy = False
@@ -5377,6 +5928,7 @@ async def exec_tool(
                 "ollama_url": config.OLLAMA_URL,
                 "max_rounds": max_rounds,
                 "num_ctx": num_ctx,
+                "num_predict": context_policy.resolve("builder").num_predict,
                 "language": language,
                 "context": context,
                 "project_id": _oh_project_id,
@@ -5571,54 +6123,16 @@ async def exec_tool(
                 duration = result.get("duration_seconds", 0)
                 summary = result.get("summary", "")
 
-                # If OpenHands returned 0 files, scan CodeBox filesystem as fallback
+                # The worker owns workspace identity; never guess from recent files.
+                _project_id = result.get("project_id") or _oh_project_id
+                if not _project_id or not re.fullmatch(r"[A-Za-z0-9_.-]+", _project_id):
+                    await _finalize_run("failed", {"error": "Worker did not return a valid project identity"})
+                    return "ERROR: Worker did not return a valid project identity."
+                project_dir = f"/root/projects/{_project_id}"
+                files = [f for f in files if f.startswith(project_dir + "/")]
                 if not files:
-                    try:
-                        scan_r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                            "command": "find /root/ -maxdepth 5 -type f -mmin -10 "
-                                       "! -path '*/node_modules/*' ! -path '*/.git/*' "
-                                       "! -path '*/__pycache__/*' ! -path '*/.cache/*' "
-                                       "! -path '*/.npm/*' ! -path '*/venv/*' "
-                                       "! -path '*/.openhands/*' ! -path '*/.bash_history' "
-                                       "! -name '*.pyc' ! -name 'package-lock.json' "
-                                       "2>/dev/null | sort",
-                            "timeout": 10
-                        }, timeout=15)
-                        scan_out = scan_r.json().get("stdout", "").strip()
-                        if scan_out:
-                            files = [f for f in scan_out.splitlines() if f.strip()]
-                            print(f"[CODEGEN:OH] Filesystem fallback found {len(files)} files")
-                    except Exception as scan_e:
-                        print(f"[CODEGEN:OH] Filesystem scan failed: {scan_e}")
+                    files = await _scan_project_files(http, project_dir)
 
-                # Determine project directory from files
-                # Prefer /root/projects/{name} workspace, then project-*, then /root
-                project_dir = "/root"
-                if files:
-                    dirs = set()
-                    workspace_dirs = set()
-                    for f in files:
-                        parts = f.split("/")
-                        # /root/projects/{name}/... → ["", "root", "projects", "name", ...]
-                        if len(parts) >= 5 and parts[2] == "projects":
-                            workspace_dirs.add("/".join(parts[:4]))
-                        # Legacy: /root/project-{id}/... → ["", "root", "project-xxx", ...]
-                        elif len(parts) >= 4 and parts[2].startswith("project-"):
-                            workspace_dirs.add("/".join(parts[:3]))
-                        elif len(parts) >= 3:
-                            dirs.add("/".join(parts[:3]))
-                    if len(workspace_dirs) == 1:
-                        project_dir = workspace_dirs.pop()
-                        files = [f for f in files if f.startswith(project_dir)]
-                    elif len(workspace_dirs) > 1:
-                        # Multiple workspace dirs — pick the one with most files
-                        best = max(workspace_dirs, key=lambda d: sum(1 for f in files if f.startswith(d)))
-                        project_dir = best
-                        files = [f for f in files if f.startswith(project_dir)]
-                    elif len(dirs) == 1:
-                        project_dir = dirs.pop()
-
-                _project_id = _oh_project_id or result.get("project_id", "")
                 if required_files and project_dir and project_dir.startswith("/root/projects/"):
                     scanned_files = await _scan_project_files(http, project_dir)
                     if scanned_files:
@@ -6002,7 +6516,7 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                             if _current_file and _current_lines:
                                 _code_files[_current_file] = "\n".join(_current_lines)
                             if _code_files:
-                                asyncio.create_task(_rag.index_generated_code(
+                                _spawn_bg(_rag.index_generated_code(
                                     task=task, language=language, file_contents=_code_files,
                                     conv_id=conv_id, project_id=_project_id,
                                 ))
@@ -6308,25 +6822,39 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
         elif name in custom_tool_map:
             ct = custom_tool_map[name]
             await events.emit(conv_id, "tool_start", {"tool": name, "icon": "code", "status": f"Running {name}..."})
-            if args:
-                arg_parts = ", ".join(f"{k}={repr(v)}" for k, v in args.items())
-            else:
-                arg_parts = ""
-            run_code = f"{ct['code']}\n\n_result = {name}({arg_parts})\nprint(_result if _result is not None else '')"
+            run_code = build_custom_tool_code(ct.get("code") or "", name, args)
             try:
-                r = await http.post(
-                    f"{config.CODEBOX_URL}/execute",
-                    json={"code": run_code, "language": "python"},
-                    timeout=30,
-                )
-                result = r.json()
-                stdout = result.get("stdout", "").strip()
-                stderr = result.get("stderr", "").strip()
+                result = await run_custom_tool_code(http, run_code)
+                stdout = (result.get("stdout") or "").strip()
+                stderr = (result.get("stderr") or "").strip()
+
+                # Auto-install only modules the tool's own code imports, then retry once.
+                mod_match = re.search(r"ModuleNotFoundError: No module named '([\w.]+)'", stderr)
+                if mod_match:
+                    mod_root = mod_match.group(1).split(".")[0]
+                    if mod_root in tool_import_names(ct.get("code") or ""):
+                        pkg = pip_name_for_import(mod_root)
+                        await events.emit(conv_id, "tool_start", {
+                            "tool": name, "icon": "code",
+                            "status": f"Installing {pkg} for {name}...",
+                        })
+                        if await pip_install_in_venv(http, pkg):
+                            result = await run_custom_tool_code(http, run_code)
+                            stdout = (result.get("stdout") or "").strip()
+                            stderr = (result.get("stderr") or "").strip()
+                        else:
+                            stderr += f"\n(Automatic install of '{pkg}' into the sandbox venv failed.)"
+
                 success = result.get("exit_code", -1) == 0 or result.get("success", False)
                 await events.emit(conv_id, "tool_end", {
                     "tool": name, "icon": "code",
                     "status": f"{'OK' if success else 'FAILED'} {name}",
                 })
+                if not success and f"NameError: name '{name}' is not defined" in stderr:
+                    return (
+                        f"Custom tool '{name}' failed: the code does not define a function named '{name}'. "
+                        f"The tool name must match the function name — edit the tool in the Tools panel.\n\n{stderr[-500:]}"
+                    )
                 return stdout or stderr or "No output"
             except Exception as exec_e:
                 await events.emit(conv_id, "tool_error", {"tool": name, "icon": "code", "status": f"Error: {str(exec_e)}"})

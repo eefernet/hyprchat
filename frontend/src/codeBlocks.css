@@ -1,0 +1,16 @@
+.hc-code .token { background: transparent; text-shadow: none; }
+.hc-code .token.comment, .hc-code .token.prolog, .hc-code .token.doctype,
+.hc-code .token.cdata { color: var(--code-comment); }
+.hc-code .token.punctuation { color: var(--code-punctuation); }
+.hc-code .token.keyword, .hc-code .token.atrule, .hc-code .token.selector,
+.hc-code .token.important { color: var(--code-keyword); }
+.hc-code .token.string, .hc-code .token.char, .hc-code .token.attr-value,
+.hc-code .token.regex { color: var(--code-string); }
+.hc-code .token.number, .hc-code .token.boolean { color: var(--code-number); }
+.hc-code .token.function, .hc-code .token.function-name { color: var(--code-function); }
+.hc-code .token.class-name, .hc-code .token.builtin, .hc-code .token.constant,
+.hc-code .token.property, .hc-code .token.symbol, .hc-code .token.tag,
+.hc-code .token.attr-name { color: var(--code-type); }
+.hc-code .token.operator, .hc-code .token.entity, .hc-code .token.url,
+.hc-code .token.namespace { color: var(--code-operator); }
+.hc-code .token.variable { color: inherit; }

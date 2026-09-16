@@ -47,9 +47,26 @@ REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
 SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
+WORKER_FILES = {
+    "backend/openhands_worker.py", "backend/coder_worker_runtime.py", "backend/coder_sdk_runtime.py",
+    "backend/coder_repository.py", "backend/coder_inference.py", "backend/coder_checks.py", "backend/worker-requirements.txt",
+}
+WORKER_SHARED = {"backend/context_policy.py"}
+
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
+    "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
+    "backend/coding_search.py": ("Coding Search Context", REMOTE_BACKEND, True),
+    "backend/seed_kb/seed_coder_kb.py": ("Coder Docs Seeder", REMOTE_BACKEND + "seed_kb/", False),
+    "backend/seed_kb/coder_sources.py": ("Coder Docs Sources", REMOTE_BACKEND + "seed_kb/", False),
+    "backend/coder_jobs.py": ("Coding Controller", REMOTE_BACKEND, True),
+    "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
+    "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
+    **{path:("Coding Worker", REMOTE_OPENHANDS_WORKER, False) for path in WORKER_FILES},
+    "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/daedalusJobs.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
@@ -77,6 +94,13 @@ WATCHED = {
     "backend/routes/model_configs.py": ("Model Config Routes", REMOTE_ROUTES,        True),
     "backend/routes/ollama_models.py": ("Ollama Model Routes", REMOTE_ROUTES,        True),
     "backend/routes/backup.py":     ("Backup Routes",    REMOTE_ROUTES,             True),
+    "backend/routes/scheduler.py":  ("Scheduler Routes", REMOTE_ROUTES,             True),
+    "backend/routes/notifications.py": ("Notification Routes", REMOTE_ROUTES,       True),
+    "backend/routes/assistant.py":  ("Assistant Routes", REMOTE_ROUTES,             True),
+    "backend/routes/notes.py":      ("Notes Routes",     REMOTE_ROUTES,             True),
+    "backend/routes/calendar.py":   ("Calendar Routes",  REMOTE_ROUTES,             True),
+    "backend/routes/email.py":      ("Email Routes",     REMOTE_ROUTES,             True),
+    "backend/routes/chat_files.py": ("Chat File Routes", REMOTE_ROUTES,             True),
     "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
     "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
@@ -90,12 +114,24 @@ WATCHED = {
     "backend/reranker.py":          ("RAG Reranker",     REMOTE_BACKEND,            True),
     "backend/ocr.py":               ("PDF OCR",          REMOTE_BACKEND,            True),
     "backend/canvas_edit.py":       ("Canvas AI Edit",   REMOTE_BACKEND,            True),
+    "backend/scheduler.py":         ("Task Scheduler",   REMOTE_BACKEND,            True),
+    "backend/timeutil.py":          ("Time Utils",       REMOTE_BACKEND,            True),
+    "backend/notifications.py":     ("Notifications",    REMOTE_BACKEND,            True),
+    "backend/pim.py":               ("PIM (Notes/Calendar)", REMOTE_BACKEND,        True),
+    "backend/caldav_sync.py":       ("CalDAV Sync",      REMOTE_BACKEND,            True),
+    "backend/email_client.py":      ("Email Client",     REMOTE_BACKEND,            True),
+    "backend/email_triage.py":      ("Email Triage",     REMOTE_BACKEND,            True),
+    "backend/email_render.py":      ("Email HTML Render", REMOTE_BACKEND,           True),
+    "backend/weather.py":           ("Weather",          REMOTE_BACKEND,            True),
+    "backend/quiet_hours.py":       ("Quiet Hours",      REMOTE_BACKEND,            True),
     "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
     "backend/image_prompt_enhancer.py": ("Image Prompt Enhancer", REMOTE_BACKEND,   True),
     "backend/persona_images.py":    ("Persona Images",   REMOTE_BACKEND,            True),
     "backend/voice.py":             ("Voice",            REMOTE_BACKEND,            True),
     "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
+    "backend/leak_sources.py":      ("Leak Sources",     REMOTE_BACKEND,            True),
     "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
+    "backend/search_runtime.py":    ("Search Runtime",   REMOTE_BACKEND,            True),
     "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
     "backend/storage_diagnostics.py": ("Storage Diagnostics", REMOTE_BACKEND,        True),
     "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
@@ -113,6 +149,7 @@ WATCHED = {
     "backend/agents/project_qa.py":     ("ProjectQA Agent",    REMOTE_AGENTS, True),
     "backend/agents/project_indexer.py":("Project Indexer",    REMOTE_AGENTS, True),
     "backend/agents/language_adapters.py":("Language Adapters", REMOTE_AGENTS, True),
+    "backend/agents/assistant.py":      ("Assistant Agent",    REMOTE_AGENTS, True),
     "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),
     "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
     "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
@@ -127,15 +164,36 @@ WATCHED = {
     "frontend/src/settingsSync.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/daedalusTimeline.js": ("Frontend (build)", REMOTE_FRONTEND,       False),
     "frontend/src/ModelPicker.jsx": ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/canvasEditorSetup.js": ("Frontend (build)", REMOTE_FRONTEND,      False),
+    "frontend/src/components/ArtifactCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/BackgroundCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/ChatHero.jsx": ("Frontend (build)", REMOTE_FRONTEND,   False),
+    "frontend/src/components/EmptyState.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/NavLayoutEditor.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/PanelChart.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/PanelHeader.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/Skeleton.jsx": ("Frontend (build)", REMOTE_FRONTEND,   False),
     "frontend/src/components/artifactComponents.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/hyprChatWidgets.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/icons.jsx": ("Frontend (build)", REMOTE_FRONTEND,      False),
+    "frontend/src/components/identityColor.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/markdownBlocks.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/api.js":          ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/datetime.js":     ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/navItems.js":     ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/useIsMobile.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/panels/AnalyticsPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/panels/PromptLibraryPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/panels/TasksPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,     False),
+    "frontend/src/panels/AssistantPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/panels/NotesPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,     False),
+    "frontend/src/panels/CalendarPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,  False),
+    "frontend/src/panels/EmailPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,     False),
     "frontend/src/vendor.js":       ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
+    "frontend/src/prism-languages.js": ("Frontend (build)", REMOTE_FRONTEND,        False),
+    "frontend/src/syntaxHighlight.js": ("Frontend (build)", REMOTE_FRONTEND,        False),
+    "frontend/src/codeBlocks.css":  ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/vite.config.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
     "frontend/package.json":        ("Frontend (build)", REMOTE_FRONTEND,           False),
@@ -155,6 +213,7 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    "frontend/src/components/DaedalusJobCard.jsx", "frontend/src/components/DaedalusSettings.jsx", "frontend/src/daedalusJobs.js",
     "frontend/src/main.jsx",
     "frontend/src/session.js",
     "frontend/src/theme.js",
@@ -162,15 +221,36 @@ FRONTEND_SRC_FILES = {
     "frontend/src/settingsSync.js",
     "frontend/src/daedalusTimeline.js",
     "frontend/src/ModelPicker.jsx",
+    "frontend/src/canvasEditorSetup.js",
+    "frontend/src/components/ArtifactCanvas.jsx",
     "frontend/src/components/BackgroundCanvas.jsx",
+    "frontend/src/components/ChatHero.jsx",
+    "frontend/src/components/EmptyState.jsx",
+    "frontend/src/components/NavLayoutEditor.jsx",
+    "frontend/src/components/PanelChart.jsx",
+    "frontend/src/components/PanelHeader.jsx",
+    "frontend/src/components/Skeleton.jsx",
     "frontend/src/components/artifactComponents.jsx",
     "frontend/src/components/hyprChatWidgets.jsx",
     "frontend/src/components/icons.jsx",
+    "frontend/src/components/identityColor.js",
     "frontend/src/components/markdownBlocks.jsx",
+    "frontend/src/api.js",
+    "frontend/src/datetime.js",
+    "frontend/src/navItems.js",
+    "frontend/src/useIsMobile.js",
     "frontend/src/panels/AnalyticsPanel.jsx",
     "frontend/src/panels/PromptLibraryPanel.jsx",
+    "frontend/src/panels/TasksPanel.jsx",
+    "frontend/src/panels/AssistantPanel.jsx",
+    "frontend/src/panels/NotesPanel.jsx",
+    "frontend/src/panels/CalendarPanel.jsx",
+    "frontend/src/panels/EmailPanel.jsx",
     "frontend/src/vendor.js",
     "frontend/src/prism-setup.js",
+    "frontend/src/prism-languages.js",
+    "frontend/src/syntaxHighlight.js",
+    "frontend/src/codeBlocks.css",
     "frontend/index.html",
     "frontend/vite.config.js",
     "frontend/package.json",
@@ -708,7 +788,7 @@ def _ensure_openhands_worker_service(cb):
 
 def _deploy_target(filepath, remote_dir, hypr, cb):
     """Return (target_server, remote_dir) for a watched file."""
-    if filepath == "backend/openhands_worker.py":
+    if filepath in WORKER_FILES:
         return cb, REMOTE_OPENHANDS_WORKER
     return hypr, remote_dir
 
@@ -877,6 +957,12 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} Codebox host ready")
 
+    changed = list(changed)
+    if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
+        present = {path for path, _ in changed}
+        for path in WORKER_FILES | WORKER_SHARED:
+            if path not in present:
+                changed.append((path,WATCHED[path]))
     # Phase 1 — stage: copy every backend file to <final>.deploy-tmp. Nothing
     # in the live tree changes until the whole batch has staged cleanly.
     frontend_built = False
@@ -924,6 +1010,16 @@ def deploy_changes(changed, cfg):
             })
         else:
             stage_failed.append((label, filepath, err, target))
+
+    if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
+        for filepath in WORKER_SHARED:
+            final = REMOTE_OPENHANDS_WORKER.rstrip("/") + "/" + os.path.basename(filepath)
+            ok, err = scp(filepath, cb["ip"], final + ".deploy-tmp", cb["user"], cb["pass"])
+            if ok:
+                staged.append({"filepath":filepath,"label":"Worker Context Policy","target":cb,
+                               "tmp":final+".deploy-tmp","final":final,"digest":file_digest(filepath),"restart_flag":False})
+            else:
+                stage_failed.append(("Worker Context Policy",filepath,err,cb))
 
     if stage_failed:
         # Abort the whole backend batch: the live tree stays untouched,
@@ -1045,7 +1141,7 @@ def deploy_changes(changed, cfg):
                 print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
                 _show_journal(hypr, "hyprchat")
 
-    worker_deployed = "backend/openhands_worker.py" in pushed
+    worker_deployed = bool(set(pushed) & (WORKER_FILES | WORKER_SHARED))
     aider_ready, aider_out, _ = _aider_worker_ready(cb)
     if worker_deployed or not aider_ready:
         print()
@@ -1058,6 +1154,14 @@ def deploy_changes(changed, cfg):
             print(f"     {DIM}Worker will still run; /aider/health reports missing until this is fixed.{RST}")
 
     if worker_deployed:
+        ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
+            "/root/venv/bin/python3 -m pip install -r /opt/openhands-worker/worker-requirements.txt > /tmp/daedalus-dependencies.log 2>&1 && "
+            "/root/venv/bin/python3 -m playwright install chromium --only-shell >> /tmp/daedalus-dependencies.log 2>&1", timeout=600)
+        if not ok:
+            print(f"  {R}Worker dependencies failed; service restart skipped. Inspect /tmp/daedalus-dependencies.log. Worker files will retry.{RST}")
+            for path in WORKER_FILES | WORKER_SHARED:
+                pushed.pop(path, None)
+            return pushed
         print()
         print(f"  {Y}\u25b6{RST} Ensuring OpenHands worker service...")
         svc_ok, svc_out, svc_err = _ensure_openhands_worker_service(cb)

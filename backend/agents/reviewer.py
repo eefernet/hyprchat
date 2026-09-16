@@ -24,6 +24,7 @@ import shlex
 import uuid
 
 import config
+import context_policy
 import database as db
 import cancel_registry
 import model_providers
@@ -2174,7 +2175,7 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         _ticker = asyncio.create_task(_progress_ticker())
         coro = model_providers.complete_chat(
             http, review_model, prompt,
-            temperature=0.2, num_ctx=config.DEFAULT_NUM_CTX, num_predict=4096,
+            temperature=0.2, num_ctx=context_policy.resolve("reviewer").num_ctx, num_predict=context_policy.resolve("reviewer").num_predict,
             timeout=600, ollama_url=config.OLLAMA_URL,
         )
         review_text = await cancel_registry.await_cancellable(coro, run_id)
@@ -2272,12 +2273,19 @@ async def run_review(http, events, conv_id: str, project_dir: str,
         return envelope
 
     parsed = _try_parse_review_json(review_text)
+    _any_fail = (build_result["exit_code"] != 0
+                 or test_result["exit_code"] != 0
+                 or lint_result["exit_code"] != 0)
+    if parsed and parsed.get("status") == "clean" and _any_fail:
+        # Deterministic guard: nonzero build/test/lint exits can never be
+        # "clean", no matter what the model claims. Discard the verdict and
+        # fall through to the exit-code-derived envelope below.
+        await _step("clean_override",
+                    "model reported clean despite nonzero build/test/lint exit — overriding")
+        parsed = None
     if not parsed or "status" not in parsed:
         # Heuristic fallback when the model didn't emit clean JSON.
         await _step("parse_fallback", "model output was not valid JSON")
-        _any_fail = (build_result["exit_code"] != 0
-                     or test_result["exit_code"] != 0
-                     or lint_result["exit_code"] != 0)
         _fb_issues = []
 
         # Extract FAILED/ERROR lines from test output for actionable summaries

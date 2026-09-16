@@ -20,7 +20,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from context_policy import DEFAULTS as CONTEXT_DEFAULTS
 
 
 class _RunCancelled(Exception):
@@ -57,7 +58,7 @@ AIDER_REPEAT_LINE_LIMIT = int(os.environ.get("AIDER_REPEAT_LINE_LIMIT", "120"))
 # which can never finish inside any sane timeout); the timeout then only fires
 # on genuinely dead calls, not on long-but-healthy generations.
 OH_LLM_TIMEOUT_SECONDS = int(os.environ.get("OH_LLM_TIMEOUT_SECONDS", "420"))
-OH_NUM_PREDICT = int(os.environ.get("OH_NUM_PREDICT", "8192"))
+OH_NUM_PREDICT = CONTEXT_DEFAULTS["generation_num_predict"]  # Legacy API compatibility only.
 # Thinking control for the builder LLM. Thinking-capable models (qwen3.5
 # merges etc.) otherwise reason with an UNBOUNDED budget on every tool call —
 # reasoning_effort never reaches Ollama's `think` switch through litellm.
@@ -140,7 +141,7 @@ def _ensure_sdk():
     _sdk_loaded = True
 
 
-PROJECTS_DIR = Path("/root/projects")
+PROJECTS_DIR = Path(os.environ.get("DAEDALUS_PROJECTS_DIR", "/root/projects"))
 
 
 def _derive_project_name(task: str, language: str) -> str:
@@ -336,7 +337,8 @@ class RunRequest(BaseModel):
     model: str = "qwen2.5:14b"
     ollama_url: str = "http://127.0.0.1:11434"
     max_rounds: int = 20
-    num_ctx: int = 16384
+    num_ctx: int = Field(gt=0)
+    num_predict: int = Field(default=CONTEXT_DEFAULTS["generation_num_predict"], gt=0)
     language: str = "python"
     context: str = ""
     project_id: str = ""
@@ -387,7 +389,8 @@ class AiderRunRequest(BaseModel):
     contract: dict = {}
     model: str = "qwen2.5-coder:14b"
     ollama_url: str = "http://127.0.0.1:11434"
-    num_ctx: int = 16384
+    num_ctx: int = Field(gt=0)
+    num_predict: int = Field(default=CONTEXT_DEFAULTS["generation_num_predict"], gt=0)
     test_cmd: str = ""
     lint_cmd: str = ""
     allowed_files: list[str] = []
@@ -502,7 +505,7 @@ def _make_llm_and_agent(req: "RunRequest", ollama_base: str, native_tc: bool,
     # num_predict bounds each completion so it always terminates.
     extra_body = {"options": {
         "num_ctx": req.num_ctx,
-        "num_predict": OH_NUM_PREDICT,
+        "num_predict": req.num_predict,
         "temperature": 0.3,
     }}
     think_flag = _resolve_think_flag(ollama_base, req.model, req.disable_thinking)
@@ -510,7 +513,10 @@ def _make_llm_and_agent(req: "RunRequest", ollama_base: str, native_tc: bool,
         # Top-level sibling of "options" — merged into the Ollama request
         # body by the same extra_body mechanism that delivers options.num_ctx.
         extra_body["think"] = False
+    os.environ["ALLOW_SHORT_CONTEXT_WINDOWS"] = "true"
     _llm_kwargs = dict(
+        max_input_tokens=req.num_ctx,
+        max_output_tokens=req.num_predict,
         model=f"ollama_chat/{req.model}",
         api_key="ollama",
         base_url=ollama_base,
@@ -583,7 +589,7 @@ def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
     keeps that loaded instance for subsequent requests regardless of what they
     ask for. To make the user-set num_ctx authoritative, we evict any existing
     load with the wrong context and preload with the desired value before the
-    agent run starts. Best-effort — failures don't block the run.
+    agent run starts. Allocation failures stop the run with an explicit error.
     """
     import requests
 
@@ -592,46 +598,9 @@ def _ensure_loaded(ollama_base: str, model: str, num_ctx: int) -> None:
 
 
 def _ensure_loaded_inner(ollama_base: str, model: str, num_ctx: int, requests) -> None:
-    try:
-        ps = requests.get(f"{ollama_base}/api/ps", timeout=5).json()
-        for m in (ps.get("models") or []):
-            if m.get("name") == model:
-                cur = m.get("context_length")
-                if cur == num_ctx:
-                    print(f"[OH-Worker] {model} already loaded at num_ctx={num_ctx}, skipping preload")
-                    return
-                print(f"[OH-Worker] {model} loaded at num_ctx={cur}, evicting to reload at {num_ctx}")
-                break
-    except Exception as e:
-        print(f"[OH-Worker] _ensure_loaded ps check failed (non-fatal): {e}")
-
-    # Evict (best-effort) so the next load picks up the new num_ctx.
-    try:
-        requests.post(
-            f"{ollama_base}/api/generate",
-            json={"model": model, "keep_alive": 0},
-            timeout=30,
-        )
-    except Exception as e:
-        print(f"[OH-Worker] _ensure_loaded evict failed (non-fatal): {e}")
-
-    # Preload with empty prompt + the user's num_ctx. This is what binds the
-    # loaded instance to the requested context — Ollama caches options on first
-    # load. Empty prompt makes this nearly free aside from the model swap.
-    try:
-        requests.post(
-            f"{ollama_base}/api/generate",
-            json={
-                "model": model,
-                "prompt": "",
-                "options": {"num_ctx": num_ctx},
-                "keep_alive": "10m",
-            },
-            timeout=180,
-        )
-        print(f"[OH-Worker] Preloaded {model} at num_ctx={num_ctx}")
-    except Exception as e:
-        print(f"[OH-Worker] _ensure_loaded preload failed (non-fatal): {e}")
+    from types import SimpleNamespace
+    from coder_inference import ensure_context
+    ensure_context(ollama_base,model,SimpleNamespace(num_ctx=num_ctx),180,requests_client=requests)
 
 
 def _aider_bin() -> str:
@@ -936,7 +905,7 @@ def _write_aider_model_settings(req: AiderRunRequest, prompt_dir: Path) -> Path:
     path.write_text(
         "- name: aider/extra_params\n"
         "  extra_params:\n"
-        f"    num_ctx: {int(req.num_ctx or 16384)}\n"
+        f"    num_ctx: {req.num_ctx}\n"
         f"- name: {model}\n"
         "  edit_format: diff\n"
         "  use_repo_map: true\n"
@@ -1250,9 +1219,12 @@ async def run_aider_stream(req: AiderRunRequest):
             # Client disconnected mid-run (Stop, orchestrator crash/kill):
             # nobody is consuming, so cancel — the blocking runner's poll
             # loop sees the event and kills the aider process group.
-            if not finished and not cancel_event.is_set():
-                print(f"[Aider-Worker] stream consumer vanished for {req.run_id} — cancelling run")
-                cancel_event.set()
+            if not finished:
+                with _ACTIVE_AIDER_RUNS_LOCK:
+                    entry = _ACTIVE_AIDER_RUNS.get(req.run_id)
+                if entry and not entry["cancel"].is_set():
+                    print(f"[Aider-Worker] stream consumer vanished for {req.run_id} — cancelling run")
+                    entry["cancel"].set()
 
     return StreamingResponse(
         generate(),
@@ -1261,7 +1233,7 @@ async def run_aider_stream(req: AiderRunRequest):
     )
 
 
-def _check_tool_support(ollama_base: str, model: str, num_ctx: int = 8192) -> bool:
+def _check_tool_support(ollama_base: str, model: str, num_ctx: int, num_predict: int = CONTEXT_DEFAULTS["generation_num_predict"], on_call=None) -> bool:
     """Check if an Ollama model reliably returns structured tool_calls.
 
     Two stages:
@@ -1344,8 +1316,8 @@ def _check_tool_support(ollama_base: str, model: str, num_ctx: int = 8192) -> bo
             },
         }],
         "stream": False,
-        "options": {"num_ctx": max(2048, int(num_ctx or 8192)),
-                    "num_predict": 512},
+        "options": {"num_ctx": num_ctx,
+                    "num_predict": num_predict},
     }
     if "thinking" in _model_capabilities(ollama_base, model):
         test_payload["think"] = False
@@ -1353,6 +1325,8 @@ def _check_tool_support(ollama_base: str, model: str, num_ctx: int = 8192) -> bo
     saw_tool_call = False
     for attempt in (1, 2):
         try:
+            if on_call:
+                on_call()
             r = requests.post(f"{ollama_base}/api/chat", json=test_payload, timeout=120)
             if not r.ok:
                 print(f"[OH-Worker] {model}: probe HTTP {r.status_code} (attempt {attempt})")
@@ -1422,7 +1396,7 @@ def run_task(req: RunRequest):
         # ── Detect native tool support via live test ──
         # Some models (qwen3) return structured tool_calls → use native mode.
         # Others (qwen2.5-coder) put JSON in content text → use prompt-based.
-        native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx)
+        native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx, num_predict=req.num_predict)
 
         # ── LLM + Agent (shared factory) ──
         # The user's num_ctx from HyprChat settings is authoritative — we don't
@@ -1659,7 +1633,7 @@ async def run_task_stream(req: RunRequest):
         """Synchronous function that runs in a thread."""
         try:
             ollama_base = req.ollama_url.rstrip("/")
-            native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx)
+            native_tc = _check_tool_support(ollama_base, req.model, num_ctx=req.num_ctx, num_predict=req.num_predict)
             # Force the loaded instance to match req.num_ctx — user setting wins
             # over Modelfile defaults and over whatever litellm forwards (or fails to forward).
             _ensure_loaded(ollama_base, req.model, req.num_ctx)
@@ -2234,6 +2208,9 @@ def clean_workspace():
     print(f"[OH-Worker] Clean complete: {deleted} items, freed {freed // 1024} KB")
     return {"deleted": deleted, "freed_bytes": freed, "errors": errors}
 
+
+from coder_worker_runtime import install_routes as _install_job_routes
+_JOB_STORE = _install_job_routes(app, PROJECTS_DIR)
 
 if __name__ == "__main__":
     import uvicorn
