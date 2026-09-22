@@ -59,3 +59,12 @@ test('download_project and normal follow-up events do not count as full builds',
     false,
   );
 });
+
+test('a persistent v3 job owns its message in every state, not only legacy-active ones', () => {
+  // 2026-09-19: the in-chat job card vanished once a job reached coding/checking or stopped.
+  for (const state of ['coding', 'checking', 'auditing', 'cancelled', 'ready_for_review', 'completed']) {
+    assert.equal(_isDaedalusOutput({ workflows: [{ id: 'cw3-x', workflow_version: 3, state }] }), true, state);
+  }
+  assert.equal(_isDaedalusOutput({ workflows: [{ id: 'cw-legacy', state: 'completed' }] }), false);
+  assert.equal(_isDaedalusOutput({ workflows: [] }), false);
+});

@@ -12,7 +12,7 @@ import time
 from context_policy import DEFAULTS
 
 
-def validate_plan(answer):
+def validate_plan(answer, policy_version=3):
     """Catch invalid check programs before asking the Builder to repair code."""
     milestones = answer.get("milestones")
     if not isinstance(milestones,list) or not milestones:
@@ -45,13 +45,22 @@ def validate_plan(answer):
                     except SyntaxError as error:
                         raise ValueError(f"Check {check.get('id','')} has invalid Python syntax: {error.msg}. Use a test file or multiline script.") from error
             if check.get("kind") == "browser":
+                if policy_version >= 4:
+                    from coder_browser_schema import validate_flow
+                    validate_flow(check)
                 for step in check.get("steps",[]):
-                    if not isinstance(step,dict) or step.get("action") not in {"click","fill","visible","text","reload"}:
-                        raise ValueError("Browser steps must use click, fill, visible, text, or reload")
+                    if not isinstance(step,dict) or step.get("action") not in {"click","fill","select","press","check","scroll","exists","visible","text","reload"}:
+                        raise ValueError("Unknown browser action")
                     if step["action"] != "reload" and not step.get("selector"):
                         raise ValueError("Browser step needs a selector")
                     if step["action"] == "text" and "value" not in step:
                         raise ValueError("Browser text check needs an expected value")
+                    if step["action"] == "exists" and "value" in step and not isinstance(step["value"],bool):
+                        raise ValueError("Browser exists value must be true or false")
+                    if step["action"] == "text" and not isinstance(step["value"],str):
+                        raise ValueError("Browser text value must be a string")
+                    if "exact" in step and not isinstance(step["exact"],bool):
+                        raise ValueError("Browser exact must be true or false")
 
 
 def discover(repository):
@@ -87,7 +96,7 @@ def discover(repository):
                     command = f'{manager} run {name}'
                     if name == 'test' and 'vitest' in scripts[name] and '--run' not in scripts[name]:
                         command += ' -- --run'
-                    add(name,command)
+                    add(name,command,is_test=name=='test',test_runner=scripts[name] if name=='test' else '')
             if any(key in {**manifest.get('dependencies',{}),**manifest.get('devDependencies',{})} for key in ('vite','next','react','vue','svelte')):
                 web.append(package)
                 if 'dev' in scripts:
@@ -117,13 +126,13 @@ def discover(repository):
             add('dependencies','.venv/bin/python -m pip check')
             add('syntax', '.venv/bin/python -m compileall -q -x "(^|/)(\\.venv|venv|node_modules)/" .')
             if test_paths:
-                add('tests','.venv/bin/python -m pytest -q' if pytest_needed else '.venv/bin/python -m unittest discover '+('-s tests ' if (root/'tests').is_dir() else '')+"-p '*test*.py' -v")
+                add('tests','.venv/bin/python -m pytest -q' if pytest_needed else '.venv/bin/python -m unittest discover '+('-s tests ' if (root/'tests').is_dir() else '')+"-p '*test*.py' -v",is_test=True)
         if (root/'Cargo.toml').exists():
-            add('tests','cargo test --workspace')
+            add('tests','cargo test --workspace',is_test=True)
         if (root/'go.mod').exists():
-            add('tests','go test ./...')
+            add('tests','go test ./...',is_test=True)
         if (root/'pom.xml').exists():
-            add('tests','mvn test')
+            add('tests','mvn test',is_test=True)
         if not (root/'package.json').exists() and (root/'index.html').exists():
             web.append(package)
             add('browser','',kind='browser',server_command='python3 -m http.server {port} --bind 127.0.0.1',path='/',steps=[])
@@ -134,8 +143,8 @@ def discover(repository):
             for source in sorted(p for p in paths if p.startswith(prefix) and Path(p).suffix in {'.js','.mjs','.cjs'}):
                 name = Path(source).name
                 relative = str(Path(source).relative_to(package))
-                if name.startswith(('test_', 'test.')) or '.test.' in name or any(part in {'test','tests'} for part in Path(relative).parts[:-1]):
-                    add('tests:'+relative,'node --test '+shlex.quote(relative))
+                if name.startswith(('test_', 'test.', 'test-')) or '.test.' in name or any(part in {'test','tests'} for part in Path(relative).parts[:-1]):
+                    add('tests:'+relative,'node --test '+shlex.quote(relative),is_test=True)
     return {'checks':checks,'packages':packages,'web_packages':web}
 
 

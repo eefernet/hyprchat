@@ -14,6 +14,10 @@ import { parseCodeFence } from './syntaxHighlight.js';
 
 import React from 'react';
 import DaedalusSettings from './components/DaedalusSettings.jsx';
+import DaedalusRequestOptions from './components/DaedalusRequestOptions.jsx';
+import {DaedalusStatusStrip} from './components/DaedalusJobCard.jsx';
+import NewVersionBar from './components/NewVersionBar.jsx';
+import {isDaedalusPersona,codingRequestFields,workflowIds,backgroundJob,cancellableWorkflowIds} from './daedalusJobs.js';
 import * as ReactDOMFull from 'react-dom';
 import { createRoot, hydrateRoot } from 'react-dom/client';
 import {
@@ -614,6 +618,7 @@ function HyprChat(){
   const [coderProjUploading,setCoderProjUploading]=useState(false);
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
   const [coderWorkflows,setCoderWorkflows]=useState([]);
+  const [codingOptions,setCodingOptions]=useState({});
   const notify=useCallback(({type="info",text,detail,action,duration}={})=>{
     if(!text)return null;
     const id=`toast-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
@@ -959,6 +964,8 @@ function HyprChat(){
   const isDaedalusProfileName=(name)=>String(name||"").toLowerCase().includes("daedalus");
   const isCoderPersonaName = (name)=>{const n=(name||"").toLowerCase();return n.includes("coder")||n.includes("daedalus");};
   const avatarSrc=(avatar)=>avatar?(String(avatar).startsWith("blob:")||String(avatar).startsWith("data:")||String(avatar).startsWith("http")?avatar:`${API}${avatar}`):"";
+  const showCodingOptions=isDaedalusPersona(act,actId?null:pendingPersona);
+  useEffect(()=>{setCodingOptions({});},[actId,act?.model_config_id,act?.persona_name,pendingPersona?.model_config_id,pendingPersona?.persona_name]);
   const profileAvatar=(mc)=>mc?.parameters?.avatar||(isDaedalusProfileName(mc?.name)?DAEDALUS_AVATAR:null);
   const parseTags=(v)=>Array.isArray(v)?v.map(x=>String(x).trim()).filter(Boolean):String(v||"").split(",").map(x=>x.trim()).filter(Boolean);
   const tagsToText=(v)=>parseTags(v).join(", ");
@@ -2922,6 +2929,7 @@ function HyprChat(){
 
       const ctrl=new AbortController();abortR.current=ctrl;
       const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null),use_memories:!isGhostSend&&(cv?.use_memories==="1"||cv?.use_memories===1||cv?.use_memories===true)};
+      Object.assign(body,codingRequestFields(codingOptions,cv));
       if(isGhostSend)body.ephemeral=true;
       const _wsForChat=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&wsDetail.conversations.some(wc=>wc.id===cid))?wsDetail:null;
       if(_wsForChat?.id&&!isGhostSend)body.workspace_id=_wsForChat.id;
@@ -3008,10 +3016,12 @@ function HyprChat(){
       // Pluck run_ids out of the raw event stream so the Daedalus summary can
       // find every run even when older status events are trimmed.
       const _streamRunIds = _runIdsFromEvents(_rawEvts);
-      let _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length) ? {
+      const _streamWorkflowIds=workflowIds({},_rawEvts);
+      let _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length || _streamWorkflowIds.length) ? {
         ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
         ...(refinementsCount>0?{refinements:refinementsCount}:{}),
         ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        ...(_streamWorkflowIds.length?{workflow_ids:_streamWorkflowIds}:{}),
         ...(_doneStats?{stats:_doneStats}:{}),
         has_full_product_build: _streamHasFullProductBuild,
         in_progress: false,
@@ -3363,8 +3373,7 @@ function HyprChat(){
     // row stays status='running' forever.
     try{
       const stopEvents=evtsRef.current||evts;
-      const workflowIds=new Set(stopEvents.map(event=>event.data?.workflow_id).filter(Boolean));
-      coderWorkflows.filter(workflow=>workflow.workflow_version===3&&workflow.conversation_id===actId&&!['completed','cancelled'].includes(workflow.state)).forEach(workflow=>workflowIds.add(workflow.id));
+      const workflowIds=cancellableWorkflowIds(coderWorkflows,stopEvents,actId);
       for(const workflowId of workflowIds)fetch(`${API}/api/coder/workflows/${workflowId}/cancel`,{method:"POST"}).catch(()=>{});
       const rids=_runIdsFromEvents(stopEvents);
       for(const rid of rids){
@@ -4573,7 +4582,8 @@ function HyprChat(){
       </div>
       {extras?<div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>{extras}</div>:null}
     </div>);
-  const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&(!act||(!(act.messages||[]).length&&!act.is_council));
+  const standaloneCoderJobs=coderWorkflows.filter(w=>w.workflow_version===3&&w.conversation_id===actId);
+  const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&!standaloneCoderJobs.length&&(!act||(!(act.messages||[]).length&&!act.is_council));
   const emptyComposerLift=isEmptyChatSurface?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
   useEffect(()=>{
     if(!isEmptyChatSurface)return;
@@ -7217,7 +7227,7 @@ function HyprChat(){
             <span style={{flex:1}}/>
             <span style={{fontSize:10,color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
           </div>
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Acceptance, and ProjectQA. Reviewer and Fixer model overrides apply to legacy workflows.</div>
+          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Reviewer for verification, Acceptance, and ProjectQA. Fixer model overrides apply to legacy workflows.</div>
 
           {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`,display:"flex",flexDirection:"column",gap:14}}>
             {modelField({label:"📐 Architect Model",icon:"📐",value:architectModel,set:setArchitectModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Architect agent only"})}
@@ -7677,7 +7687,7 @@ function HyprChat(){
           {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
           {/* Messages */}
           <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
-          {!act||!(act.messages||[]).length&&!councilRunning?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface?250:0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
+          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface?250:0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
             {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
             :<ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface}/>}
           </div>:act?.is_council?(()=>{
@@ -7903,7 +7913,9 @@ function HyprChat(){
               const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
               const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
               const liveEventsForMsg=isLastAssistant?evts:[];
-              const messageWorkflows=isLastAssistant&&Array.isArray(coderWorkflows)?coderWorkflows.slice(0,3):[];
+              const messageWorkflowIds=!isU?[...new Set([...workflowIds(meta,liveEventsForMsg),...coderWorkflows.filter(w=>w.origin_message_id&&String(w.origin_message_id)===String(msg.id)).map(w=>w.id)])]:[];
+              const messageWorkflows=messageWorkflowIds.map(id=>coderWorkflows.find(w=>w.id===id)||{id,workflow_version:3,state:'queued'});
+              if(!messageWorkflows.length&&isLastAssistant)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
               // For the message that is ACTIVELY streaming, derive run ids from
               // the UNCAPPED stream buffer (same source the finalize PATCH
               // uses): the live `evts` state keeps only the last 200 events, so
@@ -7970,7 +7982,7 @@ function HyprChat(){
                   {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {!msg.isS&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const isLast=isLastAssistant;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU||isDaedalusOutput)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {(()=>{if(isU||isDaedalusOutput)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
@@ -8092,11 +8104,14 @@ function HyprChat(){
               </div></React.Fragment>;
             })}</>;})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
+            {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
             <div ref={chatEnd}/>
           </div>}
         </div>
         </div>
         <div style={{flexShrink:0,position:"relative",transform:emptyComposerLift,transition:"transform .7s cubic-bezier(.2,.8,.2,1)",willChange:"transform",zIndex:120,pointerEvents:"auto"}}>
+          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
+          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
         {/* TOOL TOGGLES BAR + QUICK SEARCH */}
         <div style={{padding:"0 16px",flexShrink:0}}>
           <div ref={connectorPickerRef} style={{maxWidth:chatWidth,margin:"0 auto",position:"relative"}}>
@@ -8501,4 +8516,4 @@ function HyprChat(){
   </div>;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<HyprChat/>);
+ReactDOM.createRoot(document.getElementById("root")).render(<><HyprChat/><NewVersionBar/></>);

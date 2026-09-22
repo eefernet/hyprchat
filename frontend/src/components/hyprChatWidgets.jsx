@@ -628,7 +628,13 @@ function WorkflowCard(props){
 }
 function DaedalusSummary(props){
   const jobs=(props.workflows||[]).filter(w=>w.workflow_version===3);
-  if(jobs.length)return jobs.map(workflow=><DaedalusJobCard key={workflow.id} workflow={workflow} t={props.t} font={props.font} onOpenArtifact={props.onOpenArtifact}/>);
+  if(jobs.length){
+    const jobIds=new Set(jobs.map(w=>w.id));
+    const artifactIds=new Set(jobs.flatMap(w=>[w.artifact?.id,w.candidate_artifact?.id]).filter(Boolean));
+    const attachments=[...(props.savedEvents||[]),...(props.liveEvts||[])].filter(e=>e.type==='file_ready'&&!jobIds.has(e.data?.workflow_id)&&!artifactIds.has(e.data?.artifact_id));
+    return <>{jobs.map(workflow=><DaedalusJobCard key={workflow.id} workflow={workflow} t={props.t} font={props.font} md={props.md} onOpenArtifact={props.onOpenArtifact}/>)}
+      {attachments.length>0&&<ToolStatus evts={attachments} t={props.t} font={props.font} md={props.md} historical onPreview={props.onPreview} onOpenArtifact={props.onOpenArtifact} msgContent={props.msgContent}/>}</>;
+  }
   return <LegacyDaedalusSummary {...props}/>;
 }
 

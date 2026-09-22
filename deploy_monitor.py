@@ -49,24 +49,52 @@ SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
 WORKER_FILES = {
     "backend/openhands_worker.py", "backend/coder_worker_runtime.py", "backend/coder_sdk_runtime.py",
-    "backend/coder_repository.py", "backend/coder_inference.py", "backend/coder_checks.py", "backend/worker-requirements.txt",
+    "backend/coder_inference.py", "backend/coder_checks.py", "backend/worker-requirements.txt",
+    "backend/coder_browser.py", "backend/coder_browser_tool.py", "backend/coder_visual.py", "backend/coder_evidence.py",
+    "backend/coder_context.py",
 }
-WORKER_SHARED = {"backend/context_policy.py"}
+WORKER_SHARED = {"backend/context_policy.py", "backend/coder_verification.py", "backend/coder_contracts.py", "backend/coder_failures.py", "backend/coder_api_probe.py", "backend/coder_browser_schema.py"}
+WORKER_SHARED.update({'backend/'+name+'.py' for name in ('coder_file_probe','coder_check_schema','coder_contracts_v5','coder_response_recovery')})
+WORKER_SHARED.update({'backend/'+name+'.py' for name in ('coder_profiles','coder_native_checks','coder_review','coder_repository')})
+WORKER_SHARED.update({'backend/'+name+'.py' for name in (
+    'coder_policy7', 'coder_policy7_ops', 'coder_policy7_evidence', 'coder_patch_runtime', 'coder_project_runtime',
+    'coder_policy7_builder', 'coder_audit_hygiene', 'coder_page_guard', 'coder_frontend_guard')})
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
+    **{path:("Coding Verification", REMOTE_BACKEND, True) for path in WORKER_SHARED},
     "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
+    "backend/coder_verification.py": ("Coding Verification", REMOTE_BACKEND, True),
+    "backend/coder_contracts.py": ("Coding Contracts", REMOTE_BACKEND, True),
+    "backend/coder_api_probe.py": ("API Probe Contract", REMOTE_BACKEND, True),
+    "backend/coder_browser_schema.py": ("Browser Contract", REMOTE_BACKEND, True),
+    "backend/coder_probe_audit.py": ("Verification Audit", REMOTE_BACKEND, True),
+    "backend/coder_failures.py": ("Coding Failures", REMOTE_BACKEND, True),
     "backend/coding_search.py": ("Coding Search Context", REMOTE_BACKEND, True),
     "backend/seed_kb/seed_coder_kb.py": ("Coder Docs Seeder", REMOTE_BACKEND + "seed_kb/", False),
     "backend/seed_kb/coder_sources.py": ("Coder Docs Sources", REMOTE_BACKEND + "seed_kb/", False),
     "backend/coder_jobs.py": ("Coding Controller", REMOTE_BACKEND, True),
+    "backend/coder_loop.py": ("Coding Loop", REMOTE_BACKEND, True),
+    "backend/coder_policy7_controller.py": ("Coding Policy 7 Controller", REMOTE_BACKEND, True),
+    "backend/coder_presentation.py": ("Coding Presentation", REMOTE_BACKEND, True),
+    "backend/coder_profiles.py": ("Execution Profiles", REMOTE_BACKEND, True),
+    "backend/coder_native_checks.py": ("Native Checks", REMOTE_BACKEND, True),
+    "backend/coder_review.py": ("Independent Review", REMOTE_BACKEND, True),
     "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
     "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
     **{path:("Coding Worker", REMOTE_OPENHANDS_WORKER, False) for path in WORKER_FILES},
     "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/DaedalusRequestOptions.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/daedalusJobs.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/daedalusJobStore.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/daedalusJob.css": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/DaedalusPlanPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/daedalusPlan.css": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/NewVersionBar.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/daedalusProgress.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/versionCheck.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
@@ -213,6 +241,8 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    "frontend/src/daedalusJobStore.js", "frontend/src/components/daedalusJob.css",
+    "frontend/src/components/DaedalusRequestOptions.jsx",
     "frontend/src/components/DaedalusJobCard.jsx", "frontend/src/components/DaedalusSettings.jsx", "frontend/src/daedalusJobs.js",
     "frontend/src/main.jsx",
     "frontend/src/session.js",
@@ -778,6 +808,17 @@ def _ensure_openhands_worker_service(cb):
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
+        "EOF\n"
+        "fi\n"
+        # Toolchains the checks need but systemd's minimal PATH lacks. .NET installs under /root/.dotnet with
+        # PATH/DOTNET_ROOT only in .bashrc: production C# builds failed every setup step with
+        # `dotnet: command not found` (live run 2026-09-22) while the login-shell evaluator found it.
+        "if [ ! -f /etc/systemd/system/openhands-worker.service.d/toolchains.conf ]; then\n"
+        "mkdir -p /etc/systemd/system/openhands-worker.service.d\n"
+        "cat > /etc/systemd/system/openhands-worker.service.d/toolchains.conf <<'EOF'\n"
+        "[Service]\n"
+        "Environment=DOTNET_ROOT=/root/.dotnet\n"
+        "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet:/root/.dotnet/tools\n"
         "EOF\n"
         "fi\n"
         "systemctl daemon-reload\n"

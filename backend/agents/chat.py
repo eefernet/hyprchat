@@ -1658,7 +1658,27 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
         _active_project = None
         print(f"[CHAT] Active project lookup failed (non-fatal): {_ape}")
 
-    if _active_project:
+    from coder_jobs import uses_persistent_workflow, REQUEST_OPTIONS
+    if not _is_v2_persona:
+        # Hidden composer selections must not redirect a general CodeAgent call.
+        REQUEST_OPTIONS.set({})
+    _project_persistent = _is_v2_persona and await uses_persistent_workflow(conv_id)
+    if _project_persistent:
+        _options = REQUEST_OPTIONS.get()
+        if _options.get("new_project"):
+            _active_project = None
+        elif _options.get("project_id"):
+            _active_project = await db.get_coding_project(_options["project_id"])
+        if _active_project:
+            messages.append({"role":"system","content":"Active Daedalus project: "+json.dumps({
+                "project_id":_active_project["id"],"name":_active_project["name"],
+                "accepted_revision":_active_project.get("accepted_revision_id","")})+
+                ". Follow-up changes use this project's accepted revision with mode edit_project. Questions use ask_project. "
+                "Project IDs are registry identities, not filesystem paths. The controller owns workspaces and revisions."})
+        else:
+            messages.append({"role":"system","content":"No project is selected for this request. Start requested new work with mode build_from_prompt."})
+
+    if _active_project and not _project_persistent:
         _ap_files = _active_project.get("file_manifest") or []
         # On-disk dir is openhands_project_id when present (worker may have
         # dedupe-renamed); every tools.py consumer resolves the same way.
@@ -1910,6 +1930,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             ollama_tools = [tool for tool in ollama_tools if tool.get("function",{}).get("name") in available_tool_names]
             ollama_tools = [{**tool,"function":{**tool["function"],"description":"Start a persistent local coding job once. The controller handles planning, coding, checks, and Acceptance in the background. Questions use ask_uploaded_project and never authorize editing."}}
                             if tool.get("function",{}).get("name") == "start_coder_workflow" else tool for tool in ollama_tools]
+            for tool in ollama_tools:
+                if tool.get("function",{}).get("name")=="start_coder_workflow":
+                    parameters=tool["function"].get("parameters",{})
+                    tool["function"]["parameters"]={**parameters,"properties":{**parameters.get("properties",{}),
+                        "mode":{"type":"string","enum":["build_from_prompt","edit_project","ask_uploaded_project"],
+                                "description":"Build a new project, update the selected project, or ask a read-only source question."}}}
             protocol = ("Persistent Daedalus execution mode: this replaces older manual tool-sequence instructions. "
                         "For requested code changes call start_coder_workflow once with the complete user task and appropriate mode/project. "
                         "For source questions call ask_project or start_coder_workflow(mode=ask_uploaded_project); questions never authorize editing. "

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 
 
@@ -17,6 +18,8 @@ DEFAULTS = {
     "aider_num_ctx": 0,
     "research_num_ctx": 40960,
     "daedalus_role_contexts": {},
+    "daedalus_role_outputs": {},
+    "daedalus_role_thinking": {},
     "generation_num_predict": 4096,
     "context_headroom_percent": 5,
     "daedalus_compaction": "inherit",
@@ -26,11 +29,23 @@ DEFAULTS = {
         "compaction": 8192, "extraction": 8192, "image": 4096,
     },
     "daedalus_v3_enabled": False,
+    "daedalus_visual_review": False,
+    # Uploaded-project repairs and edits use the evidence-gated policy 7; new builds keep the default policy.
+    "daedalus_policy7_edits": False,
+    # New projects: agent-loop builder behind the policy-7 evidence gate (measured 9/16 accepted, 0 false acceptances).
+    "daedalus_policy7_builds": False,
+    "daedalus_visual_model": "",
+    "daedalus_visual_batch_size": 2,
+    "daedalus_image_tokens": 2048,
+    "daedalus_browser_viewports": [{"name": "desktop", "width": 1440, "height": 900},
+                                   {"name": "mobile", "width": 390, "height": 844}],
+    "daedalus_min_free_mb": 1024,
     "daedalus_job_seconds": 3600,
     "daedalus_model_calls": 120,
     "daedalus_attempt_turns": 20,
     "daedalus_command_seconds": 600,
     "daedalus_browser_step_seconds": 15,
+    "daedalus_browser_startup_seconds": 60,
     "daedalus_upload_mb": 250,
     "daedalus_extracted_mb": 1000,
     "daedalus_storage_mb": 10000,
@@ -39,7 +54,7 @@ DEFAULTS = {
         "dist", "build", "target", ".cache", ".pytest_cache",
     ],
 }
-ROLES = ("chat", "architect", "builder", "reviewer", "acceptance", "qa", "fixer", "aider", "compaction")
+ROLES = ("chat", "architect", "builder", "reviewer", "acceptance", "visual", "qa", "fixer", "aider", "compaction")
 _CONFIG_KEYS = {
     "default_num_ctx": "DEFAULT_NUM_CTX", "openhands_num_ctx": "OPENHANDS_NUM_CTX",
     "aider_num_ctx": "AIDER_NUM_CTX", "research_num_ctx": "RESEARCH_NUM_CTX",
@@ -47,10 +62,11 @@ _CONFIG_KEYS = {
 
 
 def positive_int(value, name: str, *, inherit=False) -> int:
-    if inherit and value in (None, "", 0, "0", "inherit", "default"):
-        return 0
+    # bool first: False == 0, so `False in (None, "", 0, ...)` accepted false as "inherit".
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a positive integer")
+    if inherit and value in (None, "", 0, "0", "inherit", "default"):
+        return 0
     try:
         number = int(value)
     except (ValueError, TypeError, OverflowError):
@@ -77,13 +93,19 @@ def validate_patch(patch: dict, current: dict) -> dict:
             continue
         if key in ("openhands_num_ctx", "aider_num_ctx"):
             clean[key] = positive_int(value, key, inherit=True)
-        elif key in ("daedalus_role_contexts", "helper_contexts"):
+        elif key == "daedalus_role_thinking":
+            if not isinstance(value, dict) or set(value) - set(ROLES):
+                raise ValueError("Unknown thinking stage")
+            if any(v not in ("inherit", "off", "on", "low", "medium", "high") for v in value.values()):
+                raise ValueError("Thinking must be inherit, off, on, low, medium, or high")
+            clean[key] = {**(current.get(key) or {}), **value}
+        elif key in ("daedalus_role_contexts", "daedalus_role_outputs", "helper_contexts"):
             if not isinstance(value, dict):
                 raise ValueError(f"{key} must be an object")
-            allowed = ROLES if key == "daedalus_role_contexts" else DEFAULTS["helper_contexts"]
+            allowed = ROLES if key != "helper_contexts" else DEFAULTS["helper_contexts"]
             if set(value) - set(allowed):
                 raise ValueError(f"Unknown {key} entries: {', '.join(sorted(set(value) - set(allowed)))}")
-            entries = {k: positive_int(v, f"{key}.{k}", inherit=key == "daedalus_role_contexts") for k,v in value.items()}
+            entries = {k: positive_int(v, f"{key}.{k}", inherit=key != "helper_contexts") for k,v in value.items()}
             clean[key] = {**DEFAULTS[key], **(current.get(key) or {}), **entries}
         elif key in ("context_headroom_percent", "context_compaction_threshold"):
             number = float(value)
@@ -94,10 +116,28 @@ def validate_patch(patch: dict, current: dict) -> dict:
             if value not in ("inherit", "on", "off"):
                 raise ValueError("daedalus_compaction must be inherit, on, or off")
             clean[key] = value
-        elif key == "daedalus_v3_enabled":
+        elif key in ("daedalus_v3_enabled", "daedalus_visual_review", "daedalus_policy7_edits", "daedalus_policy7_builds"):
             if not isinstance(value, bool):
-                raise ValueError("daedalus_v3_enabled must be a boolean")
+                raise ValueError(f"{key} must be a boolean")
             clean[key] = value
+        elif key == "daedalus_visual_model":
+            value = value.strip() if isinstance(value,str) else value
+            if not isinstance(value, str) or value.startswith(("openai:", "anthropic:", "custom:")) or value.endswith(("-cloud", ":cloud")):
+                raise ValueError("Visual review requires an installed local model")
+            clean[key] = value.strip()
+        elif key == "daedalus_browser_viewports":
+            if not isinstance(value, list) or not value:
+                raise ValueError("At least one browser viewport is required")
+            viewports = []
+            for viewport in value:
+                if not isinstance(viewport, dict) or not isinstance(viewport.get("name"), str) or not re.fullmatch(r"[A-Za-z0-9_-]+",viewport["name"]):
+                    raise ValueError("Each viewport needs a name, width and height")
+                viewports.append({"name": viewport["name"].strip(),
+                                  "width": positive_int(viewport.get("width"), "viewport.width"),
+                                  "height": positive_int(viewport.get("height"), "viewport.height")})
+            if len({v["name"] for v in viewports}) != len(viewports):
+                raise ValueError("Viewport names must be unique")
+            clean[key] = viewports
         elif key == "daedalus_exclude_dirs":
             if not isinstance(value, list) or any(not isinstance(v, str) or not v or "/" in v or "\\" in v for v in value):
                 raise ValueError("daedalus_exclude_dirs must be directory names")
@@ -151,7 +191,7 @@ def resolve(role="builder", settings: dict | None = None) -> ContextPolicy:
         context, source = positive_int(values["openhands_num_ctx"], "openhands_num_ctx"), "daedalus"
     else:
         context, source = positive_int(values["default_num_ctx"], "default_num_ctx"), "global"
-    output = positive_int(values["generation_num_predict"], "generation_num_predict")
+    output = positive_int((values.get("daedalus_role_outputs") or {}).get(role) or values["generation_num_predict"], "generation_num_predict")
     available = context - output - math.ceil(context * float(values["context_headroom_percent"]) / 100)
     if available <= 0:
         raise ValueError(f"{role}: context {context} cannot fit the configured completion allowance and headroom; adjust Settings")
@@ -162,6 +202,28 @@ def resolve(role="builder", settings: dict | None = None) -> ContextPolicy:
     return ContextPolicy(context, output, available,
                          int(available * float(values["context_compaction_threshold"]) / 100),
                          str(mode).lower() in ("on", "true", "1"), source, version)
+
+
+def operation_settings(payload):
+    """Old persisted operations retain their pre-policy-3 output behavior."""
+    settings = payload["settings"]
+    if payload.get("policy_version", 1) < 3:
+        return {**settings, "daedalus_role_outputs": {}, "daedalus_role_thinking": {}}
+    return settings
+
+
+def thinking_options(role, payload, details):
+    mode = (operation_settings(payload).get("daedalus_role_thinking") or {}).get(role, "inherit")
+    if "thinking" not in details.get("capabilities", []):
+        return {}, "unsupported"
+    if mode == "inherit":
+        return ({"think": False} if payload.get("disable_thinking", True) else {}), "inherited"
+    family = str(details.get("details", {}).get("family", "")).lower()
+    if family == "gptoss" or "gpt-oss" in payload.get("model", "").lower():
+        if mode == "off":
+            raise ValueError("This model cannot disable thinking; select a thinking level in Settings")
+        return {"think": "medium" if mode == "on" else mode}, mode
+    return {"think": {"on": True, "off": False}.get(mode, mode)}, mode
 
 
 def helper_context(profile="workspace") -> int:
@@ -196,6 +258,19 @@ def compaction_segments(messages, tools, policy):
     if not tail_start:
         raise ValueError("Current instructions/tool result exceed configured context; request narrower source ranges or increase context in Settings")
     return prefix, body[:tail_start], body[tail_start:]
+
+
+def compile_context(messages, tools, policy, summarize):
+    """Pack the formatted SDK request, including its tools, within Settings."""
+    parts = compaction_segments(messages, tools, policy)
+    if parts is None:
+        return messages, False
+    prefix, older, tail = parts
+    summary = summarize(older)
+    rebuilt = [*prefix, {'role':'user', 'content':'Earlier execution checkpoint (source files remain authoritative):\n' + summary}, *tail]
+    if estimate_tokens({'messages':rebuilt, 'tools':tools}) > policy.input_budget:
+        raise ValueError('Current tool evidence still exceeds context after compaction; increase context or request narrower ranges')
+    return rebuilt, True
 
 
 def public_settings() -> dict:

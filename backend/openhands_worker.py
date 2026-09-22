@@ -2146,7 +2146,9 @@ def clean_stale():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "sdk_loaded": _sdk_loaded}
+    return {"status": "ok", "sdk_loaded": _sdk_loaded,
+            "projects_root": str(PROJECTS_DIR.resolve()),
+            "state_root": str(Path(os.environ.get('DAEDALUS_STATE_DIR', str(PROJECTS_DIR.parent / '.daedalus'))).resolve())}
 
 
 @app.post("/clean")

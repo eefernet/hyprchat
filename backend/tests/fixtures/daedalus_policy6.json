@@ -1,0 +1,19 @@
+{
+  "brief": {
+    "outcomes": [{"text":"Return the requested list and sentinel, with README and executable tests", "evidence_types":["behavior","documentation","tests"]}],
+    "constraints": ["Use ordinary Python"], "components":["subject.py","README.md","test_subject.py"],
+    "approach":["Implement the public API and test it"], "validation":["Run project tests and independent assertions"]
+  },
+  "author": {
+    "checks": [
+      {"outcomes":["o1"],"evidence_types":["behavior"],"cwd":".",
+       "command":"python3 \"$DAEDALUS_AUDIT_DIR/check_api.py\"",
+       "files":{"check_api.py":"import subject\nfrom subject import MISSING\nassert MISSING is subject.MISSING\nassert subject.values() == [1, 2]\n"}},
+      {"outcomes":["o1"],"evidence_types":["documentation"],"kind":"file","path":"README.md","assertions":[{"kind":"contains","value":"Usage"}]}
+    ],
+    "notes":[]
+  },
+  "accepted": {"outcomes":[{"id":"o1","status":"passed","reason":"Real imports, list and identity assertions, project tests and documentation passed"}],"disposition":"accepted","summary":"Requested behavior checked","corrections":[]},
+  "application_defect": {"outcomes":[{"id":"o1","status":"failed","reason":"The list does not match the request"}],"disposition":"application_defect","summary":"Repair values() to return the requested list","corrections":[]},
+  "ambiguous": {"outcomes":[{"id":"o1","status":"unverified","reason":"Target runtime is unavailable"}],"disposition":"environment","summary":"Review in the requested runtime","corrections":[]}
+}

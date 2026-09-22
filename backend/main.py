@@ -678,6 +678,10 @@ class ChatRequest(BaseModel):
     # Ghost/private mode. When true, this stream must not persist messages,
     # workspace memories, token usage, or RAG/research memory for the turn.
     ephemeral: bool = False
+    daedalus_project_id: str = ""
+    daedalus_new_project: bool = False
+    daedalus_visual_review: Optional[bool] = None
+    daedalus_visual_model: Optional[str] = None
     # Continue a length-truncated assistant message: id of the existing
     # assistant row to resume. messages[] must end with that partial assistant
     # message; no new stub row is created and the frontend PATCHes the
@@ -941,6 +945,9 @@ async def chat_stream(req: ChatRequest):
 
     async def _stream():
         token = db.set_current_user_id(user_id)
+        import coder_jobs
+        coding_token = coder_jobs.REQUEST_OPTIONS.set({"project_id":req.daedalus_project_id,
+            "new_project":req.daedalus_new_project,"visual_review":req.daedalus_visual_review,"visual_model":req.daedalus_visual_model})
         try:
             async for chunk in chat_stream_generate(
                 req,
@@ -953,6 +960,7 @@ async def chat_stream(req: ChatRequest):
             ):
                 yield chunk
         finally:
+            coder_jobs.REQUEST_OPTIONS.reset(coding_token)
             db.reset_current_user_id(token)
 
     return StreamingResponse(

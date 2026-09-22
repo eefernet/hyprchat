@@ -64,8 +64,8 @@ logs/
 *.deploy-tmp
 .deployments/
 
-# Raw evaluation traces stay local; keep summaries and benchmark source tracked
-/docs/evaluations/*.json
+# Evaluation runs (traces and summaries) stay local; only evaluator source under backend/evals/ is tracked
+/docs/evaluations/
 
 # OS
 .DS_Store
