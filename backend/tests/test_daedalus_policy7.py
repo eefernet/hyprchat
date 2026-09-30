@@ -56,6 +56,7 @@ def test_audit_path_errors_never_become_application_repairs():
     row = {'passed': False, 'origin': 'independent', 'log_tail': "python: can't open file '/audit/ledger.py': No such file or directory"}
     assert failure_class(row) == 'audit_defect'
     assert failure_class({**row, 'log_tail': 'AssertionError: 0.2 != 0.3'}) == 'unresolved'
+    assert failure_class({**row, 'log_tail': "OSError: [Errno 30] Read-only file system: 'fixture.txt'"}) == 'audit_defect'
 
 
 def test_outcome_coverage_is_bound_to_exact_revision_and_check():
@@ -66,11 +67,17 @@ def test_outcome_coverage_is_bound_to_exact_revision_and_check():
              'evidence_types': ['behavior'], 'execution_succeeded': True, 'source_bindings': [{'path': 'app.py', 'sha256': 'a'*64}]}
     assert not acceptance(outcomes, [check], verdict, 'current')['accepted']
     assert not acceptance(outcomes[:1], [check], verdict, 'different')['accepted']
-    assert acceptance(outcomes[:1], [check], verdict, 'current')['accepted']
+    summary = acceptance(outcomes[:1], [check], verdict, 'current')
+    assert not summary['accepted']  # generated audit cannot supply trusted behavior coverage
+    assert summary['outcomes'][0]['missing_evidence'] == ['behavior']
 
 
 def test_draft_obligations_cannot_disappear_from_new_brief():
-    brief = make_brief({'outcomes': ['New feature'], 'batches': [{'task': 'Add it'}]}, 'New feature', ['Original missing UI'])
+    answer = {'outcomes': ['New feature'], 'batches': [{'task': 'Add it'}]}
+    with pytest.raises(ValueError, match='inheritance disposition'):
+        make_brief(answer, 'New feature', ['Original missing UI'])
+    brief = make_brief({**answer, 'inheritance': [{'parent_id': 'o1', 'action': 'retain'}]},
+                       'New feature', ['Original missing UI'])
     assert [o['text'] for o in brief['outcomes']] == ['Original missing UI', 'New feature']
 
 
@@ -253,7 +260,7 @@ def test_setup_never_runs_under_assertion_tracing(tmp_path, monkeypatch):
     import coder_project_runtime as runtime
     repo, store = fixture(tmp_path, {})
     observed = []
-    def execute(store, op, command, cwd, env, log):
+    def execute(store, op, command, cwd, env, log, **kwargs):
         observed.append(env)
         log.write_text('setup completed')
         return 0

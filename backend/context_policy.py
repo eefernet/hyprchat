@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 
 DEFAULTS = {
     "default_num_ctx": 16384,
-    "openhands_num_ctx": 32768,
+    "openhands_num_ctx": 65536,  # 2026-09-25: the SDK builder's fixed overhead (~14K tokens) left web-app repairs no room at 32-35K
     "aider_num_ctx": 0,
     "research_num_ctx": 40960,
     "daedalus_role_contexts": {},
@@ -76,8 +76,27 @@ def positive_int(value, name: str, *, inherit=False) -> int:
     return number
 
 
+_FALLBACK_STORE = None
+
+
+def _config():
+    """The backend's `config` module, or an in-process stand-in inside the worker bundle.
+
+    config.py is backend-only. The sandboxed SDK child (coder_sandbox_agent) calls apply_settings on the
+    worker, where an unguarded `import config` failed every production policy-7 build on 2026-09-25."""
+    global _FALLBACK_STORE
+    try:
+        import config
+        return config
+    except ImportError:
+        if _FALLBACK_STORE is None:
+            import types
+            _FALLBACK_STORE = types.SimpleNamespace()
+        return _FALLBACK_STORE
+
+
 def runtime_settings() -> dict:
-    import config
+    config = _config()
     values = {**DEFAULTS, **getattr(config, "CONTEXT_SETTINGS", {})}
     for key, attribute in _CONFIG_KEYS.items():
         values[key] = getattr(config, attribute, values[key])
@@ -153,7 +172,9 @@ def validate_patch(patch: dict, current: dict) -> dict:
 
 
 def apply_settings(settings: dict) -> None:
-    import config
+    config = _config()
+    if 'context_compaction' in settings:
+        config.CONTEXT_COMPACTION = 'on' if str(settings['context_compaction']).lower() in {'on', '1', 'true', 'yes'} else 'off'
     values = {**DEFAULTS, **getattr(config, "CONTEXT_SETTINGS", {}),
               **{k: v for k, v in settings.items() if k in DEFAULTS}}
     # Old global Auto was already resolved to the global default. Materialize
@@ -282,3 +303,11 @@ def public_settings() -> dict:
         except ValueError as error:
             resolved[role] = {"error": str(error)}
     return {**{k: values[k] for k in DEFAULTS}, "resolved_contexts": resolved}
+
+
+def coding_allocation(configured_calls, remaining_calls):
+    """Fixed per-round verification reserve; callers persist this once per round."""
+    remaining = max(0, int(remaining_calls))
+    reserve = min(max(1, int(configured_calls) // 4), remaining // 2)
+    return {'remaining_at_start': remaining, 'verification_reserve': reserve,
+            'coding_calls': max(0, remaining - reserve)}

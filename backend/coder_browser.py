@@ -58,6 +58,17 @@ def interact(page, step, milliseconds):
 
 
 def browser_check(root, check, evidence_dir, timeout, *, step_timeout=None, viewports=None, emit=None, startup_timeout=None, policy_version=3):
+    from coder_sandbox_call import invoke, browser_options
+    if "{port}" not in check.get("server_command", ""):
+        raise ValueError("Preview server_command must use {port} for its listening port")
+    if os.environ.get('DAEDALUS_SANDBOXED') != '1':
+        Path(evidence_dir).mkdir(parents=True, exist_ok=True)
+        result = invoke('coder_browser', 'browser_check', [str(root), check, str(evidence_dir), timeout],
+            {'step_timeout': step_timeout, 'viewports': viewports, 'startup_timeout': startup_timeout,
+             'policy_version': policy_version}, writable=[root, evidence_dir], timeout=timeout + 10)
+        if emit:
+            for event in result.get('timeline', []): emit(event)
+        return result
     if policy_version >= 4:
         from coder_browser_schema import validate_flow
         validate_flow(check)
@@ -95,7 +106,7 @@ def browser_check(root, check, evidence_dir, timeout, *, step_timeout=None, view
             cwd=root,stdout=output,stderr=subprocess.STDOUT,start_new_session=True,env=environment)
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True,args=["--no-sandbox"],timeout=remaining())
+                browser = playwright.chromium.launch(headless=True,args=["--no-sandbox"],timeout=remaining(), **browser_options())
                 try:
                     for viewport in viewports:
                         name = viewport["name"]

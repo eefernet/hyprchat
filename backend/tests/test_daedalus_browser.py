@@ -70,7 +70,7 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             page.get_by_label('Daedalus project',exact=True).select_option('cp-fixture')
             expect(page.get_by_label('Request options')).to_contain_text('"daedalus_project_id":"cp-fixture"')
             page.get_by_label('Daedalus local vision model').fill('qwen3.5:4b')
-            expect(page.get_by_label('Daedalus context window',exact=True)).to_have_value('32768')
+            expect(page.get_by_label('Daedalus context window',exact=True)).to_have_value(str(DEFAULTS['openhands_num_ctx']))
             page.get_by_label('Daedalus context window',exact=True).fill('300000')
             page.get_by_label('Daedalus compaction',exact=True).select_option('off')
             page.get_by_label('Browser interaction timeout (seconds)',exact=True).focus()
@@ -94,7 +94,7 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             assert saved[-1]['daedalus_compaction']=='off'
             assert saved[-1]['daedalus_browser_step_seconds']==16
             assert saved[-1]['daedalus_exclude_dirs']==['node_modules','generated']
-            expect(page.get_by_label('Daedalus coding job').get_by_role('status')).to_have_text('Building')
+            expect(page.get_by_label('Daedalus coding job').locator('.dj-state')).to_have_text('Building')
             page.get_by_role('button',name='View details',exact=True).click()
             page.get_by_role('button',name='Files & logs',exact=True).click()
             page.get_by_text('Browse project evidence',exact=True).click()
@@ -110,6 +110,7 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             expect(page.get_by_text('return 42',exact=False)).to_be_visible()
             assert inspections[-1]['start']==300100 and inspections[-1]['sha256']=='source-hash'
             page.get_by_role('button',name='Checks',exact=True).click()
+            page.get_by_text('Every check with its log',exact=True).click()
             page.get_by_role('button',name='Read full log',exact=True).click()
             expect(page.get_by_text('first page',exact=True)).to_be_visible()
             page.get_by_role('button',name='Next log page',exact=True).click()
@@ -117,13 +118,13 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             page.screenshot(path=str(tmp_path/'daedalus-settings.png'),full_page=True)
             page.get_by_role('button',name='Close job details',exact=True).click()
             page.get_by_role('button',name='Stop',exact=True).click()
-            expect(page.get_by_label('Daedalus coding job').get_by_role('status')).to_have_text('Stopped')
+            expect(page.get_by_label('Daedalus coding job').locator('.dj-state')).to_have_text('Stopped')
             expect(page.get_by_text('Reconnecting to progress. Last confirmed status is shown.')).to_be_visible()
-            expect(page.get_by_label('Daedalus coding job').get_by_role('status')).to_have_text('Stopped')
+            expect(page.get_by_label('Daedalus coding job').locator('.dj-state')).to_have_text('Stopped')
             snapshot_unavailable=False
             page.reload()
             expect(page.get_by_label('Daedalus context window',exact=True)).to_have_value('300000')
-            expect(page.get_by_label('Daedalus coding job').get_by_role('status')).to_have_text('Stopped')
+            expect(page.get_by_label('Daedalus coding job').locator('.dj-state')).to_have_text('Stopped')
             job={**job,'state':'blocked','event_sequence':7,
                  'probe_audits':[{'cache_key':'audit-1','check_id':'check-r1','revision_id':'revision123','round':2,'disposition':'ambiguous',
                      'reason':'Text includes the adjacent Delete control','request_basis':'Keep Delete usable','source_basis':'app.js renders the control','failure_basis':'The whole row includes both labels'}],
@@ -134,6 +135,7 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             expect(page.get_by_text('Please file a public bug report.',exact=False)).to_have_count(0)
             page.get_by_role('button',name='View details',exact=True).click()
             expect(page.get_by_role('dialog')).to_be_visible()
+            page.get_by_text('Diagnostic',exact=True).click()
             expect(page.get_by_text('Please file a public bug report.',exact=False)).to_be_visible()
             page.keyboard.press('Escape')
             expect(page.get_by_role('button',name='View details',exact=True)).to_be_focused()
@@ -222,3 +224,52 @@ def test_policy4_composite_text_keeps_delete_actionable():
         with pytest.raises(TimeoutError): interact(page,steps[1],200)
         assert page.locator('li').count()==1
         browser.close()
+
+
+@pytest.mark.skipif(os.environ.get('DAEDALUS_BROWSER_TEST')!='1', reason='Opt-in Vite/Chromium integration')
+@pytest.mark.parametrize('width', [390, 1440])
+def test_policy7_scope_question_survives_refresh_and_continue(tmp_path, width):
+    import socket
+    from playwright.sync_api import sync_playwright, expect
+    frontend = Path(__file__).resolve().parents[2] / 'frontend'
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+    log = (tmp_path / 'vite.log').open('w')
+    server = subprocess.Popen(['node', 'node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', str(port)],
+                              cwd=frontend, stdout=log, stderr=subprocess.STDOUT)
+    job = {'id': 'fixture-job', 'workflow_version': 3, 'policy_version': 7, 'state': 'waiting_for_input',
+           'scope_question': 'Which export format?', 'event_sequence': 1, 'model': 'local', 'checks': []}
+    submitted, errors = [], []
+    def route_api(route):
+        nonlocal job
+        request = route.request
+        if '/api/settings' in request.url:
+            return route.fulfill(json={**DEFAULTS, 'resolved_contexts': {r: resolve(r, DEFAULTS).as_dict() for r in ROLES}})
+        if '/api/coder/projects' in request.url:
+            return route.fulfill(json={'projects': []})
+        if '/events' in request.url:
+            return route.fulfill(content_type='text/event-stream', body=': heartbeat\n\n')
+        if '/resume' in request.url:
+            submitted.append(request.post_data_json)
+            job = {**job, 'state': 'planning', 'scope_question': '', 'event_sequence': 2}
+        return route.fulfill(json=job)
+    try:
+        url = f'http://127.0.0.1:{port}/tests/daedalus-harness.html'
+        for _ in range(100):
+            try: urllib.request.urlopen(url, timeout=1).close(); break
+            except Exception: time.sleep(.05)
+        with sync_playwright() as runtime:
+            browser = runtime.chromium.launch(headless=True)
+            page = browser.new_page(viewport={'width': width, 'height': 900})
+            page.route('**/api/**', route_api); page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(url); page.reload()
+            card = page.get_by_label('Daedalus coding job')
+            expect(card.get_by_role('button', name='Continue', exact=True)).to_be_disabled()
+            card.get_by_label('Scope clarification', exact=True).fill('Use JSON instead of CSV')
+            card.get_by_role('button', name='Continue', exact=True).click()
+            expect(card.locator('.dj-state')).to_have_text('Planning')
+            assert submitted == [{'clarification': 'Use JSON instead of CSV'}]
+            assert not errors
+            browser.close()
+    finally:
+        server.terminate(); server.wait(timeout=10); log.close()

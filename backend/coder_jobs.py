@@ -212,6 +212,7 @@ async def cancel(job_id):
             response.raise_for_status()
             if response.json()["status"] in ("cancelled", "failed", "succeeded", "blocked", "interrupted"):
                 operation = response.json()
+                job = await store.account_operation(job_id, job['worker_operation'], job.get('operation_kind', operation.get('kind', '')), operation)
                 checkpoint = operation.get("result",{}).get("snapshot")
                 if checkpoint:
                     await store.record_revision(job_id,checkpoint)
@@ -220,6 +221,9 @@ async def cancel(job_id):
                     await db.update_run(job["worker_operation"],status="cancelled",result_envelope=operation.get("result",{}),ended=True)
                 return await store.save(job_id, state="cancelled", event="cancelled", **({"revision_id":checkpoint["revision"]} if checkpoint else {}))
         except Exception:
+            latest = await store.get(job_id)
+            if latest and latest['state'] in store.TERMINAL:
+                return latest  # A simultaneous Stop or publication already committed.
             job = await store.save(job_id, state="cancelling", blocker="Waiting for worker cancellation acknowledgement")
             owner = db.current_user_id()
             previous = _RUNNERS.get(job_id)
@@ -238,7 +242,7 @@ async def cancel(job_id):
     return await store.get(job_id)
 
 
-async def resume(job_id, *, visual_review=None, visual_model=None, candidate_revision=None):
+async def resume(job_id, *, visual_review=None, visual_model=None, candidate_revision=None, clarification=None):
     job = await store.get(job_id)
     if not job:
         raise LookupError("Workflow not found")
@@ -262,7 +266,25 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
                 await db.update_run(job["worker_operation"], status=operation["status"], result_envelope=operation.get("result", {}), ended=True)
         except httpx.HTTPError as error:
             raise ValueError("Cannot confirm the previous worker has stopped. Reconnect the worker before continuing.") from error
+    previous = _RUNNERS.get(job_id)
+    if previous and not previous.done():
+        # Worker acknowledgement can arrive before the old controller handles
+        # its cancelled result. Keep the terminal state until that owner exits,
+        # otherwise its exception handler can overwrite the resumed job.
+        _, pending = await asyncio.wait({previous}, timeout=30)
+        if pending:
+            raise ValueError('The previous controller is still stopping. Retry Continue shortly.')
+        job = await store.get(job_id)
     changes = {}
+    if clarification is not None and (not isinstance(clarification, str) or not clarification.strip() or len(clarification) > 10000):
+        raise ValueError('Clarification must contain between 1 and 10000 characters')
+    if job.get('scope_question') and not clarification:
+        raise ValueError('Answer the scope question before continuing')
+    if clarification:
+        if job.get('policy_version', 1) < 7 or not job.get('scope_question'):
+            raise ValueError('This workflow is not waiting for a scope clarification')
+        changes.update(scope_clarifications=[*job.get('scope_clarifications', []), {'text': clarification.strip(), 'at': store.now()}],
+                       resume_state='planning', scope_question='')
     if visual_review is not None or visual_model is not None:
         policy = dict(job.get("visual_policy") or {"enabled":False,"model":""})
         if visual_review is not None:
@@ -275,7 +297,9 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
             policy["model_inherited"] = False
         changes.update(visual_policy=policy, visual_review={"status":"pending"}, acceptance=None)
         if job.get("resume_state") in {"accepting", "packaging", "visual_review"}:
-            changes["resume_state"] = "visual_review"
+            # Policy 7 captures on managed services during checks. Enabling vision
+            # after a skipped capture must recreate the current revision's evidence.
+            changes["resume_state"] = "checking" if job.get('policy_version', 1) >= 7 else "visual_review"
     if job.get('policy_version', 1) >= 6:
         changes.update(candidate_revision=candidate_revision or '', delivery_status='building', acceptance=None, review=None, stop_limit='')
         if job.get('resume_state') == 'packaging' and 'visual_policy' not in changes:
@@ -284,6 +308,13 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
             changes.pop('acceptance'); changes.pop('review')
         if job.get('candidate_artifact'):
             changes.update(candidate_history=[*job.get('candidate_history', []), job['candidate_artifact']], candidate_artifact=None)
+    if job.get('policy_version', 1) >= 7 and job.get('brief'):
+        if job.get('inherited') and job['brief'].get('scope_version') != 1:
+            changes.update(resume_state='planning', acceptance=None, review=None, audit_checks=[], audit_attempts=0,
+                           last_valid_audit='', audit_error='', visual_review={'status': 'pending'})
+        elif job.get('verification_version') != 3 and job.get('resume_state') in {
+                'checking', 'auditing', 'reviewing', 'accepting', 'visual_review', 'packaging', 'candidate_packaging'}:
+            changes.update(resume_state='checking', acceptance=None, review=None, visual_review={'status': 'pending'})
     job = await store.save(job_id, state="queued", event="resume", allowance=job.get("allowance", 1) + 1,
                            calls_used=0, seconds_used=0, worker_operation="", operation_key="", blocker="", attempt=0, acceptance_attempt=0,
                            plan_errors=[], visual_attempt=0, probe_corrections=0, probe_diagnoses=[], failure=None,
@@ -390,7 +421,7 @@ async def route_tool(name, args, conversation_id, events):
 
 def verification_reserve(settings):
     """Model calls a policy-7 build may not spend on coding: the audit and review still need them."""
-    return max(20, settings["daedalus_model_calls"] // 4)
+    return context_policy.coding_allocation(settings["daedalus_model_calls"], settings["daedalus_model_calls"])["verification_reserve"]
 
 
 async def _operate(job, kind, *, reserve_calls=0, **extra):
@@ -422,6 +453,9 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                "settings": settings, "seconds_remaining": seconds, "calls_remaining": calls,
                "revision_id": job.get("revision_id", ""), **extra}
     payload["baseline_revision"] = job.get("baseline_revision","")
+    if job.get('policy_version', 1) >= 7:
+        from coder_scope import effective_task
+        payload.update(task=effective_task(job), original_task=effective_task(job))
     stage_model = {"plan": config.ARCHITECT_MODEL or config.PLANNING_MODEL,
                    "verify": config.REVIEWER_MODEL or config.ACCEPTANCE_MODEL or config.PLANNING_MODEL,
                    "accept": config.ACCEPTANCE_MODEL or config.PLANNING_MODEL,
@@ -494,17 +528,7 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
         await asyncio.sleep(2)
     result = operation["result"]
     await db.update_run(job["worker_operation"], status=operation["status"], result_envelope=result, ended=True)
-    if not current.get("operation_accounted"):
-        # An operation cancelled while still queued has no start time.
-        begun = operation.get("started") or operation.get("ended") or 0
-        elapsed = max(0, (operation.get("ended") or begun) - begun)
-        stage_usage = [r for r in current.get('stage_usage',[]) if r['operation_id']!=job['worker_operation']]
-        stage_usage.append({'operation_id':job['worker_operation'],'stage':kind,'seconds':elapsed,
-            'calls':operation.get('calls',0),'status':operation['status']})
-        await store.save(job["id"], calls_used=current.get("calls_used", 0) + operation.get("calls", 0),
-                         seconds_used=current.get("seconds_used", 0) + elapsed, operation_accounted=True,
-                         last_operation_status=operation["status"], operation_calls=0, operation_seconds=0,
-                         stage_usage=stage_usage)
+    await store.account_operation(job['id'], job['worker_operation'], kind, operation)
     if result.get("snapshot"):
         await store.record_revision(job["id"], result["snapshot"])
     if operation["status"] != "succeeded" or deadline_exhausted:
@@ -552,6 +576,10 @@ def _checks(milestones, discovered=None):
 async def _deliver(job, result, *, candidate=False):
     from coder_policy7_evidence import runnable
     accepted = job.get("acceptance") or {}
+    if job.get('policy_version', 1) >= 7 and not candidate:
+        summary = job.get('verification_summary') or {}
+        if summary.get('evidence_version') != 3 or not summary.get('accepted') or any(c.get('status') != 'passed' for c in summary.get('criteria', [])):
+            raise ValueError('Policy 7 publication requires current trusted criterion evidence; recheck this revision')
     if result['revision_id'] != job['revision_id'] or (not candidate and (not accepted.get('accepted') or accepted.get('revision_id') != job['revision_id'])):
         raise ValueError("Artifact revision does not match accepted revision")
     artifact_id = "artifact-" + hashlib.sha256(f"{job['id']}:{job['revision_id']}".encode()).hexdigest()[:24]

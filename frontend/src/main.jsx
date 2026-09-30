@@ -53,7 +53,7 @@ import { createSettingsSync, createPrefsSync } from './settingsSync.js';
 import { NAV_ITEMS, NAV_ITEM_MAP, DEFAULT_NAV_LAYOUT, resolveNavLayout } from './navItems.js';
 import NavLayoutEditor from './components/NavLayoutEditor.jsx';
 import ModelPicker from './ModelPicker.jsx';
-import useIsMobile, { isMobileNow, useKeyboardViewportHeight } from './useIsMobile.js';
+import useIsMobile, { isMobileNow, useMobileViewport } from './useIsMobile.js';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
 import TasksPanel from './panels/TasksPanel.jsx';
@@ -392,7 +392,12 @@ function HyprChat(){
     }catch{}
   },[tm,fi]);
 
-  useEffect(()=>{try{localStorage.setItem("hc-theme",tm);}catch{}},[tm]);
+  useEffect(()=>{
+    try{localStorage.setItem("hc-theme",tm);}catch{}
+    document.documentElement.style.setProperty("--hc-page-bg",t.bg);
+    document.documentElement.style.colorScheme=isLightTheme?"light":"dark";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content",t.bg);
+  },[tm,t.bg,isLightTheme]);
   useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
   useEffect(()=>{persistServerSetting("hc-num-ctx","default_num_ctx",numCtx,String(numCtx));},[numCtx]);
@@ -469,7 +474,7 @@ function HyprChat(){
     setPreparingSend("");
   };
   const isMobile=useIsMobile();
-  const keyboardVvh=useKeyboardViewportHeight(isMobile);
+  const keyboardOpen=useMobileViewport(isMobile);
   const [sidebar,setSidebar]=useState(()=>!isMobileNow());
   const [notifUnseen,setNotifUnseen]=useState(0);
   const notifMaxIdRef=React.useRef(0);
@@ -4521,7 +4526,7 @@ function HyprChat(){
   const secTitleS={fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.75};
   const secHintS={fontSize:10,color:t.mut,lineHeight:1.45};
   const secFieldLabelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
-  const secGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:10,alignItems:"end"};
+  const secGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,190px),1fr))",gap:10,alignItems:"end"};
   const secResetBtnS={padding:"6px 10px",background:`${t.err}14`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:700,whiteSpace:"nowrap",fontFamily:font};
   const secInheritRowS={display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer"};
   // Render helpers below are PLAIN FUNCTIONS called as {fn(...)} — never JSX element
@@ -4584,14 +4589,34 @@ function HyprChat(){
     </div>);
   const standaloneCoderJobs=coderWorkflows.filter(w=>w.workflow_version===3&&w.conversation_id===actId);
   const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&!standaloneCoderJobs.length&&(!act||(!(act.messages||[]).length&&!act.is_council));
-  const emptyComposerLift=isEmptyChatSurface?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
+  const emptyComposerLift=isEmptyChatSurface&&!isMobile?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
   useEffect(()=>{
-    if(!isEmptyChatSurface)return;
+    if(!isEmptyChatSurface||isMobile)return;
     const id=setTimeout(()=>{
       try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}
     },760);
     return()=>clearTimeout(id);
-  },[isEmptyChatSurface]);
+  },[isEmptyChatSurface,isMobile]);
+  React.useLayoutEffect(()=>{
+    const el=inpRef.current;
+    if(!el||panel!=="chat")return;
+    const resize=()=>{
+      el.style.height="auto";
+      const available=(window.visualViewport?.height||window.innerHeight)/(uiFontSize/14);
+      const composer=el.closest(".hc-chat-composer");
+      const header=document.querySelector(".hc-app-header");
+      const room=isMobile?available-(header?.offsetHeight||0)-((composer?.offsetHeight||0)-el.offsetHeight)-2:available;
+      el.style.height=Math.min(el.scrollHeight,Math.max(48,Math.min(120,available*.28,room)))+"px";
+    };
+    resize();
+    let width=el.getBoundingClientRect().width;
+    const observer=new ResizeObserver(()=>{
+      const next=el.getBoundingClientRect().width;
+      if(Math.abs(width-next)>.5){width=next;resize();}
+    });
+    observer.observe(el);
+    return()=>observer.disconnect();
+  },[inp,panel,isEmptyChatSurface,isMobile,keyboardOpen,uiFontSize,attachments]);
   const latestLivePhase=(()=>{
     const useful=evts.filter(e=>["thinking","thought_done","tool_start","tool_progress","tool_status","tool_end","tool_done","tool_error","error","search_results"].includes(e.type));
     for(let i=useful.length-1;i>=0;i--){
@@ -4684,13 +4709,13 @@ function HyprChat(){
   // RENDER
   // ============================================================
   const _uiScale=uiFontSize/14;
-  return <div style={{height:keyboardVvh?`${(keyboardVvh/_uiScale).toFixed(1)}px`:`${(100/_uiScale).toFixed(3)}${isMobile?"dvh":"vh"}`,width:`${(100/_uiScale).toFixed(3)}${isMobile?"dvw":"vw"}`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+  return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
     {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${t.acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
     <BackgroundCanvas effect={bgEffect} t={t}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
-    {userGateOpen&&<div style={{position:"fixed",inset:0,zIndex:320,background:"rgba(0,0,0,.72)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,backdropFilter:"blur(6px)"}}>
-      <div style={{width:"min(520px,94vw)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:20,animation:"fadeIn .18s"}}>
+    {userGateOpen&&<div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:320,background:"rgba(0,0,0,.72)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,backdropFilter:"blur(6px)"}}>
+      <div className="hc-dialog-card" style={{width:"min(520px,94vw)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:20,animation:"fadeIn .18s"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
           <span style={{display:"flex",color:t.acc}}><IC.User/></span>
           <div>
@@ -4710,7 +4735,7 @@ function HyprChat(){
         </div>
         <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
           <div style={{fontSize:11,fontWeight:800,color:t.dim,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>New Profile</div>
-          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr) auto",gap:8}}>
+          <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(0,1fr) auto",gap:8}}>
             <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Name" style={inputS}/>
             <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={inputS}/>
             <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
@@ -4720,7 +4745,7 @@ function HyprChat(){
     </div>}
 
     {/* NAV RAIL */}
-    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + env(safe-area-inset-top))"}:{})}}>
+    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
         <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
@@ -4756,7 +4781,7 @@ function HyprChat(){
 
     {/* CONVERSATION LIST */}
     <div inert={!sidebar?"":undefined} style={{...(isMobile
-      ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
+      ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,paddingTop:"var(--hc-content-safe-top)",paddingBottom:"var(--hc-content-safe-bottom)",transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
       :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}55`,overflow:"hidden",background:`${t.bgDeep}F2`,backdropFilter:"none"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
         <div style={{fontSize:13,fontWeight:800,letterSpacing:1.8,textTransform:"uppercase",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:8,fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:4}}>ALPHA</span></div>
@@ -4870,8 +4895,8 @@ function HyprChat(){
 
     {/* MAIN */}
     <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
-      <div style={{padding:isMobile?"8px 10px":"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + env(safe-area-inset-top))"}:{})}}>
-        <div style={{display:"flex",alignItems:"center",gap:6,...(isMobile?{flexWrap:"wrap",minWidth:0}:{})}}>
+      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
+        <div style={{display:"flex",alignItems:"center",gap:6,...(isMobile?{flexWrap:"wrap",minWidth:0,maxWidth:"100%"}:{})}}>
           {isMobile&&<button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide menu":"Show menu"} style={{display:"flex",alignItems:"center",justifyContent:"center",width:34,height:30,flexShrink:0,background:"transparent",border:`1px solid ${t.brd}44`,borderRadius:8,color:t.dim,cursor:"pointer",fontFamily:font}}><IC.Sidebar/></button>}
           {panel==="chat"&&!act&&<>
             <ModelPicker value={pendingChatModel||models[0]||""} onChange={setPendingChatModel} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>
@@ -4902,11 +4927,11 @@ function HyprChat(){
               <span style={{fontSize:10,fontWeight:600,color:type==="persona"?t.text:c}}>{act.persona_name}</span>
             </div>
             <button onClick={leaveActiveProfile} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
-            {!act.is_council&&!act.persona_name&&<div style={{position:"relative"}}>
+            {!act.is_council&&!act.persona_name&&<div className="hc-header-secondary" style={{position:"relative"}}>
               <button onClick={()=>setShowSysPromptPicker(p=>!p)} style={{fontSize:10,padding:"3px 8px",borderRadius:8,border:`1px solid ${act.system_prompt?`${t.warm}44`:`${t.brd}33`}`,background:act.system_prompt?`${t.warm}12`:"transparent",color:act.system_prompt?t.warm:t.mut,cursor:"pointer",fontFamily:font,display:"flex",alignItems:"center",gap:3}}>
                 {act.system_prompt?"\u{1F4CB} System Prompt":"\u002B System Prompt"}
               </button>
-              {showSysPromptPicker&&<div style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
+              {showSysPromptPicker&&<div className="hc-composer-menu" style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
                 {(()=>{const sysPrompts=validPrompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
                     <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
@@ -4922,7 +4947,7 @@ function HyprChat(){
           </>}
         </div>
         {/* Token counter + export — persistent */}
-        <div style={{display:"flex",alignItems:"center",gap:8,...(isMobile?{flexWrap:"wrap",minWidth:0}:{})}}>
+        <div className="hc-header-secondary" style={{display:"flex",alignItems:"center",gap:8,...(isMobile?{flexWrap:"wrap",minWidth:0,maxWidth:"100%"}:{})}}>
           {/* Activity Center */}
           {downloads.length>0&&(()=>{
             const active=downloads.filter(d=>!_activityIsTerminal(d.status));
@@ -5063,7 +5088,7 @@ function HyprChat(){
       {/* Panels + Preview wrapper. Keyed on the active panel so a panel switch remounts
           this column and replays the entry fade; key is stable while chatting. */}
       <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
-      <div key={wsPanel&&activeWs?"ws":panel} style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0,animation:"fadeIn .18s ease"}}>
+      <div className={panel!=="chat"||wsPanel&&activeWs?"hc-safe-panel":""} key={wsPanel&&activeWs?"ws":panel} style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0,animation:"fadeIn .18s ease"}}>
       {/* Panels */}
       {wsPanel&&activeWs
         ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
@@ -5312,7 +5337,7 @@ function HyprChat(){
           <div style={{fontSize:9,fontWeight:700,color:t.mut,letterSpacing:1,textTransform:"uppercase"}}>Connectors</div>
           <button onClick={refreshConnectors} style={{...btnS(t.mut),fontSize:10,padding:"4px 8px"}}>Refresh</button>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:10,marginBottom:10}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:10,marginBottom:10}}>
           <div style={{...cardS,borderColor:`${t.acc}33`}}>
             <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:8}}>MCP Server</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 110px",gap:8,marginBottom:8}}>
@@ -5441,7 +5466,7 @@ function HyprChat(){
             <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",minWidth:160,padding:"9px 18px",opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
           </div>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12,alignItems:"start"}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,300px),1fr))",gap:12,alignItems:"start"}}>
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={cardS}>
             <span style={cardHeadS}>Report</span>
@@ -5642,7 +5667,7 @@ function HyprChat(){
           <div style={kickerS}>Quick Start Presets</div>
           <span style={metaS}>{councilPresets.length} templates</span>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,190px),1fr))",gap:8}}>
           {councilPresets.map(p=><button key={p.id} onClick={async()=>{
             try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});if(!r.ok)throw new Error(`HTTP ${r.status}`);const c=await r.json();setCouncils(prev=>[c,...prev]);setActiveCouncilId(c.id);notify({type:"success",text:"Council preset added",detail:p.name});}catch(e){console.error("Preset error:",e);notify({type:"error",text:"Preset failed",detail:e.message||String(e)});}
           }} style={{cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.brd}34`,borderRadius:8,background:`${t.bgDeep}72`,textAlign:"left",display:"flex",flexDirection:"column",gap:4,fontFamily:font}}>
@@ -5674,7 +5699,7 @@ function HyprChat(){
             </div>
           </div>
           {isActive&&<div style={{padding:14,display:"flex",flexDirection:"column",gap:12}}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,alignItems:"stretch"}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,alignItems:"stretch"}}>
               <div style={sectionS}>
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:9,color:t.warm}}><IC.Crown/><span style={kickerS}>Host / Moderator</span></div>
                 <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:8}}/>
@@ -5965,7 +5990,7 @@ function HyprChat(){
         </div>}
       </div>;};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px 0",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"flex-end",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"flex-end",gap:4}}>
+      <div style={{display:"flex",alignItems:"flex-end",gap:4,flexWrap:"wrap",minWidth:0}}>
         <span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc,marginRight:12,paddingBottom:10}}>Agents</span>
         {[["agents",<IC.Cube/>,"Agents",agentProfiles.length],["personas",<IC.User/>,"Personas",personaProfiles.length]].map(([key,ico,label,count])=><button key={key} onClick={()=>{setProfileTab(key);setEditMc(null);}} style={{padding:"8px 16px",borderRadius:"8px 8px 0 0",border:`1px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):t.brd}44`,borderBottom:`2px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):"transparent"}`,background:profileTab===key?`${key==="personas"?t.pink:t.acc}12`:"transparent",color:profileTab===key?(key==="personas"?t.pink:t.acc):t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:profileTab===key?800:500,marginBottom:-1,display:"flex",alignItems:"center",gap:6}}>
           {ico}{label}<span style={{fontSize:9,color:t.mut}}>{count}</span>
@@ -5990,7 +6015,7 @@ function HyprChat(){
           <button onClick={()=>charCardImportRef.current?.click()} style={btnS(t.pink)}><IC.Download/> Import Card</button></>}
       </div>
     </div>
-    <div style={{padding:"10px 20px",borderBottom:`1px solid ${t.brd}18`,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:8,background:`${t.surface}22`}}>
+    <div style={{padding:"10px 20px",borderBottom:`1px solid ${t.brd}18`,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:8,background:`${t.surface}22`}}>
       <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",borderRadius:8,border:`1px solid ${t.acc}24`,background:`${t.acc}08`,minWidth:0}}>
         <span style={{display:"flex",color:t.acc,marginTop:1,flexShrink:0}}><IC.Cube/></span>
         <div style={{fontSize:11,lineHeight:1.45,color:t.dim,minWidth:0}}><span style={{fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6,fontSize:9}}>Agents</span> are task-driven assistants for coding, research, automation, tools, knowledge bases, and specialized work.</div>
@@ -6022,10 +6047,10 @@ function HyprChat(){
           <div style={{fontSize:10,color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from Hugging Face</div>
         </div>
       </div>
-      <div style={{display:"flex",alignItems:"center",gap:4,padding:3,borderRadius:8,border:`1px solid ${t.brd}28`,background:`${t.surface}44`}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,padding:3,minWidth:0,maxWidth:"100%",overflowX:"auto",borderRadius:8,border:`1px solid ${t.brd}28`,background:`${t.surface}44`}}>
         {[["ollama","Ollama","🦙",installedModelCount],["hf","Hugging Face","🤗",hfModelCount],["hyprfit","HyprFit","⚡",null]].map(([key,label,icon,count])=>{
           const active=modelsTab===key;
-          return <button key={key} onClick={()=>{setModelsTab(key);setModelParamsOpen(null);setShowModelfile(false);if(key!=="hf")setHfSelected(null);}} style={{padding:"7px 13px",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
+          return <button key={key} onClick={()=>{setModelsTab(key);setModelParamsOpen(null);setShowModelfile(false);if(key!=="hf")setHfSelected(null);}} style={{padding:"7px 13px",flexShrink:0,whiteSpace:"nowrap",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
             <span>{icon}</span><span>{label}</span>{count!=null&&<span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>}
           </button>;
         })}
@@ -6127,12 +6152,12 @@ function HyprChat(){
           <div style={{maxWidth:860}}>
             <div style={{...mmPanelStrongS,padding:18,marginBottom:16}}>
               <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
-                <div style={{minWidth:220,flex:"1 1 260px"}}>
+                <div style={{minWidth:isMobile?0:220,flex:"1 1 260px"}}>
                   <div style={mmKickerS}>Ollama pull</div>
                   <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4}}>Pull Ollama model</div>
                   <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Install a model by name, then tune its overrides from the inventory list.</div>
                 </div>
-                <div style={{display:"flex",gap:8,alignItems:"center",flex:"1 1 340px",minWidth:280}}>
+                <div style={{display:"flex",gap:8,alignItems:"center",flex:"1 1 340px",minWidth:isMobile?0:280,flexWrap:isMobile?"wrap":"nowrap"}}>
                   <input ref={pullInputRef} value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,minWidth:180,fontSize:13,padding:"9px 11px",background:t.bgDeep}}/>
                   <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"9px 14px",fontSize:12,flexShrink:0,opacity:pullName.trim()?1:.55}}><IC.Download/> Pull</button>
                 </div>
@@ -6806,7 +6831,7 @@ function HyprChat(){
 
       :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{let live=cid;try{const ar=await fetch(`${API}/api/assistant`);const ad=await ar.json();live=ad?.profile?.conversation_id||cid;}catch{}if(!live)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(live);loadConversation(live);setPanel("chat");}}/>
 
-      :panel==="settings"?ReactDOM.createPortal(<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
+      :panel==="settings"?ReactDOM.createPortal(<div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div style={{width:isMobile?"100%":"min(1100px,95vw)",maxHeight:isMobile?"100%":"85vh",height:isMobile?"100%":"85vh",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
       <div style={{borderRight:isMobile?"none":`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:isMobile?"calc(8px + env(safe-area-inset-top)) 12px 8px":18,display:"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:`1px solid ${t.brd}44`,alignItems:"center"}:{})}}>
         <div style={{display:isMobile?"none":"flex",alignItems:"center",gap:9,marginBottom:10}}>
@@ -6856,7 +6881,7 @@ function HyprChat(){
         {loginError&&<div style={{fontSize:11,color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:7,padding:"7px 9px",marginBottom:12}}>{loginError}</div>}
 
         {settingSection("Create Profile",null,
-          <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) minmax(180px,1fr) 96px",gap:8,alignItems:"center"}}>
+          <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(180px,1fr) minmax(180px,1fr) 96px",gap:8,alignItems:"center"}}>
             <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="New user name" style={{...inputS,fontSize:12}}/>
             <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={{...inputS,fontSize:12}}/>
             <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),fontSize:12,padding:"8px 13px",height:38,opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
@@ -6875,7 +6900,7 @@ function HyprChat(){
                   </div>
                   {u.id!=="default"&&canManage&&<button onClick={()=>deleteManagedUser(u)} title="Delete profile" style={{...btnS(t.err),fontSize:10,padding:"6px 8px",height:32,flexShrink:0}}><IC.Trash/></button>}
                 </div>
-                {canManage&&<div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) 74px minmax(180px,1fr) 74px minmax(72px,auto)",gap:8,alignItems:"center"}}>
+                {canManage&&<div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr) 74px":"minmax(180px,1fr) 74px minmax(180px,1fr) 74px minmax(72px,auto)",gap:8,alignItems:"center"}}>
                   <input value={nameDraft} onChange={e=>setUserNameDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:12,padding:"8px 10px"}}/>
                   <button onClick={()=>updateManagedUser(u.id,{name:nameDraft})} disabled={!nameDraft.trim()||nameDraft===u.name} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",height:36,opacity:nameDraft.trim()&&nameDraft!==u.name?1:.45,justifyContent:"center"}}>Save</button>
                   <input type="password" value={pwdDraft} onChange={e=>setUserPasswordDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder={u.password_enabled?"New password":"Set password"} style={{...inputS,fontSize:12,padding:"8px 10px"}}/>
@@ -6948,7 +6973,7 @@ function HyprChat(){
           </div>
         ,"API keys are stored for the current HyprChat user.")}
         {settingSection("Endpoints",null,
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,300px),1fr))",gap:12}}>
             {[
               ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
               ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
@@ -6973,7 +6998,7 @@ function HyprChat(){
               <span style={mmChipS(ollamaScanSshAuthMode==="password"&&ollamaScanSshHasPassword?t.ok:ollamaScanSshAuthMode==="key"&&ollamaScanSshKeyPath?t.ok:t.mut,`${t.bgDeep}AA`)}>
                 {ollamaScanSshAuthMode==="password"?(ollamaScanSshHasPassword?"password saved":"password needed"):(ollamaScanSshKeyPath?"key configured":"key needed")}
               </span>,<>
-            <div style={{display:"grid",gridTemplateColumns:"minmax(130px,1fr) 90px minmax(100px,.8fr) 120px",gap:9,alignItems:"end"}}>
+            <div style={{display:"grid",gridTemplateColumns:isMobile?"repeat(2,minmax(0,1fr))":"minmax(130px,1fr) 90px minmax(100px,.8fr) 120px",gap:9,alignItems:"end"}}>
               <label>
                 <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Host</span>
                 <input value={ollamaScanSshHost} onChange={e=>setOllamaScanSshHost(e.target.value)} placeholder="derived from Ollama URL" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
@@ -7251,10 +7276,9 @@ function HyprChat(){
         </div>
         </>,"These engine switches apply to legacy workflows. Persistent jobs use OpenHands for coding and repairs.")}
 
-        {settingSection("Build Limits",null,<>
         <DaedalusSettings t={t} font={font} onSaved={data=>{setCoderNumCtx(data.openhands_num_ctx);setCoderChatCtx(data.resolved_contexts?.chat?.num_ctx||0);}}/>
-        {sliderField({label:"Legacy Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1})}
 
+        {settingSection("Builder Behavior",null,<>
         <div>
           <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
           <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
@@ -7272,7 +7296,8 @@ function HyprChat(){
           </label>
           <div style={{fontSize:9,color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
         </div>
-        </>,"Runtime budgets for the Builder agent loop.")}
+        {sliderField({label:"Legacy Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1,hint:"Legacy workflows only. Persistent jobs use Turns per coding attempt above."})}
+        </>,"How the Builder model reasons before each tool call. These save as you change them.")}
       </div>
 
       {/* TILE: Appearance */}
@@ -7687,9 +7712,9 @@ function HyprChat(){
           {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
           {/* Messages */}
           <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
-          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface?250:0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
+          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
             {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
-            :<ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface}/>}
+            :<ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>}
           </div>:act?.is_council?(()=>{
             const councilCfg=councils.find(c=>c.id===act.council_config_id);
             const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
@@ -7776,7 +7801,7 @@ function HyprChat(){
               if(!votes.length&&!councilVoting)return null;
               const tally=tallyFromVotes(votes);
               const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
-              return <div style={{background:`${t.surface}66`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:12}}>
+              return <div style={{background:`${t.surface}66`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:12}}>
                 <div>
                   <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.7}}><IC.Trophy/> Peer Ballot</div>
                   {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -7843,7 +7868,7 @@ function HyprChat(){
                           <span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{label}</span>
                           <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
                         </button>
-                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginTop:10}}>
+                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
                           {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
                         </div>}
                       </div>;
@@ -7854,7 +7879,7 @@ function HyprChat(){
                         <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
                       </div>
                       {councilKbStatus&&<div style={{fontSize:10,color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12,marginTop:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
                         {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
                       </div>
                     </div>}
@@ -7878,7 +7903,7 @@ function HyprChat(){
                   </div>
                 </div>;
               })}
-              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:12}}>
+              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12}}>
                 {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
               </div>}
               <div ref={chatEnd}/>
@@ -8109,7 +8134,7 @@ function HyprChat(){
           </div>}
         </div>
         </div>
-        <div style={{flexShrink:0,position:"relative",transform:emptyComposerLift,transition:"transform .7s cubic-bezier(.2,.8,.2,1)",willChange:"transform",zIndex:120,pointerEvents:"auto"}}>
+        <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
           {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
           {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
         {/* TOOL TOGGLES BAR + QUICK SEARCH */}
@@ -8128,7 +8153,7 @@ function HyprChat(){
                 <IC.Tool/> Connectors{activeConnectorCount?` ${activeConnectorCount}`:""}
               </button>}
             </div>
-            {!act?.is_council&&showConnectorPicker&&connectorOperationTools.length>0&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:0,zIndex:310,width:300,maxWidth:"calc(100vw - 32px)",maxHeight:260,overflow:"hidden",background:`${t.bgDeep}F7`,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 10px 28px #0009`,padding:8,display:"flex",flexDirection:"column",gap:7,backdropFilter:"blur(8px)",animation:"fadeIn .16s ease"}}>
+            {!act?.is_council&&showConnectorPicker&&connectorOperationTools.length>0&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"calc(100% + 6px)",left:0,zIndex:310,width:300,maxWidth:"calc(100vw - 32px)",maxHeight:260,overflow:"hidden",background:`${t.bgDeep}F7`,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 10px 28px #0009`,padding:8,display:"flex",flexDirection:"column",gap:7,backdropFilter:"blur(8px)",animation:"fadeIn .16s ease"}}>
               <div style={{display:"flex",alignItems:"center",gap:7}}>
                 <div style={{fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.7,whiteSpace:"nowrap"}}>Connectors</div>
                 <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{activeConnectorCount} active · {connectorOperationTools.length} available</div>
@@ -8147,7 +8172,8 @@ function HyprChat(){
           </div>
         </div>
         {/* INPUT */}
-        <div style={{padding:isMobile?(keyboardVvh?"6px 12px 10px":"6px 12px calc(10px + env(safe-area-inset-bottom))"):"6px 18px 16px",flexShrink:0}}>
+        <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
+          <div className="hc-composer-extras">
           {currentRun&&(()=>{
             const phaseLabel={searching:"searching",thinking:"thinking",tool:"tool running",streaming:"streaming",voting:"council voting",council:"council",stopped:"stopped",failed:"failed",complete:"complete"}[currentRun.phase]||currentRun.phase||"running";
             const pct=currentRun.pct!=null?Math.max(0,Math.min(100,Number(currentRun.pct)||0)):null;
@@ -8208,7 +8234,8 @@ function HyprChat(){
                 <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
               </span>)}
           </div>}
-          <div className={isEmptyChatSurface?"empty-composer-box":""} style={{maxWidth:chatWidth,margin:"0 auto",...glass,background:composerState==="error"?`${t.err}08`:composerState==="stopped"?`${t.surface}E8`:glass.background,borderRadius:8,padding:isEmptyChatSurface?"9px 7px 9px 14px":"6px 6px 6px 12px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${composerColor}${composerActive||composerFocused?"55":"32"}`,boxShadow:composerActive?`0 0 10px ${composerColor}18`:composerFocused?`0 0 0 2px ${composerColor}12`:"none",transition:"border-color .18s, box-shadow .22s, background .18s",minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`}}>
+          </div>
+          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} style={{maxWidth:chatWidth,margin:"0 auto",...glass,background:composerState==="error"?`${t.err}08`:composerState==="stopped"?`${t.surface}E8`:glass.background,borderRadius:8,padding:isEmptyChatSurface?"9px 7px 9px 14px":"6px 6px 6px 12px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${composerColor}${composerActive||composerFocused?"55":"32"}`,boxShadow:composerActive?`0 0 10px ${composerColor}18`:composerFocused?`0 0 0 2px ${composerColor}12`:"none",transition:"border-color .18s, box-shadow .22s, background .18s",minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`}}>
             {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:8,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
               {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
             </div>}
@@ -8216,7 +8243,7 @@ function HyprChat(){
             {slashMenuActive()&&(()=>{
               const matches=slashMatchesFor(inp);
               const hi=Math.min(slashIdx,Math.max(matches.length-1,0));
-              return <div style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:8,animation:"fadeIn .14s ease"}}>
+              return <div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:8,animation:"fadeIn .14s ease"}}>
                 <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,padding:"2px 6px 6px"}}>Prompts — ↑↓ select · Enter insert · Esc dismiss</div>
                 <div style={{maxHeight:230,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {matches.map((p,ix)=><div key={p.id||ix} onMouseDown={e=>{e.preventDefault();insertPrompt(p);}} onMouseEnter={()=>setSlashIdx(ix)}
@@ -8233,9 +8260,9 @@ function HyprChat(){
               </div>;
             })()}
             {/* {{variable}} fill-in card for prompt insertion */}
-            {slashVarFill&&<div style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,background:t.bgDeep,border:`1px solid ${t.warm}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:12,animation:"fadeIn .14s ease"}}>
+            {slashVarFill&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,background:t.bgDeep,border:`1px solid ${t.warm}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:12,animation:"fadeIn .14s ease"}}>
               <div style={{fontSize:11,fontWeight:800,color:t.warm,marginBottom:8}}>Fill in “{slashVarFill.title}”</div>
-              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
+              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
                 <span style={{fontSize:10,color:t.dim,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</span>
                 <input autoFocus={ix===0} value={v.value} onChange={e=>setSlashVarFill(s=>({...s,vars:s.vars.map((x,j)=>j===ix?{...x,value:e.target.value}:x)}))}
                   onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();applyVarFill();}if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashVarFill(null);}}}
@@ -8246,17 +8273,17 @@ function HyprChat(){
                 <button onClick={applyVarFill} style={{...btnS(t.warm),fontSize:10,fontWeight:700}}>Insert</button>
               </div>
             </div>}
-            {!act?.is_council&&<><div ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
+            {!act?.is_council&&<><div className="hc-composer-anchor hc-quick-anchor" ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
               <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
-              {showQuickMenu&&<div style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
+              {showQuickMenu&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
                 <button disabled={!!preparingSend} onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
                 {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
                 {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
               </div>}
             </div>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {validPrompts.length>0&&<div ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
-              {showPromptPicker&&<div style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
+            {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
+              {showPromptPicker&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
                 <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
                 <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
                   {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
@@ -8283,17 +8310,16 @@ function HyprChat(){
                 if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
               }
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":"What's on your mind?"}`} rows={1}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
               disabled={streaming||councilRunning||loadingConv||!!preparingSend}
-              style={{flex:1,background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
+              style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
-              onInput={e=>{e.target.style.height="auto";e.target.style.height=Math.min(e.target.scrollHeight,120)+"px";}}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
-            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId?effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort:pendingEffort!==null&&pendingEffort!==globalEffort;return <div ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
+            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId?effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort:pendingEffort!==null&&pendingEffort!==globalEffort;return <div className="hc-composer-anchor" ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
               <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
-                <span style={{fontSize:13}}>{L.emoji}</span><span style={{fontSize:10}}>{L.name}</span>
+                <span style={{fontSize:13}}>{L.emoji}</span><span className="hc-effort-label" style={{fontSize:10}}>{L.name}</span>
               </button>
-              {showEffortPicker&&<div style={{position:"absolute",bottom:"110%",right:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6,animation:"fadeIn .16s ease"}}>
+              {showEffortPicker&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",right:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6,animation:"fadeIn .16s ease"}}>
                 <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
                 {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}else{setPendingEffort(v);}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
                   <span style={{fontSize:14}}>{lv.emoji}</span>
@@ -8390,7 +8416,7 @@ function HyprChat(){
 
 
     {/* KB File Preview Modal */}
-    {kbPreview&&<div style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setKbPreview(null);}}>
+    {kbPreview&&<div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setKbPreview(null);}}>
       <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(720px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
         <div style={{padding:"12px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
           <span style={{fontSize:14}}>{kbPreview.isPdf?"📕":"📄"}</span>
@@ -8409,8 +8435,8 @@ function HyprChat(){
       </div>
     </div>}
 
-    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const isPrompt=!!confirmDialog.prompt;const phraseOk=isPrompt?!!confirmPhrase.trim():(!requiredText||confirmPhrase===requiredText);const close=v=>{const dlg=confirmDialog;const phrase=confirmPhrase;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(dlg.prompt?(v?phrase.trim():null):v);};return <div style={{position:"fixed",inset:0,zIndex:12000,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
-      <div style={{width:"min(420px,94vw)",background:t.bgDeep,border:`1px solid ${c}44`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:18,animation:"fadeIn .16s"}}>
+    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const isPrompt=!!confirmDialog.prompt;const phraseOk=isPrompt?!!confirmPhrase.trim():(!requiredText||confirmPhrase===requiredText);const close=v=>{const dlg=confirmDialog;const phrase=confirmPhrase;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(dlg.prompt?(v?phrase.trim():null):v);};return <div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:12000,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
+      <div className="hc-dialog-card" style={{width:"min(420px,94vw)",background:t.bgDeep,border:`1px solid ${c}44`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:18,animation:"fadeIn .16s"}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
           <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:800}}>{isPrompt?"✎":"!"}</div>
           <div style={{fontSize:14,fontWeight:800,color:t.text,letterSpacing:.3}}>{confirmDialog.title}</div>
@@ -8428,7 +8454,7 @@ function HyprChat(){
     </div>;})(),document.body)}
 
     {/* Toast host */}
-    {toasts.length>0&&<div style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",zIndex:520,display:"flex",flexDirection:"column",gap:7,pointerEvents:"none",width:"min(440px,calc(100vw - 28px))"}}>
+    {toasts.length>0&&<div className="hc-toast-host" style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",zIndex:520,display:"flex",flexDirection:"column",gap:7,pointerEvents:"none",width:"min(440px,calc(100vw - 28px))"}}>
       {toasts.map(tt=>{const c={success:t.ok,error:t.err,warning:t.warm,info:t.acc}[tt.type||"info"]||t.acc;const action=tt.action||(tt.onUndo?{label:"Undo",onClick:tt.onUndo}:null);return <div key={tt.id} style={{display:"flex",alignItems:"center",gap:10,background:t.bgDeep,border:`1px solid ${c}55`,borderRadius:10,padding:"9px 12px",fontSize:12,color:t.dim,boxShadow:`0 8px 24px rgba(0,0,0,.4)`,pointerEvents:"auto",animation:"fadeIn .2s"}}>
         <span style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 8px ${c}88`,flexShrink:0}}/>
         <span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0,flex:1}}>
@@ -8513,7 +8539,7 @@ function HyprChat(){
       select option{background:${t.bgDeep};color:${t.text}}
       button{transition:filter .15s ease,border-color .15s ease,background-color .15s ease,color .15s ease;position:relative;overflow:hidden}button:hover{filter:brightness(1.08)}button:active{filter:brightness(.98)}
     `}</style>
-  </div>;
+  </div></div>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<><HyprChat/><NewVersionBar/></>);

@@ -112,6 +112,8 @@ Final browser checks use desktop **1440×900** and mobile **390×844** by defaul
 
 **AI visual review defaults to off.** Each request can inherit Settings, turn it off, or request it if supported. CLI, library, and other non-UI tasks skip it. When enabled, review uses the configured installed local vision model, or the coding model only if Ollama reports vision capability. It never downloads a model, substitutes a cloud model, or sends screenshots to a text-only model. Unsupported/unavailable optional vision is recorded as skipped; ordinary requirements can still pass. An explicit visual-verification requirement remains unmet and pauses for input. A blocked job's Continue control can change its visual-review setting.
 
+Policy 7 captures screenshots and browser traces from the immutable execution copy while managed services are running. Captures use the existing job-scoped evidence URLs. Objective layout findings feed the normal check/repair path; a model's style preference does not. Enabling visual review on Continue reruns checks to capture the current revision.
+
 Visual calls share the job's time and model-call allowances. Batches default to two screenshots, with a separately configurable image-token estimate; base64 data is excluded from text-token estimates and actual provider usage remains checked. Subjective suggestions stay advisory. Suspected clipping/overflow or obstructed controls must be reproduced by browser measurements before triggering an automatic repair. A changed source revision invalidates prior visual review.
 
 ## Context settings
@@ -224,7 +226,7 @@ Choose the profile using completed focused pilots, then freeze source and settin
 
 ## Deployment and rollback
 
-`deploy_monitor.py` watches the new backend, worker, and frontend modules. Worker changes include the shared context policy and pinned dependency manifest. Install worker requirements and the Playwright Chromium headless shell (`python -m playwright install chromium --only-shell`) before restarting `openhands-worker`; build the Vite frontend before shipping `frontend/dist`. Backend changes require a HyprChat restart and health/log checks.
+`deploy_monitor.py` watches the new backend, worker, and frontend modules. Worker changes include the shared context policy and pinned dependency manifest. Install worker requirements, the Playwright Chromium headless shell (`python -m playwright install chromium --only-shell`) and the `bubblewrap` and `strace` system packages before restarting `openhands-worker`. Without bubblewrap every job stops with an isolation-unavailable environment error; without strace, independent audits of compiled-language projects (Java, C/C++, C#, Go, Rust) fail closed as environment faults. `deploy_monitor.py` installs both packages on an apt-based Codebox when either is missing; build the Vite frontend before shipping `frontend/dist`. Backend changes require a HyprChat restart and health/log checks.
 
 Disable the persistent-workflow flag to route new jobs through the legacy implementation. Existing version-3 jobs retain their controller and remain inspectable. Stop active jobs before removing the new worker/controller files. Database migrations do not replace legacy workflow rows or remove existing tables.
 

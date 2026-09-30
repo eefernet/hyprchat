@@ -39,7 +39,68 @@ def requested_interfaces(task):
     # Launcher/package-manager options in a quoted run command are not application interfaces.
     flags = [v for v in flags if v not in {'--host', '--port', '--reload', '--bind', '--save', '--save-dev', '--prefix',
                                            '--workers', '--app-dir', '--no-audit', '--no-fund', '--package-lock'}]
-    return {'selectors': selectors, 'flags': flags}
+    labels, buttons, conditional = requested_names(text)
+    return {'selectors': selectors, 'flags': flags, 'labels': labels, 'buttons': buttons, 'conditional_buttons': conditional}
+
+
+_NAME_WORD = r"[A-Za-z0-9][\w'/-]*"
+_LEADING_VERB = re.compile(r'^(?:show|display|provide|include|render|offer|add|use|have|expose|give|put)\s+', re.I)
+# A Title-Case name of one to four words ("Save task"), and a comma/and list of them ("Edit and Delete").
+_NAME = r"[A-Z][\w'/-]*(?:\s+(?!buttons?\b|and\b|or\b)[a-z][\w'/-]*){0,3}"
+_NAME_LIST = _NAME + r'(?:\s*,\s*' + _NAME + r')*(?:,?\s+(?:and|or)\s+' + _NAME + r')?'
+_CONDITIONAL = re.compile(r'\bfor each\b|\bper (?:item|task|row|entry|record|project)\b|\bwhen editing\b|\bwhile editing\b|\bon each\b', re.I)
+
+
+def _name_tokens(listing):
+    """Title-Case names of one to four words from a comma/and list; quotes and backticks stripped."""
+    names = []
+    for item in re.split(r'\s*,\s*|\s+and\s+|\s+or\s+|\s*/\s*(?=[A-Z])', listing or ''):
+        item = item.strip().strip('`"\'.:;()').strip()
+        item = re.sub(r'\s+(?:and|or)$', '', item)
+        # "Show Edit" -> "Edit", but "Add task" stays: the verb is only dropped when a Title-Case name remains.
+        stripped = _LEADING_VERB.sub('', item) if len(item.split()) > 1 else item
+        item = stripped if stripped[:1].isupper() else item
+        words = item.split()
+        if not 1 <= len(words) <= 4 or not words[0][:1].isupper():
+            continue
+        if not all(re.fullmatch(_NAME_WORD, w) for w in words):
+            continue
+        if item not in names:
+            names.append(item)
+    return names
+
+
+def requested_names(text):
+    """(labels, buttons, conditional_buttons) the request names verbatim.
+
+    "accessible labels A, B, C" and "labels: A, B" name form controls the page must expose through their
+    label text; "buttons X and Y" / "X and Y buttons" name visible buttons; a clause with "for each" or
+    "when editing" names buttons that only exist once an item does (Edit, Delete, Save task). The medium
+    board (2026-09-26) failed every browser verdict at get_by_label('Project name') while its own tests
+    and audits never used a label, so the controller reads them from the request itself.
+    """
+    labels, buttons, conditional = [], [], []
+    for sentence in re.split(r'[.;\n]+', text or ''):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        for match in re.finditer(r'\b(?:accessible\s+labels?|labels?\s*:)\s*(?P<list>.+?)(?=,?\s+and\s+(?:the\s+)?buttons?\b|$)', sentence, re.I):
+            labels.extend(n for n in _name_tokens(match.group('list')) if n not in labels)
+        for part in re.split(r',\s*and\s+', sentence):
+            if not re.search(r'\bbuttons?\b', part, re.I):
+                # "..., and Save task when editing": a button named by its editing role alone.
+                for match in re.finditer(r"(?P<name>(?<![\w-])[A-Z][\w'/-]*(?:\s+[a-z][\w'/-]*){0,3})\s+(?:when|while)\s+editing\b", part):
+                    conditional.extend(n for n in _name_tokens(match.group('name')) if n not in conditional)
+                continue
+            target = conditional if _CONDITIONAL.search(part) else buttons
+            found = []
+            for match in re.finditer(r'\bbuttons?\s+(?:named\s+|called\s+|labell?ed\s+)?(?P<list>[A-Z`"\'].+?)(?=\s+(?:for|when|while|that|which|to)\b|$)', part):
+                found.extend(_name_tokens(match.group('list')))
+            for match in re.finditer(r'(?<![\w-])(?P<list>' + _NAME_LIST + r')\s+buttons?\b', part):
+                found.extend(_name_tokens(match.group('list')))
+            target.extend(n for n in found if n not in target)
+    buttons = [b for b in buttons if b not in conditional]
+    return labels, buttons, conditional
 
 
 _LEAVE = r"(?:do(?:es)?\s+not|don'?t|never|must\s+not|should\s+not)\s+(?:edit|change|modify|touch|alter|rewrite)"
@@ -100,7 +161,18 @@ def interface_files(kind, token, sources):
         pattern = '#' + name + r'(?![\w-])|(["\'`])' + name + r'\1|\bid\s*=\s*' + name + r'(?![\w-])'
     else:
         pattern = r'(?<![\w-])' + re.escape(token) + r'(?![\w-])'
-    return sorted(name for name, text in sources.items() if re.search(pattern, text))
+    found = []
+    for name, text in sources.items():
+        text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+        text = '\n'.join(line for line in text.splitlines() if not re.match(r'\s*(?://|\*)' + (r'|\s*#' if PurePosixPath(name).suffix in {'.py', '.sh'} else ''), line))
+        declared = re.search(pattern, text)
+        if kind == 'flag' and not declared:
+            # Go flag/pflag names omit the leading -- in declarations.
+            flag = re.escape(token.removeprefix('--'))
+            declared = re.search(r'\b(?:flag|pflag)\.(?:String|Int|Bool|Float64|Duration)(?:Var)?P?\(\s*(?:&?\w+\s*,\s*)?[\"\']' + flag + r'[\"\']', text)
+        if declared:
+            found.append(name)
+    return sorted(found)
 
 
 def outcome(value, index):
@@ -115,9 +187,11 @@ def outcome(value, index):
     # Older briefs and combined requirements must not lose deliverable gates.
     # Wording the request is likely to use. A miss here WAIVES the gate (make_brief), so err wide:
     # "with docs and automated testing" once matched neither pattern.
-    if re.search(r'\breadme\b|\bdocs?\b|\bdocument(?:ation|ed|s)?\b|\busage guide\b', text):
+    from coder_criteria import deliverables
+    requested = deliverables(text)
+    if 'documentation' in requested:
         kinds.add('documentation')
-    if re.search(r'\btest(?:s|ed|ing)?\b|\btest suite\b', text):
+    if 'tests' in requested:
         kinds.add('tests')
     # Deliverables the user never requested are not acceptance gates, whatever the planner wrote.
     waived = set(row.get('waived', [])) & {'tests', 'documentation'}
@@ -193,6 +267,11 @@ def needs_behavior_audit(outcomes, checks):
 def evidence_matches(check, requirement, kind, revision, solo=True):
     if not (check.get('passed') and check.get('revision_id') == revision and check.get('execution_id')):
         return False
+    if check.get('provenance_kind') == 'compiled_subprocess':
+        from coder_process_evidence import VERSION
+        process = check.get('process_evidence') or {}
+        if process.get('version') != VERSION or process.get('revision_id') != revision or not process.get('processes'):
+            return False
     component = requirement.get('component', '.')
     if kind == 'tests':
         return (check.get('origin') == 'project' and check.get('is_test') and
@@ -257,10 +336,14 @@ def blocking(check):
     tests, launch, audits, protected files and retained baseline failures still block."""
     if check.get('passed'):
         return False
+    if check.get('origin') == 'controller' and check.get('phase') == 'visual' and check.get('skipped') and check.get('optional_visual'):
+        return False
     return not (check.get('origin') == 'project' and check.get('phase') in ADVISORY_PHASES and not check.get('is_test'))
 
 
-def acceptance(outcomes, checks, verdict, revision):
+def acceptance(outcomes, checks, verdict, revision, request=None, history=()):
+    from coder_criteria import EVIDENCE_VERSION, criteria
+    obligations = criteria(request, outcomes, history)
     reported = {o.get('id'): o for o in verdict.get('outcomes', [])}
     rows = []
     requirements = [{**outcome(original, index), 'id': original['id']} for index, original in enumerate(outcomes)]
@@ -269,6 +352,9 @@ def acceptance(outcomes, checks, verdict, revision):
         solo = len(behavior_peers(requirement, requirements)) == 1
         for kind in requirement['evidence_types']:
             matches = [c for c in checks if evidence_matches(c, requirement, kind, revision, solo)]
+            if kind == 'behavior':
+                # Generated audits and an unmapped user suite cannot prove a request clause.
+                matches = []
             if kind == 'tests':
                 interfaces = {value for c in matches for value in c.get('test_interfaces', [])}
                 if set(requirement.get('test_interfaces', [])) - interfaces:
@@ -281,14 +367,18 @@ def acceptance(outcomes, checks, verdict, revision):
         if status == 'passed' and missing:
             status = 'unverified'
         rows.append({**requirement, 'status': status, 'missing_evidence': missing,
-            'executions': sorted(set(executions)), 'reason': report.get('reason', 'Independent review incomplete')})
+            'executions': sorted(set(executions)),
+            'trust_origin': None if 'behavior' in requirement['evidence_types'] else 'executed_deliverable_check',
+            'reason': ('Trusted independent behavioral verification is required; generated audits are diagnostic.'
+                       if 'behavior' in missing else report.get('reason', 'Independent review incomplete'))})
     # Scope is established per outcome by executed evidence plus the reviewer's
     # status; an explicit scope_complete=false still withholds acceptance.
-    accepted = (bool(rows) and verdict.get('scope_complete') is not False and
+    accepted = (not obligations and bool(rows) and verdict.get('scope_complete') is not False and
                 all(r['status'] == 'passed' for r in rows) and bool(checks) and
                 all(c.get('revision_id') == revision for c in checks) and
                 not any(blocking(c) for c in checks))
-    return {'accepted': accepted, 'revision_id': revision, 'outcomes': rows, 'checks': checks,
+    return {'accepted': accepted, 'evidence_version': EVIDENCE_VERSION, 'criteria': obligations,
+        'revision_id': revision, 'outcomes': rows, 'checks': checks,
         'advisory': [c['id'] for c in checks if not c.get('passed') and not blocking(c)],
         **{name: [r['id'] for r in rows if r['status'] == status]
            for name, status in [('passed', 'passed'), ('failed', 'failed'), ('unverified', 'unverified')]}}
@@ -309,7 +399,7 @@ def failure_signature(checks):
 def decide(job, summary, verdict):
     """Diagnose all failures before choosing an action; budgets are durable."""
     checks = job.get('checks', [])
-    failed = [c for c in checks if not c.get('passed')]
+    failed = [c for c in checks if blocking(c)]
     diagnoses = {d.get('check_id'): d for d in verdict.get('diagnoses', [])}
     defects, audit_faults, environments, existing = [], [], [], []
     for check in failed:
@@ -336,7 +426,8 @@ def decide(job, summary, verdict):
                 'audit_defect', 'missing_provenance'} or diagnosis == 'audit_defect' or
                 category == 'missing_coverage' and not application_exception):
             audit_faults.append(check)
-        elif category == 'application_defect' or application_exception or (check.get('origin') == 'project' and category in {'missing_coverage', 'missing_provenance'}) or (category == 'unresolved' and
+        elif category == 'application_defect' or application_exception or (check.get('origin') == 'project' and category in {'missing_coverage', 'missing_provenance'}) \
+                or (check.get('origin') == 'controller' and category == 'unverified_interface') or (category == 'unresolved' and
                 diagnosis == 'application_defect' and check.get('coverage_observed') and
                 (check.get('source_bindings') or check.get('service_bindings'))):
             if check.get('origin') == 'project' and category == 'missing_coverage':
@@ -374,7 +465,7 @@ def decide(job, summary, verdict):
             elif kind == 'documentation' and row['id'] in job.get('missing_deliverables', []):
                 defects.append({'id': row['id'] + ':documentation', 'classification': 'application_defect',
                                 'reason': 'Requested documentation is missing', 'outcome': row})
-            elif kind != 'preservation':
+            elif kind not in {'preservation', 'behavior'}:
                 audit_faults.append({'id': row['id'] + ':' + kind, 'reason': 'Independent coverage is missing'})
     # The reviewer may fail an outcome whose checks all pass (thin documentation, a gap the
     # checks do not exercise). That is a grounded repair request, bounded by the repair rounds.
@@ -399,8 +490,21 @@ def decide(job, summary, verdict):
                 'failing audit check. Re-read the application source AND the fixture/input this audit wrote, compare with the '
                 "application's actual output, and fix the audit itself (expected value, URL path, selector).",
                 'log_tail': (d.get('log_tail') or '')[-600:]} for d in defects]}
+        history = job.get('failed_result_history', [])
+        if len(history) >= 2 and history[-2:] == [signature, signature] and not job.get('no_progress_diagnosed') and job.get('audit_corrections', 0) < MAX_AUDIT_CORRECTIONS:
+            return {'action': 'audit', 'no_progress_diagnosis': True, 'feedback': [{'id': d['id'],
+                'reason': 'The same failed result recurred three times without reducing failures. Diagnose against the exact authorized request and retained expected/actual values. Do not change application behavior to satisfy a wrong generated expectation or weaken user-owned tests. Preserve both audit versions.',
+                'log_tail': (d.get('log_tail') or '')[-1200:]} for d in defects]}
         if job.get('repair_round', 0) >= MAX_REPAIRS:
             return {'action': 'candidate', 'reason': 'Both application repair rounds were used.', 'limit': 'application_repairs'}
+        # A repair that ended because the model-call allowance ran out is not "no progress": the model was
+        # cut off, not stuck (sweep C++ 2026-09-25 parked a spent allowance as a durable limit, disabling Continue).
+        if patch.get('input_budget') and not patch.get('changed'):
+            return {'action': 'candidate', 'limit': 'input_budget', 'reason': job.get('editor_stopped') or
+                    'The builder prompt for this round exceeds the configured input budget, so the model never ran. Raise the Daedalus context window in Settings, then Continue.'}
+        if patch.get('allowance_spent') and job.get('unchanged_source'):
+            return {'action': 'candidate', 'limit': 'model_calls',
+                    'reason': 'The model-call allowance ended during the repair before it changed any source; the checkpoint was checked. Continue grants a fresh allowance.'}
         # A stalled editor ends the job only once the durable repair rounds have had
         # their grounded attempt at the same defects.
         if signature == job.get('failure_signature') and (job.get('unchanged_source') or job.get('editor_stopped')):
@@ -416,4 +520,4 @@ def decide(job, summary, verdict):
         return {'action': 'candidate', 'reason': 'The execution environment needs attention; application repairs were not exhausted.'}
     if existing:
         return {'action': 'candidate', 'reason': 'Existing baseline failures remain outside the confirmed repair scope.'}
-    return {'action': 'candidate', 'reason': 'Independent review could not verify every requested outcome.'}
+    return {'action': 'candidate', 'reason': 'Ready for review: requested behavior lacks trusted criterion-specific verification. Generated audits cannot authorize acceptance.'}

@@ -52,6 +52,17 @@ def review(store,operation_id):
                 # remain visible for the user instead of imposing a design preference.
                 findings.append({**finding,"advisory":True})
         defects=[]; measurements=[]
+        if payload.get('policy_version', 1) >= 7:
+            from coder_policy7_visual import measure
+            measurements = measure(store, operation_id, payload, findings)
+            defects = [d for row in measurements for d in row.get('layout_defects', [])]
+            # A failed replay is unverified, never a visual pass. Confirmed defects
+            # become ordinary controller check rows and use the existing repair budget.
+            if any(not row.get('passed') for row in measurements) and not defects:
+                return {'status': 'skipped', 'reason': 'Layout measurements could not be completed', 'model': model,
+                        'revision_id': payload['revision_id'], 'findings': findings, 'measurements': measurements}
+            return {'status': 'failed' if defects else 'passed', 'model': model, 'revision_id': payload['revision_id'],
+                    'findings': findings, 'defects': defects, 'measurements': measurements}
         from coder_browser import browser_check
         from coder_repository import safe_relative
         operation=store.get(operation_id)

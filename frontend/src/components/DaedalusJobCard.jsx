@@ -10,6 +10,7 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const {job,connection,error,busy,action}=useDaedalusJob(workflow);
   const [details,setDetails]=useState(false),[tab,setTab]=useState('Overview'),[now,setNow]=useState(Date.now());
   const [resumeVisual,setResumeVisual]=useState('unchanged');
+  const [clarification,setClarification]=useState('');
   const dialog=useRef(null),opener=useRef(null);
   const active=!terminalJobStates.has(job.state),status=jobStatusLabel(job);
   useEffect(()=>{if(!active)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[active]);
@@ -24,7 +25,7 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const calls=(job.calls_used||0)+(job.operation_calls||0);
   const facts=[job.model,`${elapsedLabel(elapsed)} elapsed`,job.call_limit?`${calls} of ${job.call_limit} model calls`:`${calls} model call${calls===1?'':'s'}`,job.inventory?.files?`${job.inventory.files} files`:''].filter(Boolean).join(' · ');
   const artifact=job.artifact||job.candidate_artifact;
-  const controls=<>{active?<button style={button} disabled={busy||job.state==='cancelling'} onClick={()=>action('cancel')}>{job.state==='cancelling'?'Stopping…':'Stop'}</button>:resumable?<button style={button} disabled={busy||!!disabledReason} title={disabledReason} onClick={()=>action('resume',resumeVisual)}>Continue</button>:null}</>;
+  const controls=<>{active?<button style={button} disabled={busy||job.state==='cancelling'} onClick={()=>action('cancel')}>{job.state==='cancelling'?'Stopping…':'Stop'}</button>:resumable?<button style={button} disabled={busy||!!disabledReason||!!job.scope_question&&!clarification.trim()} title={disabledReason} onClick={()=>action('resume',resumeVisual,clarification)}>Continue</button>:null}</>;
   const downloads=<>{artifact&&<a style={button} href={userScopedUrl(`/api/artifacts/${artifact.id}/download`)} download>{job.artifact?'Download accepted project':'Download candidate'}</a>}
     {!artifact&&resumable&&job.revision_id&&<a style={button} href={userScopedUrl(`/api/coder/workflows/${job.id}/checkpoint`)} download>Download checkpoint</a>}</>;
   const evidence=check=><><CheckEvidence jobId={job.id} check={check} button={button}/><BrowserEvidence jobId={job.id} check={check} button={button}/></>;
@@ -35,6 +36,7 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
     {connection==='reconnecting'&&<p className="dj-notice">Reconnecting to progress. Last confirmed status is shown.</p>}
     {active&&job.blocker&&<p className="dj-notice">{jobBlockerMessage(job.blocker)}</p>}
     {resumable&&disabledReason&&!outcomeExplanation(job)&&<p className="dj-notice">{disabledReason}</p>}
+    {resumable&&job.scope_question&&<label style={{display:'block'}}>Clarify this change: {job.scope_question}<textarea aria-label="Scope clarification" value={clarification} maxLength={10000} onChange={e=>setClarification(e.target.value)} style={{...button,display:'block',width:'100%',boxSizing:'border-box',minHeight:85,marginTop:8}}/></label>}
   </>;
   if(compact)return <>
     <section className="dj-card dj-strip" aria-label="Background coding job" style={vars}>
@@ -74,6 +76,10 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
           <h2>Checks on this revision</h2>
           {!job.checks?.length&&<p>No checks have completed yet.</p>}
           <ChecksSection job={job} renderEvidence={evidence}/>
+          {!!job.verification_summary?.criteria?.length&&<details className="dp-section"><summary>Independent verification of requirements</summary>
+            <p>Passing generated audits do not prove every requested behavior. Requirements below need independent verification before automatic acceptance.</p>
+            {job.verification_summary.criteria.map(criterion=><div className="dj-row" key={criterion.id}><strong>{criterion.status==='passed'?'Verified':'Needs verification'}</strong><p>{criterion.request_excerpt}</p></div>)}
+          </details>}
           {!!job.checks?.length&&<details className="dp-section"><summary>Every check with its log</summary>
             {(job.checks||[]).map((check,index)=><div className="dj-row" key={`${check.id}-${index}`}><strong>{check.passed?'✓':'✗'} {check.id}</strong><p>{check.classification|| (check.passed?'Passed':'Needs attention')}{check.test_count!=null&&` · ${check.test_count} tests`}</p><pre>{check.log_tail||check.error||check.summary||check.command}</pre>{evidence(check)}</div>)}</details>}
           {job.visual_review?.status&&<p>AI visual review: {job.visual_review.status} {job.visual_review.reason}</p>}
@@ -83,6 +89,8 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
           <details><summary>Model responses and recovery evidence</summary><pre>{JSON.stringify({plan:job.plan_text,patch:job.last_patch&&{...job.last_patch,source_hashes:undefined},recovery:job.verification_events,knowledge:job.knowledge_sources},null,2)}</pre></details>
         </>}
         {tab==='History'&&<><h2>History</h2>{job.project_id&&<ProjectHistory projectId={job.project_id} refreshKey={job.state} button={button}/>}
+          {!!job.brief?.requirement_history?.length&&<details><summary>Requirement changes</summary>{job.brief.requirement_history.map(row=><p key={row.parent_id}><strong>{row.action}</strong>: {row.parent_outcome.text}{row.request_quote&&<> — “{row.request_quote}”</>}</p>)}</details>}
+          {(job.scope_clarifications||[]).map((row,index)=><p key={`clarification-${index}`}>Clarification: {row.text}</p>)}
           {(job.stage_usage||[]).map(row=><p key={row.operation_id}>{row.stage} · {row.status} · {elapsedLabel(row.seconds)}</p>)}
           {(job.reviews||[]).map((review,index)=><details key={index}><summary>Review {index+1}</summary><pre>{JSON.stringify(review,null,2)}</pre></details>)}
           {(job.audit_history||job.check_history||[]).map((row,index)=><details key={index}><summary>Audit {index+1} · {row.revision_id?.slice(0,10)}</summary><pre>{JSON.stringify(row,null,2)}</pre></details>)}

@@ -55,6 +55,8 @@ def validate_links(root, excludes=()):
     for directory, dirs, files in os.walk(root, followlinks=False):
         dirs[:] = [name for name in dirs if name not in excludes and name != ".git"]
         for name in dirs + files:
+            if name in excludes or name == ".git":
+                continue
             path = Path(directory) / name
             if path.is_symlink():
                 if not path.resolve().is_relative_to(root):
@@ -170,7 +172,12 @@ class Repository:
         # The private index is scratch state, not the user's Git index. Rebuild
         # it so newly excluded/generated files cannot leak into checkpoints.
         self.git("read-tree", "--empty")
-        (self.git_dir / "info" / "exclude").write_text("\n".join(f"{name}/" for name in self.excludes) + "\n")
+        from coder_generated import directories
+        generated = directories(self.root)
+        # Prepared environments may be directory symlinks. A trailing slash
+        # only ignores real directories, allowing absolute cache links into
+        # archives even though inventory excludes them.
+        (self.git_dir / "info" / "exclude").write_text("\n".join([*self.excludes, *(f"/{name}/" for name in sorted(generated))]) + "\n")
         # Packaging must reproduce the checkpoint, including files a project's
         # own release export rules would omit or rewrite.
         (self.git_dir / "info" / "attributes").write_text("* -export-ignore -export-subst\n")

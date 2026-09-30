@@ -1,6 +1,7 @@
 // Pure view-model helpers for the Daedalus job card. Everything here reads the job
 // snapshot the card already receives; every field is optional so older workflows
 // (policy-6 briefs without batches, legacy cancelled jobs) render without throwing.
+import {jobBlockerMessage} from './daedalusJobs.js';
 
 const STAGES=['Plan','Build','Check','Audit','Review','Deliver'];
 const STAGE_OF={queued:0,inspecting:0,baselining:0,planning:0,coding:1,checking:2,auditing:3,reviewing:3,
@@ -28,6 +29,9 @@ export function stageRail(job={}){
 
 export function loopLabel(job={}){
   const parts=[];
+  // Optional: the lowest verification layer still failing (foundation, core behavior, interface integration, delivery).
+  const phase=job.stage_progress;
+  if(phase&&phase.of&&!['completed','cancelled'].includes(job.state))parts.push(`Phase ${phase.phase}/${phase.of} · ${phase.label||''}`.trim());
   if(job.state==='coding'){
     const narrowed=list(job.narrowed_targets);
     if(narrowed.length)parts.push(`Editing ${narrowed[0]}${narrowed.length>1?` (${narrowed.length} files queued)`:''}`);
@@ -103,7 +107,7 @@ export function checkSummary(job={}){
     failing:[...failed,...rows.filter(row=>row.advisory)]};
 }
 
-const LIMIT_TEXT={application_repairs:'both automatic repair rounds were used',
+const LIMIT_TEXT={input_budget:'the builder prompt did not fit the configured input budget, so the model never ran (raise the Daedalus context window in Settings, then Continue)',application_repairs:'both automatic repair rounds were used',
   audit_corrections:'the independent audit could not be completed after two corrections',
   no_progress:'the editor stopped making changes',
   model_calls:'the model-call allowance was used up before verification finished (Continue grants another)'};
@@ -124,7 +128,7 @@ export function outcomeExplanation(job={}){
   }
   if(state==='cancelled')return {tone:'neutral',title:'Stopped',
     text:`Work stopped at a saved checkpoint${job.inventory?.files?` with ${job.inventory.files} file${job.inventory.files===1?'':'s'}`:''}.`};
-  if(state==='blocked'||state==='waiting_for_input')return {tone:'warn',title:'Needs attention',text:clip(job.blocker,260)||'The job cannot continue on its own.'};
+  if(state==='blocked'||state==='waiting_for_input')return {tone:'warn',title:'Needs attention',text:clip(jobBlockerMessage(job.blocker),260)||'The job cannot continue on its own.'};
   return null;
 }
 

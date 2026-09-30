@@ -98,12 +98,31 @@ class WorkerStore:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
             if old:
+                # A durable cancellation can arrive before the delayed start POST.
+                if old['job_id'] == job_id and old['kind'] == 'cancel' and old['cancel_requested']:
+                    return False
                 if old["job_id"] != job_id or old["kind"] != kind or json.loads(old["payload"]).get("request_key") != payload.get("request_key"):
                     raise ValueError("Operation identity reused for another request")
                 return False
             db.execute("INSERT INTO operations(id,job_id,kind,status,payload) VALUES(?,?,?,'queued',?)",
                        (operation_id, job_id, kind, json.dumps(payload)))
         return True
+
+
+    def cancel_before_dispatch(self, operation_id, job_id):
+        """Acknowledge an absent operation while fencing every later delivery of it."""
+        for value in (operation_id, job_id):
+            if not re.fullmatch(r'[A-Za-z0-9_-]+', value):
+                raise ValueError('Invalid operation identity')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT job_id FROM operations WHERE id=?', (operation_id,)).fetchone()
+            if old and old['job_id'] != job_id:
+                raise ValueError('Operation belongs to another job')
+            if not old:
+                db.execute("INSERT INTO operations(id,job_id,kind,status,payload,result,cancel_requested,ended) VALUES(?,?,'cancel','cancelled',?,?,1,?)",
+                    (operation_id,job_id,json.dumps({'settings':DEFAULTS}),json.dumps({'error':'Cancelled before dispatch'}),time.time()))
+        return self.get(operation_id)
 
 
 def operation_repo(store, operation):
@@ -640,17 +659,19 @@ def _run_check(store, operation_id, repository, payload):
             if browser.get("environment_fault"):
                 break
             continue
-        with log_path.open("wb") as output:
-            environment = {k:v for k,v in os.environ.items() if k not in {"PYTHONPATH","PYTHONHOME","VIRTUAL_ENV","PIP_TARGET","PIP_PREFIX","PIP_CONSTRAINT","PIP_REQUIRE_VIRTUALENV","PIP_CONFIG_FILE","npm_config_prefix","NPM_CONFIG_PREFIX","NPM_CONFIG_USERCONFIG","NPM_CONFIG_GLOBALCONFIG","GOFLAGS"}}
-            environment["PATH"] = os.pathsep.join([str(cwd/".venv"/"bin"),str(root/".venv"/"bin"),environment.get("PATH","")])
-            environment["PIP_CONFIG_FILE"] = os.devnull
-            process = subprocess.Popen(["bash", "-c", check["command"]], cwd=cwd, stdout=output, stderr=subprocess.STDOUT, start_new_session=True,env=environment)
+        from coder_sandbox import Sandbox
+        from coder_patch_runtime import stop_process
+        environment = {k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LC_ALL', 'TZ'}}
+        environment['PATH'] = os.pathsep.join([str(cwd / '.venv/bin'), str(root / '.venv/bin'), environment.get('PATH', '')])
+        with Sandbox(['bash', '-c', check['command']], cwd=cwd, writable=[root], environment=environment) as box, log_path.open('wb') as output:
+            process = subprocess.Popen(box.args, cwd=cwd, stdout=output, stderr=subprocess.STDOUT, start_new_session=True, env=box.env)
             try:
                 exit_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
+                stop_process(process)
                 exit_code = -1
+            finally:
+                stop_process(process)
         # Logs are evidence references, not a hidden permanent truncation.
         policy = resolve("reviewer", payload["settings"])
         with log_path.open("rb") as source:
@@ -1031,7 +1052,10 @@ def install_routes(app, projects_root):
 
     @app.post("/jobs/{job_id}/operations/{operation_id}/cancel")
     def cancel_operation(job_id: str, operation_id: str):
-        operation_status(job_id, operation_id)
+        try:
+            store.cancel_before_dispatch(operation_id, job_id)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
         return cancel(store, operation_id)
 
     @app.patch("/jobs/{job_id}/operations/{operation_id}/settings")

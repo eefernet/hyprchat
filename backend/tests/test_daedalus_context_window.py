@@ -155,13 +155,16 @@ def test_one_compile_pays_for_at_most_one_summary():
 
 def test_one_clamped_observation_does_not_reset_the_conservative_ratio():
     # ratio >= 1.0 doubled as "uncalibrated": a dense turn pinned it to 1.0 and the next dropped it to 0.5.
+    # Since sweep3 the ceiling is RATIO_CEILING (1.6): a dense turn is recorded as measured, never reset.
     window = ContextWindow()
     for estimate, reported in ((1000, 600), (1000, 900), (1000, 1200), (1000, 400)):
         window.observe(estimate, reported)
-    assert window.ratio == 1.0
+    assert window.ratio == 1.2
     restored = ContextWindow(window.state())
     restored.observe(1000, 400)
-    assert restored.ratio == 1.0
+    assert restored.ratio == 1.2
+    restored.observe(1000, 5000)
+    assert restored.ratio == 1.6
     legacy = ContextWindow({'ratio': 0.69, 'boundary': None})   # a window file written before the flag existed
     legacy.observe(1000, 500)
     assert legacy.ratio == 0.69
@@ -182,3 +185,34 @@ def test_compaction_off_sizes_and_sends_the_same_messages():
             continue
         # Whatever is sent is what was measured: the whole history, within the budget.
         assert not changed and len(sent) == 2 + 2 * turns and window.estimate(sent, []) <= off.input_budget, turns
+
+
+# sweep3 (2026-09-26): a Kanban session at the 64K window reached 58,033 of 58,163 prompt tokens with
+# compaction ON and never compacted. bytes/3 under-counts dense JSON/code, the calibration ratio was
+# clamped at 1.0, and nothing used the prompt size the model had just reported.
+def test_sweep3_kanban_dense_prompts_calibrate_above_one_and_compact_before_the_budget():
+    active = policy(openhands_num_ctx=65536, generation_num_predict=4096)
+    assert active.input_budget == 58163
+    saved, paid = [], []
+    window = ContextWindow(save=saved.append)
+    window.observe(30000, 36000)
+    assert window.ratio == 1.2 and saved[-1]['ratio'] == 1.2
+    for turns in (6, 7):   # neither size crosses the threshold on its estimate alone
+        sent, compacted = window.compile(conversation(turns), [], active, lambda older: paid.append(len(older)) or 'summary')
+        assert not compacted and not paid and window.estimate(sent, []) < window.threshold(*ContextWindow.split(sent)[:1], [], active)
+    # The model reports 58,033 tokens for that call: the estimate stays where it was (ratio unchanged), but
+    # the reported size is a floor for the next call under the same instructions and boundary.
+    window.observe(round(58033 / 1.2), 58033)
+    assert window.ratio == 1.2 and saved[-1]['last_prompt'] == 58033 and saved[-1]['last_prompt_key']
+    assert ContextWindow(saved[-1]).last_prompt == 58033
+    sent, compacted = window.compile(conversation(7), [], active, lambda older: paid.append(len(older)) or 'summary')
+    assert compacted and paid == [paid[0]] and window.boundary and window.estimate(sent, []) <= active.input_budget
+    assert sent[2]['content'].startswith('Earlier execution checkpoint')
+    # The floor retires with the boundary that replaced it: the next call is sized by its estimate again.
+    sent, compacted = window.compile(conversation(7), [], active, lambda older: pytest.fail('floor outlived its boundary'))
+    assert not compacted and window.last_prompt_key != window._pending_key
+    # A rewritten history (different instructions) retires it as well.
+    window.observe(40000, 50000)
+    rewritten = conversation(7, prefix_bytes=59000)
+    sent, compacted = window.compile(rewritten, [], active, lambda older: pytest.fail('floor outlived its history'))
+    assert not compacted

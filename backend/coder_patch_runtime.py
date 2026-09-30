@@ -39,9 +39,11 @@ def readonly_command(command, writable):
 def tree_hashes(root, excludes=()):
     """Include every existing source file, including extensionless executables."""
     validate_links(root, excludes)
+    from coder_generated import directories
+    generated = directories(root)
     result = {}
     for directory, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in excludes and not (Path(directory) / d).is_symlink())
+        dirs[:] = sorted(d for d in dirs if d not in excludes and (Path(directory) / d).relative_to(root).as_posix() not in generated and not (Path(directory) / d).is_symlink())
         for name in sorted(files):
             path = Path(directory) / name
             if name in excludes:
@@ -287,8 +289,10 @@ def edit(store, operation_id, root, task, *, read_root=None, preferred=(), binar
     store.event(operation_id, 'patch_started', files=files, read_files=reads, omitted=omitted, version=AIDER_VERSION)
     log = folder / 'aider.log'
     with inference_bridge(store, operation_id, role, chat) as (url, errors):
-        environment = {k: v for k, v in os.environ.items() if not k.startswith(('AIDER_', 'OLLAMA_', 'OPENAI_', 'ANTHROPIC_'))}
+        from coder_sandbox import Sandbox, clean_environment
+        environment = clean_environment({k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LC_ALL', 'TZ'}})
         environment.update(OLLAMA_API_BASE=url, AIDER_ANALYTICS_DISABLE='true', NO_COLOR='1')
+        writable = [root, folder]
         if read_root:
             home = folder / 'home'; home.mkdir(exist_ok=True)
             temporary = folder / 'tmp'; temporary.mkdir(exist_ok=True)
@@ -300,9 +304,11 @@ def edit(store, operation_id, root, task, *, read_root=None, preferred=(), binar
             for path in audit_targets:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.touch(exist_ok=True)
-            command = readonly_command(command, [*audit_targets, folder])
-        with log.open('w') as output:
-            process = subprocess.Popen(command, cwd=root, env=environment, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+            writable = [*audit_targets, folder]
+        with Sandbox(command, cwd=root, writable=writable,
+                     readonly=[root, *([read_root] if read_root else [])],
+                     environment=environment, network_urls=[url]) as box, log.open('w') as output:
+            process = subprocess.Popen(box.args, cwd=root, env=box.env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 while process.poll() is None:
                     _boundary(store, operation_id)
@@ -312,6 +318,12 @@ def edit(store, operation_id, root, task, *, read_root=None, preferred=(), binar
                     time.sleep(.1)
             finally:
                 stop_process(process)
+    # Aider creates zero-byte targets before an edit. Keep user-owned empties;
+    # remove only untouched placeholders introduced by this editor invocation.
+    for name in files:
+        path = safe_relative(root, name)
+        if name not in before and path.is_file() and path.stat().st_size == 0:
+            path.unlink()
     after = tree_hashes(root, excludes)
     if read_root and tree_hashes(read_root, excludes) != readonly_before:
         raise ValueError('Audit editor changed read-only project source')

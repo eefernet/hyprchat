@@ -87,7 +87,7 @@ def test_stage_output_policy_preserves_old_jobs():
     assert thinking_options('reviewer',payload,{'capabilities':[]})==({},'unsupported')
     assert thinking_options('reviewer',payload,{'capabilities':['thinking']})[0]=={'think':True}
     with pytest.raises(ValueError,match='cannot fit'):
-        validate_patch({'daedalus_role_outputs':{'reviewer':32768}},DEFAULTS)
+        validate_patch({'daedalus_role_outputs':{'reviewer':DEFAULTS['openhands_num_ctx']}},DEFAULTS)
 
 
 def test_text_history_preserves_batched_calls_and_observations():

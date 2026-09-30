@@ -67,3 +67,11 @@ test('older and empty jobs render without throwing',()=>{
   assert.equal(outcomeExplanation({state:'cancelled',inventory:{files:3}}).text,'Work stopped at a saved checkpoint with 3 files.');
   assert.equal(requestSummary('**Tech Stack:**\n- Node.js + `Express`'),'Tech Stack: - Node.js + Express');
 });
+
+test('a job with stage progress shows its phase on the strip and the card', () => {
+  const job={state:'coding',builder:'sdk',build_continuations:0,repair_round:1,
+    stage_progress:{phase:1,of:4,label:'foundation',blocked_by:['launch:app'],complete:false}};
+  assert.equal(loopLabel(job),'Phase 1/4 · foundation · Agent builder · pass 1 of 6 · Repair 1 of 2');
+  assert.equal(loopLabel({state:'completed',artifact:{},stage_progress:{phase:4,of:4,label:'delivery'}}),'');
+  assert.equal(loopLabel({state:'checking'}),'');
+});

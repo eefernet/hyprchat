@@ -44,7 +44,8 @@ _HERMETIC_UNSET_VARS = [
     "GOFLAGS",
 ]
 for _var in _HERMETIC_UNSET_VARS:
-    os.environ.pop(_var, None)
+    if _var != "PIP_REQUIRE_VIRTUALENV" or os.environ.get("DAEDALUS_SANDBOXED") != "1":
+        os.environ.pop(_var, None)
 
 
 _ACTIVE_RUNS: dict[str, dict] = {}
@@ -671,16 +672,13 @@ def _git_diff(project_dir: Path) -> str:
 
 def _run_shell_capture(project_dir: Path, command: str, env: dict,
                        timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        command,
-        cwd=str(project_dir),
-        env=env,
-        shell=True,
-        executable="/bin/bash",
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    if os.environ.get('DAEDALUS_SANDBOXED') == '1':
+        return subprocess.run(['bash', '-c', command], cwd=project_dir, env=env,
+                              capture_output=True, text=True, timeout=timeout)
+    from coder_sandbox import Sandbox
+    with Sandbox(['bash', '-c', command], cwd=project_dir, writable=[project_dir], environment=env) as box:
+        return subprocess.run(box.args, env=box.env, capture_output=True, text=True, timeout=timeout)
+
 
 
 def _safe_allowed_files(project_dir: Path, files: list[str]) -> list[str]:
@@ -934,6 +932,9 @@ def _build_aider_command(req: AiderRunRequest, prompt_file: Path,
 
 
 def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
+    if os.environ.get('DAEDALUS_SANDBOXED') != '1':
+        from coder_sandbox_legacy import run
+        return run('aider', req, stream_cb)
     start = time.time()
     project_dir = Path(req.project_dir)
     if not project_dir.is_dir():
@@ -1377,6 +1378,9 @@ def _check_tool_support(ollama_base: str, model: str, num_ctx: int, num_predict:
 @app.post("/run", response_model=RunResponse)
 def run_task(req: RunRequest):
     """Run an OpenHands coding agent on a task inside the sandbox."""
+    if os.environ.get("DAEDALUS_SANDBOXED") != "1":
+        from coder_sandbox_legacy import run
+        return RunResponse(**run("sdk", req))
     global _run_counter
     _run_counter += 1
     if _run_counter % 10 == 0:
@@ -1604,6 +1608,9 @@ def cancel_run(run_id: str):
 @app.post("/run-stream")
 async def run_task_stream(req: RunRequest):
     """SSE streaming version of /run — emits real-time progress events."""
+    if os.environ.get("DAEDALUS_SANDBOXED") != "1":
+        from coder_sandbox_legacy import stream
+        return await stream(req)
     global _run_counter
     _run_counter += 1
     if _run_counter % 10 == 0:

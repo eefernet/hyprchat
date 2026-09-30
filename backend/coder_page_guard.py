@@ -34,6 +34,10 @@ def serves_html(url, timeout=5):
 
 def load_errors(url, *, startup_seconds=60, step_seconds=15):
     """Return (uncaught page errors, environment fault text)."""
+    import os
+    from coder_sandbox_call import invoke, browser_options
+    if os.environ.get('DAEDALUS_SANDBOXED') != '1':
+        return invoke('coder_page_guard', 'load_errors', [url], {'startup_seconds': startup_seconds, 'step_seconds': step_seconds}, timeout=startup_seconds + step_seconds * 20)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as error:
@@ -41,7 +45,7 @@ def load_errors(url, *, startup_seconds=60, step_seconds=15):
     errors = []
     try:
         with sync_playwright() as runtime:
-            browser = runtime.chromium.launch(headless=True, timeout=startup_seconds * 1000)
+            browser = runtime.chromium.launch(headless=True, timeout=startup_seconds * 1000, **browser_options())
             try:
                 page = browser.new_page()
                 page.on('pageerror', lambda error: errors.append(str(error)[:400]))
@@ -80,6 +84,6 @@ def page_row(service, url, settings, loader=load_errors):
         'interface does not work: ' + ' | '.join(errors[:3]) + '. Open the page script and the HTML together and fix the '
         'mismatch (element ids/selectors the script looks up must exist in the HTML).')
     return {'id': 'page:' + service['id'], 'phase': 'launch', 'origin': 'project', 'passed': passed,
-            'cwd': service.get('cwd', '.'), 'command': 'load ' + path + ' in headless Chromium',
+            'cwd': service.get('cwd', '.'), 'page_path': path, 'command': 'load ' + path + ' in headless Chromium',
             'reason': reason, 'log_tail': '\n'.join(errors) or fault, 'page_errors': errors,
             'environment_fault': bool(fault), 'execution_succeeded': passed}

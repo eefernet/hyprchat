@@ -22,17 +22,20 @@ def shape(path):
 
 
 def requested_endpoints(request):
-    return {(method.upper(), shape(path)) for method, path in ENDPOINT.findall(request or '')}
+    return {(method.upper(), shape(path.rstrip('.,;:')) ) for method, path in ENDPOINT.findall(request or '')}
 
 
 def web_audit_faults(name, text, request=''):
     faults = []
     if 'DAEDALUS_APP_URL' not in text:
         return faults
-    if re.search(r'assert\s+len\(\s*\w+\s*\)\s*==\s*\d+', text):
+    # A count over a filtered collection can be the exact requested postcondition.
+    scoped = set(re.findall(r'(\w+)\s*=\s*\[.*?\bfor\b.*?\bif\b.*?\]', text))
+    counted = set(re.findall(r'assert\s+len\(\s*(\w+)\s*\)\s*==\s*\d+', text))
+    if counted - scoped:
         faults.append(f'{name} asserts an exact number of records (assert len(...) == N). The application database is NOT empty: '
                       'it keeps rows from earlier runs. Create a record with a unique title, then find THAT record by its id or title '
-                      'in the listing; after deleting, assert that id is absent. Never assert total counts.')
+                      'in the listing; after deleting, assert that id is absent. Scope counts to the records created by this suite.')
     listed = requested_endpoints(request)
     if listed:
         extra = sorted({f'{method.upper()} {path}' for method, path in CALL.findall(text)

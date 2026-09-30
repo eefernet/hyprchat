@@ -7,6 +7,7 @@ import shutil
 from coder_inference import local_chat
 from coder_patch_runtime import edit, select_files, tree_hashes
 from context_policy import resolve
+from coder_scope import active_interfaces
 
 
 def implementation_task(job):
@@ -32,14 +33,9 @@ def implementation_task(job):
             task += '\nKEY ERROR LINES (fix these exact problems):\n' + '\n'.join(keys)
         task += '\nCONFIRMED DEFECTS:\n' + json.dumps(job['repair_feedback'])
     failures = job.get('preflight_failures') or []
-    if failures and not job.get('repair_round') and not job.get('narrowed_targets'):
-        manifests = []
-        for failure in failures:
-            package = failure.get('cwd', '.')
-            for name in ('requirements.txt', 'pyproject.toml', 'package.json', 'vite.config.js', '.daedalus.json', '.daedalus-run.json'):
-                if name in (failure.get('command') or '') + (failure.get('log_tail') or '') or name in {'requirements.txt', 'package.json'}:
-                    manifests.append(name if package == '.' else package.rstrip('/') + '/' + name)
-        targets = list(dict.fromkeys([*targets, *manifests]))
+    if failures and not job.get('narrowed_targets'):
+        from coder_repair_packet import repair_targets   # worker-shared; the controller module is backend-only
+        targets = list(dict.fromkeys([*targets, *repair_targets(job, failures)]))
         task += ('\nTHE PROJECT SETUP/BUILD IS CURRENTLY FAILING after the previous step. Fix this first, with the smallest '
                  'edit to the owning manifest (for example never list Python standard-library modules such as sqlite3 in '
                  'requirements.txt), then do this step:\n' + json.dumps(failures))
@@ -47,6 +43,21 @@ def implementation_task(job):
 
 
 MAX_BUILD_CONTINUATIONS = 5
+# In-operation static-fault nudges for the audit author: the second is spent only on mechanical slips
+# (a syntax error, a rebuild, a missing assert). sweep3-c Node p2 spent BOTH audit corrections on one syntax error.
+MAX_STATIC_NUDGES = 2
+MECHANICAL_FAULT = ('syntax error', 'no assert statement', 'builds, tests or installs', 'writes a file into the project')
+
+
+def request_clauses(task, limit=24):
+    """Whole sentences of the request. Never split on 'and': "prints an error to stderr and exits with code 2" is one clause."""
+    import re as _re
+    clauses = [c.strip() for c in _re.split(r'[.;\n]+', task or '')]
+    return [c for c in clauses if len(c) > 3][:limit]
+
+
+def mechanical_fault(text):
+    return any(marker in str(text) for marker in MECHANICAL_FAULT)
 # Source a requested #id or --flag may live in, including server-side templates: a bare word in
 # server.js used to pass EJS/Jinja projects by accident, so tightening the match needs these.
 INTERFACE_SUFFIXES = {'.html', '.htm', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.py', '.mjs', '.cjs', '.css', '.java', '.kt',
@@ -94,6 +105,18 @@ def edit_transition(job, result):
                  'build_continuations': 0}
         if category == 'no_op' or changed and (result.get('agent_finished') or continued >= MAX_BUILD_CONTINUATIONS):
             return check
+        if result.get('input_budget') and changed:
+            # A saturated session overflowed AFTER real work (verify-kanban 2026-09-25: 14 calls, app.js written):
+            # verify that checkpoint; the next round starts a fresh session with a bounded prompt.
+            return check
+        if result.get('input_budget'):
+            # The request never reached the model. Once: retry in a fresh session (sdk_build keys it by
+            # recovery_used). Twice: say so; "no source changes" hid this in every archived repair retry.
+            if not job.get('recovery_used'):
+                return {'state': 'editing', 'recovery_used': True}
+            return {'state': 'candidate', 'stop_limit': 'input_budget',
+                    'reason': 'The builder prompt for this round exceeds the configured input budget, so the model never ran. '
+                              'Raise the Daedalus context window or lower the generation limit in Settings, then Continue.'}
         if result.get('allowance_spent') or result.get('stalled'):
             # More passes cannot help: verify what exists, or hand over the checkpoint when nothing was written.
             if changed or continued or job.get('repair_round'):
@@ -102,7 +125,7 @@ def edit_transition(job, result):
                     'reason': 'The model-call allowance for building was used before any source was written.' if result.get('allowance_spent')
                     else 'The builder only re-read files and wrote nothing, even after a specific correction.'}
         if changed:
-            return {'state': 'editing', 'build_continuations': continued + 1}
+            return {'state': 'editing', 'build_continuations': continued + 1, 'preflight_pending': True}
         if continued:
             return check  # earlier progress this round: let the checks judge the checkpoint
         feedback = job.get('repair_feedback') or []
@@ -177,9 +200,24 @@ def execute_operation(store, operation_id, repository):
             result = sdk_build(store, operation_id, repository, job, payload)
         else:
             task, targets = implementation_task(job)
+            if job.get('baseline_test_files'):
+                task += '\nPreserve existing user tests unchanged: ' + ', '.join(job['baseline_test_files']) + '. Add new tests in new files.'
             result = edit(store, operation_id, repository.root, task, preferred=targets)
+        baseline_tests = job.get('baseline_test_files', [])
+        restored_tests = []
+        if baseline_tests:
+            # Preserve the attempted edits before restoring tests the current request
+            # did not authorize changing; old repair evidence is never rewritten.
+            attempted = repository.snapshot('Editor checkpoint before baseline test protection', parent=payload['revision_id'])
+            restored_tests = restore_protected(repository, job.get('baseline_revision') or payload['revision_id'], baseline_tests)
+            if restored_tests:
+                repository.git('update-ref', 'refs/daedalus/protected-test-edits/' + attempted['revision'], attempted['revision'])
+                result['unauthorized_test_edits'] = {'paths': restored_tests, 'revision_id': attempted['revision']}
+                store.event(operation_id, 'baseline_tests_restored', **result['unauthorized_test_edits'])
         restored = restore_protected(repository, job.get('baseline_revision') or payload['revision_id'], job.get('protected_files'))
+        restored = list(dict.fromkeys([*restored, *restored_tests]))
         if restored:
+            result['source_hashes'] = tree_hashes(repository.root, payload['settings']['daedalus_exclude_dirs'])
             store.event(operation_id, 'protected_restored', paths=restored)
             result['changed'] = [name for name in result.get('changed') or [] if name not in restored]
             result['protected_restored'] = restored
@@ -202,6 +240,15 @@ def execute_operation(store, operation_id, repository):
             audit_source=Path(job['audit_dir']) if payload.get('audit') else None,
             checks=job.get('audit_checks') if payload.get('audit') else None)
         result['execution_profile'] = profile
+        if not payload.get('audit') and not payload.get('baseline') and not payload.get('preflight'):
+            regressed = repair_regressions(job, result['checks'], tree_hashes(repository.root, repository.excludes))
+            regressed.extend(missing_repair_deliverables(job, repository))
+            if regressed:
+                result['repair_regression'] = {'failed_revision': payload['revision_id'], 'checks': result['checks'], 'regressed': regressed}
+                result['restored_snapshot'] = restore_repair(repository, job['repair_checkpoint'], payload['revision_id'])
+                # The controller may repair again from the restored tree; its targets must reflect THAT tree.
+                result['source_hashes'] = tree_hashes(repository.root, repository.excludes)
+                return result
         if not payload.get('baseline') and not payload.get('preflight'):
             import hashlib
             from coder_repository import file_hash, safe_relative
@@ -224,7 +271,7 @@ def execute_operation(store, operation_id, repository):
             # Requested controls must exist in the delivered source, whatever the model's own tests say.
             import re as _re
             from coder_policy7_evidence import interface_files, requested_interfaces
-            wanted = requested_interfaces(job['task'])
+            wanted = active_interfaces(job)
             if wanted['selectors'] or wanted['flags']:
                 is_test = lambda name: any('test' in part.lower() or 'spec' in part.lower() for part in Path(name).parts)
                 sources = {}
@@ -236,27 +283,45 @@ def execute_operation(store, operation_id, repository):
                     found = interface_files(kind, token, sources)
                     label = ('#' + token) if kind == 'selector' else token
                     result['checks'].append({'id': 'interface:' + label, 'passed': bool(found), 'origin': 'controller',
-                        'classification': 'passed' if found else 'application_defect', 'evidence_types': [],
+                        'classification': 'passed' if found else 'unverified_interface', 'evidence_types': [],
+                        'interface_status': 'declared_unverified' if found else 'unresolved',
                         'outcomes': [], 'revision_id': payload['revision_id'], 'execution_id': operation_id + ':interface:' + label,
                         'log_tail': '' if found else 'The request names ' + label + ' but no delivered source file defines or handles it. '
                             'Implement exactly that ' + ('element id' if kind == 'selector' else 'command-line flag') + '; do not substitute another control.',
-                        'reason': '' if found else 'Requested interface ' + label + ' is absent from the application source'})
+                        'reason': '' if found else 'Requested interface ' + label + ' could not be resolved from source; runtime proof is required'})
             # Values a page script reads from a FormData by names the delivered HTML never assigns (the September
             # Kanban acceptance): a controller row on the immutable execution copy, never the editor's tree.
             from coder_frontend_guard import form_fields_row
             fields = form_fields_row(result['workspace'], payload['revision_id'], operation_id)
             if fields:
                 result['checks'].append(fields)
+            # Diagnostic probes from the literal request: the requested command must run, a .NET solution
+            # must carry a real test project, a skeleton's placeholders must have been replaced. Never evidence.
+            if not payload.get('audit'):
+                from coder_request_probes import command_rows, solution_test_rows
+                from coder_scope import effective_task
+                result['checks'].extend(solution_test_rows(result['workspace'], payload['revision_id'], operation_id))
+                result['checks'].extend(command_rows(store, operation_id, result['workspace'], profile, effective_task(job),
+                                                     payload['revision_id'], project_id=payload['project_id']))
+                if (job.get('skeleton') or {}).get('applied'):
+                    from coder_skeletons import placeholder_row
+                    placeholder = placeholder_row(result['workspace'], job['skeleton'], payload['revision_id'], operation_id)
+                    if placeholder:
+                        result['checks'].append(placeholder)
             # A user-owned test that failed before the edit and passes now, byte-identical,
             # demonstrates the repair without any model-authored audit.
             from coder_policy7_evidence import repair_demonstrated
             before = {b.get('id'): b for b in job.get('baseline_checks', [])}
             for row in result['checks']:
-                row['repair_demonstrated'] = repair_demonstrated(row, before.get(row.get('id')))
+                old = before.get(row.get('id'))
+                row['repair_demonstrated'] = repair_demonstrated(row, old)
+                row['test_origin'] = ('baseline_user_unchanged' if old and row.get('test_files') and row['test_files'] == old.get('test_files')
+                                      else 'current_builder' if row.get('origin') == 'project' else 'generated_audit')
             # Absent documentation is an application defect, never an audit fault.
-            from coder_policy7 import documentation_files
+            from coder_policy7 import documented
+            packages = [p.get('cwd', '.') for p in profile.get('profiles', []) if isinstance(p, dict)]
             result['missing_deliverables'] = [o['id'] for o in job.get('brief', {}).get('outcomes', [])
-                if 'documentation' in o.get('evidence_types', []) and not documentation_files(repository.root, o.get('component', '.'))]
+                if 'documentation' in o.get('evidence_types', []) and not documented(repository.root, o.get('component', '.'), packages)]
         return result
     raise ValueError('Unsupported policy-7 operation: ' + kind)
 
@@ -280,6 +345,9 @@ class Operations:
             'AUDIT TASK. The application has ALREADY been edited by someone else; you are NOT fixing or changing it. '
             'Your whole reply is two new files created with empty-SEARCH blocks: test_behavior.py and audit.json. '
             'Do not announce a plan or ask to examine files; the source is already supplied read-only. '
+            'Use absolute paths under DAEDALUS_AUDIT_DIR for temporary fixtures; never derive project paths from __file__. '
+            'Use subprocess argv lists with cwd set to DAEDALUS_PROJECT_ROOT. For Go exit-code checks use the built executable; go run wraps exit status. If no executable is available, report missing launch evidence rather than claiming its exit code. '
+            'Generated browser audits must use the supplied DAEDALUS_APP_URL. Delivered project tests should also support a standalone local-launch fallback. '
             'Write independent executable tests in the writable audit directory. The actual project is READ ONLY. '
             'Explicit new-file targets are audit.json and test_behavior.py. Inspect the supplied source. '
             'Never copy/reimplement the app or put project modules in the audit. Python clients may test a Node HTTP API; '
@@ -289,11 +357,11 @@ class Operations:
             'Do not create services; the controller starts them. Use plain assert statements against actual application results. '
             'Use Python Playwright for browser checks, never Selenium or a DOM script executed by Node. '
             'Launch the application with ITS OWN runtime, never sys.executable unless the application itself is Python '
-            '(node <file>.js for Node, go run . for Go). '
+            '(node <file>.js for Node, the built executable for Go). '
             'For a compiled program (Java, C, C++, C#, Go, Rust) the controller has ALREADY built it: launch the built artifact with '
             'subprocess.run from os.environ[\"DAEDALUS_PROJECT_ROOT\"] and assert on its real stdout/exit code, e.g. '
             '[\"java\",\"-cp\",\"target/classes\",\"<MainClass>\",...], [\"build/<exe>\",...], [\"dotnet\",\"<App>/bin/Debug/net8.0/<App>.dll\",...], '
-            '[\"target/debug/<bin>\",...] or [\"go\",\"run\",\".\",...]. Never rebuild and never write inside the project. '
+            '[\"target/debug/<bin>\",...] or [\"./<built-go-program>\",...]. Never rebuild and never write inside the project. '
             'Include a __main__ entrypoint so python executes the assertions. Map each tested outcome ID in metadata; '
             'o1 is only an example, include every outcome actually covered by that check. '
             'Write audit.json metadata {\"checks\":[{\"command\":\"\\\"$DAEDALUS_AUDIT_PYTHON\\\" {audit}/test_behavior.py\",'
@@ -301,17 +369,20 @@ class Operations:
             'Documentation uses {\"kind\":\"file\",\"path\":\"README.md\",\"outcomes\":[\"o2\"],'
             '\"evidence_types\":[\"documentation\"],\"assertions\":[{\"kind\":\"nonempty\"}]}. '
             'An independent audit cannot substitute for requested tests DELIVERED IN THE PROJECT. '
+            'For every request clause that names an input class (invalid, malformed, missing, empty, unknown, boundary) write an '
+            'executed assertion that feeds exactly that class of input to the requested invocation and asserts the stated exit code, '
+            'stderr and stdout. '
             'Correct faulty checks while retaining valid checks and all requested outcomes.\n' + json.dumps({
-                'original_request': job['task'], 'outcomes_to_audit': [
+                'original_request': job['task'], 'request_clauses': request_clauses(job['task']), 'outcomes_to_audit': [
                     {**row, 'evidence_types': [kind for kind in row['evidence_types'] if kind in {'behavior', 'documentation'}]}
                     for row in job['brief']['outcomes'] if set(row['evidence_types']) & {'behavior', 'documentation'}],
                 'delivered_tests': 'Controller executes project tests separately; do not register them as audit commands.',
-                'requested_interfaces_the_audit_must_use_exactly': requested_interfaces(job['task']),
+                'requested_interfaces_the_audit_must_use_exactly': active_interfaces(job),
                 'correction_required': ([{**f, 'instruction': 'Add an executed assertion for this outcome and list its ID in audit.json outcomes'
                         if str(f.get('id', '')).endswith(':behavior') else 'Fix this audit check'} for f in job.get('audit_feedback', [])]
                     if job.get('audit_correction_pending') else []),
                 'execution_profile': job.get('execution_profile'),
-                'previous_failures': [{k: c.get(k) for k in ('id', 'classification', 'command', 'log_tail')}
+                'previous_failures': [{k: c.get(k) for k in ('id', 'classification', 'command', 'log_tail', 'audit_fixture_error', 'subprocess_diagnostics')}
                                       for c in job.get('checks', []) if not c.get('passed')]}))
         patch = self.editor(self.store, op, directory, instruction, read_root=self.repo.root,
                             preferred=['audit.json', 'test_behavior.py'])
@@ -325,15 +396,31 @@ class Operations:
                 'SEARCH/REPLACE blocks (empty SEARCH) that create test_behavior.py and audit.json.\n' + instruction,
                 read_root=self.repo.root, preferred=['audit.json', 'test_behavior.py'])
         mechanical_audit_rewrites(directory, self.repo.root)
-        faults = static_audit_faults(directory, self.repo.root, self.job.get('task', '')) if script.is_file() and script.read_text().strip() else []
-        if faults:
-            # Visible before execution: one precise nudge inside this operation, never a correction round.
+        for nudge in range(MAX_STATIC_NUDGES):
+            faults = static_audit_faults(directory, self.repo.root, self.job.get('task', '')) if script.is_file() and script.read_text().strip() else []
+            if not faults or (nudge and not all(mechanical_fault(f) for f in faults)):
+                break
+            # Visible before execution: precise nudges inside this operation, never a correction round.
             if self.store:
-                self.store.event(op, 'audit_static_faults', faults=faults)
+                self.store.event(op, 'audit_static_faults', faults=faults, nudge=nudge + 1)
             patch = self.editor(self.store, op, directory, 'Fix these defects in the audit files you just wrote, keeping everything else:\n- ' +
                 '\n- '.join(faults) + '\n' + instruction, read_root=self.repo.root, preferred=['audit.json', 'test_behavior.py'])
+            mechanical_audit_rewrites(directory, self.repo.root)
+        import re as _re
+        labels = [v for v in (active_interfaces(job).get('labels') or []) if v]
+        text = script.read_text(errors='replace') if script.is_file() else ''
+        if labels and _re.search(r'DAEDALUS_APP_URL|playwright', text, _re.I) and not any(label in text for label in labels):
+            # A browser audit that never touches the controls the request names by label cannot exercise them
+            # (sweep3 medium: get_by_label("Project name") found nothing; no audit had looked). A nudge, not a fault.
+            if self.store:
+                self.store.event(op, 'audit_labels_unused', labels=labels)
+            patch = self.editor(self.store, op, directory, 'Your browser audit never uses the accessible labels the request names (' +
+                ', '.join(labels) + '). Locate those controls with page.get_by_label(<label>, exact=True) and the requested buttons with '
+                'page.get_by_role("button", name=<text>, exact=True), keeping everything else:\n' + instruction,
+                read_root=self.repo.root, preferred=['audit.json', 'test_behavior.py'])
+        packages = [p.get('cwd', '.') for p in (job.get('execution_profile') or {}).get('profiles', []) if isinstance(p, dict)]
         try:
-            notes = normalize_audit(directory, job['brief']['outcomes'], self.repo.root)
+            notes = normalize_audit(directory, job['brief']['outcomes'], self.repo.root, packages=packages)
         except (ValueError, OSError) as error:
             notes = ['Audit normalization skipped: ' + str(error)]
         after = tree_hashes(directory)
@@ -349,7 +436,7 @@ class Operations:
             if needs_behavior:
                 # A named control that no audit file touches has not been independently exercised.
                 text = ''.join(p.read_text(errors='replace') for p in sorted(directory.rglob('*')) if p.is_file() and p.name != 'audit.json')
-                wanted = requested_interfaces(job['task'])
+                wanted = active_interfaces(job)
                 # Flags are verified in source by the controller; a browser/API audit need not invoke the CLI.
                 unused = ['#' + v for v in wanted['selectors'] if v not in text]
                 if unused:
@@ -370,12 +457,19 @@ class Operations:
 
     def plan(self, op):
         from coder_policy7 import make_brief, json_object
+        from coder_scope import ScopeClarification, parents, protected_conflict, review_scope, plan_schema
+        from coder_policy7_evidence import protected_paths
+        clarification = '\n'.join(n['text'] for n in self.job.get('scope_clarifications', []))
+        reaffirmed = protected_paths(clarification, self.job.get('protected_files', []))
+        conflict = protected_conflict(self.job['task'], [p for p in self.job.get('protected_files', []) if p not in reaffirmed])
+        if conflict:
+            return {'scope_question': conflict}
         instruction = ('Create a compact work brief. Return JSON {"outcomes":[{"text":"requested result","component":".","evidence_types":["behavior"]}],'
             '"batches":[{"task":"focused implementation task","files":["suggested path"]}]}. '
             'Size the plan to the task. A command-line tool, library, small web page or edit is ONE batch of at most five files. '
             'Only a genuinely multi-component application (for example a separate backend and frontend) gets up to four dependency-ordered batches. '
             'Never plan more files than the request needs: no duplicate sources, sample data, scratch or report files. '
-            'Give explicit file targets, including new files, for each batch. List EVERY file needed to install, build and run, at most three files per batch, '
+            'Give explicit file targets, including new files, for each batch. List EVERY file needed to install, build and run, '
             'using ONLY the manifests of the project\'s own ecosystem (Python: requirements.txt/pyproject.toml; Node/React: package.json, and '
             'index.html + vite.config.js for a Vite frontend; Java: pom.xml; C/C++: CMakeLists.txt; C#: .sln + .csproj files; Go: go.mod; Rust: Cargo.toml). '
             'NEVER add another ecosystem\'s manifest (no package.json in a C++, C#, Go, Rust, Java or Python project). '
@@ -385,22 +479,64 @@ class Operations:
             'Include all requested behavior, tests and documentation. Browser regression tests should be Python Playwright files with a .daedalus.json test command; do not run DOM tests with Node. '
             'Do not write code or executable probes.\n')
         context = self.source_context(resolve('architect', self.job['settings']))
-        retained = []
+        schema = None
+        if self.job['inherited']:
+            schema = plan_schema(self.job['task'], self.job['inherited'])
+            context['parent_outcomes'] = parents(self.job['inherited'])
+            instruction += ('For this follow-up, include inheritance as an object keyed by the supplied parent IDs: '
+                '{"o1":{"action":"retain","request_quote":"","replacement_outcomes":[],"question":""}}. '
+                'Give exactly one entry per parent outcome. Actions: retain unrelated requirements, replace explicitly changed ones, '
+                'remove explicitly removed ones, or clarify an ambiguous conflict. request_quote must be an exact phrase from the '
+                'CURRENT request for replace/remove. replacement_outcomes are one-based indexes into your NEW outcomes list. '
+                'Put only NEW or REPLACEMENT outcomes in outcomes: retained outcomes are added by the controller. '
+                'A replacement must preserve unaffected parts of the old requirement. Do not retain a requirement the user explicitly replaces. '
+                'If the desired replacement is unclear, use clarify and ask one specific question.\n')
+        retained, scope_text = [], []
         for attempt in range(2):
-            raw = self.chat(self.store, op, 'architect', [{'role': 'user', 'content': instruction + self.job['task'] + '\n' + json.dumps(context)}])
+            content = instruction + self.job['task'] + '\n' + json.dumps(context)
+            if self.job['inherited']:
+                content = (instruction + json.dumps(context) + '\nCURRENT USER REQUEST (authoritative; latest clarification takes precedence):\n' +
+                    self.job['task'] + '\nSource files and parent outcomes describe earlier behavior, not the current request. '
+                    'Never quote earlier requirements as user authorization for a change.')
+            try:
+                raw = self.chat(self.store, op, 'architect', [{'role': 'user', 'content': content}], **({'schema': schema} if schema else {}))
+            except ValueError as error:
+                if schema and 'rejected response format' in str(error).lower():
+                    schema = None
+                    retained.append(str(error))
+                    continue
+                raise
             retained.append(raw)
             try:
                 brief = make_brief(json_object(raw), self.job['task'], self.job['inherited'])
+                if brief['requirement_history']:
+                    try:
+                        brief['scope_review'] = review_scope(brief, self.job['task'],
+                            lambda prompt, schema: self.chat(self.store, op, 'reviewer', [{'role': 'user', 'content': prompt}], schema=schema), scope_text)
+                    except ScopeClarification as error:
+                        if attempt == 0:
+                            instruction += ('\nThe scope review found a problem in the proposed reconciliation: ' + str(error) +
+                                '. Correct the plan using the current request and latest clarification. Preserve unrelated clauses; '
+                                'do not retain old behavior the request explicitly replaces. If the user intent is still ambiguous, '
+                                'use action clarify and ask a specific question.')
+                            continue
+                        raise
                 protected = self.protected_files()
                 if not (protected or self.job.get('protected')):
                     for requirement in brief['outcomes']:
                         requirement['evidence_types'] = [k for k in requirement['evidence_types'] if k != 'preservation'] or ['behavior']
-                return {'brief': brief, 'plan_text': retained, 'protected_files': protected, 'grounded_protected_files': self.grounded}
+                return {'brief': brief, 'plan_text': retained, 'scope_review_text': scope_text,
+                        'protected_files': protected, 'grounded_protected_files': self.grounded, 'baseline_test_files': baseline_test_files(self.job)}
+            except ScopeClarification as error:
+                return {'scope_question': str(error), 'plan_text': retained, 'scope_review_text': scope_text}
             except (ValueError, TypeError) as error:
                 instruction += '\nCorrect this brief format: ' + str(error)
+        if self.job['inherited']:
+            return {'scope_question': 'The follow-up could not be reconciled with the earlier requirements. Clarify which behavior should change and which should remain.',
+                    'plan_text': retained, 'scope_review_text': scope_text}
         return {'brief': make_brief({'outcomes': [self.job['task']], 'batches': [{'task': self.job['task']}]},
                                    self.job['task'], self.job['inherited']), 'plan_text': retained, 'planning_fallback': True,
-                'protected_files': self.protected_files(), 'grounded_protected_files': self.grounded}
+                'protected_files': self.protected_files(), 'grounded_protected_files': self.grounded, 'baseline_test_files': baseline_test_files(self.job)}
 
     def protected_files(self):
         """API-supplied files plus those the request text says to leave alone (existing at baseline only)."""
@@ -416,11 +552,11 @@ class Operations:
 
     def review(self, op):
         from coder_policy7 import json_object
-        from coder_policy7_evidence import acceptance, normalize_verdict
+        from coder_policy7_evidence import acceptance, normalize_verdict, blocking
         policy = resolve('reviewer', self.job['settings'])
         outcomes = self.job['brief']['outcomes']
         checks = [{k: c.get(k) for k in ('id', 'passed', 'classification', 'command', 'log_tail', 'outcomes',
-            'source_bindings', 'service_bindings', 'assertions_executed', 'evidence_types', 'test_files')} for c in self.job['checks']]
+            'source_bindings', 'service_bindings', 'assertions_executed', 'assertion_failures', 'audit_fixture_error', 'subprocess_diagnostics', 'evidence_types', 'test_files', 'test_origin')} for c in self.job['checks'] if c.get('passed') or blocking(c)]
         for check in checks:
             check['log_tail'] = (check.get('log_tail') or '')[-1600:] if not check['passed'] else ''
         audit_root = Path(self.job.get('audit_dir', self.root / 'missing-audit'))
@@ -435,11 +571,15 @@ class Operations:
             'edit and is history, never evidence against the revision; a check listed there as failing that passes in '
             'checks has been FIXED. Baseline failures that still fail may be repaired only when they are explicitly '
             'in the current request; cite their outcome IDs in diagnoses[].outcomes. Otherwise leave them as existing failures. '
-            'A passing check is insufficient if it copies application logic or checks another component.\n')
+            'A passing check is insufficient if it copies application logic or checks another component. '
+            'advisory_checks are informational lint/typecheck or optional visual skips. Never diagnose them as blocking defects.\n')
         gaps = acceptance(outcomes, self.job['checks'], {}, self.job['revision_id'])['outcomes']
         current = {c['id']: c.get('passed') for c in self.job['checks']}
         baseline = self.job.get('baseline_checks', self.job.get('baseline', []))
         data = {'original_request': self.job['task'], 'outcomes': outcomes, 'checks': checks,
+                'requirement_history': self.job['brief'].get('requirement_history', []),
+                'advisory_checks': [{k: c.get(k) for k in ('id', 'phase', 'log_tail')} for c in self.job['checks']
+                                    if not c.get('passed') and not blocking(c)],
                 'source': self.source_context(policy),
                 'audit_source': {p: (audit_root / p).read_text() for p in audit_files}, 'omitted_audit_files': omitted,
                 'evidence_gaps': gaps,
@@ -458,7 +598,13 @@ class Operations:
                 'check_id': {'type': 'string'}, 'reason': {'type': 'string'},
                 'kind': {'type': 'string', 'enum': ['application_defect', 'audit_defect', 'environment', 'unresolved']},
                 'outcomes': {'type': 'array', 'items': {'type': 'string'}}}}}}}
-        base, correction, retained, verdict, challenged = prompt + json.dumps(data), '', [], None, False
+        from coder_inference import InputBudgetError
+        try:
+            base = pack_review(prompt, data, policy.input_budget)
+        except InputBudgetError as error:
+            return {'scope_complete': False, 'outcomes': [{'id': o['id'], 'status': 'unverified', 'reason': str(error)} for o in outcomes],
+                    'diagnoses': [], 'review_error': {'category': 'input_budget', 'message': str(error)}}
+        correction, retained, verdict, challenged = '', [], None, False
         # Same bounded format recovery as planning; a contradiction with executed
         # evidence earns one grounded re-ask, never an automatic pass.
         for attempt in range(4):
@@ -467,6 +613,9 @@ class Operations:
                 retained.append(raw)
                 verdict = normalize_verdict(json_object(raw), outcomes)
             except (ValueError, TypeError) as error:
+                if getattr(error, 'failure_category', '') == 'input_budget':
+                    return {'scope_complete': False, 'outcomes': [{'id': o['id'], 'status': 'unverified', 'reason': str(error)} for o in outcomes],
+                            'diagnoses': [], 'review_error': {'category': 'input_budget', 'message': str(error)}}
                 if getattr(error, 'failure_category', '') == 'output_limit':
                     correction = '\nYour previous review exceeded the output limit. Keep every reason under 25 words.'
                 else:
@@ -475,8 +624,8 @@ class Operations:
                     schema = None
                 verdict = None
                 continue
-            failing = {name for c in self.job['checks'] if not c.get('passed') for name in c.get('outcomes') or []}
-            unscoped = any(not c.get('passed') and not c.get('outcomes') for c in self.job['checks'])
+            failing = {name for c in self.job['checks'] if blocking(c) for name in c.get('outcomes') or []}
+            unscoped = any(blocking(c) and not c.get('outcomes') for c in self.job['checks'])
             disputed = [row['id'] for row, gap in zip(verdict['outcomes'], gaps) if row['status'] != 'passed'
                         and not gap['missing_evidence'] and row['id'] not in failing]
             if disputed and not unscoped and not challenged:
@@ -490,3 +639,146 @@ class Operations:
         if verdict is None:
             raise ValueError('Reviewer returned no valid verdict after format correction')
         return {**verdict, 'review_text': retained}
+
+
+def pack_review(prompt, data, budget):
+    """Fit the actual serialized input, retaining request/outcomes/failing checks."""
+    from context_policy import estimate_tokens
+    from coder_inference import InputBudgetError
+    import copy
+    data = copy.deepcopy(data)
+    def fits():
+        text = prompt + json.dumps(data)
+        return estimate_tokens({'messages': [{'role': 'user', 'content': text}]}) <= max(0, budget - 512)
+    # Lowest-priority context goes first; corrective text has a reserved allowance.
+    for key in ('source_diff', 'source', 'audit_source', 'advisory_checks', 'before_this_work'):
+        if fits(): break
+        data.pop(key, None)
+    if not fits():
+        data['checks'] = [c for c in data['checks'] if not c.get('passed')]
+        for c in data['checks']:
+            c['log_tail'] = (c.get('log_tail') or '')[-600:]
+    if not fits():
+        raise InputBudgetError('Authoritative review requirements and failures exceed the configured input budget')
+    return prompt + json.dumps(data)
+
+
+def placeholder_test_hashes(job):
+    """sha256 of the skeleton's replace-marked files as written: a placeholder suite the model replaced is progress."""
+    import hashlib
+    spec = job.get('skeleton') or {}
+    if not spec.get('id'):
+        return set()
+    try:
+        from coder_skeletons import files_for
+        rendered = files_for(spec['id'], spec.get('names') or {})
+    except (KeyError, ImportError):
+        return set()
+    return {hashlib.sha256(rendered[path].encode()).hexdigest() for path in spec.get('replace', []) if path in rendered}
+
+
+def retained_suite_regression(old, current, placeholder_hashes=(), source_hashes=None):
+    """Whether a retained passing project suite regressed: the SAME suite must now fail or run fewer tests.
+
+    sweep3-c Kanban p1, q35coder, verify3 p2 and the medium runs (2026-09-26): the model replaced the skeleton's
+    placeholder test with real CRUD tests that failed; matching rows by id alone called that a regression, restored
+    the checkpoint (discarding a revision where the form and persistence already worked) and parked the job. A
+    rewritten suite is a failing-test defect for decide(), never a regression; a deleted or renamed suite is a
+    missing-tests defect. This mirrors repair_demonstrated's same-suite rule.
+    """
+    def fewer(now):
+        return (old.get('test_count') is not None and now.get('test_count') is not None
+                and now['test_count'] < old['test_count'])
+    files = {(f['path'], f['sha256']) for f in old.get('test_files', []) if isinstance(f, dict) and f.get('sha256')}
+    if files and all(digest in placeholder_hashes for _, digest in files):
+        return False
+    if not files:
+        # Compiled runners trace no test files: the id rule stands.
+        return current is None or not current.get('passed') or fewer(current)
+    if current is None:
+        # Deselected: every file of the suite is still present and unchanged, yet its row is gone.
+        return source_hashes is None or all(source_hashes.get(path) == digest for path, digest in files)
+    now = {(f['path'], f['sha256']) for f in current.get('test_files', []) if isinstance(f, dict) and f.get('sha256')}
+    if now != files:
+        return False
+    return not current.get('passed') or fewer(current)
+
+
+def repair_regressions(job, current, source_hashes=None):
+    """Retained project suites must pass at the project-check stage.
+
+    Generated audits and controller probes run in later stages. Their absence
+    here means they are pending, not that the repair removed or broke them.
+    """
+    if not job.get('repair_checkpoint'):
+        return []
+    checks = {c['id']: c for c in current}
+    placeholders = placeholder_test_hashes(job)
+    return [old['id'] for old in job.get('repair_checks', []) if old.get('passed') and old.get('is_test')
+            and old.get('origin', 'project') == 'project'
+            and retained_suite_regression(old, checks.get(old['id']), placeholders, source_hashes)]
+
+
+def missing_repair_deliverables(job, repository):
+    """Protect named delivered files and still-required documentation during repair.
+
+    A follow-up starts a fresh repair checkpoint after scope reconciliation; removed
+    parent requirements are not copied into this list.
+    """
+    if not job.get('repair_checkpoint'):
+        return []
+    current = tree_hashes(repository.root, repository.excludes)
+    missing = ['deliverable:' + name for name in job.get('repair_deliverables', []) if name not in current]
+    from coder_policy7 import documented
+    packages = [p.get('cwd', '.') for p in (job.get('execution_profile') or {}).get('profiles', []) if isinstance(p, dict)]
+    for component in job.get('repair_documentation', []):
+        if not documented(repository.root, component, packages):
+            missing.append('documentation:' + component)
+    return missing
+
+
+def retained_deliverables(job):
+    import re
+    from coder_scope import effective_task
+    known = (job.get('last_patch') or {}).get('source_hashes', {})
+    text = effective_task(job)
+    named = [name for name in known if re.search(r'(?<![\w./-])' + re.escape(name) + r'(?![\w./-])', text)]
+    docs = [o.get('component', '.') for o in job.get('brief', {}).get('outcomes', [])
+            if 'documentation' in o.get('evidence_types', [])]
+    # Only preserve documentation that was present before this repair.
+    documented = {o.get('component', '.') for o in (job.get('verification_summary') or {}).get('outcomes', [])
+                  if 'documentation' not in o.get('missing_evidence', [])}
+    return {'repair_deliverables': named, 'repair_documentation': [c for c in docs if c in documented]}
+
+
+def restore_repair(repository, checkpoint, failed_revision):
+    """Both immutable commits remain reachable, while the working tree is restored."""
+    import re
+    if any(not re.fullmatch(r'[a-f0-9]{40,64}', value) for value in (checkpoint, failed_revision)):
+        raise ValueError('Invalid repair checkpoint')
+    repository.git('update-ref', 'refs/daedalus/failed-repairs/' + failed_revision, failed_revision)
+    # Inventory refresh rebuilds the scratch index. Restore its failed tree
+    # first so checkout knows which newly added files must be removed.
+    repository.git('read-tree', failed_revision)
+    repository.git('read-tree', '--reset', '-u', checkpoint)
+    restored = repository.snapshot('Restore passing pre-repair checkpoint', parent=checkpoint)
+    if restored['revision'] != checkpoint:
+        raise ValueError('Repair rollback did not reproduce the saved checkpoint')
+    return restored
+
+
+def baseline_test_files(job):
+    """Existing user tests need explicit current-request authorization to change."""
+    import re
+    from coder_scope import effective_task
+    task = effective_task(job)
+    names = {b['path'] for row in job.get('baseline_checks', job.get('baseline', []))
+             for b in row.get('test_files', [])}
+    protected = []
+    for name in sorted(names):
+        target = r'(?:[`"\']?' + re.escape(name) + r'[`"\']?|(?:the\s+)?(?:existing\s+)?(?:unit\s+)?tests?)'
+        pattern = r'\b(?:edit|modify|update|rewrite|remove|delete|replace|fix)\s+' + target + r'(?![\w./-])'
+        authorized = any(not re.search(r"(?:not|never|don't)\s*$", task[max(0,m.start()-20):m.start()], re.I)
+                         for m in re.finditer(pattern, task, re.I))
+        if not authorized: protected.append(name)
+    return protected

@@ -25,6 +25,7 @@ WORKING_SHARE = 0.8     # of the room left above the fixed prompt, usable before
 HARD_SHARE = 0.92       # calibrated estimates stay this far under the input budget
 SUMMARY_ALLOWANCE = 1200  # tokens assumed for a summary when a tail is sized BEFORE paying for one
 LOW_SHARE = 0.5         # of that room a fresh boundary may occupy, so a compaction buys several turns
+RATIO_CEILING = 1.6     # dense JSON/code can exceed bytes/3; a 1.0 ceiling let a session reach 58,033 of 58,163 tokens uncompacted
 
 
 def _digest(messages):
@@ -38,10 +39,15 @@ class ContextWindow:
         # Older window files carry no flag: a ratio below 1.0 can only have come from an observation.
         self.calibrated = bool(state.get('calibrated', self.ratio < 1.0))
         self.boundary = state.get('boundary') or None
+        # The prompt size the model last reported, and the (instructions, boundary, mode) it was sent under.
+        self.last_prompt = int(state.get('last_prompt') or 0)
+        self.last_prompt_key = state.get('last_prompt_key') or None
+        self._pending_key = None
         self._save = save or (lambda _state: None)
 
     def state(self):
-        return {'ratio': self.ratio, 'calibrated': self.calibrated, 'boundary': self.boundary}
+        return {'ratio': self.ratio, 'calibrated': self.calibrated, 'boundary': self.boundary,
+                'last_prompt': self.last_prompt, 'last_prompt_key': self.last_prompt_key}
 
     def estimate(self, messages, tools):
         return math.ceil(estimate_tokens({'messages': messages, 'tools': tools}) * self.ratio)
@@ -50,12 +56,20 @@ class ContextWindow:
         """Track the highest observed tokens-per-estimate so the correction stays conservative."""
         if not raw_estimate or not prompt_tokens:
             return
-        seen = min(1.0, max(0.5, prompt_tokens / raw_estimate))
+        seen = min(RATIO_CEILING, max(0.5, prompt_tokens / raw_estimate))
         # `ratio >= 1.0` used to mean "uncalibrated" too, so one dense turn that clamped to 1.0 let the
         # next observation drop the ratio to 0.5 and the following prompt went out ~2x over its estimate.
         self.ratio = max(self.ratio, seen) if self.calibrated else seen
         self.calibrated = True
+        # What was actually sent is a floor on the next call under the same key (the conversation
+        # only grows between compactions); a key change (new boundary, rewritten history, new
+        # instructions, compaction toggled) retires it.
+        self.last_prompt, self.last_prompt_key = int(prompt_tokens), self._pending_key
         self._save(self.state())
+
+    @staticmethod
+    def _key(prefix, boundary, policy):
+        return [_digest(prefix), boundary['digest'] if boundary else None, bool(policy.compaction)]
 
     def threshold(self, prefix, tools, policy):
         fixed = self.estimate(prefix, tools)
@@ -80,13 +94,17 @@ class ContextWindow:
         held = self.boundary
         if held and not (len(body) >= held['count'] and _digest(body[:held['count']]) == held['digest']):
             held = self.boundary = None
+        key = self._pending_key = self._key(prefix, held, policy)
         if not policy.compaction:
             # Size what is actually sent: a boundary stored while compaction was on is not applied.
             if self.estimate(messages, tools) <= policy.input_budget:
                 return messages, False
             raise ValueError('Context is full and automatic compaction is disabled. Adjust Settings to continue.')
         working = self.rebuild(prefix, held['summary'], body[held['count']:]) if held else messages
-        size = self.estimate(working, tools)
+        # The last reported prompt is a floor while the same key is in force: even calibrated, bytes/3
+        # under-counted a dense Kanban session to 58,033 of 58,163 tokens without crossing the threshold.
+        floor_tokens = self.last_prompt if self.last_prompt and self.last_prompt_key == key else 0
+        size = max(self.estimate(working, tools), floor_tokens)
         threshold = self.threshold(prefix, tools, policy)
         if size <= threshold:
             return working, False
@@ -119,6 +137,7 @@ class ContextWindow:
                 return working, False
             raise ValueError('Current tool evidence still exceeds context after compaction; increase context or request narrower ranges')
         self.boundary = {'count': choice, 'digest': _digest(body[:choice]), 'summary': summary}
+        self._pending_key = self._key(prefix, self.boundary, policy)   # the floor retires with the old boundary
         self._save(self.state())
         return rebuilt, True
 

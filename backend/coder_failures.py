@@ -10,6 +10,8 @@ def classify_failure(error, stage, *, recovery_attempted=False):
     category,action='operation_failed','Inspect the recorded evidence before continuing.'
     if malformed_native_call(error) or 'multiple tool calls' in text:
         category,action='tool_protocol','The model returned an invalid tool call. Continue with another local model or inspect tool-protocol evidence.'
+    elif 'input exceeds' in text or 'input budget' in text or 'input-budget' in text:
+        category,action='input_budget','Narrow the review input or adjust its context in Settings; response-format retries cannot fix this.'
     elif 'completion allowance' in text or 'output limit' in text:
         category,action='output_limit','Increase this stage’s output allowance in Settings or narrow the request, then continue.'
     elif 'model-call allowance' in text:
@@ -18,7 +20,7 @@ def classify_failure(error, stage, *, recovery_attempted=False):
         category,action='time_limit','Review progress and continue from the checkpoint with a new allowance.'
     elif 'preview' in text:
         category,action='preview_startup','Inspect the preview command and server log; correct startup before retrying browser checks.'
-    elif any(s in text for s in ('environment','name resolution','enotfound','missing dependencies',"executable doesn't exist")):
+    elif any(s in text for s in ('bubblewrap','isolation','environment','name resolution','enotfound','missing dependencies',"executable doesn't exist")):
         category,action='environment','Restore dependencies or the unavailable service, then continue; changing application code will not fix this failure.'
     elif 'response-format recovery exhausted' in text:
         category,action='response_format','Inspect the rejected responses and format attempts. Select a different local model for a new job; Continue retains exhausted step limits.'

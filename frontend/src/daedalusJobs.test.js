@@ -65,3 +65,9 @@ test('a spent model-call allowance leaves Continue enabled; durable repair limit
  assert.equal(continueReason({stop_limit:'model_calls',blocker:'Model-call allowance exhausted'}),'');
  assert.equal(continueReason({stop_limit:'no_progress',blocker:'The editor made no source changes'}),'The editor made no source changes');
 });
+test('scope clarification is sent only for a job awaiting an answer and keeps candidate identity',()=>{
+ const job={scope_question:'Which format?',candidate_artifact:{metadata:{revision_id:'saved'}}};
+ assert.deepEqual(resumeJobBody(job,'unchanged','  Use JSON  '),{candidate_revision:'saved',clarification:'Use JSON'});
+ assert.deepEqual(resumeJobBody({},'unchanged','stale answer'),{});
+ assert.deepEqual(resumeJobBody(job,'on',''),{candidate_revision:'saved',visual_review:true});
+});

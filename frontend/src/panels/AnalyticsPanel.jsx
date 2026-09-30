@@ -94,7 +94,7 @@ export default function AnalyticsPanel({
                     }}/>
                 </div>
                 <div style={{display:"flex",gap:16,marginTop:16,flexWrap:"wrap"}}>
-                  {topModels.length>1&&<div style={{...cardS,padding:20,flex:"1 1 300px",minWidth:280,marginBottom:0}}>
+                  {topModels.length>1&&<div style={{...cardS,padding:20,flex:"1 1 300px",minWidth:isMobile?0:280,marginBottom:0}}>
                     <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Model share (all time)</div>
                     <PanelChart t={t} font={CHART_FONT} type="doughnut" height={230}
                       data={{labels:[...topModels.map(d=>d.model),...(otherTokens>0?["Other"]:[])],
@@ -103,7 +103,7 @@ export default function AnalyticsPanel({
                           borderColor:t.bgDeep,borderWidth:2}]}}
                       options={{cutout:"62%"}}/>
                   </div>}
-                  {costRows.length>0&&<div style={{...cardS,padding:20,flex:"2 1 380px",minWidth:300,marginBottom:0}}>
+                  {costRows.length>0&&<div style={{...cardS,padding:20,flex:"2 1 380px",minWidth:isMobile?0:300,marginBottom:0}}>
                     <div style={{fontSize:12,fontWeight:800,marginBottom:12,color:t.mut}}>Cloud spend {spanLabel}</div>
                     <PanelChart t={t} font={CHART_FONT} type="line" height={230}
                       data={{labels:costRows.map(d=>(d.date||"").slice(5)),
@@ -113,8 +113,9 @@ export default function AnalyticsPanel({
                 </div>
                 </>;
               })():<EmptyState t={t} icon={<IC.BarChart/>} title="No statistics recorded yet" hint="Start chatting to record token telemetry and populate this page."/>}
-              {allModels.length>0&&<div style={{...cardS,marginTop:16}}>
+              {allModels.length>0&&<div style={{...cardS,marginTop:16,minWidth:0}}>
                 <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>All-Time Model Breakdown</div>
+                <div role="region" aria-label="Model usage table" tabIndex={0} style={{overflowX:"auto"}}><div style={{minWidth:hasCost?620:530}}>
                 <div style={{display:"grid",gridTemplateColumns:`minmax(180px,2fr) repeat(${hasCost?5:4},minmax(80px,1fr))`,gap:8,padding:"6px 0",borderBottom:`1px solid ${t.brd}33`,fontSize:10,fontWeight:800,color:t.mut}}>
                   <div>Model</div><div style={{textAlign:"right"}}>Processed</div><div style={{textAlign:"right"}}>Generated</div><div style={{textAlign:"right"}}>Total</div><div style={{textAlign:"right"}}>Requests</div>{hasCost&&<div style={{textAlign:"right"}}>Cost</div>}
                 </div>
@@ -126,6 +127,7 @@ export default function AnalyticsPanel({
                   <div style={{textAlign:"right",color:t.mut}}>{d.request_count||0}</div>
                   {hasCost&&<div style={{textAlign:"right",color:d.cost_usd?t.warm:t.mut,fontWeight:d.cost_usd?800:400}}>{d.cost_usd?fmtUsd(d.cost_usd):"—"}</div>}
                 </div>)}
+                </div></div>
               </div>}
               {allProfiles.length>0&&<div style={{...cardS,marginTop:16}}>
                 <div style={{fontSize:12,fontWeight:800,marginBottom:8,color:t.mut}}>Top Profiles</div>

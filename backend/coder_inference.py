@@ -7,6 +7,10 @@ import time
 from context_policy import estimate_tokens, resolve, operation_settings, thinking_options
 
 
+class InputBudgetError(ValueError):
+    failure_category = "input_budget"
+
+
 def require_local_model(url, model, timeout=15):
     """Reject cloud aliases before a tool-support probe or inference request."""
     import requests
@@ -62,7 +66,7 @@ def local_chat(store, operation_id, role, messages, *, temperature=0.2, model=No
             raise ValueError('Selected local model does not support images')
         estimate += images * payload['settings'].get('daedalus_image_tokens',2048)
     if estimate > policy.input_budget:
-        raise ValueError(f'{role} input exceeds the configured context. Narrow the source range or increase context in Settings.')
+        raise InputBudgetError(f'{role} input exceeds the configured context. Narrow the source range or increase context in Settings.')
     url = payload['ollama_url'].rstrip('/')
     remaining = payload['seconds_remaining'] - (time.time() - operation['started'])
     ensure_context(url, model, policy, remaining)
@@ -75,6 +79,7 @@ def local_chat(store, operation_id, role, messages, *, temperature=0.2, model=No
     formatting = {'format':'json' if mode=='json' else schema} if schema and mode!='text' and not payload.get('schema_unsupported') else {}
     with requests.post(url + '/api/chat', json={'model':model,'messages':messages,'stream':True,**thinking,**formatting,
             'options':{'num_ctx':policy.num_ctx,'num_predict':policy.num_predict,'temperature':temperature}},
+            headers={'X-Daedalus-Role': role},
             timeout=remaining, stream=True) as response:
         if formatting and response.status_code in (400,422) and any(word in response.text.lower() for word in ('format','schema','grammar')):
             if payload.get('policy_version',1)>=5:

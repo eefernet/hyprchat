@@ -180,6 +180,11 @@ def native_narration_streak(response, tools, native, previous):
 
 
 def run_coder(store, operation_id, repository):
+    from coder_sandbox_agent import run_isolated
+    return run_isolated(store, operation_id, repository)
+
+
+def _run_coder_local(store, operation_id, repository):
     import requests
     from coder_worker_runtime import _boundary, evidence_catalog
 
@@ -395,16 +400,10 @@ def run_coder(store, operation_id, repository):
                 + "Complete verification evidence is saved at " + str(evidence_path) + ". Read selected JSON entries or referenced logs when a collection has more pages. Edit only project source.\n"
                 + json.dumps({"milestone": payload.get("milestone"), "evidence": evidence_catalog(evidence,policy.input_budget//3)}))
         if payload.get('policy_version', 1) >= 6:
-            task = ('Work only in this project: ' + str(repository.root) + '.\nOriginal request:\n' + payload['original_task'] +
-                '\nImplement the complete requested change. The work brief is guidance. Inspect relevant source before editing; preserve explicit constraints. '
-                'Run appropriate project checks and return a meaningful checkpoint when done or blocked. Do not repeat completion summaries. '
-                'When more work remains, execute the next tool action instead of ending with a next-step announcement. '
-                'Requested tests must be executable with a documented, discoverable test command; README claims and manual HTML pages are not automated tests. '
-                'The controller independently verifies the saved revision after you return.\n' +
-                payload.get('builder_guidance', '') +
-                ('Previous work repeated without progress. Diagnose the specific failing assertion before one focused repair.\n' if payload.get('focused_recovery') else '') +
-                'Full evidence and logs are at ' + str(evidence_path) + '; retrieve only relevant ranges.\n' +
-                json.dumps({'revision':payload['revision_id'], 'brief':payload.get('brief'), 'evidence':evidence_catalog(evidence, policy.input_budget//3)}))
+            from coder_policy7_prompt import repair_task
+            task, tier = repair_task(payload, repository, evidence, evidence_path, policy, catalog=evidence_catalog)
+            if tier:
+                store.event(operation_id, 'prompt_bounded', tier=tier, estimate=estimate_tokens(task), input_budget=policy.input_budget)
         conversation.send_message(task)
         # The hybrid policy-7 builder asks for a whole project per operation: keep nudging until the
         # agent finishes or its turn allowance ends, instead of returning at the first checkpoint.

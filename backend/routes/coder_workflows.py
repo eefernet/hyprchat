@@ -48,7 +48,7 @@ async def create_workflow(request: CreateWorkflow):
 @router.post("/api/coder/workflows/{workflow_id}/resume")
 async def resume_workflow(workflow_id: str, body: dict = Body(default={})):
     try:
-        return await coder_jobs.resume(workflow_id,visual_review=body.get("visual_review"),visual_model=body.get("visual_model"),candidate_revision=body.get('candidate_revision'))
+        return await coder_jobs.resume(workflow_id,visual_review=body.get("visual_review"),visual_model=body.get("visual_model"),candidate_revision=body.get('candidate_revision'),clarification=body.get('clarification'))
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:

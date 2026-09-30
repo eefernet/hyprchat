@@ -264,8 +264,11 @@ def run_checks(store, operation_id, repository, payload):
                 if not check.get('is_test') and check.get('origin') != 'independent' and check.get('phase') != 'launch':
                     environment.pop('PYTHONPATH', None)
                     environment.pop('NODE_V8_COVERAGE', None)
-                with log.open('wb') as output:
-                    process = subprocess.Popen(['bash', '-c', command], cwd=cwd, env=environment,
+                from coder_sandbox import Sandbox
+                cached = [cache for cache, _ in environments.values()]
+                with Sandbox(['bash', '-c', command], cwd=cwd, writable=[root, check_audit, evidence_dir, *cached],
+                             readonly=[instrumentation], environment=environment) as box, log.open('wb') as output:
+                    process = subprocess.Popen(box.args, cwd=cwd, env=box.env,
                         stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                     try:
                         code = process.wait(timeout=max(0.001, timeout))

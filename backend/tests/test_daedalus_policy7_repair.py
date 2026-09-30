@@ -22,7 +22,7 @@ def test_recorded_false_acceptance_cannot_replace_delivered_tests_with_app_audit
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
     result = acceptance(outcomes, [evidence()], verdict, 'revision')
     assert not result['accepted']
-    assert set(result['outcomes'][0]['missing_evidence']) == {'documentation', 'tests'}
+    assert set(result['outcomes'][0]['missing_evidence']) == {'behavior', 'documentation', 'tests'}
 
 
 def test_tests_must_be_delivered_executed_current_and_component_specific():
@@ -78,7 +78,7 @@ def test_missing_tests_route_builder_while_missing_audit_routes_author():
     summary = {'outcomes': [{'id': 'o1', 'text': 'Tests', 'component': '.', 'missing_evidence': ['tests']}]}
     assert decide({'checks': []}, summary, {})['action'] == 'repair'
     summary['outcomes'][0]['missing_evidence'] = ['behavior']
-    assert decide({'checks': []}, summary, {})['action'] == 'audit'
+    assert decide({'checks': []}, summary, {})['action'] == 'candidate'
 
 
 def test_baseline_failure_is_retained_without_expanding_repair_scope():
@@ -170,13 +170,15 @@ def test_edit_revision_and_next_stage_commit_atomically():
     from types import SimpleNamespace
     from coder_policy7_controller import step
     job = {'id': 'j', 'state': 'coding', 'project_id': 'p', 'revision_id': 'old',
+           'stage_allocation': {'round_key': '1:0', 'verification_reserve': 30},
            'brief': {'outcomes': [], 'batches': [{'task': 'Build', 'files': ['app.py']}]}}
     writes = []
     async def save(identity, **changes):
         writes.append(changes); return {**job, **changes}
     async def operate(*args, **kwargs):
         return {'changed': ['app.py'], 'snapshot': {'revision': 'new'}, 'inventory': {}}, job
-    asyncio.run(step(job, SimpleNamespace(store=SimpleNamespace(save=save), _operate=operate)))
+    asyncio.run(step(job, SimpleNamespace(store=SimpleNamespace(save=save), _operate=operate,
+        context_policy=SimpleNamespace(runtime_settings=lambda: {'daedalus_model_calls': 120}))))
     assert len(writes) == 1
     assert writes[0]['revision_id'] == 'new' and writes[0]['state'] == 'checking'
 
@@ -340,22 +342,22 @@ def test_persistent_policy7_controller_runs_worker_operations_and_publishes_exac
         return result['result'],saved
     monkeypatch.setattr(coder_jobs,'_operate',operate)
     async def deliver(job,result,**kw):
-        assert not kw.get('candidate'),job.get('verification_summary')
-        return await jobs.finish_artifact(job['id'],job['revision_id'],artifact_id='accepted',filename='values.tar.gz',
-            url='/values.tar.gz',storage_path=result['path'],sha256=result['sha256'],kind='archive',status='accepted')
+        assert kw.get('candidate') and not job['verification_summary']['accepted']
+        return await jobs.finish_candidate(job['id'],job['revision_id'],artifact_id='candidate',filename='values.tar.gz',
+            url='/values.tar.gz',storage_path=result['path'],sha256=result['sha256'],kind='archive',status='candidate')
     monkeypatch.setattr(coder_jobs,'_deliver',deliver)
     async def scenario():
         explicit={'packages':{'.':{'setup':'true','build':'python3 -m py_compile subject.py','test':'python3 test_subject.py'}}}
         job=await coder_jobs.create('conversation','Return values with README and executable tests.',model='saved:local',execution_commands=explicit)
         await coder_jobs.run(job['id'])
         saved=await jobs.get(job['id'])
-        assert saved['state']=='completed',saved.get('blocker')
-        assert saved['verification_summary']['accepted']
-        assert saved['artifact_status']=='delivered'
+        assert saved['state']=='ready_for_review',saved.get('blocker')
+        assert not saved['verification_summary']['accepted']
+        assert saved['delivery_status']=='review_candidate'
         assert all(c['revision_id']==saved['revision_id'] for c in saved['checks'])
-        assert hashlib.sha256(Path(saved['artifact']['storage_path']).read_bytes()).hexdigest()==saved['artifact']['sha256']
+        assert hashlib.sha256(Path(saved['candidate_artifact']['storage_path']).read_bytes()).hexdigest()==saved['candidate_artifact']['sha256']
         # A partial checkpoint (agent not finished) earns a continuation before any check runs.
-        assert order==['inspect','plan','code',*(['code'] if partial_edit else []),'check','verify','check','accept','package']
+        assert order==['inspect','plan','code',*(['check','code'] if partial_edit else []),'check','verify','check','accept','package']
         assert saved['builder']=='sdk' and saved['last_patch']['builder']=='sdk' and len(edits)==(2 if partial_edit else 1)
         assert not saved.get('editor_stopped') and saved['repair_round']==0
     asyncio.run(scenario())
@@ -380,7 +382,7 @@ def test_reviewer_scope_notes_cannot_veto_executed_evidence():
     verdict = normalize_verdict(raw, outcomes)
     assert 'missing_outcomes' not in verdict and verdict['scope_complete'] is True
     summary = acceptance(outcomes, checks, verdict, 'revision')
-    assert summary['accepted']
+    assert not summary['accepted']
     # The safety properties are unchanged.
     assert not acceptance(outcomes, checks, {**verdict, 'scope_complete': False}, 'revision')['accepted']
     assert not acceptance(outcomes, [checks[0], {**checks[1], 'coverage_observed': False}], verdict, 'revision')['accepted']
@@ -403,7 +405,7 @@ def test_unrequested_lint_is_advisory_but_build_and_tests_still_block():
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}, {'id': 'o2', 'status': 'passed'}]}
     lint = {'id': '.:lint:0', 'origin': 'project', 'phase': 'lint', 'passed': False, 'revision_id': 'revision'}
     summary = acceptance(outcomes, [*checks, lint], verdict, 'revision')
-    assert summary['accepted'] and summary['advisory'] == ['.:lint:0']
+    assert not summary['accepted'] and summary['advisory'] == ['.:lint:0']
     for phase in ('build', 'test', 'launch', 'setup'):
         assert not acceptance(outcomes, [*checks, {**lint, 'phase': phase}], verdict, 'revision')['accepted']
     assert not acceptance(outcomes, [*checks, {**lint, 'classification': 'existing_failure', 'phase': 'test'}], verdict, 'revision')['accepted']
@@ -472,9 +474,10 @@ def test_review_retries_format_and_challenges_stale_baseline_reasoning(tmp_path)
            'revision_id': 'revision', 'baseline_revision': 'base', 'audit_dir': str(tmp_path / 'audit'),
            'baseline_checks': [{'id': '.:test:0', 'passed': False, 'command': 'python3 tests/check_ledger.py'}]}
     verdict = Operations(None, 'op', Repo(), tmp_path, job, chat=chat).review('op')
-    assert len(prompts) == 3 and 'Correct this review format' in prompts[1] and 'Re-examine outcomes o1' in prompts[2]
+    assert len(prompts) == 2 and 'Correct this review format' in prompts[1]
+    assert all('Re-examine outcomes o1' not in prompt for prompt in prompts)
     assert 'FIXED: passes in checks' in prompts[0]
-    assert acceptance(outcomes, checks, verdict, 'revision')['accepted']
+    assert not acceptance(outcomes, checks, verdict, 'revision')['accepted']
 
 
 def test_audit_paths_derived_from_file_are_pointed_at_the_project_root(tmp_path):
@@ -504,7 +507,7 @@ def test_unchanged_user_test_that_now_passes_is_behavior_evidence():
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
     test = evidence(id='.:test:0', origin='project', is_test=True, outcomes=[], evidence_types=None, repair_demonstrated=True,
                     test_files=[{'path': 'tests/check_ledger.py', 'sha256': 'b'*64}])
-    assert acceptance(outcomes, [test], verdict, 'revision')['accepted']
+    assert not acceptance(outcomes, [test], verdict, 'revision')['accepted']
     for delta in ({'repair_demonstrated': False}, {'coverage_observed': False}, {'source_bindings': []}, {'origin': 'independent'}):
         assert not acceptance(outcomes, [{**test, **delta}], verdict, 'revision')['accepted']
 
@@ -631,6 +634,7 @@ def test_preflight_failure_is_handed_to_the_next_batch():
     """Smoke5 medium: requirements.txt listed sqlite3; setup stayed broken through five batches."""
     job = {'task': 'Build a task board', 'batch': 1, 'brief': {'batches': [{'task': 'Backend', 'files': ['app.py']},
         {'task': 'Frontend', 'files': ['frontend/src/App.jsx']}]},
+        'last_patch': {'source_hashes': {'requirements.txt': 'hash'}},
         'preflight_failures': [{'id': '.:setup:0', 'cwd': '.', 'command': 'pip install -r requirements.txt',
                                 'log_tail': 'ERROR: No matching distribution found for sqlite3'}]}
     task, targets = implementation_task(job)
@@ -839,7 +843,7 @@ def test_agent_builder_continues_through_partial_checkpoints_before_checks():
     job = {'builder': 'sdk', 'brief': {'batches': [{'task': 'x', 'files': []}]}}
     partial = {'category': 'source_changed', 'changed': ['pom.xml'], 'agent_finished': False}
     step = edit_transition(job, partial)
-    assert step == {'state': 'editing', 'build_continuations': 1}
+    assert step == {'state': 'editing', 'build_continuations': 1, 'preflight_pending': True}
     done = edit_transition({**job, **step}, {'category': 'source_changed', 'changed': ['README.md'], 'agent_finished': True})
     assert done['state'] == 'checking' and done['build_continuations'] == 0
     # A stall after earlier progress is checked, not abandoned; a stall with no progress gets one retry.
@@ -912,7 +916,7 @@ def test_the_builder_result_names_a_stall_and_spent_calls(tmp_path):
 def test_the_verification_reserve_keeps_calls_for_the_audit_and_review():
     from coder_jobs import verification_reserve
     assert verification_reserve({'daedalus_model_calls': 120}) == 30
-    assert verification_reserve({'daedalus_model_calls': 40}) == 20
+    assert verification_reserve({'daedalus_model_calls': 40}) == 10
 
 
 def test_an_express_app_is_started_with_npm_start_and_its_public_folder_is_not_a_second_service(tmp_path):
@@ -1038,7 +1042,7 @@ def test_a_repaired_user_test_proves_a_single_outcome_job_only():
     assert not result['accepted'] and [o['missing_evidence'] for o in result['outcomes']] == [['behavior'], ['behavior']]
     # Independent evidence per outcome still accepts the same job.
     audits = [evidence(id='audit-1', outcomes=['o1']), evidence(id='audit-2', execution_id='op:2', outcomes=['o2'])]
-    assert acceptance(two, [repaired, *audits], verdict, 'revision')['accepted']
+    assert not acceptance(two, [repaired, *audits], verdict, 'revision')['accepted']
     # A documentation outcome beside the single behavior outcome does not disturb the credit.
     from coder_policy7_evidence import needs_behavior_audit
     docs = [two[0], {'id': 'o2', 'text': 'README explains usage', 'evidence_types': ['documentation'], 'component': '.'}]
@@ -1048,7 +1052,7 @@ def test_a_repaired_user_test_proves_a_single_outcome_job_only():
     split = [{**two[0], 'component': 'backend'}, {**two[1], 'component': 'frontend'}]
     backend = {**repaired, 'source_bindings': [{'path': 'backend/app.py', 'sha256': 'a' * 64}]}
     rows = acceptance(split, [backend], verdict, 'revision')['outcomes']
-    assert [o['missing_evidence'] for o in rows] == [[], ['behavior']]
+    assert [o['missing_evidence'] for o in rows] == [['behavior'], ['behavior']]
 
 
 def test_docs_and_testing_wording_keeps_the_deliverable_gates():
@@ -1495,3 +1499,200 @@ def test_a_builder_that_finds_nothing_to_change_disputes_an_audit_only_failure_e
     assert decide(active, summary, verdict)['action'] == 'repair'
     project = {**audit, 'id': '.:test:0', 'origin': 'project', 'is_test': True, 'classification': 'application_defect', 'exit_code': 1}
     assert decide({**job, 'checks': [project]}, summary, verdict)['limit'] == 'application_repairs'
+
+
+def test_sweep3_kanban_replacing_the_placeholder_test_is_not_a_regression():
+    """sweep3-c Kanban p1 / q35coder / verify3 p2: the model replaced the skeleton's health test with real CRUD tests that
+    failed; id-only matching called that a regression, rolled back a revision where the form and persistence worked, and parked."""
+    import hashlib
+    from coder_policy7_ops import repair_regressions, placeholder_test_hashes
+    from coder_skeletons import describe, files_for
+    spec = describe('express-sqlite', 'Build an Express + SQLite board', 'board')
+    placeholder = hashlib.sha256(files_for('express-sqlite', {})['tests/api.test.js'].encode()).hexdigest()
+    assert placeholder in placeholder_test_hashes({'skeleton': spec}) and placeholder_test_hashes({}) == set()
+    old = {'id': '.:test:0', 'origin': 'project', 'is_test': True, 'passed': True, 'test_count': 1,
+           'test_files': [{'path': 'tests/api.test.js', 'sha256': placeholder}]}
+    job = {'repair_checkpoint': 'before', 'repair_checks': [old], 'skeleton': spec}
+    rewritten = {**old, 'passed': False, 'test_count': 6, 'test_files': [{'path': 'tests/api.test.js', 'sha256': 'b' * 64}]}
+    assert repair_regressions(job, [rewritten], {'tests/api.test.js': 'b' * 64}) == []
+    assert repair_regressions(job, [], {}) == []   # a dropped placeholder is progress too
+    # Without a skeleton the same-suite rule still holds: a rewritten suite is a failing-test defect, not a regression.
+    real = {**old, 'test_files': [{'path': 'tests/api.test.js', 'sha256': 'a' * 64}]}
+    plain = {'repair_checkpoint': 'before', 'repair_checks': [real]}
+    assert repair_regressions(plain, [rewritten], {'tests/api.test.js': 'b' * 64}) == []
+    assert repair_regressions(plain, [{**real, 'passed': False}], {'tests/api.test.js': 'a' * 64}) == ['.:test:0']
+    assert repair_regressions(plain, [{**real, 'test_count': 0}], {'tests/api.test.js': 'a' * 64}) == ['.:test:0']
+    assert repair_regressions(plain, [], {'tests/api.test.js': 'a' * 64}) == ['.:test:0']   # deselected, files untouched
+    assert repair_regressions(plain, [], {'tests/crud.test.js': 'c' * 64}) == []             # suite removed: a missing-tests defect
+    compiled = {'id': 'cargo:test', 'origin': 'project', 'is_test': True, 'passed': True, 'test_count': 14}
+    assert repair_regressions({'repair_checkpoint': 'before', 'repair_checks': [compiled]}, [{**compiled, 'passed': False}], {}) == ['cargo:test']
+
+
+def test_sweep3_kanban_rollback_with_rounds_left_repairs_again_instead_of_parking():
+    """sweep3-c Kanban: a genuine rollback parked the job at repair_round 1 of 2 with 80 calls left."""
+    import asyncio
+    from types import SimpleNamespace
+    from coder_policy7_controller import step, regression_entries
+    from context_policy import DEFAULTS
+    failed_row = {'id': '.:test:0', 'origin': 'project', 'is_test': True, 'passed': False, 'command': 'npm test', 'cwd': '.',
+                  'log_tail': 'not ok 1 - can create a task', 'test_files': [{'path': 'tests/api.test.js', 'sha256': 'a' * 64}]}
+    job = {'id': 'job', 'state': 'checking', 'project_id': 'p', 'revision_id': 'failed', 'worker_operation': 'check',
+           'verification_version': 3, 'task': 'Build the board.', 'repair_round': 1, 'calls_used': 40,
+           'stage_allocation': {'verification_reserve': 30}, 'repair_checkpoint': 'before',
+           'repair_checks': [{**failed_row, 'passed': True}],
+           'repair_feedback': [{'id': 'workflow:app:drag', 'origin': 'controller', 'classification': 'application_defect',
+                                'command': 'drag workflow in headless Chromium', 'reason': 'no request was sent'}],
+           'last_patch': {'source_hashes': {'server.js': '1', 'public/app.js': '2', 'tests/api.test.js': '3'}},
+           'brief': {'outcomes': [{'id': 'o1', 'text': 'Drag persists', 'evidence_types': ['behavior']}],
+                     'batches': [{'task': 'b', 'files': ['server.js', 'public/app.js']}]}}
+    async def operate(current, kind, **kwargs):
+        return {'restored_snapshot': {'revision': 'before'},
+                'source_hashes': {'server.js': '1', 'public/app.js': '2', 'tests/api.test.js': '0'},
+                'repair_regression': {'failed_revision': 'failed', 'regressed': ['.:test:0'], 'checks': [failed_row]}}, current
+    async def save(identity, **changes):
+        job.update(changes); return dict(job)
+    async def record(*args): pass
+    controller = SimpleNamespace(store=SimpleNamespace(save=save, record_check=record), _operate=operate,
+                                 context_policy=SimpleNamespace(runtime_settings=lambda: dict(DEFAULTS)))
+    asyncio.run(step(dict(job), controller))
+    assert job['state'] == 'coding' and job['repair_round'] == 2 and job['revision_id'] == 'before' and job['checks'][0]['passed']
+    first = job['repair_feedback'][0]
+    assert first['id'] == '.:test:0' and first['priority'] and 'refs/daedalus/failed-repairs' in first['reason'] and 'can create a task' in first['log_tail']
+    assert job['repair_feedback'][1]['id'] == 'workflow:app:drag' and job['repair_packet'] and job['repair_packet'][0]['id'] == '.:test:0'
+    assert job['last_patch']['source_hashes']['tests/api.test.js'] == '0' and len(job['repair_regressions']) == 1
+    # At the repair cap the rollback parks exactly as before.
+    job.update(state='checking', revision_id='failed2')
+    asyncio.run(step(dict(job), controller))
+    assert job['state'] == 'candidate_packaging' and job['revision_id'] == 'before' and len(job['repair_regressions']) == 2
+    assert not job['verification_summary']['accepted'] and job['resume_state'] == 'checking'
+    removed = regression_entries({'failed_revision': 'f' * 40, 'regressed': ['documentation:.', 'deliverable:README.md'], 'checks': []})
+    assert [e['id'] for e in removed] == ['documentation:.', 'deliverable:README.md'] and all(e['priority'] and e['classification'] == 'application_defect' for e in removed)
+    assert 'removed the delivered documentation for .' in removed[0]['reason'] and 'file README.md' in removed[1]['reason']
+
+
+def test_sweep3_rust_readme_inside_the_cargo_package_is_not_missing(tmp_path):
+    """sweep3-c Rust p1: base64tool/README.md existed, the outcome said 'documentation is missing', the no-op repair parked the job."""
+    from coder_policy7 import documented, documentation_files, normalize_audit
+    from coder_policy7_ops import missing_repair_deliverables
+    from coder_repository import Repository
+    project = tmp_path / 'p'; (project / 'base64tool' / 'src').mkdir(parents=True); (project / 'scripts').mkdir()
+    (project / 'base64tool' / 'README.md').write_text('# base64tool\n'); (project / 'scripts' / 'run.sh').write_text('echo\n')
+    assert documentation_files(project, '.') == []
+    assert documented(project, '.', ['base64tool']) == ['base64tool/README.md']
+    assert documented(project, '.', ['.', 'scripts']) == [] and documented(project, 'scripts', ['base64tool']) == []
+    repository = Repository(project, tmp_path / 'revisions')
+    checkpoint = repository.snapshot()['revision']
+    job = {'repair_checkpoint': checkpoint, 'repair_documentation': ['.'], 'execution_profile': {'profiles': [{'cwd': 'base64tool'}]}}
+    assert missing_repair_deliverables(job, repository) == []
+    assert missing_repair_deliverables({**job, 'execution_profile': {}}, repository) == ['documentation:.']
+    audit = tmp_path / 'audit'; audit.mkdir(); (audit / 'test_behavior.py').write_text('assert True\n')
+    outcomes = [{'id': 'o1', 'text': 'Decode', 'evidence_types': ['behavior'], 'component': '.'},
+                {'id': 'o2', 'text': 'README', 'evidence_types': ['documentation'], 'component': '.'}]
+    normalize_audit(audit, outcomes, project, packages=['base64tool'])
+    rows = json.loads((audit / 'audit.json').read_text())['checks']
+    assert any(r.get('kind') == 'file' and r['path'] == 'base64tool/README.md' for r in rows)
+
+
+def test_sweep3_medium_server_log_is_runtime_state_not_source(tmp_path):
+    """sweep3-web medium p1: the last patch changed only server.log, a log the agent's trial run wrote."""
+    from coder_policy7_builder import sdk_build, runtime_log, logs_are_input
+    from tests.test_daedalus_policy7 import fixture
+    repo, store = fixture(tmp_path, {'app.py': 'x\n'})
+    payload = store.get('check')['payload']
+    job = {'task': 'Build a FastAPI board', 'brief': {'outcomes': [], 'batches': [{'task': 'b', 'files': ['app.py']}]}}
+    def runner(store, op, repository):
+        (repository.root / 'server.log').write_text('INFO: Uvicorn running\n')
+        return {'agent_finished': True, 'execution_status': 'finished'}
+    result = sdk_build(store, 'check', repo, job, payload, runner=runner)
+    assert result['changed'] == [] and result['category'] == 'no_op' and not (repo.root / 'server.log').exists()
+    assert runtime_log('server.log') and runtime_log('backend/uvicorn.log') and runtime_log('npm-debug.log')
+    assert not runtime_log('tests/fixtures/server.log') and not runtime_log('sample.log') and not runtime_log('data/app.log')
+    # A log summarizer's own fixture is a deliverable: nothing is removed when logs are the request's input.
+    assert logs_are_input('`logsummary <logfile>` prints counts per level') and not logs_are_input('Build a board')
+    logs = {**job, 'task': 'Build logsummary: `logsummary <logfile>` prints counts per level.'}
+    def fixture_runner(store, op, repository):
+        (repository.root / 'app.log').write_text('ERROR x\n'); return {'agent_finished': True}
+    assert sdk_build(store, 'check', repo, logs, payload, runner=fixture_runner)['changed'] == ['app.log']
+
+
+def test_sweep3_node_audit_syntax_error_gets_a_second_in_operation_nudge(tmp_path):
+    """sweep3-c Node p2: both audit corrections were spent on one syntax error the author kept re-emitting."""
+    from coder_policy7_ops import Operations, MAX_STATIC_NUDGES
+    project = tmp_path / 'project'; project.mkdir(); (project / 'mdtoc.js').write_text('module.exports = 1\n')
+    class Repo:
+        root = project
+    outcomes = [{'id': 'o1', 'text': 'TOC works', 'evidence_types': ['behavior'], 'component': '.'}]
+    bad, good = 'import os\nassert (\n', 'import os\nassert os.environ\n'
+    calls = []
+    def editor(store, op, root, task, **kwargs):
+        calls.append(task); (root / 'test_behavior.py').write_text(bad if len(calls) < 3 else good)
+        return {'changed': ['test_behavior.py'], 'category': 'source_changed'}
+    job = {'task': 'Build mdtoc', 'brief': {'outcomes': outcomes}, 'checks': []}
+    result = Operations(None, 'op', Repo(), tmp_path, job, editor=editor).author('op')
+    assert len(calls) == 1 + MAX_STATIC_NUDGES == 3 and all(c.startswith('Fix these defects') and 'syntax error' in c for c in calls[1:])
+    assert not result.get('audit_error') and result['audit_checks']
+    stuck = []
+    def always_bad(store, op, root, task, **kwargs):
+        stuck.append(task); (root / 'test_behavior.py').write_text(bad); return {'changed': ['test_behavior.py']}
+    result = Operations(None, 'op2', Repo(), tmp_path, job, editor=always_bad).author('op2')
+    assert len(stuck) == 3 and 'not executable evidence' in result['audit_error']
+
+
+def test_audit_author_receives_request_clauses_and_the_input_class_instruction(tmp_path, monkeypatch):
+    """sweep3 Rust/Node: no audit ever fed an invalid or missing input; the author was never asked to."""
+    import coder_policy7_ops
+    from coder_policy7_ops import Operations, request_clauses
+    task = ('Build base64tool. `base64tool decode <base64>` prints the decoded text. Invalid Base64 input prints an error to '
+            'stderr and exits with code 2; a README is included.\nAdd tests under tests/.')
+    clauses = request_clauses(task)
+    assert 'Invalid Base64 input prints an error to stderr and exits with code 2' in clauses and 'Add tests under tests/' in clauses
+    assert len(request_clauses('. '.join(f'clause {i}' for i in range(40)))) == 24
+    project = tmp_path / 'project'; project.mkdir(); (project / 'Cargo.toml').write_text('[package]\nname = "base64tool"\n')
+    class Repo:
+        root = project
+    outcomes = [{'id': 'o1', 'text': 'Decode works', 'evidence_types': ['behavior'], 'component': '.'}]
+    seen = []
+    def editor(store, op, root, task, **kwargs):
+        seen.append(task); (root / 'test_behavior.py').write_text('import os\nassert os.environ\n')
+        return {'changed': ['test_behavior.py'], 'category': 'source_changed'}
+    result = Operations(None, 'op', Repo(), tmp_path, {'task': task, 'brief': {'outcomes': outcomes}, 'checks': []}, editor=editor).author('op')
+    assert not result.get('audit_error') and len(seen) == 1
+    payload = json.loads(seen[0].split('\n', 1)[1])
+    assert payload['request_clauses'] == clauses and 'names an input class' in seen[0] and 'stated exit code, stderr and stdout' in seen[0]
+    # A browser audit that ignores the labels the request names gets ONE in-operation nudge, never a correction round.
+    monkeypatch.setattr(coder_policy7_ops, 'active_interfaces', lambda job: {'selectors': [], 'flags': [], 'labels': ['Project name', 'Task title']})
+    browser = ('import os\nfrom playwright.sync_api import sync_playwright\nurl = os.environ["DAEDALUS_APP_URL"]\n'
+               'assert url\n')
+    labelled = browser.replace('assert url', 'assert url and "Project name"')
+    nudged = []
+    def browser_editor(store, op, root, task, **kwargs):
+        nudged.append(task); (root / 'test_behavior.py').write_text(browser if len(nudged) == 1 else labelled)
+        return {'changed': ['test_behavior.py'], 'category': 'source_changed'}
+    result = Operations(None, 'op2', Repo(), tmp_path, {'task': 'Use accessible labels Project name, Task title.', 'brief': {'outcomes': outcomes}, 'checks': []},
+                        editor=browser_editor).author('op2')
+    assert len(nudged) == 2 and 'get_by_label' in nudged[1] and 'Project name' in nudged[1] and not result.get('audit_error')
+
+
+def test_fix4_node_audit_writing_into_the_read_only_project_is_a_static_fault(tmp_path):
+    # fix4-c pass1-node-mdtoc (2026-09-26): the audit created its fixture with open(<project>/test_input.md, "w"),
+    # hit the read-only mount and spent BOTH audit corrections on it. A static fault is a free in-operation nudge.
+    from coder_policy7 import static_audit_faults
+    from coder_policy7_ops import mechanical_fault
+    audit = tmp_path / 'audit'; audit.mkdir()
+    script = audit / 'test_behavior.py'
+    script.write_text('import os, subprocess\n'
+                      'root = os.environ["DAEDALUS_PROJECT_ROOT"]\n'
+                      'with open(os.path.join(root, "test_input.md"), "w") as f:\n    f.write("# x")\n'
+                      'open("relative.md", "w").write("# y")\n'
+                      'assert subprocess.run(["node", "mdtoc.js", "test_input.md"], cwd=root).returncode == 0\n')
+    faults = static_audit_faults(audit, tmp_path, '')
+    writes = [f for f in faults if 'writes a file into the project' in f]
+    assert len(writes) == 2 and 'test_input.md' in writes[0] and 'relative.md' in writes[1] and 'DAEDALUS_AUDIT_DIR' in writes[0]
+    assert all(mechanical_fault(f) for f in writes)
+    script.write_text('import os, subprocess, tempfile\nfrom pathlib import Path\n'
+                      'fixtures = os.environ["DAEDALUS_AUDIT_DIR"]\n'
+                      'with open(os.path.join(fixtures, "test_input.md"), "w") as f:\n    f.write("# x")\n'
+                      '(Path(tempfile.mkdtemp()) / "b.md").write_text("# y")\n'
+                      'open("/tmp/c.md", "w").write("z")\n'
+                      'assert subprocess.run(["node", "mdtoc.js", f.name], cwd=os.environ["DAEDALUS_PROJECT_ROOT"]).returncode == 0\n')
+    assert not [f for f in static_audit_faults(audit, tmp_path, '') if 'writes a file into the project' in f]

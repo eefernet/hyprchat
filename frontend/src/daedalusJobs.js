@@ -66,8 +66,9 @@ export function elapsedLabel(seconds){
 }
 export function timestamp(value){return typeof value==='number'?value*1000:Date.parse(value?.endsWith('Z')||/[+-]\d\d:\d\d$/.test(value||'')?value:`${value||''}Z`);}
 
-export function resumeJobBody(job,visual='unchanged'){
+export function resumeJobBody(job,visual='unchanged',clarification=''){
   return {...(visual!=='unchanged'?{visual_review:visual==='on'}:{}),
+    ...(job.scope_question&&clarification.trim()?{clarification:clarification.trim()}:{}),
     ...(job.candidate_artifact?{candidate_revision:job.candidate_artifact.metadata?.revision_id}: {})};
 }
 

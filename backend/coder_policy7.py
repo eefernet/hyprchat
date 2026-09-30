@@ -89,7 +89,7 @@ def make_brief(answer, original, inherited=()):
         kept = []
         for target in batch.get('files', []):
             parts = Path(target).parts
-            if re.search(r'[*?\[\]]', target) or target.endswith('/') or {'target', 'build', 'bin', 'obj', 'dist', 'node_modules',
+            if re.search(r'[*?\[\]]', target) or target.endswith('/') or {'target', 'build', 'dist', 'node_modules',
                     '.venv', '__pycache__'} & set(parts[:-1]) or target in seen:
                 continue
             seen.add(target); kept.append(target)
@@ -104,10 +104,17 @@ def make_brief(answer, original, inherited=()):
             note = '' if len(groups) == 1 else f' (step {index + 1} of {len(groups)}: only {", ".join(group)})'
             split.append({**batch, 'task': batch['task'] + note, 'files': group})
     batches = split
-    texts = []
-    for item in [*inherited, *outcomes]:
-        if item not in texts:
+    from coder_scope import reconcile, VERSION as SCOPE_VERSION
+    retained, history = reconcile(answer, original, inherited)
+    texts, positions = [], {}
+    for item in [*retained, *outcomes]:
+        identity = json.dumps(outcome(item, 0), sort_keys=True)
+        if identity not in positions:
+            positions[identity] = len(texts)
             texts.append(item)
+    for row in history:
+        items = [row['parent_outcome']] if row['action'] == 'retain' else [outcomes[i - 1] for i in row['replacement_outcomes']]
+        row['active_outcome_ids'] = [f'o{positions[json.dumps(outcome(item, 0), sort_keys=True)]+1}' for item in items]
     required = outcome(original, 0)
     # The request decides which deliverables are gated: a planner that adds "tests" to an app whose
     # user asked for none would make acceptance demand files nobody requested.
@@ -116,7 +123,7 @@ def make_brief(answer, original, inherited=()):
         # Only a box the planner ticked with no wording behind it: an outcome that itself names tests keeps its gate.
         named = set(outcome(item if isinstance(item, str) else {'text': item.get('text', '')}, 0)['evidence_types'])
         dropped = [kind for kind in unrequested if kind not in named]
-        return item if item in inherited or isinstance(item, str) or not dropped else {**item, 'waived': dropped}
+        return item if item in retained or isinstance(item, str) or not dropped else {**item, 'waived': dropped}
     texts = [waive(item) for item in texts]
     represented = {kind for item in texts for kind in outcome(item, 0)['evidence_types']}
     for kind in set(required['evidence_types']) & {'documentation', 'tests'} - represented:
@@ -129,7 +136,8 @@ def make_brief(answer, original, inherited=()):
                       'evidence_types': ['tests'], 'test_interfaces': sorted(missing_interfaces)})
     return {'project_name': str(answer.get('project_name') or 'Daedalus project')[:100],
             'outcomes': [outcome(item, i) for i, item in enumerate(texts)],
-            'batches': batches, 'original_request': original}
+            'batches': batches, 'original_request': original,
+            'scope_version': SCOPE_VERSION, 'requirement_history': history}
 
 
 AUDIT_KEYS = ('command', 'cwd', 'outcomes', 'evidence_types', 'kind', 'path', 'assertions', 'name', 'description')
@@ -224,7 +232,35 @@ def documentation_files(project, component='.'):
                          if p.is_file() and p.read_text(errors='replace').strip())
         if folder == Path(project):
             break
+    if not found and component == '.':
+        # A wrapper directory may enclose the one actual package. Do not borrow a sibling package README.
+        children = [p for p in project.iterdir() if p.is_dir() and not p.name.startswith('.') and p.name not in {'node_modules', 'target', 'build', 'dist', '__pycache__'}]
+        if len(children) == 1:
+            found.extend(p for p in children[0].glob('README*') if p.is_file() and p.read_text(errors='replace').strip())
     return list(dict.fromkeys(str(p.relative_to(project)) for p in found))
+
+
+def documented(project, component='.', packages=()):
+    """Documentation for a component; the root component also accepts a README inside a discovered package.
+
+    sweep3-c Rust p1 (2026-09-26): the Cargo package lived in base64tool/ beside a scripts/ directory, so the
+    lone-child fallback above found nothing, the outcome was reported as undocumented although base64tool/README.md
+    existed, the repair round was a no-op and the job parked with a durable no_progress. Package cwds come from the
+    execution profile; a sibling non-package directory never lends its README.
+    """
+    found = documentation_files(project, component)
+    if found or component != '.':
+        return found
+    for cwd in packages:
+        if not cwd or cwd == '.':
+            continue
+        try:
+            found = documentation_files(project, cwd)
+        except (ValueError, OSError):
+            continue
+        if found:
+            return found
+    return []
 
 
 FILE_ROOT = re.compile(
@@ -326,6 +362,43 @@ def mechanical_audit_rewrites(directory, project=None):
     return notes
 
 
+def project_writes(tree, text):
+    """Source of each file-write target that lands in the read-only project: `open(..., 'w')`, `.write_text(...)` or
+    `.write_bytes(...)` on a path that names the project root or is a bare relative literal (the audit's cwd is the
+    project). fix4 Node p1 (2026-09-26) spent both audit corrections on `open(<project>/test_input.md, 'w')`."""
+    found, tainted = [], set()
+    for _ in range(2):   # names assigned from the project root, and names assigned from those
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                source = ast.get_source_segment(text, node.value) or ''
+                if 'PROJECT_ROOT' in source.upper() or any(re.search(rf'\b{re.escape(name)}\b', source) for name in tainted):
+                    tainted.add(node.targets[0].id)
+    def names_project(source):
+        return 'PROJECT_ROOT' in source.upper() or any(re.search(rf'\b{re.escape(name)}\b', source) for name in tainted)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = None
+        if isinstance(node.func, ast.Name) and node.func.id == 'open' and node.args:
+            mode = ''
+            if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                mode = str(node.args[1].value)
+            for kw in node.keywords:
+                if kw.arg == 'mode' and isinstance(kw.value, ast.Constant):
+                    mode = str(kw.value.value)
+            if any(ch in mode for ch in 'wax'):
+                target = node.args[0]
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in {'write_text', 'write_bytes'}:
+            target = node.func.value
+        if target is None:
+            continue
+        source = ast.get_source_segment(text, target) or ''
+        literal = isinstance(target, ast.Constant) and isinstance(target.value, str)
+        if names_project(source) or (literal and not target.value.startswith(('/', '~'))):
+            found.append(source[:80])
+    return found
+
+
 def static_audit_faults(directory, project=None, request=''):
     """Defects visible without running the audit. Each costs nothing to point out precisely."""
     from coder_audit_hygiene import web_audit_faults
@@ -348,6 +421,10 @@ def static_audit_faults(directory, project=None, request=''):
         if runtime and 'sys.executable' in text:
             faults.append(f'{path.name} launches the application with the Python interpreter (sys.executable), but this is a '
                           f'{runtime[0]} program. Launch it with its own runtime: subprocess.run([{runtime[1]}, ...]).')
+        for target in project_writes(tree, text):
+            faults.append(f'{path.name} writes a file into the project directory ({target}). The project is READ-ONLY during the '
+                          "audit; create fixtures under os.environ['DAEDALUS_AUDIT_DIR'] (or tempfile.mkdtemp()) and pass that path "
+                          'to the program.')
         if REBUILD.search(text):
             faults.append(f'{path.name} builds, tests or installs the project. The controller has ALREADY built it and the '
                           'audit filesystem is read-only. Remove that step and launch the existing built artifact directly '
@@ -356,7 +433,7 @@ def static_audit_faults(directory, project=None, request=''):
     return faults
 
 
-def normalize_audit(directory, outcomes, project=None):
+def normalize_audit(directory, outcomes, project=None, packages=()):
     """Repair mechanical metadata slips before validation; they are not audit judgement.
 
     The model's tests and outcome mapping are kept. Only fields the controller
@@ -422,7 +499,7 @@ def normalize_audit(directory, outcomes, project=None):
         covered = {v for row in fixed if row.get('kind') == 'file' for v in row['outcomes']}
         for requirement in outcomes:
             if 'documentation' in requirement.get('evidence_types', []) and requirement['id'] not in covered:
-                files = documentation_files(project, requirement.get('component', '.'))
+                files = documented(project, requirement.get('component', '.'), packages)
                 if files:
                     fixed.append({'kind': 'file', 'path': files[0], 'outcomes': [requirement['id']],
                                   'evidence_types': ['documentation'], 'assertions': [{'kind': 'nonempty'}], 'cwd': '.'})
@@ -469,6 +546,10 @@ class Experiment(Operations):
                 'project_id': project_id or self.root.name, 'explicit': explicit or {},
                 'protected': list(protected), 'inherited': list(inherited), 'operation': '', 'history': []}
             self.save()
+        # Experiments resolve inherited compaction exactly like the production controller.
+        import context_policy
+        context_policy.apply_settings(self.job['settings'])
+        self.save(settings=context_policy.runtime_settings())
         self.repo = Repository(self.root / 'workspace', self.root / 'repository', self.job['settings']['daedalus_exclude_dirs'])
 
     def save(self, **changes):
@@ -517,13 +598,21 @@ class Experiment(Operations):
     def candidate(self, reason):
         self.transition('candidate', reason=reason)
 
-    def resume(self):
+    def resume(self, clarification=None):
         old = self.store.get(self.job['operation']) if self.job.get('operation') else None
         stopped = old and old['status'] in {'cancelled', 'interrupted', 'failed', 'running'}
-        if self.job['state'] not in {'interrupted', 'candidate'} and not stopped:
+        if self.job['state'] not in {'interrupted', 'candidate', 'waiting_for_input'} and not stopped:
             raise ValueError('Only interrupted work or a candidate can resume')
         if self.job.get('stop_limit'):
             raise ValueError(self.job.get('reason') or 'Retained limits prevent continuation')
+        if self.job.get('scope_question'):
+            if not isinstance(clarification, str) or not clarification.strip():
+                raise ValueError('Answer the scope question before continuing')
+            from coder_scope import effective_task
+            self.save(user_task=self.job.get('user_task', self.job['task']),
+                      scope_clarifications=[*self.job.get('scope_clarifications', []), {'text': clarification.strip()}],
+                      scope_question='', resume_state='planning')
+            self.save(task=effective_task(self.job))
         if self.job.get('operation'):
             if old and old['status'] == 'running':
                 from coder_worker_runtime import _alive
@@ -571,7 +660,7 @@ class Experiment(Operations):
             handle.close()
             raise ValueError('Another experimental writer owns this project') from None
         try:
-            while self.job['state'] not in {'candidate', 'accepted', 'interrupted'}:
+            while self.job['state'] not in {'candidate', 'accepted', 'interrupted', 'waiting_for_input'}:
                 self.step()
         except (Exception, KeyboardInterrupt) as error:
             interrupted = isinstance(error, (InterruptedError, KeyboardInterrupt))
@@ -581,7 +670,8 @@ class Experiment(Operations):
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
             handle.close()
-        self.package()
+        if self.job['state'] != 'waiting_for_input':
+            self.package()
         return self.job
 
     def step(self):
@@ -613,7 +703,8 @@ class Experiment(Operations):
                 self.transition('reviewing', checks=[*job['project_checks'], *result['checks']])
         elif state == 'planning':
             result = self.operation('plan', self.plan)
-            self.transition('editing', **result)
+            self.transition('waiting_for_input' if result.get('scope_question') else 'editing',
+                            **result, **({'resume_state': 'planning'} if result.get('scope_question') else {}))
         elif state == 'editing':
             from coder_policy7_ops import implementation_task, edit_transition
             task, targets = implementation_task(job)

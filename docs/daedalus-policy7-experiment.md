@@ -6,9 +6,13 @@ operations. `coder_policy7_evidence.py` and `coder_policy7_ops.py` share decisio
 between that controller and the historical experiment adapter. The web server
 does not run `Experiment` or a standalone experimental process.
 
-**New product jobs still select policy 6 until qualification passes.** Existing
-jobs retain their policies. V3 remains opt-in, and deployment requires the frozen
-proof below. Deterministic tests and saved-response journeys do not qualify it.
+**New product jobs select policy 6 by default.** The separate
+`daedalus_policy7_edits` and `daedalus_policy7_builds` Settings flags opt new jobs
+into policy 7; existing jobs retain their policies. V3 remains opt-in. Default
+promotion requires the frozen proof below; deterministic tests and saved-response
+journeys do not qualify it.
+
+**Evidence version 3 withholds behavior without trusted, criterion-specific proof.** Passing model-generated audits cannot authorize acceptance. See the version 3 safeguards below; historical acceptance counts describe earlier evidence rules.
 
 The implementation separates behavior, documentation, delivered executable tests
 and protected-file evidence. Independent audits cannot replace delivered tests.
@@ -24,6 +28,18 @@ corrections after application edits. Truncated edits split into explicit file
 targets without raising Settings limits; repeated focused failure saves a candidate.
 
 ## Running an isolated request
+
+### Review safeguards
+
+Compiled subprocess audits require controller-owned `strace` observations outside the audit sandbox. A source-code mention of a subprocess is insufficient: a successful application launch, matching artifact hashes, current revision, and observed assertions are required. JVM and .NET traces must also load an application artifact. Install `strace` and `bubblewrap` on Codebox; missing tracing fails closed.
+
+Lint/typecheck failures remain advisory throughout scheduling, review and repair decisions. They cannot suppress executable tests or spend application repair rounds; setup/build/launch failures still block dependent execution.
+
+Follow-up plans assign every inherited outcome a disposition: retain, replace, remove or clarify. Replacements/removals require exact request quotes and a separate scope review. Ambiguity pauses before editing; Continue accepts a clarification and preserves the requirement history and repair counters. Protected-file constraints remain enforced. Old unfinished jobs re-plan unresolved inherited scope and rerun verification before acceptance; completed deliveries are preserved.
+
+Follow-up structured output constrains parent IDs and request quotes to controller-supplied values. The scope review sees each parent together with its proposed action and resulting requirements; it judges whether that action is authorized. Both stages have bounded format recovery and text fallback for unsupported runtimes. A rejected reconciliation gets one corrective re-plan; unresolved disagreement still pauses before editing. Repeated copies of an identical retained outcome share one active outcome while preserving their history links.
+
+Optional visual review captures current-revision screenshots on managed services and uses an installed vision model. Measured layout defects join ordinary checks. An unavailable optional review records a skip; explicitly requested visual verification pauses for input.
 
 On Codebox, use the worker test interpreter and a dedicated disk-backed directory:
 
@@ -203,4 +219,55 @@ retained under `agent-output/daedalus-repair-20260918/runs/`; each live finding 
 
 The local evidence folders for the older campaigns (`agent-output/daedalus-policy7-proof/` and the policy 4–6
 folders) were pruned on 2026-09-19 as superseded, together with their copies on Codebox; the 2026-09-17 proof
-evidence remains under `agent-output/daedalus-repair-20260917/` (`proof-r2-evidence.tar.gz`, hash in its report).
+evidence remained under `agent-output/daedalus-repair-20260917/` (`proof-r2-evidence.tar.gz`, hash in its report).
+
+On 2026-09-30, ahead of the 18.1 release, the remaining local evidence was pruned as well: the run summaries under
+`agent-output/daedalus-repair-20260918/runs/`, the live-run folders, the 2026-09-17 proof folder and the frozen
+evidence archives, together with the finished evaluation run directories on Codebox. Paths to those folders in this
+document are historical. The evaluation and deploy tooling and `REPORT-newbuilds-20260925.md` are retained; each
+live finding keeps its regression test.
+
+### Verification evidence version 3
+
+Policy 7 now keeps behavior without trusted, criterion-specific proof **Ready for review**, even when every generated audit and review passes. Generated tests remain useful for finding defects and guiding repairs. They cannot independently establish that the builder interpreted the request correctly. There is currently no registered controller-maintained behavioral fixture library, so behavioral builds remain candidates. An unchanged user test without an explicit requirement mapping is also insufficient. Candidates do not replace the accepted revision; completed earlier artifacts remain immutable.
+
+The summary includes request excerpts, criterion status, trust origin, assertion failures, and evidence version. Older unfinished policy-7 work must acknowledge its active operation and recheck the exact checkpoint before publication. Policy 6 remains the default.
+
+Project execution uses a Linux bubblewrap child with private process/network namespaces, read-only toolchains, and scoped writable project/runtime directories. SDK and Aider inference passes through a supervisor-owned bridge; child diagnostics cannot change the model-call ledger. Public dependency traffic uses a restricted proxy. Missing isolation is an environment failure. Builder setup and revision checks share manifest-keyed dependency environments. Controller form probes use disposable service/data copies so their writes do not contaminate tests.
+
+Failed setup/build checks return to bounded prerequisite recovery within the current coding round, before audit authoring. A builder finish event cannot bypass them. Python audit diagnostics retain bounded subprocess arguments, working directory, stdout and stderr. An observed temporary fixture passed by a missing relative path is routed to audit correction; these diagnostics do not confer behavioral trust.
+
+Repairs retain failed revisions. If a previously passing project test disappears or regresses, the controller restores the earlier checkpoint for review. Generated audits run in a later stage; their absence during project checks does not trigger rollback. Coding rounds persist a verification reserve based on remaining calls; Continue preserves durable repair limits. Review input packing reserves space for corrections and reports input-budget failures separately from malformed responses.
+
+These safeguards do not constitute release qualification. A fresh frozen server campaign and the documented promotion gates remain required; candidate-only results cannot pass the automatic-acceptance release gate.
+
+## Four undelivered stacks — 2026-09-26 investigation and fixes
+
+At the 64K window the sweep left Rust `base64tool`, Node `mdtoc`, the Express/SQLite Kanban board and the
+React/Vite + FastAPI board at 0/2 externally working. Thirty archived jobs (`agent-output/daedalus-repair-20260918/runs/*`)
+showed three mechanisms rather than one:
+
+- **Untested inputs.** No model test or audit ever used the inputs the verifier fails on (`====`/`a===`, a fenced
+  `# heading`, a real drag/edit/delete, `get_by_label`), and the controller's `probe:command:n` passed on exit 0 alone —
+  Node printed nothing and passed; it listed the fixture's fenced heading and passed. Medium's `workflow:*` rows fell to
+  advisory because the guard could not find the form fields the request names by label.
+- **Mis-routed repairs.** A `workflow:*` defect contributed no repair target, so the union collapsed to the skeleton's
+  `tests/api.test.js`; `documentation_files(root, '.')` missed `base64tool/README.md` and a no-op repair became a durable
+  `no_progress`; failed `interface:*` rows (`unverified_interface`) reached no `decide()` branch.
+- **Rollbacks that discarded progress.** `repair_regressions` compared test rows by id only, so replacing the skeleton
+  placeholder test with real failing CRUD tests restored the checkpoint (twice discarding a revision where `form:app` and
+  persistence already worked) and parked the job with rounds left. A `server.log` counted as a source change.
+
+Fixes (all rows diagnostic — `evidence_types: []`, `outcomes: []` — and `acceptance()` untouched): wording-derived negative
+probes (`probe:invalid:<n>:<k>`, `probe:missing:<n>`, exact exit code + empty stdout + stderr message), fixture-aware output
+rules on the positive probe, `interface:labels:<service>` plus label-driven item creation in the workflow guard, front-end and
+server files as repair targets for guard defects, same-suite regressions (`retained_suite_regression`) with continue-after-
+rollback while rounds remain, `documented()` over package cwds, runtime logs exempt, `unverified_interface` routed to repair,
+a second in-operation audit nudge for mechanical faults, request clauses handed to the audit author, and `ContextWindow`
+calibration allowed above 1.0 (`RATIO_CEILING` 1.6) with the last reported prompt as a floor so compaction runs before the
+window fills. Eval side, per the user's "fix both sides" decision: the Node, Rust and medium requests now state the fenced-code,
+padding and auto-selected-project expectations the verifier relied on; the Kanban/medium verifiers locate columns by heading
+text, wait for an asynchronous edit form to populate, drop onto the innermost list (real mouse drag first), accept dialogs
+and 200/204, and scope CRUD assertions to the created project. The 2026-09-20 false-acceptance Kanban archive still fails
+under the corrected verifier (creation does not persist, page error on load). Measured results: see the round report,
+`agent-output/daedalus-repair-20260918/REPORT-newbuilds-20260925.md` ("Round 3").

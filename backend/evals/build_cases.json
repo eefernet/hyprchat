@@ -32,12 +32,12 @@
  {
   "name": "rust-base64tool",
   "language": "rust",
-  "task": "Build a Rust command-line tool with Cargo, package name base64tool, implementing standard Base64 without external crates. `base64tool encode <text>` prints the Base64 encoding and `base64tool decode <base64>` prints the decoded text. Invalid Base64 input prints an error to stderr and exits with code 2. Put the codec in src/lib.rs, add integration tests under tests/ run by `cargo test`, and include a README."
+  "task": "Build a Rust command-line tool with Cargo, package name base64tool, implementing standard Base64 without external crates. `base64tool encode <text>` prints the Base64 encoding and `base64tool decode <base64>` prints the decoded text. Invalid Base64 input prints an error to stderr and exits with code 2. Reject wrong or missing padding and impossible lengths as invalid. Put the codec in src/lib.rs, add integration tests under tests/ run by `cargo test`, and include a README."
  },
  {
   "name": "node-mdtoc",
   "language": "node",
-  "task": "Build a Node.js command-line tool named mdtoc with no runtime dependencies. Running `node mdtoc.js <file.md>` prints a table of contents for the Markdown headings: one line per heading as two spaces of indentation per level below 1, then `- [Title](#slug)`, where the slug is the lowercased title with spaces replaced by hyphens and characters other than letters, digits and hyphens removed. Support `--max-depth N` to ignore deeper headings. A missing file prints an error to stderr and exits with code 2. Include tests run by `npm test` using node:test, and a README."
+  "task": "Build a Node.js command-line tool named mdtoc with no runtime dependencies. Running `node mdtoc.js <file.md>` prints a table of contents for the Markdown headings: one line per heading as two spaces of indentation per level below 1, then `- [Title](#slug)`, where the slug is the lowercased title with spaces replaced by hyphens and characters other than letters, digits and hyphens removed. Support `--max-depth N` to ignore deeper headings. A missing file prints an error to stderr and exits with code 2. Headings inside fenced code blocks are not headings and must not appear. Include tests run by `npm test` using node:test, and a README."
  },
  {
   "name": "kanban-live",

@@ -67,7 +67,7 @@ def test_bad_audit_path_is_corrected_without_application_repair(tmp_path):
     experiment = Experiment(tmp_path / 'job', 'Set VALUE to 99', model='local', ollama_url='http://unused',
                             files={'subject.py': 'VALUE=0\n'}, editor=editor, chat=chat)
     result = experiment.run()
-    assert result['state'] == 'accepted', result.get('reason')
+    assert result['state'] == 'candidate', result.get('reason')
     assert result['repair_round'] == 0 and result['audit_corrections'] == 1
     assert len(edits) == 1 and len(authors) == 2
 
@@ -120,7 +120,7 @@ def test_a_builder_out_of_its_share_is_verified_with_the_reserve_not_parked_unve
     async def operate(job, kind, **extra):
         raise AssertionError('no code operation should be dispatched: ' + kind)
     spent = dict(state='coding', revision_id='r2', brief=BRIEF, builder='sdk', build_continuations=2, calls_used=95,
-                 last_patch={'changed': ['app.py']})
+                 last_patch={'changed': ['app.py']}, stage_allocation={'round_key': '1:0', 'verification_reserve': 30, 'coding_calls': 90, 'remaining_at_start': 120})
     job = _drive(monkeypatch, tmp_path, spent, operate)
     assert job['state'] == 'checking' and not job.get('stop_limit')
 

@@ -241,6 +241,9 @@ def discover(repository, explicit=None, proposals=None):
                 add('test', 'bundle exec rspec')
             elif (root / 'Rakefile').exists():
                 add('test', 'bundle exec rake test')
+        # README startup recipes can identify a server without a Node manifest.
+        if not launch:
+            launch = documented_launch(root)
         # Preview classification is separate from the presence of any manifest.
         if not launch and (root / 'index.html').is_file():
             launch = 'python3 -m http.server {port} --bind 127.0.0.1'
@@ -300,3 +303,33 @@ def environment_key(root, profile):
     key = hashlib.sha256(json.dumps({'manifests': manifests, 'versions': versions,
         'setup': profile.get('commands', {}).get('setup', [])}, sort_keys=True).encode()).hexdigest()
     return key, versions
+
+
+def documented_launch(root):
+    """Ground a small set of ordinary startup recipes in existing source files.
+
+    Unrecognized recipes remain available through explicit execution commands;
+    prose and guessed module names never start a controller-managed service.
+    """
+    root = Path(root)
+    for readme in sorted(root.glob('README*')):
+        if not readme.is_file(): continue
+        for line in readme.read_text(errors='replace').splitlines():
+            command = line.strip().strip('`').removeprefix('$ ').strip()
+            try: words = shlex.split(command)
+            except ValueError: continue
+            if not words or any(token in words for token in ('&&',';','|','>','&')): continue
+            runner = words[0]
+            offset = 1
+            if runner in {'python','python3'} and words[1:3] == ['-m','uvicorn']:
+                runner,offset = 'uvicorn',3
+            if runner == 'uvicorn' and len(words)>offset and re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*',words[offset]):
+                module = words[offset].split(':')[0].replace('.','/')
+                if not (root/(module+'.py')).is_file(): continue
+                # Controller supplies bind address and port; app import stays exactly documented.
+                return '.venv/bin/python -m uvicorn ' + shlex.quote(words[offset]) + ' --host 0.0.0.0 --port {port}'
+            if runner == 'node' and len(words)==2 and not Path(words[1]).is_absolute() and '..' not in Path(words[1]).parts and (root/words[1]).is_file() and words[1].endswith(('.js','.mjs','.cjs')):
+                source=(root/words[1]).read_text(errors='replace')
+                if re.search(r'\.listen\s*\(',source) and 'process.env.PORT' in source:
+                    return 'PORT={port} HOST=127.0.0.1 node ' + shlex.quote(words[1])
+    return None

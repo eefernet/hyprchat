@@ -50,12 +50,12 @@ export function useDaedalusJob(workflow){
     return ()=>{entry.listeners.delete(listener);if(!entry.listeners.size){entry.controller?.abort();entry.controller=null;}};
   },[entry]);
   const snapshot=useSyncExternalStore(subscribe,()=>entry.snapshot);
-  const action=async(name,visual='unchanged')=>{
+  const action=async(name,visual='unchanged',clarification='')=>{
     if(entry.snapshot.busy)return;
     publish(entry,{busy:true,error:''});
     try{
       const response=await fetch(userScopedUrl(`/api/coder/workflows/${workflow.id}/${name}`),{
-        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name==='resume'?resumeJobBody(entry.job,visual):{})});
+        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name==='resume'?resumeJobBody(entry.job,visual,clarification):{})});
       const job=await response.json();if(!response.ok)throw new Error(job.detail||'Unable to update this job');
       entry.job=job;entry.sequence=Math.max(entry.sequence,job.event_sequence||0);
       publish(entry,{job,connection:'connected'});

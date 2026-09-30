@@ -1416,9 +1416,9 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
     </div>
   </div>;};
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Memory & Profile</span></div>
-      <div style={{display:"flex",gap:8}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>

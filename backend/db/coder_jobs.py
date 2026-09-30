@@ -333,6 +333,12 @@ async def finish_artifact(workflow_id, revision_id, **artifact_fields):
         acceptance = job.get("acceptance") or {}
         if job["state"] != "packaging" or job["revision_id"] != revision_id or acceptance.get("revision_id") != revision_id or acceptance.get("accepted") is not True:
             raise ValueError("Delivery requires Acceptance for the current revision")
+        if job.get('policy_version', 1) >= 7:
+            summary = job.get('verification_summary') or {}
+            if summary.get('evidence_version') != 3 or summary.get('revision_id') != revision_id or not summary.get('accepted'):
+                raise ValueError('Policy 7 delivery requires current trusted verification evidence')
+            if any(c.get('status') != 'passed' for c in summary.get('criteria', [])):
+                raise ValueError('Unverified behavior cannot advance the accepted project head')
         if job.get("policy_version",1) >= 2:
             heads = await connection.execute_fetchall("SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?", (job["project_id"], db.current_user_id()))
             if not heads or (heads[0][0] or "") != job.get("source_revision_id", ""):
@@ -400,3 +406,34 @@ async def finish_candidate(workflow_id, revision_id, **artifact_fields):
         return artifact
     finally:
         await connection.close()
+
+
+async def account_operation(workflow_id, operation_id, kind, operation):
+    """Cancel and normal completion may race; final worker usage is charged once."""
+    if operation['status'] in {'queued', 'starting', 'running', 'cancelling'}:
+        raise ValueError('Usage requires terminal worker acknowledgement')
+    connection = await db.get_db()
+    try:
+        await connection.execute('BEGIN IMMEDIATE')
+        rows = await connection.execute_fetchall(
+            'SELECT w.job_json FROM coder_workflows w JOIN conversations c ON c.id=w.conversation_id '
+            'WHERE w.id=? AND c.user_id=? AND w.workflow_version=3', (workflow_id, db.current_user_id()))
+        if not rows:
+            raise LookupError('Workflow not found')
+        payload = json.loads(rows[0]['job_json'])
+        if payload.get('worker_operation') == operation_id and not payload.get('operation_accounted'):
+            begun = operation.get('started') or operation.get('ended') or 0
+            elapsed = max(0, (operation.get('ended') or begun) - begun)
+            usage = [r for r in payload.get('stage_usage', []) if r['operation_id'] != operation_id]
+            usage.append({'operation_id': operation_id, 'stage': kind, 'seconds': elapsed,
+                          'calls': operation.get('calls', 0), 'status': operation['status']})
+            payload.update(calls_used=payload.get('calls_used', 0) + operation.get('calls', 0),
+                seconds_used=payload.get('seconds_used', 0) + elapsed, operation_accounted=True,
+                last_operation_status=operation['status'], operation_calls=0, operation_seconds=0, stage_usage=usage)
+            await connection.execute('UPDATE coder_workflows SET job_json=?,updated_at=? WHERE id=?',
+                                     (json.dumps(payload), now(), workflow_id))
+            await _event(connection, workflow_id, 'operation_accounted', {'operation_id': operation_id, 'calls': operation.get('calls', 0)})
+        await connection.commit()
+    finally:
+        await connection.close()
+    return await get(workflow_id)

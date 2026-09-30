@@ -14,9 +14,9 @@ def main():
  with tarfile.open(archive,'w:gz') as bundle:
   for path in source.rglob('*'):
    if path.is_file():bundle.add(path,arcname=path.relative_to(source))
- result=subprocess.run([sys.executable,str(Path(__file__).with_name('policy7_golden.py')),'--folder',str(root),
-  '--archive',str(archive),'--scenario','upload-medium'],capture_output=True,text=True,
-  env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1])},timeout=600)
+ from evals.isolated_judge import run as isolated_judge
+ result=isolated_judge(Path(__file__).with_name('policy7_golden.py'),['--folder',str(root),
+  '--archive',str(archive),'--scenario','upload-medium'],root,archive,timeout=600)
  (root/'golden-output.log').write_text(result.stdout+result.stderr)
  report=json.loads((root/'golden.json').read_text())
  print(json.dumps(report,indent=2))

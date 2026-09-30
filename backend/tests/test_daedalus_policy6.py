@@ -426,6 +426,7 @@ def test_candidate_card_pins_continue_and_shows_evidence(tmp_path,width):
     job={'id':'fixture-job','workflow_version':3,'policy_version':6,'state':'ready_for_review','event_sequence':1,
          'revision_id':'a'*40,'candidate_artifact':{'id':'candidate','filename':'candidate.tar.gz','metadata':{'revision_id':'a'*40,'runnable':False,
          'run_instructions':[{'cwd':'.','commands':{'test':['python3 test_app.py']}}]}},
+         'brief':{'outcomes':[{'id':'o1','text':'Requested behavior','evidence_types':['behavior']}]},
          'verification_summary':{'outcomes':[{'id':'o1','text':'Requested behavior','status':'unverified','reason':'Runtime not available','missing_evidence':['behavior']}]}}
     submitted=[]; errors=[]
     def route_api(route):
@@ -451,29 +452,27 @@ def test_candidate_card_pins_continue_and_shows_evidence(tmp_path,width):
             page.on('console',lambda m:errors.append(m.text) if m.type=='error' else None)
             page.goto(url)
             card=page.get_by_label('Daedalus coding job')
-            expect(card.get_by_text('Build incomplete',exact=True)).to_be_visible()
+            expect(card.locator('.dj-state')).to_have_text('Build incomplete')
             card.get_by_role('button',name='View details',exact=True).click()
             panel=page.get_by_role('dialog')
             expect(panel.get_by_text('python3 test_app.py',exact=True)).to_be_visible()
-            panel.get_by_role('button',name='Checks',exact=True).click()
-            expect(panel.get_by_text('unverified · Runtime not available',exact=True)).to_be_visible()
-            assert not card.get_by_text('Download accepted revision',exact=True).count()
+            expect(panel.get_by_text('No behavior evidence was recorded for this outcome.',exact=True)).to_be_visible()
+            assert not card.get_by_text('Download accepted project',exact=True).count()
             folder=Path(os.environ.get('DAEDALUS_QA_DIR',tmp_path));folder.mkdir(parents=True,exist_ok=True)
             page.screenshot(path=str(folder/f'candidate-{width}.png'),full_page=True)
             panel.get_by_role('button',name='Close job details').click()
             card.get_by_role('button',name='Continue',exact=True).click()
-            expect(card.get_by_text('Checking',exact=True)).to_be_visible()
+            expect(card.locator('.dj-state')).to_have_text('Checking')
             assert submitted==[{'candidate_revision':'a'*40}]
             job={**job,'state':'completed','artifact_status':'delivered','artifact':{'id':'accepted','filename':'accepted.tar.gz'},
                  'verification_summary':{'outcomes':[{'id':'o1','text':'Requested behavior','status':'passed','reason':'Checked'}]},
                  'acceptance':{'coverage':[{'id':'o1','text':'Requested behavior','status':'passed','reason':'Checked'}]}}
             page.reload()
-            expect(card.get_by_text('Complete',exact=True)).to_be_visible()
+            expect(card.locator('.dj-state')).to_have_text('Complete')
             card.get_by_role('button',name='View details',exact=True).click()
-            expect(panel.get_by_role('link',name='Download accepted revision',exact=True)).to_be_visible()
+            expect(panel.get_by_role('link',name='Download accepted project',exact=True)).to_be_visible()
             assert not panel.get_by_role('link',name='Download candidate',exact=True).count()
-            panel.get_by_role('button',name='Checks',exact=True).click()
-            expect(panel.get_by_text('passed · Checked',exact=True)).to_be_visible()
+            expect(panel.locator('.dp-outcomes').get_by_text('Verified',exact=True)).to_be_visible()
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert not errors,errors
             browser.close()

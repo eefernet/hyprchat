@@ -79,9 +79,9 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
           </div>
           <textarea value={form.content} onChange={e=>setForm(f=>({...f,content:e.target.value}))} placeholder="Details (optional)" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
-            <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Due (local)</div>
+            <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Due (local)</div>
               <input type="datetime-local" value={form.due_local||""} onChange={e=>setForm(f=>({...f,due_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
-            <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Remind me at</div>
+            <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Remind me at</div>
               <input type="datetime-local" value={form.remind_local||""} onChange={e=>setForm(f=>({...f,remind_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
           </div>
           <div style={{display:"flex",gap:8}}>

@@ -121,6 +121,10 @@ def _fill(page, form):
 def submit_forms(url, *, startup_seconds=60, step_seconds=15, limit=3):
     """Submit up to `limit` forms on the page; return {'forms', 'submitted', 'writes', 'errors', 'fault'}."""
     result = {'forms': 0, 'submitted': 0, 'writes': [], 'errors': [], 'fault': ''}
+    import os
+    from coder_sandbox_call import invoke, browser_options
+    if os.environ.get('DAEDALUS_SANDBOXED') != '1':
+        return invoke('coder_frontend_guard', 'submit_forms', [url], {'startup_seconds': startup_seconds, 'step_seconds': step_seconds, 'limit': limit}, timeout=startup_seconds + step_seconds * 20)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as error:
@@ -128,7 +132,7 @@ def submit_forms(url, *, startup_seconds=60, step_seconds=15, limit=3):
         return result
     try:
         with sync_playwright() as runtime:
-            browser = runtime.chromium.launch(headless=True, timeout=startup_seconds * 1000)
+            browser = runtime.chromium.launch(headless=True, timeout=startup_seconds * 1000, **browser_options())
             try:
                 page = browser.new_page()
                 page.set_default_timeout(step_seconds * 1000)
@@ -175,9 +179,15 @@ def form_row(service, url, settings, prober=submit_forms):
     if not probe['fault'] and not probe['forms']:
         return None
     rejected = [w for w in probe['writes'] if w['status'] >= 400]
-    passed = not probe['fault'] and not rejected
+    # fix5 Kanban p1 (2026-09-27): the submit handler threw `taskIdInput is not defined`; no write was sent, so the row
+    # stayed advisory while the independent verifier failed "UI creation did not persist" + the script error.
+    threw = [e for e in probe.get('errors', []) if e] if not probe['writes'] else []
+    passed = not probe['fault'] and not rejected and not threw
     if probe['fault']:
         reason = 'The page could not be exercised in the verification browser: ' + probe['fault']
+    elif threw:
+        reason = ('Submitting the page\'s own form as a user would threw an uncaught page error (' + ' | '.join(e[:200] for e in threw[:2]) +
+                  ') and sent no request. Fix the handler (undefined names, wrong element ids) so the submit reaches the API.')
     elif rejected:
         listed = ', '.join(f"{w['method']} {w['path']} -> {w['status']}" for w in rejected[:4])
         reason = ('Submitting the page\'s own form as a user would sent a request the server rejected (' + listed + '). The form '

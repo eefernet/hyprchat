@@ -694,8 +694,8 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     </div>
     {/* LIGHTBOX — front-and-center full preview with arrow navigation */}
     {lightbox&&cur&&createPortal(
-      <div onClick={e=>{if(e.target===e.currentTarget)setLightbox(false);}} style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.85)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",gap:14,animation:"fadeIn .2s"}}>
-        <button onClick={()=>setLightbox(false)} title="Close (Esc)" style={{position:"absolute",top:16,right:18,width:36,height:36,borderRadius:18,border:`1px solid ${t.brd}55`,background:"rgba(0,0,0,.5)",color:t.text,fontSize:15,cursor:"pointer",fontFamily:font}}>✕</button>
+      <div onClick={e=>{if(e.target===e.currentTarget)setLightbox(false);}} className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.85)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",gap:14,animation:"fadeIn .2s"}}>
+        <button onClick={()=>setLightbox(false)} title="Close (Esc)" style={{position:"absolute",top:"calc(16px + env(safe-area-inset-top, 0px))",right:18,width:36,height:36,borderRadius:18,border:`1px solid ${t.brd}55`,background:"rgba(0,0,0,.5)",color:t.text,fontSize:15,cursor:"pointer",fontFamily:font}}>✕</button>
         {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)),true)}
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,maxWidth:"86vw",minWidth:0}}>
           {cur.exists_status==="missing"
@@ -996,7 +996,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {loading&&<SkeletonGrid t={t} cards={6} minW={250} cardH={120}/>}
       {!loading&&!items.length&&<EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Files the assistant delivers with download_file or download_project are collected here."/>}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,250px),1fr))",gap:12}}>
         {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)} confirmAction={confirmAction}/>)}
       </div>
     </div>

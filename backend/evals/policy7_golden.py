@@ -17,7 +17,30 @@ import traceback
 import urllib.error
 import urllib.request
 import zipfile
-from playwright.sync_api import sync_playwright, expect
+from coder_sandbox_call import browser_options
+
+
+
+def labelled(page, name, control='text'):
+    """`get_by_label(name, exact=True)` narrowed to the fillable/selectable control when the app labels two elements the
+    same way (fix6 medium p1, 2026-09-27: a project <select> and the project-name <input> were both labelled "Project name"
+    and Playwright's strict mode refused to fill). The label association is still required; only the ambiguity is resolved."""
+    found = page.get_by_label(name, exact=True)
+    if found.count() > 1:
+        narrowed = found.and_(page.locator('select' if control == 'select' else 'input, textarea'))
+        if narrowed.count():
+            return narrowed.first
+    return found
+
+def title_pattern(text):
+    """The title as rendered anywhere in an element's text (a row may add status/priority around it)."""
+    return re.compile(r'(?<!\w)'+re.escape(text)+r'(?!\w)')
+
+
+def requirements_file(source):
+    """The delivered pip requirements: shallowest first, `requirements.txt` before variants, never node_modules."""
+    found=[p for p in source.rglob('requirements*.txt') if 'node_modules' not in p.parts]
+    return sorted(found,key=lambda p:(len(p.parts),p.name!='requirements.txt',str(p)))[0] if found else None
 
 
 
@@ -56,6 +79,7 @@ def native_project_browser_tests(source, candidates, base, url, serverlog):
     assert re.search(r'(?:GET|POST) /',traffic),'Browser tests did not request the served application'
 
 def run(args):
+    from playwright.sync_api import sync_playwright, expect
     base=Path(args.folder);archive=base/args.archive;source=base/'golden-source'
     source.mkdir()
     if zipfile.is_zipfile(archive):
@@ -108,8 +132,9 @@ def run(args):
             def install():
                 venv=base/'golden-env'
                 command([sys.executable,'-m','venv',str(venv)],timeout=90)
-                requirements=source/'requirements.txt'
-                if requirements.exists():command([str(venv/'bin/python'),'-m','pip','install','-r',str(requirements)],timeout=240)
+                requirements=requirements_file(source)
+                if requirements:command([str(venv/'bin/python'),'-m','pip','install','-r',str(requirements)],timeout=240)
+                elif (source/'pyproject.toml').exists():command([str(venv/'bin/python'),'-m','pip','install',str(source)],timeout=240)
                 frontends=[]
                 for manifest_path in source.rglob('package.json'):
                     if 'node_modules' in manifest_path.parts:continue
@@ -168,7 +193,7 @@ def run(args):
                         native_project_browser_tests(source, candidates, base, url, serverlog)
                         return
                     with sync_playwright() as pw:
-                        browser=pw.chromium.launch(headless=True,args=['--no-sandbox'])
+                        browser=pw.chromium.launch(headless=True,args=['--no-sandbox'], **browser_options())
                         try:
                             for test in html_tests:
                                 page=browser.new_page();errors=[];requests=[]
@@ -186,19 +211,22 @@ def run(args):
             if args.scenario in {'medium','upload-medium'} and process and process.poll() is None:
                 ids={}
                 def crud():
+                    # The delivered tests ran first against this same database: judge deltas, scoped to our project.
+                    before=api('GET','/api/summary');ids['before']=before
                     project=api('POST','/api/projects',{'name':'Golden project'},(200,201));ids['project']=project['id']
                     assert any(p['id']==project['id'] for p in api('GET','/api/projects'))
+                    scope='project_id='+str(project['id'])
                     tasks=[]
                     for title,status,priority in [('Budget alpha','todo','high'),('Ship beta','doing','low')]:
                         tasks.append(api('POST','/api/tasks',{'project_id':project['id'],'title':title,'status':status,'priority':priority},(200,201)))
                     ids['tasks']=[t['id'] for t in tasks]
-                    assert len(api('GET','/api/tasks'))==2
-                    assert [t['title'] for t in api('GET','/api/tasks?q=alpha')]==['Budget alpha']
-                    assert [t['title'] for t in api('GET','/api/tasks?status=doing')]==['Ship beta']
+                    assert len(api('GET','/api/tasks?'+scope))==2
+                    assert [t['title'] for t in api('GET','/api/tasks?q=alpha&'+scope)]==['Budget alpha']
+                    assert [t['title'] for t in api('GET','/api/tasks?status=doing&'+scope)]==['Ship beta']
                     summary=api('GET','/api/summary')
-                    assert all(summary[k]==v for k,v in {'total':2,'todo':1,'doing':1,'done':0}.items()),summary
-                    api('PATCH','/api/tasks/'+str(tasks[0]['id']),{'title':'Budget updated','status':'done','priority':'medium'})
-                    assert api('GET','/api/summary')['done']==1
+                    assert all(summary[k]-before[k]==v for k,v in {'total':2,'todo':1,'doing':1,'done':0}.items()),(before,summary)
+                    api('PATCH','/api/tasks/'+str(tasks[0]['id']),{'title':'Budget updated','status':'done','priority':'medium'},(200,204))
+                    assert api('GET','/api/summary')['done']==before['done']+1
                     api('POST','/api/projects',{'name':''},(400,422))
                     api('POST','/api/tasks',{'project_id':project['id'],'title':'','priority':'high','status':'todo'},(400,422))
                     api('POST','/api/tasks',{'project_id':project['id'],'title':'Invalid','priority':'urgent','status':'todo'},(400,422))
@@ -206,11 +234,11 @@ def run(args):
                 check('API CRUD filtering summaries and validation',crud)
                 def restart():
                     stop();start()
-                    tasks=api('GET','/api/tasks')
+                    tasks=api('GET','/api/tasks?project_id='+str(ids['project']))
                     assert {t['id'] for t in tasks}==set(ids['tasks'])
                     assert any(t['title']=='Budget updated' for t in tasks)
                     for ident in ids['tasks']:api('DELETE','/api/tasks/'+str(ident),expected=(200,204))
-                    assert api('GET','/api/summary')['total']==0
+                    assert api('GET','/api/summary')['total']==ids['before']['total']
                 check('restart persistence and deletion',restart)
             if args.scenario=='upload-medium' and process and process.poll() is None:
                 check('delivered executable API tests',lambda:command([sys.executable,'tests/test_api.py'],env={**env,'DAEDALUS_APP_URL':url}))
@@ -226,10 +254,17 @@ def run(args):
             for width in (1440,390):
                 def browser_case(width=width):
                     with sync_playwright() as pw:
-                        browser=pw.chromium.launch(headless=True,args=['--no-sandbox'])
+                        browser=pw.chromium.launch(headless=True,args=['--no-sandbox'], **browser_options())
                         context=browser.new_context(viewport={'width':width,'height':900},accept_downloads=True)
                         context.tracing.start(screenshots=True,snapshots=True,sources=True)
                         page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+                        page.on('dialog',lambda d:d.accept())   # a confirm() before delete is the app's choice, not a failure
+                        def shown(text):
+                            return page.locator('#rows li').filter(has_text=text) if args.scenario=='upload-medium' else page.get_by_text(title_pattern(text))
+                        def visible(text):expect(shown(text).first).to_be_visible()
+                        def absent(text):
+                            expect(shown(text).first).not_to_be_visible()
+                            assert not any(e.is_visible() for e in shown(text).all()),text+' is still shown'
                         try:
                             page.goto(url,wait_until='networkidle',timeout=20000)
                             if args.scenario=='web':
@@ -266,25 +301,25 @@ def run(args):
                                 expect(page.locator('#todos')).to_contain_text('Keep me')
                             else:
                                 name='Browser '+str(width)
-                                page.get_by_label('Project name',exact=True).fill(name);page.get_by_role('button',name='Create project',exact=True).click()
-                                page.get_by_label('Task title',exact=True).fill('Browser task '+str(width))
-                                page.get_by_label('Priority',exact=True).select_option('high')
-                                page.get_by_label('Status',exact=True).select_option('todo')
+                                labelled(page,'Project name','text').fill(name);page.get_by_role('button',name='Create project',exact=True).click()
+                                labelled(page,'Task title','text').fill('Browser task '+str(width))
+                                labelled(page,'Priority','select').select_option('high')
+                                labelled(page,'Status','select').select_option('todo')
                                 page.get_by_role('button',name='Add task',exact=True).click()
-                                expect(page.locator('#rows li').filter(has_text='Browser task '+str(width)) if args.scenario=='upload-medium' else page.get_by_text('Browser task '+str(width),exact=True)).to_be_visible()
-                                page.reload();expect(page.locator('#rows li').filter(has_text='Browser task '+str(width)) if args.scenario=='upload-medium' else page.get_by_text('Browser task '+str(width),exact=True)).to_be_visible()
-                                page.get_by_label('Search',exact=True).fill('NO_MATCH_9876')
-                                expect(page.locator('#rows li').filter(has_text='Browser task '+str(width)) if args.scenario=='upload-medium' else page.get_by_text('Browser task '+str(width),exact=True)).not_to_be_visible()
-                                page.get_by_label('Search',exact=True).fill('')
+                                visible('Browser task '+str(width))
+                                page.reload();visible('Browser task '+str(width))
+                                labelled(page,'Search','text').fill('NO_MATCH_9876')
+                                absent('Browser task '+str(width))
+                                labelled(page,'Search','text').fill('')
                                 page.get_by_role('button',name='Edit',exact=True).last.click()
-                                page.get_by_label('Task title',exact=True).fill('Edited browser task '+str(width))
+                                labelled(page,'Task title','text').fill('Edited browser task '+str(width))
                                 page.get_by_role('button',name='Save task',exact=True).click()
-                                expect(page.locator('#rows li').filter(has_text='Edited browser task '+str(width)) if args.scenario=='upload-medium' else page.get_by_text('Edited browser task '+str(width),exact=True)).to_be_visible()
+                                visible('Edited browser task '+str(width))
                                 page.get_by_role('button',name='Delete',exact=True).last.click()
-                                page.reload();expect(page.locator('#rows li').filter(has_text='Edited browser task '+str(width)) if args.scenario=='upload-medium' else page.get_by_text('Edited browser task '+str(width),exact=True)).not_to_be_visible()
+                                page.reload();absent('Edited browser task '+str(width))
                             if args.scenario=='upload-medium' and args.step:
-                                expect(page.get_by_label('Priority filter',exact=True)).to_be_visible()
-                                page.get_by_label('Priority filter',exact=True).select_option('high')
+                                expect(labelled(page,'Priority filter','select')).to_be_visible()
+                                labelled(page,'Priority filter','select').select_option('high')
                             assert not errors,errors
                             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth+1'),'Horizontal viewport overflow'
                         finally:

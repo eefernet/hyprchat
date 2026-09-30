@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--root', required=True)
     parser.add_argument('--request')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--clarification', help='Answer a parked follow-up scope question with --resume')
     args = parser.parse_args()
     root = Path(args.root)
     if (root / 'job.json').exists() and not args.resume:
@@ -26,7 +27,7 @@ def main():
     request = json.loads(Path(args.request).read_text()) if args.request else {}
     experiment = Experiment(root, **request)
     if args.resume:
-        experiment.resume()
+        experiment.resume(clarification=args.clarification)
     result = experiment.run()
     print(json.dumps({k: result.get(k) for k in ('id', 'state', 'reason', 'revision_id', 'calls', 'seconds',
         'repair_round', 'audit_corrections', 'runnable', 'artifact')}, indent=2), flush=True)

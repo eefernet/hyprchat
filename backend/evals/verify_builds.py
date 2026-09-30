@@ -46,6 +46,8 @@ def verify(language, root, work):
         except ValueError: ok = False
         checks.append({'name': 'json', 'passed': ok, 'detail': None if ok else out[-300:]})
         expect(checks, 'missing file', [sys.executable, 'wordfreq.py', str(work / 'nope.txt')], base, code=2, stdout='')
+        ties = work / 'ties.txt'; ties.write_text('Beta ALPHA! beta, alpha. gamma\n')
+        expect(checks, 'alphabetical frequency tie', [sys.executable, 'wordfreq.py', str(ties), '--top', '2'], base, stdout='alpha 2\nbeta 2')
     elif language == 'java':
         pom = find(root, 'pom.xml'); base = pom.parent if pom else root
         expect(checks, 'mvn test', 'mvn -q test', base)
@@ -53,6 +55,8 @@ def verify(language, root, work):
         java = ['java', '-cp', 'target/classes', 'app.UnitConv']
         expect(checks, 'km to m', [*java, '1.5', 'km', 'm'], base, stdout='1500.00')
         expect(checks, 'c to f', [*java, '100', 'c', 'f'], base, stdout='212.00')
+        for label, args, output in [('kelvin to c', ['273.15','k','c'], '0.00'), ('fahrenheit to c',['32','f','c'],'0.00'), ('miles to feet',['1','mi','ft'],'5280.00')]:
+            expect(checks, label, [*java, *args], base, stdout=output)
         expect(checks, 'incompatible', [*java, '1', 'km', 'c'], base, code=2, stdout='')
     elif language in {'c', 'cpp'}:
         cmake = find(root, 'CMakeLists.txt'); base = cmake.parent if cmake else root
@@ -64,10 +68,17 @@ def verify(language, root, work):
             expect(checks, 'expression', [binary, '3 4 + 2 *'], base, stdout='14.00')
             expect(checks, 'division', [binary, '7 2 /'], base, stdout='3.50')
             expect(checks, 'divide by zero', [binary, '1 0 /'], base, code=2, stdout='')
+            expect(checks, 'negative fractions', [binary, '-2.5 4 *'], base, stdout='-10.00')
+            for malformed in ['3 4', '+', '3 +', '2 bogus +']:
+                expect(checks, 'malformed RPN ' + malformed, [binary, malformed], base, code=2, stdout='')
         else:
             expect(checks, 'det', [binary, 'det', '1,2;3,4'], base, stdout='-2.00')
             expect(checks, 'transpose', [binary, 'transpose', '1,2;3,4'], base, stdout='1,3;2,4')
             expect(checks, 'non-square det', [binary, 'det', '1,2,3;4,5,6'], base, code=2, stdout='')
+            expect(checks, '3 by 3 determinant', [binary, 'det', '1,2,3;0,1,4;5,6,0'], base, stdout='1.00')
+            expect(checks, 'rectangular transpose', [binary, 'transpose', '1,2,3;4,5,6'], base, stdout='1,4;2,5;3,6')
+            for malformed in ['1,2;3', '1,x;3,4']:
+                expect(checks, 'malformed matrix ' + malformed, [binary, 'det', malformed], base, code=2, stdout='')
     elif language == 'csharp':
         sln = find(root, '*.sln'); base = sln.parent if sln else root
         env = {'DOTNET_CLI_TELEMETRY_OPTOUT': '1', 'DOTNET_NOLOGO': '1'}
@@ -78,6 +89,8 @@ def verify(language, root, work):
         expect(checks, 'dotnet build', 'dotnet build -v q', base, env=env)
         command = ['dotnet', 'run', '--no-build', '--project', str(app) if app else 'CsvStats', '--']
         expect(checks, 'stats', [*command, str(csv), '--column', 'score'], base, stdout='min 1.50\nmax 4.00\nmean 2.50', env=env)
+        quoted = work / 'quoted.csv'; quoted.write_text('name,score\n"Doe, Jane",1.5\nZed,4\nThird,2\n')
+        expect(checks, 'quoted CSV fields', [*command, str(quoted), '--column', 'score'], base, stdout='min 1.50\nmax 4.00\nmean 2.50', env=env)
         expect(checks, 'unknown column', [*command, str(csv), '--column', 'nope'], base, code=2, stdout='', env=env)
     elif language == 'go':
         mod = find(root, 'go.mod'); base = mod.parent if mod else root
@@ -96,6 +109,10 @@ def verify(language, root, work):
         expect(checks, 'encode', 'cargo run --quiet -- encode "hello world"', base, stdout='aGVsbG8gd29ybGQ=')
         expect(checks, 'decode', 'cargo run --quiet -- decode aGVsbG8gd29ybGQ=', base, stdout='hello world')
         expect(checks, 'invalid', 'cargo run --quiet -- decode "%%%"', base, code=2, stdout='')
+        expect(checks, 'UTF8 encode', ['target/debug/base64tool', 'encode', 'café'], base, stdout='Y2Fmw6k=')
+        expect(checks, 'UTF8 decode', ['target/debug/base64tool', 'decode', 'Y2Fmw6k='], base, stdout='café')
+        for invalid in ['====', 'a===', 'A', '@@@=']:
+            expect(checks, 'invalid Base64 ' + invalid, ['target/debug/base64tool', 'decode', invalid], base, code=2, stdout='')
     elif language == 'node':
         script = find(root, 'mdtoc.js'); base = script.parent if script else root
         expect(checks, 'npm test', 'npm test --silent', base)
@@ -105,6 +122,8 @@ def verify(language, root, work):
         expect(checks, 'max depth', ['node', 'mdtoc.js', str(md), '--max-depth', '2'], base,
                stdout='- [Intro](#intro)\n  - [Getting Started!](#getting-started)\n  - [API v2](#api-v2)')
         expect(checks, 'missing file', ['node', 'mdtoc.js', str(work / 'nope.md')], base, code=2, stdout='')
+        fenced = work / 'fenced.md'; fenced.write_text('# Real\n\n```text\n# Not a heading\n```\n\n## Next\n')
+        expect(checks, 'fenced code is not a heading', ['node', 'mdtoc.js', str(fenced)], base, stdout='- [Real](#real)\n  - [Next](#next)')
     elif language == 'kanban':
         from verify_webapp import kanban
         checks.extend(kanban(root))

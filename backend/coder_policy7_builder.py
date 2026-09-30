@@ -28,7 +28,12 @@ def key_error_lines(defects, limit=14):
 
 def guidance(job):
     from coder_policy7 import EXECUTION_HELP
-    text = '\nPROJECT CONVENTIONS (the controller discovers and runs these itself after you return):\n' + EXECUTION_HELP
+    text = ('Existing user tests are protected: ' + ', '.join(job.get('baseline_test_files', [])) + '. Add new tests in new files.\n' if job.get('baseline_test_files') else '')
+    if job.get('repair_round'):
+        text += ('\nPROJECT CONVENTIONS: unchanged from the build round (native test runners, .daedalus.json only for a non-native test '
+                 'command, .daedalus-run.json only for HTTP services with {port}, Playwright tests under DAEDALUS_AUDIT_PYTHON).\n')
+    else:
+        text += '\nPROJECT CONVENTIONS (the controller discovers and runs these itself after you return):\n' + EXECUTION_HELP
     text += ('\nDo NOT write a .daedalus.json when the native test command already works (mvn test, ctest, dotnet test, go test, '
              'cargo test, npm test, pytest): the controller discovers it. Never wrap a native test suite in a Python script.'
              '\nWrite EVERY requested deliverable (application source, executable tests, README) in this session. A chat message ends '
@@ -39,6 +44,13 @@ def guidance(job):
         text += ('\nCONTINUE: your previous run stopped at a partial checkpoint. The files you already wrote are in the project. '
                  'Write the REMAINING files from the brief (application, tests, README), then build and run the tests. '
                  'Call finish only when every requested deliverable exists and its tests pass.\n')
+    prerequisites = job.get('preflight_failures') or []
+    if prerequisites:
+        text += '\nSETUP/BUILD MUST SUCCEED BEFORE AUDIT. Correct these prerequisite failures on the existing checkpoint:\n'
+        text += '\n'.join('- ' + str(d.get('command') or d.get('id')) + '\n' + str(d.get('log_tail') or d.get('reason') or '')[-1600:]
+                          for d in prerequisites)
+    from coder_skeletons import guidance as skeleton_guidance
+    text += skeleton_guidance(job.get('skeleton'))
     defects = job.get('repair_feedback') or []
     if job.get('repair_round') and defects:
         keys = key_error_lines(defects)
@@ -49,8 +61,15 @@ def guidance(job):
             text += ('These failing checks are an independent audit written without running your program; its expected values can be '
                      'wrong. First reproduce the failing command yourself. If the application already does what the ORIGINAL REQUEST '
                      'says, change nothing and call finish immediately, stating the evidence; the audit will be corrected instead.\n')
-        text += 'FAILED CHECKS:\n' + '\n'.join(
-            '- ' + str(d.get('id')) + ': ' + str(d.get('reason') or d.get('command') or d.get('classification') or '')[:400] for d in defects[:8]) + '\n'
+        from coder_repair_packet import render
+        packet = job.get('repair_packet') or []
+        if packet:
+            text += render(packet) + '\n'
+        else:
+            text += 'FAILED CHECKS:\n' + '\n'.join(
+                '- ' + str(d.get('id')) + ': ' + str(d.get('reason') or d.get('command') or d.get('classification') or '')[:400] for d in defects[:8]) + '\n'
+        text += ('This is an EXISTING CHECKPOINT with work in it: never delete or re-initialise it (rm -rf, cargo new, dotnet new, npm init, '
+                 'git init, create-* generators are forbidden). Every check that passed before must still pass after your fix.\n')
     return text
 
 
@@ -88,6 +107,25 @@ def sanitize_workspace(root, excludes=()):
     return removed
 
 
+# A service log the agent's trial run left behind (sweep3-web medium p1: the last patch changed only server.log).
+RUNTIME_LOG = re.compile(r'^(?:[^/]+/)?(?:server|app|application|api|backend|frontend|vite|uvicorn|gunicorn|flask|django|node|npm-debug|'
+                         r'yarn-error|dev|debug|error|errors|access|output|out|run|start|nohup|stdout|stderr)(?:[.-][\w-]*)?\.(?:log|out)$', re.I)
+FIXTURE_DIRS = {'tests', 'test', 'fixtures', 'testdata', 'samples', 'sample', 'examples', 'data', 'docs'}
+
+
+def runtime_log(name):
+    """A runtime log at the project or package root; a log under a fixture directory is a deliverable and stays."""
+    parts = name.split('/')
+    if any(part.lower() in FIXTURE_DIRS for part in parts[:-1]):
+        return False
+    return bool(RUNTIME_LOG.match(name))
+
+
+def logs_are_input(task):
+    """Log files are the application's domain (a log summarizer): never remove any of them."""
+    return bool(re.search(r'\.log\b|\blog\s*files?\b|<[^<>]*log[^<>]*>', task or '', re.I))
+
+
 def sdk_build(store, operation_id, repository, job, payload, *, runner=None):
     """Run the agent-loop builder and adapt its result to what edit_transition and
     repair_targets consume (changed, category, source_hashes, log_tail)."""
@@ -97,13 +135,28 @@ def sdk_build(store, operation_id, repository, job, payload, *, runner=None):
     excludes = tuple(payload['settings']['daedalus_exclude_dirs']) + ('.git', '.aider', '__pycache__')
     sanitize_workspace(repository.root, excludes)   # also frees a job an earlier round already wedged
     before = tree_hashes(repository.root, excludes)
+    skeleton_applied = []
+    skeleton = job.get('skeleton')
+    if skeleton and not skeleton.get('applied') and not job.get('repair_round') and not job.get('build_continuations') and not before:
+        # A verified starting structure, written once into an EMPTY workspace so the build proceeds as an
+        # edit of runnable files. The empty-tree guard keeps a re-dispatched operation from writing twice.
+        from coder_skeletons import apply
+        skeleton_applied = apply(repository.root, skeleton)
+        store.event(operation_id, 'skeleton_applied', skeleton=skeleton['id'], version=skeleton.get('version'), files=skeleton_applied)
     outcomes = (job.get('brief') or {}).get('outcomes', [])
-    failures = [{k: d.get(k) for k in ('id', 'classification', 'origin', 'command', 'reason', 'log_tail')} for d in job.get('repair_feedback') or []]
+    failures = [{k: d.get(k) for k in ('id', 'classification', 'origin', 'command', 'reason', 'log_tail', 'request_excerpt', 'probe_input', 'exit_code')}
+                for d in [*job.get('preflight_failures', []), *job.get('repair_feedback', [])]]
+    if job.get('repair_packet'):
+        failures = [{**entry, 'log_tail': ' | '.join(entry.get('trace') or [])} for entry in job['repair_packet']]
     current = store.get(operation_id)
     # The agent runner reads its inputs from the stored payload; policy 7 nests them under policy7_job.
     store.update(operation_id, payload={**current['payload'], 'brief': job.get('brief'), 'builder_guidance': guidance(job),
-        # One agent session per round: continuations resume it with their context intact.
-        'milestone_id': f"build-r{job.get('repair_round', 0)}", 'round_id': job.get('repair_round', 0),
+        # One agent session per round: continuations resume it with their context intact. The focused retry
+        # starts a FRESH session: re-sending the whole repair task into the first attempt's session pushed
+        # the request over the input budget in 15 of 15 archived repair retries (2026-09-25), so the retry
+        # never ran and the job reported "no source changes".
+        'milestone_id': f"build-r{job.get('repair_round', 0)}" + ('-retry' if job.get('recovery_used') else ''),
+        'round_id': job.get('repair_round', 0),
         'focused_recovery': bool(job.get('recovery_used')), 'builder_until_finish': True,
         'ui_required': any(re.search(r'\bbrowser\b|\bweb\b|\bfrontend\b', o.get('text', ''), re.I) for o in outcomes),
         'evidence': {'brief': job.get('brief'), 'failures': failures, 'revision_id': payload['revision_id']}})
@@ -123,6 +176,8 @@ def sdk_build(store, operation_id, repository, job, payload, *, runner=None):
     # The agent starts the app to try it, which leaves its database (with the agent's test rows) in the
     # project. That is runtime state, not a deliverable: the application recreates it on first start.
     planned = {name for batch in (job.get('brief') or {}).get('batches', []) for name in batch.get('files', [])}
+    from coder_scope import effective_task
+    keep_logs = logs_are_input(effective_task(job))
     for name in tree_hashes(repository.root, excludes).keys() - before.keys() - planned:
         path = repository.root / name
         try:
@@ -130,7 +185,8 @@ def sdk_build(store, operation_id, repository, job, payload, *, runner=None):
                 runtime_state = handle.read(16) == b'SQLite format 3\x00'
         except OSError:
             continue
-        if runtime_state or name.endswith(('-wal', '-shm', '-journal')):
+        # Server logs are runtime state too (the last patch of a medium build once changed only server.log).
+        if runtime_state or name.endswith(('-wal', '-shm', '-journal')) or (not keep_logs and runtime_log(name)):
             path.unlink(missing_ok=True)
     after = tree_hashes(repository.root, excludes)
     changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
@@ -138,11 +194,13 @@ def sdk_build(store, operation_id, repository, job, payload, *, runner=None):
     # Spent calls or a stalled agent end the pass at its checkpoint; neither is an inference fault.
     spent = 'model-call allowance' in error.lower()
     stalled = 'builder stalled' in error.lower()
-    category = 'source_changed' if changed else 'stalled' if stalled else 'allowance' if spent else 'environment' if error else \
-        'no_op' if outcome.get('agent_finished') else 'narration'
+    over_budget = 'input budget' in error.lower()
+    category = 'source_changed' if changed else 'stalled' if stalled else 'allowance' if spent else 'input_budget' if over_budget else \
+        'environment' if error else 'no_op' if outcome.get('agent_finished') else 'narration'
     result = {'builder': 'sdk', 'changed': changed, 'applied': changed, 'category': category, 'errors': [], 'source_hashes': after,
               'log_tail': error or outcome.get('incomplete_reason', ''), 'summary': f'{len(changed)} files changed',
               'allowance_spent': spent, 'stalled': stalled, 'agent_finished': bool(outcome.get('agent_finished')), 'execution_status': outcome.get('execution_status', ''),
-              'session_id': outcome.get('session_id', ''), 'events': outcome.get('events', 0), 'removed': removed}
+              'session_id': outcome.get('session_id', ''), 'events': outcome.get('events', 0), 'removed': removed,
+              'skeleton_applied': bool(skeleton_applied), 'input_budget': over_budget}
     store.event(operation_id, 'builder_returned', **{k: v for k, v in result.items() if k != 'source_hashes'})
     return result
