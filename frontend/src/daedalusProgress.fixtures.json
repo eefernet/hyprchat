@@ -1,0 +1,863 @@
+{
+ "accepted_java": {
+  "id": "cw3-378be2daaa13c916215503b9",
+  "state": "completed",
+  "policy_version": 7,
+  "mode": "build_from_prompt",
+  "model": "qwen3-coder:30b",
+  "builder": "sdk",
+  "batch": 2,
+  "build_continuations": 0,
+  "repair_round": 0,
+  "narrowed_targets": [],
+  "blocker": "",
+  "calls_used": 28,
+  "seconds_used": 180.95927000045776,
+  "project_name": "Unit Converter",
+  "user_task": "Build a Java 17 Maven project for a command-line unit converter. Main class `app.UnitConv`. Running it with arguments `<value> <from> <to>` prints only the converted number with exactly two decimal places. Support length units m, km, ft, mi and temperature units c, f, k. An unknown unit or incompatible pair prints an error to stderr and exits with code 2. Include JUnit 5 tests run by `mvn test` and a README with build and usage instructions.",
+  "revision_id": "7e94b579962d7649698b3af58a459edd7a7507b5",
+  "brief": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "text": "A command-line unit converter that converts between specified units and prints the result with exactly two decimal places",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    },
+    {
+     "id": "o2",
+     "text": "Error handling for unknown units or incompatible unit pairs, printing error to stderr and exiting with code 2",
+     "evidence_types": [
+      "behavior",
+      "tests"
+     ]
+    }
+   ],
+   "batches": [
+    {
+     "task": "Initialize Maven project structure and core implementation",
+     "files": [
+      "pom.xml",
+      "src/main/java/app/UnitConv.java"
+     ]
+    },
+    {
+     "task": "Add JUnit 5 tests for unit conversion logic",
+     "files": [
+      "src/test/java/app/UnitConvTest.java"
+     ]
+    },
+    {
+     "task": "Create README with build and usage instructions",
+     "files": [
+      "README.md"
+     ]
+    }
+   ]
+  },
+  "verification_summary": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "status": "passed",
+     "missing_evidence": [],
+     "reason": "The command-line unit converter correctly converts between specified units and prints results with exactly two decimal places. Behavior tests confirm accurate conversions for both length and temperature units, and the output formatting matches requirements.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    },
+    {
+     "id": "o2",
+     "status": "passed",
+     "missing_evidence": [],
+     "reason": "Error handling for unknown units or incompatible unit pairs works correctly. The program prints errors to stderr and exits with code 2 as required. Integration tests verify this behavior for all error cases including invalid units, incompatible types, and invalid number formats.",
+     "evidence_types": [
+      "behavior",
+      "tests"
+     ]
+    }
+   ]
+  },
+  "checks": [
+   {
+    "id": ".:build:0",
+    "phase": "build",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "mvn -q -DskipTests package",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:test:0",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "mvn test",
+    "test_count": 5,
+    "is_test": true,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:build:0",
+    "phase": "build",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "mvn -q -DskipTests package",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "audit-2",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "outcomes": [
+     "o1"
+    ],
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "audit-1",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "\"$DAEDALUS_AUDIT_PYTHON\" {audit}/test_behavior.py",
+    "test_count": null,
+    "is_test": true,
+    "outcomes": [
+     "o1",
+     "o2"
+    ],
+    "repair_demonstrated": false,
+    "log_tail": ""
+   }
+  ],
+  "last_patch": {
+   "changed": [],
+   "category": "environment",
+   "source_hashes": {
+    "README.md": "h",
+    "pom.xml": "h",
+    "src/main/java/app/UnitConv.java": "h",
+    "src/test/java/app/UnitConvTest.java": "h"
+   }
+  },
+  "inventory": {
+   "files": 4
+  },
+  "artifact": {
+   "id": "a"
+  },
+  "candidate_artifact": null,
+  "reviews": [
+   1
+  ],
+  "audit_history": [
+   1
+  ]
+ },
+ "withheld_csharp": {
+  "id": "cw3-e3da47216b950f942d453746",
+  "state": "ready_for_review",
+  "policy_version": 7,
+  "mode": "build_from_prompt",
+  "model": "qwen3-coder:30b",
+  "builder": "sdk",
+  "batch": 2,
+  "build_continuations": 0,
+  "repair_round": 1,
+  "audit_corrections": 2,
+  "narrowed_targets": [],
+  "stop_limit": "audit_corrections",
+  "blocker": "Both audit correction attempts were used; independent evidence is incomplete.",
+  "calls_used": 64,
+  "seconds_used": 460.16293263435364,
+  "project_name": "CsvStats",
+  "user_task": "Build a C# .NET 8 solution named CsvStats with a console app project `CsvStats` and an xUnit test project `CsvStats.Tests`. Running the app with `<file.csv> --column <name>` reads a CSV with a header row and prints three lines for that numeric column: `min X`, `max X`, `mean X`, each with exactly two decimal places. An unknown column or missing file prints an error to stderr and exits with code 2. Put the statistics logic in its own class used by both the app and the tests. Include a README with build and usage instructions.",
+  "revision_id": "adc049e5b2e432cc5c779739c955a501c73e2f84",
+  "brief": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "text": "A C# .NET 8 solution that reads a CSV file, calculates min, max, and mean for a specified numeric column, and outputs results with two decimal places.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    }
+   ],
+   "batches": [
+    {
+     "task": "Create the solution structure with console app and test project",
+     "files": [
+      "CsvStats.sln",
+      "CsvStats/CsvStats.csproj",
+      "CsvStats.Tests/CsvStats.Tests.csproj"
+     ]
+    },
+    {
+     "task": "Implement the CSV statistics logic in a shared class",
+     "files": [
+      "CsvStats/StatisticsCalculator.cs",
+      "CsvStats/Program.cs",
+      "CsvStats.Tests/StatisticsCalculatorTests.cs"
+     ]
+    },
+    {
+     "task": "Add README with build and usage instructions",
+     "files": [
+      "README.md"
+     ]
+    }
+   ]
+  },
+  "verification_summary": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "status": "unverified",
+     "missing_evidence": [
+      "behavior"
+     ],
+     "reason": "All requirements met including CSV parsing, statistics calculation with exactly two decimal places, proper error handling, and README documentation.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    }
+   ]
+  },
+  "checks": [
+   {
+    "id": ".:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.sln",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.csproj",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Shared:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.Shared.csproj",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Tests:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.Tests.csproj",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:build:0",
+    "phase": "build",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.sln --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats:build:0",
+    "phase": "build",
+    "cwd": "CsvStats",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.csproj --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Shared:build:0",
+    "phase": "build",
+    "cwd": "CsvStats.Shared",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.Shared.csproj --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Tests:build:0",
+    "phase": "build",
+    "cwd": "CsvStats.Tests",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.Tests.csproj --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:test:0",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet test CsvStats.sln --no-build",
+    "test_count": 5,
+    "is_test": true,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Tests:test:0",
+    "phase": "test",
+    "cwd": "CsvStats.Tests",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet test CsvStats.Tests.csproj --no-build",
+    "test_count": 5,
+    "is_test": true,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "interface:--column",
+    "passed": true,
+    "classification": "passed",
+    "outcomes": [],
+    "repair_demonstrated": false,
+    "reason": "",
+    "log_tail": ""
+   },
+   {
+    "id": ".:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.sln",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.csproj",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Shared:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.Shared.csproj",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Tests:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet restore CsvStats.Tests.csproj",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:build:0",
+    "phase": "build",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.sln --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats:build:0",
+    "phase": "build",
+    "cwd": "CsvStats",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.csproj --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Shared:build:0",
+    "phase": "build",
+    "cwd": "CsvStats.Shared",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.Shared.csproj --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "CsvStats.Tests:build:0",
+    "phase": "build",
+    "cwd": "CsvStats.Tests",
+    "passed": true,
+    "classification": "passed",
+    "command": "dotnet build CsvStats.Tests.csproj --no-restore",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "audit-2",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "outcomes": [
+     "o1"
+    ],
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "audit-1",
+    "phase": "test",
+    "cwd": ".",
+    "passed": false,
+    "classification": "missing_coverage",
+    "command": "\"$DAEDALUS_AUDIT_PYTHON\" {audit}/test_behavior.py",
+    "test_count": null,
+    "is_test": true,
+    "outcomes": [
+     "o1"
+    ],
+    "repair_demonstrated": false,
+    "log_tail": "Traceback (most recent call last):\n  File \"/opt/daedalus-repair-20260918-builds7/worker/execution/cw3-e3da47216b950f942d453746-20/audit/test_behavior.py\", line 105, in <module>\n    test_csvstats_behavior()\n    ~~~~~~~~~~~~~~~~~~~~~~^^\n  File \"/opt/daedalus-repair-20260918-builds7/worker/execution/cw3-e3da47216b950f942d453746-20/audit/test_behavior.py\", line 29, in test_csvstats_behavior\n    with open(csv_file, \"w\") as f:\n         ~~~~^^^^^^^^^^^^^^^\nOSError: [Errno 30] Read-only file system: '/opt/daedalus-repair-20260918-builds7/worker/execution/cw3-e3da47216b950f942d453746-20/project/test_data.csv'\n"
+   },
+   {
+    "id": "interface:--column",
+    "passed": true,
+    "classification": "passed",
+    "outcomes": [],
+    "repair_demonstrated": false,
+    "reason": "",
+    "log_tail": ""
+   }
+  ],
+  "last_patch": {
+   "changed": [],
+   "category": "environment",
+   "source_hashes": {
+    "CsvStats.sln": "h",
+    "README.md": "h",
+    "CsvStats/CsvStats.csproj": "h",
+    "CsvStats/Program.cs": "h",
+    "CsvStats.Shared/CsvStats.Shared.csproj": "h",
+    "CsvStats.Shared/StatisticsCalculator.cs": "h",
+    "CsvStats.Tests/CsvStats.Tests.csproj": "h",
+    "CsvStats.Tests/StatisticsCalculatorTests.cs": "h",
+    "test-data/sample.csv": "h"
+   }
+  },
+  "inventory": {
+   "files": 167
+  },
+  "artifact": null,
+  "candidate_artifact": {
+   "id": "c",
+   "metadata": {
+    "runnable": true
+   }
+  },
+  "reviews": [
+   1,
+   1,
+   1,
+   1
+  ],
+  "audit_history": [
+   1,
+   1,
+   1
+  ]
+ },
+ "no_progress_c": {
+  "id": "cw3-104d3b4f424a7bf67e63b784",
+  "state": "ready_for_review",
+  "policy_version": 7,
+  "mode": "build_from_prompt",
+  "model": "qwen3-coder:30b",
+  "builder": "sdk",
+  "batch": 0,
+  "repair_round": 1,
+  "narrowed_targets": [],
+  "stop_limit": "no_progress",
+  "blocker": "The builder made no source changes after a focused retry.",
+  "calls_used": 52,
+  "seconds_used": 213.92115306854248,
+  "project_name": "rpncalc",
+  "user_task": "Build a C11 command-line reverse Polish notation calculator named rpncalc using CMake. Running `rpncalc \"3 4 + 2 *\"` prints the result with exactly two decimal places (14.00). Support + - * / on doubles. Division by zero or a malformed expression prints an error to stderr and exits with code 2. Put the evaluator in its own source file with a header, add assert-based tests registered with CTest (enable_testing and add_test), and a README with build and usage instructions.",
+  "revision_id": "72c2deba23e176a977f85393453b713273c94bc1",
+  "brief": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "text": "A C11 command-line reverse Polish notation calculator named rpncalc that evaluates expressions like \"3 4 + 2 *\" and prints results with exactly two decimal places.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    },
+    {
+     "id": "o2",
+     "text": "The calculator handles basic arithmetic operations (+, -, *, /) on doubles and exits with code 2 on division by zero or malformed expressions.",
+     "evidence_types": [
+      "behavior",
+      "tests"
+     ]
+    }
+   ],
+   "batches": [
+    {
+     "task": "Initialize CMake project and create core source files for rpncalc",
+     "files": [
+      "CMakeLists.txt",
+      "src/rpncalc.c",
+      "src/rpncalc.h"
+     ]
+    },
+    {
+     "task": "Add evaluator logic, tests, and README documentation",
+     "files": [
+      "src/evaluator.c",
+      "test/test_evaluator.c",
+      "README.md"
+     ]
+    }
+   ]
+  },
+  "verification_summary": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "status": "unverified",
+     "missing_evidence": [
+      "tests"
+     ],
+     "reason": "The rpncalc calculator correctly evaluates expressions like \"3 4 + 2 *\" and prints results with exactly two decimal places. The behavior test confirms this functionality.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    },
+    {
+     "id": "o2",
+     "status": "failed",
+     "missing_evidence": [
+      "tests"
+     ],
+     "reason": "While the calculator handles basic arithmetic operations, it does not properly exit with code 2 on division by zero or malformed expressions. The test_evaluator executable fails because it calls exit(2) which causes CTest to report failure, but the underlying logic for error handling is present in the evaluator.c file.",
+     "evidence_types": [
+      "behavior",
+      "tests"
+     ]
+    }
+   ]
+  },
+  "checks": [
+   {
+    "id": ".:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "cmake -S . -B build",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:build:0",
+    "phase": "build",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "cmake --build build",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:test:0",
+    "phase": "test",
+    "cwd": ".",
+    "passed": false,
+    "classification": "missing_coverage",
+    "command": "ctest --test-dir build --output-on-failure",
+    "test_count": 1,
+    "is_test": true,
+    "repair_demonstrated": false,
+    "log_tail": "ecution/cw3-104d3b4f424a7bf67e63b784-10/project/build\nTest project /opt/daedalus-repair-20260918-builds3/worker/execution/cw3-104d3b4f424a7bf67e63b784-10/project/build\n    Start 1: test_evaluator\n1/1 Test #1: test_evaluator ...................***Failed    0.00 sec\nRunning evaluator tests...\n\u2713 Simple addition test passed\n\u2713 Simple multiplication test passed\n\u2713 Complex expression test passed\n\u2713 Division test passed\n\u2713 Subtraction test passed\n\u2713 Complex calculation test passed\n\u2713 Single number test passed\n\u2713 Division by zero test passed\n\n\n0% tests passed, 1 tests failed out of 1\n\nTotal Test time (real) =   0.00 sec\n\nThe following tests FAILED:\n\t  1 - test_evaluator (Failed)\nErrors while running CTest\n"
+   },
+   {
+    "id": ".:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "cmake -S . -B build",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:build:0",
+    "phase": "build",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "cmake --build build",
+    "test_count": null,
+    "is_test": false,
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "audit-2",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "outcomes": [
+     "o1"
+    ],
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": "audit-1",
+    "phase": "test",
+    "cwd": ".",
+    "passed": true,
+    "classification": "passed",
+    "command": "\"$DAEDALUS_AUDIT_PYTHON\" {audit}/test_behavior.py",
+    "test_count": null,
+    "is_test": true,
+    "outcomes": [
+     "o1",
+     "o2"
+    ],
+    "repair_demonstrated": false,
+    "log_tail": ""
+   }
+  ],
+  "last_patch": {
+   "changed": [],
+   "category": "environment",
+   "source_hashes": {
+    "CMakeLists.txt": "h",
+    "README.md": "h",
+    "src/evaluator.c": "h",
+    "src/rpncalc.c": "h",
+    "src/rpncalc.h": "h",
+    "test/test_evaluator.c": "h"
+   }
+  },
+  "inventory": {
+   "files": 6
+  },
+  "artifact": null,
+  "candidate_artifact": {
+   "id": "c",
+   "metadata": {
+    "runnable": true
+   }
+  },
+  "reviews": [
+   1,
+   1
+  ],
+  "audit_history": [
+   1
+  ]
+ },
+ "node_syntax_error": {
+  "id": "cw3-99bac6cb1830d61274ba4222",
+  "state": "ready_for_review",
+  "policy_version": 7,
+  "mode": "build_from_prompt",
+  "model": "qwen3-coder:30b",
+  "builder": "sdk",
+  "batch": 1,
+  "build_continuations": 0,
+  "repair_round": 2,
+  "narrowed_targets": [],
+  "stop_limit": "application_repairs",
+  "blocker": "Both application repair rounds were used.",
+  "calls_used": 83,
+  "seconds_used": 405.29924416542053,
+  "project_name": "mdtoc",
+  "user_task": "Build a Node.js command-line tool named mdtoc with no runtime dependencies. Running `node mdtoc.js <file.md>` prints a table of contents for the Markdown headings: one line per heading as two spaces of indentation per level below 1, then `- [Title](#slug)`, where the slug is the lowercased title with spaces replaced by hyphens and characters other than letters, digits and hyphens removed. Support `--max-depth N` to ignore deeper headings. A missing file prints an error to stderr and exits with code 2. Include tests run by `npm test` using node:test, and a README.",
+  "revision_id": "dfaf8426cc049ea2d5d0fd33f1df950c48cf2a7c",
+  "brief": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "text": "A Node.js command-line tool named mdtoc that generates a table of contents for Markdown headings with specified depth limit and proper slug formatting.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    }
+   ],
+   "batches": [
+    {
+     "task": "Initialize the Node.js command-line tool with package manifest and core implementation",
+     "files": [
+      "package.json",
+      "mdtoc.js",
+      "README.md"
+     ]
+    },
+    {
+     "task": "Add tests using node:test for the mdtoc functionality",
+     "files": [
+      "test.mjs",
+      "node:test"
+     ]
+    }
+   ]
+  },
+  "verification_summary": {
+   "outcomes": [
+    {
+     "id": "o1",
+     "status": "unverified",
+     "missing_evidence": [
+      "behavior",
+      "documentation",
+      "tests"
+     ],
+     "reason": "The tool correctly generates table of contents with proper slug formatting, indentation, and --max-depth support. All tests pass and behavior matches requirements.",
+     "evidence_types": [
+      "behavior",
+      "documentation",
+      "tests"
+     ]
+    }
+   ]
+  },
+  "checks": [
+   {
+    "id": ".:setup:0",
+    "phase": "setup",
+    "passed": true,
+    "classification": "passed",
+    "command": "npm install --package-lock=false",
+    "repair_demonstrated": false,
+    "log_tail": ""
+   },
+   {
+    "id": ".:test:0",
+    "phase": "test",
+    "cwd": ".",
+    "passed": false,
+    "classification": "missing_provenance",
+    "command": "npm run test",
+    "test_count": null,
+    "is_test": true,
+    "repair_demonstrated": false,
+    "log_tail": "pe: 'test'\n  ...\n# Subtest: generateTOC generates correct table of contents\nok 2 - generateTOC generates correct table of contents\n  ---\n  duration_ms: 1.430736\n  type: 'test'\n  ...\n# Subtest: generateTOC respects max-depth option\nok 3 - generateTOC respects max-depth option\n  ---\n  duration_ms: 0.170088\n  type: 'test'\n  ...\n# Subtest: generateTOC handles empty content\nok 4 - generateTOC handles empty content\n  ---\n  duration_ms: 0.132486\n  type: 'test'\n  ...\n# Subtest: generateTOC handles no headings\nok 5 - generateTOC handles no headings\n  ---\n  duration_ms: 0.190029\n  type: 'test'\n  ...\n1..5\n# tests 5\n# suites 0\n# pass 5\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 14.142886\n"
+   },
+   {
+    "id": "interface:--max-depth",
+    "passed": true,
+    "classification": "passed",
+    "outcomes": [],
+    "repair_demonstrated": false,
+    "reason": "",
+    "log_tail": ""
+   },
+   {
+    "id": "audit-metadata",
+    "passed": false,
+    "classification": "audit_defect",
+    "log_tail": "Audit is not executable evidence: test_behavior.py contains no assert statement. Only executed plain `assert` statements count as evidence; replace print/sys.exit style checks with `assert actual == expected, message`. | test_behavior.py launches the application with the Python interpreter (sys.executable), but this is a Node program. Launch it with its own runtime: subprocess.run([\"node\", ...])."
+   }
+  ],
+  "last_patch": {
+   "changed": [],
+   "category": "environment",
+   "source_hashes": {
+    "README.md": "h",
+    "debug_test.mjs": "h",
+    "mdtoc.js": "h",
+    "output.txt": "h",
+    "package.json": "h",
+    "sample.md": "h",
+    "temp_test.md": "h",
+    "test.mjs": "h",
+    "test_file.md": "h"
+   }
+  },
+  "inventory": {
+   "files": 9
+  },
+  "artifact": null,
+  "candidate_artifact": {
+   "id": "c",
+   "metadata": {
+    "runnable": false
+   }
+  },
+  "reviews": [
+   1,
+   1,
+   1
+  ],
+  "audit_history": [
+   1
+  ]
+ }
+}

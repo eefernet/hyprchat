@@ -4,7 +4,11 @@ from __future__ import annotations
 import json
 import time
 
-from context_policy import estimate_tokens, resolve
+from context_policy import estimate_tokens, resolve, operation_settings, thinking_options
+
+
+class InputBudgetError(ValueError):
+    failure_category = "input_budget"
 
 
 def require_local_model(url, model, timeout=15):
@@ -19,6 +23,7 @@ def require_local_model(url, model, timeout=15):
         raise ValueError("This Ollama model uses remote inference; select a local model in Settings")
     if details.get("error"):
         raise ValueError(details["error"])
+    return details
 
 
 def ensure_context(url, model, policy, timeout, requests_client=None):
@@ -45,25 +50,46 @@ def ensure_context(url, model, policy, timeout, requests_client=None):
         raise ValueError(f'Ollama did not allocate the configured {policy.num_ctx} context. Adjust Settings or runtime memory.')
 
 
-def local_chat(store, operation_id, role, messages, *, temperature=0.2):
+def local_chat(store, operation_id, role, messages, *, temperature=0.2, model=None, schema=None):
     """Stream internally so cancellation closes inference, and count real calls."""
     import requests
     from coder_worker_runtime import _boundary
     operation = _boundary(store, operation_id)
     payload = operation['payload']
-    policy = resolve(role, payload['settings'])
-    estimate = estimate_tokens({'messages':messages})
+    policy = resolve(role, operation_settings(payload))
+    model = model or payload['model']
+    images = sum(len(message.get('images',[])) for message in messages)
+    details = require_local_model(payload['ollama_url'],model) if payload.get('policy_version',1)>=2 or images else {}
+    estimate = estimate_tokens({'messages':[{k:v for k,v in message.items() if k!='images'} for message in messages]})
+    if images:
+        if 'vision' not in details.get('capabilities',[]):
+            raise ValueError('Selected local model does not support images')
+        estimate += images * payload['settings'].get('daedalus_image_tokens',2048)
     if estimate > policy.input_budget:
-        raise ValueError(f'{role} input exceeds the configured context. Narrow the source range or increase context in Settings.')
+        raise InputBudgetError(f'{role} input exceeds the configured context. Narrow the source range or increase context in Settings.')
     url = payload['ollama_url'].rstrip('/')
     remaining = payload['seconds_remaining'] - (time.time() - operation['started'])
-    ensure_context(url, payload['model'], policy, remaining)
+    ensure_context(url, model, policy, remaining)
     _boundary(store, operation_id, model_call=True)
-    store.event(operation_id, 'model_call', context=policy.as_dict(), prompt_tokens_estimate=estimate, model=payload['model'])
+    store.event(operation_id, 'model_call', context=policy.as_dict(), prompt_tokens_estimate=estimate, image_count=images, model=model)
     content, final = [], None
-    with requests.post(url + '/api/chat', json={'model':payload['model'],'messages':messages,'stream':True,
+    thinking, thinking_mode = thinking_options(role,{**payload,'model':model},details)
+    store.event(operation_id,'inference_policy',role=role,thinking=thinking_mode,structured=bool(schema))
+    mode=payload.get('structured_mode','schema')
+    formatting = {'format':'json' if mode=='json' else schema} if schema and mode!='text' and not payload.get('schema_unsupported') else {}
+    with requests.post(url + '/api/chat', json={'model':model,'messages':messages,'stream':True,**thinking,**formatting,
             'options':{'num_ctx':policy.num_ctx,'num_predict':policy.num_predict,'temperature':temperature}},
+            headers={'X-Daedalus-Role': role},
             timeout=remaining, stream=True) as response:
+        if formatting and response.status_code in (400,422) and any(word in response.text.lower() for word in ('format','schema','grammar')):
+            if payload.get('policy_version',1)>=5:
+                from coder_response_recovery import ResponseFormatError
+                raise ResponseFormatError('Runtime rejected response format: '+response.text[:1000])
+            response.close()
+            current=store.get(operation_id)
+            store.update(operation_id,payload={**current['payload'],'schema_unsupported':True})
+            store.event(operation_id,'structured_output_fallback',reason='Runtime rejected response schema; semantic validation remains required',detail=response.text[:1000])
+            return local_chat(store,operation_id,role,messages,temperature=temperature,model=model)
         response.raise_for_status()
         for line in response.iter_lines():
             _boundary(store, operation_id)
@@ -81,6 +107,16 @@ def local_chat(store, operation_id, role, messages, *, temperature=0.2):
     if (final.get('prompt_eval_count') or 0) > policy.input_budget:
         raise ValueError('Actual prompt usage exceeded the configured input budget; narrow evidence or increase context in Settings')
     if final.get('done_reason') == 'length':
+        if payload.get('policy_version', 1) >= 7:
+            from coder_response_recovery import ResponseFormatError
+            store.event(operation_id, 'output_limit', response=''.join(content),
+                        usage={k: final.get(k) for k in ('prompt_eval_count', 'eval_count')})
+            raise ResponseFormatError('Output limit reached; split this component into file-specific edits within Settings limits',
+                                      response=''.join(content), failure_category='output_limit')
+        if schema and payload.get('policy_version',1)>=5:
+            from coder_response_recovery import ResponseFormatError
+            raise ResponseFormatError('Response reached the configured completion allowance; return a concise complete response within the same limit',
+                response=''.join(content), failure_category='output_limit')
         raise ValueError('Response reached the configured completion allowance; increase it in Settings or narrow the task')
     return ''.join(content)
 
@@ -90,7 +126,7 @@ def summarize_history(store, operation_id, history):
     serialized = json.dumps(history, ensure_ascii=False)
     summary, offset = '', 0
     while offset < len(serialized):
-        policy = resolve('compaction', store.get(operation_id)['payload']['settings'])
+        policy = resolve('compaction', operation_settings(store.get(operation_id)['payload']))
         instruction = ('Summarize execution evidence: requirements, decisions, source paths and hashes, checks, failed approaches, remaining work. '
                        'Preserve uncertainties. Do not invent completed work.\n')
         available = policy.input_budget - estimate_tokens(instruction + summary) - estimate_tokens({'messages':[{'role':'user','content':''}]})

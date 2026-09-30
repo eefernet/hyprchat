@@ -44,7 +44,7 @@ export function SkeletonList({t,rows=4,avatar=false,style}){
 }
 
 export function SkeletonGrid({t,cards=6,minW=250,cardH=120,style}){
-  return <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${minW}px,1fr))`,gap:12,...style}}>
+  return <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(min(100%,${minW}px),1fr))`,gap:12,...style}}>
     {Array.from({length:cards},(_,i)=><SkeletonCard key={i} t={t} h={cardH}/>)}
   </div>;
 }

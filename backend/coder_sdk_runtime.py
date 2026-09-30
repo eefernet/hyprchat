@@ -11,9 +11,10 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 import uuid
 
-from context_policy import resolve, estimate_tokens, compaction_segments
+from context_policy import resolve, estimate_tokens, compaction_segments, operation_settings, thinking_options, compile_context
 
 
 def text_tool_calls(content, tools, *, allow_stopped=False):
@@ -45,12 +46,21 @@ def text_tool_calls(content, tools, *, allow_stopped=False):
     return content, calls
 
 
-def pin_task_text(messages, task):
+def pin_task_text(messages, task, *, deduplicate=False):
     """Pin current repair evidence before the SDK adds text-tool examples."""
     messages = copy.deepcopy(messages)
     first_user = next((message for message in messages if message.get("role") == "user"), None)
     if first_user is not None:
         first_user["content"] = task
+        if deduplicate:
+            for message in messages:
+                if message is first_user or message.get("role") != "user":
+                    continue
+                content=message.get("content")
+                if isinstance(content,list) and all(isinstance(item,dict) and item.get("type")=="text" for item in content):
+                    content="".join(item.get("text","") for item in content)
+                if content==task:
+                    message["content"]="Continue from the saved workspace. The current request and verification evidence are pinned in the first user message above."
     else:
         messages.append({"role":"user", "content":task})
     return messages
@@ -73,28 +83,42 @@ def normalize_text_tool_response(response, tools, *, allow_stopped=False):
     return count
 
 
-def compile_context(messages, tools, policy, summarize):
-    """Compact whole older turns; preserve instructions and tool pairing."""
-    parts = compaction_segments(messages, tools, policy)
-    if parts is None:
-        return messages, False
-    prefix, older, tail = parts
-    summary = summarize(older)
-    rebuilt = [*prefix, {"role": "user", "content": "Earlier execution checkpoint (source files remain authoritative):\n" + summary}, *tail]
-    if estimate_tokens({"messages": rebuilt, "tools": tools}) > policy.input_budget:
-        raise ValueError("Current tool evidence still exceeds context after compaction; increase context or request narrower ranges")
-    return rebuilt, True
+def text_tool_history(messages):
+    """Serialize native batches for the SDK's single-call text converter.
+
+    This changes only the inference copy of already recorded history. The SDK
+    retains ownership of dispatch; no action or observation is dropped/replayed.
+    """
+    result=[]
+    for message in copy.deepcopy(messages):
+        calls=message.get('tool_calls') or []
+        if message.get('role')=='assistant' and len(calls)>1:
+            for index,call in enumerate(calls):
+                result.append({**message,'content':message.get('content') if index==0 else '', 'tool_calls':[call]})
+        else:result.append(message)
+    return result
+
+
+def tool_mode_is_definitive(worker, url, model, native):
+    """Whether a probe result may be saved for later operations.
+
+    The worker's probe answers False both for "this model cannot call tools" (which it records in
+    its own cache) and for a transient failure such as Ollama restarting (which it deliberately does
+    not). Saving the second kind demoted the model to text mode for every later build.
+    """
+    return bool(native) or getattr(worker, '_tool_support_cache', {}).get(f'{url}:{model}') is False
 
 
 def drive_to_finish(conversation, events, turns, limit):
     """A narrative message is not an explicit agent completion."""
     while turns() < limit():
-        before = turns()
+        before, event_start = turns(), len(events)
         conversation.max_iteration_per_run = limit() - before
         conversation.run()
+        # Only this pass: an earlier finish event must not end a later pass that finished nothing.
         finished = any(event.get("kind") == "ActionEvent" and
                        (event.get("tool_name") == "finish" or (event.get("action") or {}).get("kind") == "FinishAction")
-                       for event in events)
+                       for event in events[event_start:])
         state = str(conversation.state.execution_status).lower()
         if finished and "finish" in state:
             return True
@@ -116,6 +140,35 @@ def checkpoint_delta(history, checkpoint):
     return history
 
 
+def drive_to_checkpoint(conversation, events, turns, limit, source_tree, recovered, mark_recovery):
+    """Return after a real checkpoint; reads and next-step narration are not edits."""
+    while turns() < limit():
+        before, event_start, tree = turns(), len(events), source_tree()
+        conversation.max_iteration_per_run = limit() - before
+        conversation.run()
+        fresh = events[event_start:]
+        finished = any(e.get('tool_name') == 'finish' or (e.get('action') or {}).get('kind') == 'FinishAction' for e in fresh)
+        last_message = next((e for e in reversed(fresh) if e.get('kind') == 'MessageEvent'), {})
+        message = last_message.get('llm_message') or last_message.get('message') or {}
+        contents = message.get('content', [])
+        text = contents if isinstance(contents, str) else ' '.join(c.get('text', '') for c in contents if isinstance(c, dict))
+        next_step = bool(re.search(r'\b(?:now (?:let me|I will|I.ll)|let me also|next I(?: will|.ll))\s+(?:create|check|write|add|run|fix|implement|inspect|read|update|build|test)\b', text, re.I))
+        if finished:
+            return True
+        if source_tree() != tree and (not next_step or recovered()):
+            return False
+        if recovered() or turns() == before or turns() >= limit():
+            return False
+        mark_recovery()
+        conversation.send_message('Only inspection or a next-step announcement was returned. Execute the next necessary implementation or test action now. '
+                                  'Complete the requested deliverables, or return a concrete blocker. Do not repeat a summary.')
+    return False
+
+
+def tool_mode_key(model_digest, runtime, tool_configuration):
+    return hashlib.sha256(json.dumps([model_digest, runtime, tool_configuration], sort_keys=True).encode()).hexdigest()
+
+
 def native_narration_streak(response, tools, native, previous):
     """A successful probe is insufficient when real requests produce no calls."""
     if not native or not tools:
@@ -127,6 +180,11 @@ def native_narration_streak(response, tools, native, previous):
 
 
 def run_coder(store, operation_id, repository):
+    from coder_sandbox_agent import run_isolated
+    return run_isolated(store, operation_id, repository)
+
+
+def _run_coder_local(store, operation_id, repository):
     import requests
     from coder_worker_runtime import _boundary, evidence_catalog
 
@@ -136,22 +194,50 @@ def run_coder(store, operation_id, repository):
     worker._ensure_sdk()
     operation = store.get(operation_id)
     payload = operation["payload"]
-    policy = resolve("builder", payload["settings"])
+    policy = resolve("builder", operation_settings(payload))
     url = payload["ollama_url"].rstrip("/")
     req = worker.RunRequest(task=payload["task"], model=payload["model"], ollama_url=url,
                             num_ctx=policy.num_ctx, num_predict=policy.num_predict,
                             max_rounds=payload["settings"]["daedalus_attempt_turns"],
                             disable_thinking=payload.get("disable_thinking", True),
                             reasoning_effort=payload.get("reasoning_effort", "medium"))
-    native = worker._check_tool_support(url, req.model, num_ctx=req.num_ctx, num_predict=req.num_predict,
-                                        on_call=lambda: _boundary(store, operation_id, model_call=True))
+    mode_path=store.root/'jobs'/operation['job_id']/'tool-mode.json'
+    if payload.get('policy_version', 1) >= 6:
+        import importlib.metadata
+        response = requests.get(url + '/api/tags', timeout=15)
+        response.raise_for_status()
+        names = {req.model, req.model + ':latest'}
+        model_digest = next((m.get('digest') for m in response.json().get('models', []) if m.get('name') in names or m.get('model') in names), None)
+        if not model_digest:
+            raise ValueError('Installed model digest is unavailable; cannot select a tool mode safely')
+        configuration = {'browser':payload.get('ui_required', False), 'worker':hashlib.sha256(Path(worker.__file__).read_bytes()).hexdigest(),
+                         'adapter':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+        key = tool_mode_key(model_digest, importlib.metadata.version('openhands-sdk'), configuration)
+        mode_path = store.root / 'tool-modes' / (key + '.json')
+    mode_path.parent.mkdir(parents=True,exist_ok=True)
+    try: saved_mode=json.loads(mode_path.read_text())
+    except (OSError,ValueError): saved_mode={}
+    if payload.get('policy_version', 1) >= 6 and saved_mode.get('mode') in {'native', 'text'}:
+        native = saved_mode['mode'] == 'native'
+    else:
+        native = worker._check_tool_support(url, req.model, num_ctx=req.num_ctx, num_predict=req.num_predict,
+                                            on_call=lambda: _boundary(store, operation_id, model_call=True))
+        if payload.get('policy_version', 1) >= 6 and tool_mode_is_definitive(worker, url, req.model, native):
+            temporary = mode_path.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'mode':'native' if native else 'text'})); temporary.replace(mode_path)
     llm, agent = worker._make_llm_and_agent(req, url, native)
+    if payload.get('policy_version',1)>=3 and saved_mode.get('model')==req.model and saved_mode.get('mode')=='text':
+        llm.native_tool_calling=False
+    if payload.get("policy_version",1)>=2 and payload.get("ui_required"):
+        from coder_browser_tool import install
+        install(agent,store,operation_id,repository)
     llm.max_input_tokens = policy.input_budget
     llm.max_output_tokens = policy.num_predict
     llm.num_retries = 0  # The job controller classifies failures; no hidden retry budget.
     original_transport = worker._LLM._transport_call
     original_format = worker._LLM.format_messages_for_llm
     original_post_mock = worker._LLM.post_response_prompt_mock
+    original_completion = worker._LLM.completion
     task = None
     summary_cache = {}
     inference_turns = 0
@@ -178,9 +264,31 @@ def run_coder(store, operation_id, repository):
         temporary.replace(checkpoint_path)
         return summary
 
+    window_path = checkpoint_path.with_suffix('.window.json')
+    try:
+        window_state = json.loads(window_path.read_text())
+    except (OSError, ValueError):
+        window_state = {}
+
+    def save_window(state):
+        temporary = window_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(state))
+        temporary.replace(window_path)
+
+    from coder_context import ContextWindow, StallGuard
+    window = ContextWindow(window_state, save_window)
+    # Only whole-project builds are guarded: inspecting many files is normal for a scoped repair.
+    guard = StallGuard() if payload.get('builder_until_finish') else None
+
+    def missing_files():
+        planned = [name for batch in (payload.get('brief') or {}).get('batches', []) for name in batch.get('files', [])]
+        return [name for name in dict.fromkeys(planned) if not (repository.root / name).exists()]
+
     def format_messages(self, messages):
         formatted = original_format(self, messages)
-        return pin_task_text(formatted, task) if task is not None else formatted
+        if task is not None:
+            formatted=pin_task_text(formatted, task, deduplicate=payload.get("policy_version",1)>=2)
+        return text_tool_history(formatted) if payload.get('policy_version',1)>=3 and not self.native_tool_calling else formatted
 
     def post_prompt_mock(self, response, nonfncall_msgs, tools):
         count = normalize_text_tool_response(response, tools, allow_stopped=True)
@@ -189,21 +297,53 @@ def run_coder(store, operation_id, repository):
             return response
         return original_post_mock(self, response, nonfncall_msgs, tools)
 
+    def completion(self, messages, tools=None, **kwargs):
+        from coder_failures import malformed_native_call
+        try:
+            return original_completion(self,messages,tools=tools,**kwargs)
+        except Exception as error:
+            if payload.get('policy_version',1)<3 or not self.native_tool_calling or not tools or not malformed_native_call(error):
+                raise
+            # This boundary precedes SDK tool dispatch. No arguments from the
+            # rejected response are executed, and earlier actions are not replayed.
+            self.native_tool_calling=False
+            temporary=mode_path.with_suffix('.tmp')
+            temporary.write_text(json.dumps({'model':req.model,'mode':'text'}));temporary.replace(mode_path)
+            store.event(operation_id,'tool_mode_fallback',reason='Malformed native tool response before execution',recovery_attempted=True)
+            return original_completion(self,messages,tools=tools,**kwargs)
+
     def transport(self, *, messages, **kwargs):
         nonlocal inference_turns, narration_streak
         current = _boundary(store, operation_id)
-        active = resolve("builder", current["payload"]["settings"])
-        compiled, compacted = compile_context(copy.deepcopy(messages), kwargs.get("tools"), active, summarize)
+        active = resolve("builder", operation_settings(current["payload"]))
+        if guard and guard.stalled():
+            store.event(operation_id, 'builder_stalled', streak=guard.streak, targets=list(dict.fromkeys(guard.targets))[:12])
+            raise RuntimeError('Builder stalled: it kept re-reading the same files after a specific correction')
+        notice = guard.correction(missing_files()) if guard else ''
+        if notice:
+            store.event(operation_id, 'builder_nudge', streak=guard.streak)
+            messages = [*messages, {'role': 'user', 'content': notice}]
+        # One boundary per session: a summary is reused until the working context fills again.
+        compiled, compacted = window.compile(copy.deepcopy(messages), kwargs.get("tools"), active, summarize)
         from coder_inference import ensure_context
-        ensure_context(url, req.model, active, current["payload"]["seconds_remaining"])
+        # The time LEFT, as local_chat passes it: the whole allowance let a wedged Ollama hold one turn for an hour.
+        ensure_context(url, req.model, active, max(1, current["payload"]["seconds_remaining"] - (time.time() - current["started"])))
         _boundary(store, operation_id, model_call=True)
         extra = copy.deepcopy(kwargs.get("extra_body") or {})
         extra["options"] = {**extra.get("options", {}), "num_ctx": active.num_ctx, "num_predict": active.num_predict}
         kwargs["extra_body"] = extra
+        if payload.get('policy_version',1)>=3:
+            from coder_inference import require_local_model
+            details=require_local_model(url,req.model)
+            thinking,mode=thinking_options('builder',current['payload'],details)
+            extra.update(thinking)
+            store.event(operation_id,'inference_policy',role='builder',thinking=mode)
         kwargs["max_tokens"] = active.num_predict
         self.max_input_tokens = active.input_budget
         self.max_output_tokens = active.num_predict
-        store.event(operation_id, "model_call", context=active.as_dict(), prompt_tokens_estimate=estimate_tokens({"messages": compiled, "tools": kwargs.get("tools")}), compacted=compacted)
+        raw_estimate = estimate_tokens({"messages": compiled, "tools": kwargs.get("tools")})
+        store.event(operation_id, "model_call", context=active.as_dict(), prompt_tokens_estimate=raw_estimate,
+                    calibration=round(window.ratio, 3), compacted=compacted)
         inference_turns += 1
         response = original_transport(self, messages=compiled, **kwargs)
         count = normalize_text_tool_response(response, kwargs.get("tools"))
@@ -214,9 +354,13 @@ def run_coder(store, operation_id, repository):
             # Use the SDK's established text protocol on the next request.
             # This is local to this operation, not a permanent model demotion.
             self.native_tool_calling = False
+            if payload.get('policy_version', 1) >= 6:
+                temporary = mode_path.with_suffix('.tmp')
+                temporary.write_text(json.dumps({'mode':'text'})); temporary.replace(mode_path)
             store.event(operation_id, "tool_mode_fallback", reason="Repeated native requests returned narration without tool calls")
         usage = dict(response.usage) if getattr(response,"usage",None) else {}
         store.event(operation_id, "usage", usage=usage)
+        window.observe(raw_estimate, usage.get("prompt_tokens") or 0)
         if (usage.get("prompt_tokens") or 0) > active.input_budget:
             raise ValueError("Actual prompt usage exceeded the configured input budget; adjust context or narrow evidence")
         if any(getattr(choice,"finish_reason",None) == "length" for choice in getattr(response,"choices",[])):
@@ -226,6 +370,7 @@ def run_coder(store, operation_id, repository):
     worker._LLM._transport_call = transport
     worker._LLM.format_messages_for_llm = format_messages
     worker._LLM.post_response_prompt_mock = post_prompt_mock
+    worker._LLM.completion = completion
     events = []
 
     def on_event(event):
@@ -233,6 +378,8 @@ def run_coder(store, operation_id, repository):
         data = event.model_dump(mode="json") if hasattr(event, "model_dump") else {"type": type(event).__name__}
         store.event(operation_id, "agent", event=data)
         events.append(data)
+        if guard:
+            guard.record(data)
 
     conversation = None
     try:
@@ -248,19 +395,38 @@ def run_coder(store, operation_id, repository):
                 "Original requested outcome:\n" + payload.get("original_task", payload["task"]) + "\n\n"
                 "Implement this milestone. Inspect relevant source before editing, use ranged reads for large files, "
                 "and execute the listed checks before finishing. Repair the reported failures, including missing test modules. Do not rebuild unrelated packages or alter the requested criteria.\n" + payload["task"] + "\n"
+                + ("When browser regression checks are requested, provide a discoverable automated test command (for example a package test script or a Python test runner). A manual HTML test page alone is not an automated test command. Keep application runtime dependencies consistent with the request.\n" if payload.get('policy_version',1)>=3 and payload.get('ui_required') else '')
                 + "When the milestone and its checks are complete, call finish. Avoid repeated summaries and unnecessary demonstration files.\n"
                 + "Complete verification evidence is saved at " + str(evidence_path) + ". Read selected JSON entries or referenced logs when a collection has more pages. Edit only project source.\n"
                 + json.dumps({"milestone": payload.get("milestone"), "evidence": evidence_catalog(evidence,policy.input_budget//3)}))
+        if payload.get('policy_version', 1) >= 6:
+            from coder_policy7_prompt import repair_task
+            task, tier = repair_task(payload, repository, evidence, evidence_path, policy, catalog=evidence_catalog)
+            if tier:
+                store.event(operation_id, 'prompt_bounded', tier=tier, estimate=estimate_tokens(task), input_budget=policy.input_budget)
         conversation.send_message(task)
-        finished = drive_to_finish(conversation, events, lambda:inference_turns,
-                                   lambda:store.get(operation_id)["payload"]["settings"]["daedalus_attempt_turns"])
+        # The hybrid policy-7 builder asks for a whole project per operation: keep nudging until the
+        # agent finishes or its turn allowance ends, instead of returning at the first checkpoint.
+        if payload.get('policy_version', 1) >= 6 and not payload.get('builder_until_finish'):
+            recovery_path = checkpoint_path.with_suffix('.recovery.json')
+            def mark_recovery():
+                recovery_path.write_text(json.dumps({'used':True}))
+                store.event(operation_id, 'builder_recovery', round_id=payload.get('round_id', 0))
+            finished = drive_to_checkpoint(conversation, events, lambda:inference_turns,
+                lambda:store.get(operation_id)['payload']['settings']['daedalus_attempt_turns'],
+                lambda:repository.snapshot('Builder progress', parent=payload['revision_id'])['tree'],
+                recovery_path.exists, mark_recovery)
+        else:
+            finished = drive_to_finish(conversation, events, lambda:inference_turns,
+                                       lambda:store.get(operation_id)["payload"]["settings"]["daedalus_attempt_turns"])
         state = str(conversation.state.execution_status)
         return {"agent_finished": finished, "execution_status": state,
-                "incomplete_reason":"" if finished else "The Builder has not called finish. Complete the next action with a tool, then call finish when the milestone is done.",
+                "incomplete_reason":"" if finished else 'Builder returned a checkpoint for controller verification.' if payload.get('policy_version',1)>=6 else "The Builder has not called finish. Complete the next action with a tool, then call finish when the milestone is done.",
                 "session_id": str(session_id), "events": len(events)}
     finally:
         worker._LLM._transport_call = original_transport
         worker._LLM.format_messages_for_llm = original_format
         worker._LLM.post_response_prompt_mock = original_post_mock
+        worker._LLM.completion = original_completion
         if conversation:
             conversation.close()

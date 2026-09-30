@@ -323,7 +323,7 @@ Configure service connections and models in **Settings**. Environment variables 
 | Cloud chat | OpenAI/Anthropic keys or a custom provider URL/key in Settings → Connections | Provider-specific |
 | Quick Search and web research | SearXNG — `SEARXNG_URL`; enable its JSON search format | `8888` |
 | Code execution | Codebox — `CODEBOX_URL` | `8585` |
-| Daedalus project work | OpenHands/Aider worker — `OPENHANDS_URL`, `AIDER_WORKER_URL` | `8586` |
+| Daedalus project work | OpenHands/Aider worker — `OPENHANDS_URL`, `AIDER_WORKER_URL`; the worker host needs `bubblewrap` and `strace` | `8586` |
 | Images | ComfyUI — `COMFYUI_URL`, checkpoint or saved workflow | `8188` |
 | Speech-to-text | OpenAI-compatible STT — `STT_URL`, `STT_MODEL` | `8001` in the reference setup |
 | Text-to-speech | OpenAI-compatible TTS — `TTS_URL`, `TTS_VOICE` | `8880` in the reference setup |

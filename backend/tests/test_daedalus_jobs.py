@@ -455,3 +455,126 @@ def test_deadline_waits_for_worker_ack_and_records_final_usage(monkeypatch,tmp_p
             assert current['calls_used']==4 and current['seconds_used']==5
             assert current['revision_id']=='a'*40 and not current['cancel_requested']
     asyncio.run(scenario())
+
+
+# Code audit 2026-09-21: lifecycle wedges traced in the controller, one regression each.
+def setup7(monkeypatch, tmp_path):
+    setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, 'CONTEXT_SETTINGS', {**DEFAULTS, 'daedalus_v3_enabled': True, 'daedalus_policy7_builds': True})
+
+
+def test_stop_on_a_parked_job_keeps_its_real_resume_stage(monkeypatch, tmp_path):
+    # The chat Stop button fans /cancel to every unfinished job. request_cancel then wrote
+    # resume_state='ready_for_review': Continue inspected, parked again with its candidate already cleared, forever.
+    setup7(monkeypatch, tmp_path)
+    async def scenario():
+        job = await controller.create('conversation', 'task', model='coder:local', key='parked')
+        assert job['policy_version'] == 7
+        revision = 'a' * 40
+        await store.save(job['id'], state='ready_for_review', resume_state='checking', revision_id=revision,
+                         candidate_artifact={'metadata': {'revision_id': revision}})
+        assert (await controller.cancel(job['id']))['state'] == 'cancelled'
+        assert (await store.get(job['id']))['resume_state'] == 'checking'
+        resumed = await controller.resume(job['id'], candidate_revision=revision)
+        assert resumed['state'] == 'queued' and resumed['resume_after_inspect'] == 'checking'
+        # Stop again before the queued job is picked up: 'queued' is not a stage to resume into.
+        await controller.cancel(job['id'])
+        again = await controller.resume(job['id'])
+        assert again['resume_after_inspect'] == 'checking'
+    asyncio.run(scenario())
+
+
+def test_a_stuck_cancel_does_not_append_an_event_every_poll(monkeypatch, tmp_path):
+    setup7(monkeypatch, tmp_path)
+    async def scenario():
+        job = await controller.create('conversation', 'task', model='coder:local', key='stuck')
+        await store.save(job['id'], state='coding')
+        for _ in range(4):
+            await store.request_cancel(job['id'])
+        kinds = [e['type'] for e in await store.events(job['id'])]
+        assert kinds.count('cancelling') == 1 and (await store.get(job['id']))['resume_state'] == 'coding'
+    asyncio.run(scenario())
+
+
+def test_continue_after_a_failed_publication_still_holds_its_acceptance(monkeypatch, tmp_path):
+    # _deliver's own message says "free space and continue", but resume() cleared acceptance, so every
+    # Continue re-entered packaging and raised "Artifact revision does not match accepted revision".
+    setup7(monkeypatch, tmp_path)
+    async def scenario():
+        job = await controller.create('conversation', 'task', model='coder:local', key='publish')
+        revision = 'b' * 40
+        accepted = {'accepted': True, 'revision_id': revision}
+        await store.save(job['id'], state='blocked', resume_state='packaging', revision_id=revision, acceptance=accepted,
+                         blocker='ValueError: Artifact storage is below the configured free-space reserve; free space and continue')
+        resumed = await controller.resume(job['id'])
+        assert resumed['resume_after_inspect'] == 'packaging' and resumed['acceptance'] == accepted
+        # Any other stage still re-verifies: acceptance is cleared.
+        await store.save(job['id'], state='blocked', resume_state='checking', acceptance=accepted)
+        assert (await controller.resume(job['id']))['acceptance'] is None
+        # Changing the visual policy invalidates the verdict even when packaging was the stage.
+        await store.save(job['id'], state='blocked', resume_state='packaging', acceptance=accepted)
+        assert (await controller.resume(job['id'], visual_review=True))['acceptance'] is None
+    asyncio.run(scenario())
+
+
+def test_spent_model_calls_can_continue_but_durable_repair_limits_cannot(monkeypatch, tmp_path):
+    # The card says "Continue grants another" for model_calls, yet any stop_limit refused Continue.
+    setup7(monkeypatch, tmp_path)
+    from coder_presentation import presentation
+    async def scenario():
+        job = await controller.create('conversation', 'task', model='coder:local', key='calls')
+        await store.save(job['id'], state='ready_for_review', resume_state='checking', stop_limit='model_calls',
+                         blocker='Model-call allowance exhausted (120 of 120 used).')
+        parked = await store.get(job['id'])
+        assert presentation(parked)['actions']['resume']['enabled']
+        resumed = await controller.resume(job['id'])
+        assert resumed['state'] == 'queued' and not resumed.get('stop_limit') and resumed['calls_used'] == 0
+        for limit in ('application_repairs', 'audit_corrections', 'no_progress'):
+            await store.save(job['id'], state='ready_for_review', stop_limit=limit, blocker='Both application repair rounds were used.')
+            assert not presentation(await store.get(job['id']))['actions']['resume']['enabled']
+            with pytest.raises(ValueError):
+                await controller.resume(job['id'])
+    asyncio.run(scenario())
+
+
+def test_a_failed_candidate_package_blocks_visibly_instead_of_respawning(monkeypatch, tmp_path):
+    # RuntimeError from a failed worker package op escaped run(): the job stayed candidate_packaging,
+    # which recoverable() respawns every two seconds with nothing shown to the user.
+    setup7(monkeypatch, tmp_path)
+    async def operate(job, kind, **extra):
+        if kind == 'accept':
+            raise ValueError('Review reply was not valid JSON')
+        raise RuntimeError('Worker operation failed')
+    monkeypatch.setattr(controller, '_operate', operate)
+    async def scenario():
+        job = await controller.create('conversation', 'task', model='coder:local', key='package')
+        brief = {'outcomes': [{'id': 'o1', 'text': 'Works', 'evidence_types': ['behavior'], 'component': '.'}], 'batches': []}
+        await store.save(job['id'], state='accepting', revision_id='c' * 40, brief=brief, checks=[])
+        await controller.run(job['id'])
+        parked = await store.get(job['id'])
+        assert parked['state'] == 'blocked' and 'Worker operation failed' in parked['blocker']
+        assert parked['id'] not in [row['id'] for row in await store.recoverable()]
+    asyncio.run(scenario())
+
+
+def test_a_follow_up_edit_inherits_the_upload_test_command(monkeypatch, tmp_path):
+    # Live run 2026-09-22: the parent repair ran `python3 tests/check_ledger.py` from the API's execution_commands;
+    # the follow-up edit had none, the script is not a discoverable test name, and a correct edit parked unverified.
+    setup7(monkeypatch, tmp_path)
+    async def scenario():
+        commands = {'packages': {'.': {'test': 'python3 tests/check_ledger.py'}}}
+        # Register a project with an accepted parent job the way finish_artifact does, without a worker.
+        parent = await store.create('conversation', 'fix it', 'build_from_prompt', '', 'coder:local', 'parent', policy_version=7,
+                                    request_options={'execution_commands': commands, 'protected_files': []})
+        await store.save(parent['id'], state='packaging', revision_id='a' * 40, acceptance={'accepted': True, 'revision_id': 'a' * 40},
+                         verification_summary={'accepted': True, 'revision_id': 'a' * 40, 'evidence_version': 3, 'criteria': []})
+        await store.finish_artifact(parent['id'], 'a' * 40, artifact_id='art', filename='a.tar.gz', url='/a', kind='archive', status='accepted', metadata={})
+        project_id = (await store.get(parent['id']))['project_id']
+        child = await controller.create('conversation', 'add --json', mode='edit_project', project_id=project_id, model='coder:local', key='child')
+        assert child['execution_commands'] == commands
+        await store.save(child['id'], state='cancelled')   # one active job per project
+        explicit = {'packages': {'.': {'test': 'python3 -m pytest -q'}}}
+        other = await controller.create('conversation', 'add --csv', mode='edit_project', project_id=project_id, model='coder:local', key='child2',
+                                        execution_commands=explicit)
+        assert other['execution_commands'] == explicit
+    asyncio.run(scenario())

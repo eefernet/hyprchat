@@ -59,6 +59,9 @@ const _isDaedalusFullBuildOutput = ({meta={},savedEvents=[],liveEvents=[],runIds
 const _isDaedalusOutput = ({meta={},savedEvents=[],liveEvents=[],runIds=[],workflows=[]}={})=>{
   return !!(
     runIds.length ||
+    // A persistent (v3) job owns its message in every state: coding, checking, stopped,
+    // completed. The legacy state list below hid the card for most of a job's life.
+    (Array.isArray(workflows)&&workflows.some(w=>w?.workflow_version===3)) ||
     (Array.isArray(workflows)&&workflows.some(w=>_DAEDALUS_ACTIVE_WORKFLOW_STATES.has(String(w?.state||"").toLowerCase()))) ||
     _eventsHaveDaedalus(savedEvents) ||
     _eventsHaveDaedalus(liveEvents) ||

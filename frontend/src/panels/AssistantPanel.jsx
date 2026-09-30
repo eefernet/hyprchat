@@ -213,7 +213,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
               <input type="checkbox" checked={!!qh.enabled} onChange={e=>setDraft(d=>({...d,quiet_hours:{...d.quiet_hours,enabled:e.target.checked}}))}/>
               Enabled
             </label>
-            <label style={{fontSize:11,color:t.dim,display:"flex",gap:6,alignItems:"center"}}>
+            <label style={{fontSize:11,color:t.dim,display:"flex",gap:6,flexWrap:"wrap",minWidth:0,alignItems:"center"}}>
               from <input type="time" value={qh.start} onChange={e=>setDraft(d=>({...d,quiet_hours:{...d.quiet_hours,start:e.target.value}}))} style={{...inputS,width:"auto"}}/>
               to <input type="time" value={qh.end} onChange={e=>setDraft(d=>({...d,quiet_hours:{...d.quiet_hours,end:e.target.value}}))} style={{...inputS,width:"auto"}}/>
             </label>

@@ -1,40 +1,54 @@
 <details open>
-<summary>Alpha v18.1 — Sept 14, 2026</summary>
+<summary>Alpha v18.1 — Sept 30, 2026</summary>
 
-> Pre-prod hardening release: investigative research, CalDAV correctness, and a reliability + UX pass — dossier citations that actually resolve, calendar sync that stops re-pulling and preserves recurrence, error-surfacing across the Jarvis panels, first-load skeletons, a mobile pass on the assistant panels, and a keyboard-accessible model picker.
+> More reliable Daedalus builds, stronger research and calendar sync, and a smoother mobile interface.
 
-## Search & Daedalus
+## Daedalus
 
-- **Master Developer** — conversational coding help across languages with Coder Docs, Quick Search and small code checks; refreshed references include SwiftUI.
-- **Coder Docs** — incremental refreshes preserve working references on failures; Markdown retrieval keeps code indentation and version notes.
-- **Code answers** — Swift syntax highlighting, improved language labels and readable light/dark colors; Quick Search now recognizes pasted code, API names and coding follow-ups.
-- **Web search** — shared chat, research-tool and council pipeline with hybrid ranking, relevant page excerpts, bounded timeouts, partial results and clearer failure diagnostics.
-- **SearXNG VPN reliability** — fixed the missing gateway and stuck rotation locks; hardened recovery while preserving VPN egress protection.
-- **Daedalus persistent jobs** — experimental, opt-in workflows with checkpoint continuation, restart recovery, repository inspection and downloads tied to verified, accepted revisions. Disabled by default; legacy workflows remain.
-- **Context settings** — shared stage overrides, configurable helper contexts and compaction controls replace fixed context limits.
+- **Persistent jobs** — opt-in background workflows support checkpoints, restart recovery, Stop/Continue, repository inspection and revision-specific downloads. Experimental workflows remain disabled by default; legacy workflows remain available.
+- **Evidence-gated builds and repairs** — separate policy 7 toggles enable new projects and uploaded-project edits. Jobs are checked with executed tests, an independent audit and a review, then delivered as downloadable **Ready for review** candidates, or **Build incomplete** when the result does not run. No evidence-gated job is marked **Complete** in this release: that needs trusted proof for each requirement, which generated tests cannot supply, and no such checks are registered yet.
+- **Sandboxed execution** — in persistent jobs, builders, audits and project commands run inside a bubblewrap sandbox with private process and network namespaces, read-only toolchains and a restricted dependency proxy; model calls pass through a supervised bridge. The legacy builder and Aider use the same sandbox. Codebox now needs `bubblewrap`, without which a job stops with an environment error rather than running unisolated, and `strace`, which audits of compiled-language projects use to confirm the built program really ran.
+- **Build and repair reliability** — the builder compiles and runs projects while working, targets failing files during repairs, and avoids repeated file-reading and excessive context summaries. It reserves calls for audit/review and returns a candidate when the build allowance runs out.
+- **Stronger verification** — protected files, requested interfaces, documentation and test evidence receive stricter checks. Removing failing tests or printing success cannot substitute for executed assertions. Browser checks catch startup errors, form submissions the server rejects and submit handlers that throw; a form that silently sends nothing is only noted, so generated apps still need hands-on review.
+- **Language support** — verification now recognizes Java, C/C++, C#, Go and Rust test runners alongside Python and Node. A server whose start command appears only in the README (uvicorn or node) is launched for checks.
+- **Requested-behavior probes** — Daedalus now runs the invalid-input and missing-file cases a request describes (“exits with code 2”), checks a requested command's output against its own fixture instead of the exit code alone, and verifies that the accessible labels and buttons a request names exist on the delivered page.
+- **Smarter repairs** — browser-journey failures now point the repair at the page script and server, replacing a scaffold's placeholder test is no longer treated as a regression, a rolled-back repair gets another round while budget remains, and documentation inside a package directory is recognized.
+- **Longer builder sessions** — context calibration no longer under-counts dense code, so compaction runs before the window fills.
+- **New-build delivery** — verified starting skeletons for static web, Express/SQLite, React/Vite + FastAPI/SQLite and .NET/xUnit builds; the literal requested command, .NET test projects and the requested browser workflows (edit, drag, delete, persistence, literal text) are probed before any audit; repairs receive an ordered evidence packet (foundation first), the focused repair retry no longer overflows the builder input budget (it used to fail silently as "no source changes"), and job cards show the verification phase.
+- **Recovery** — fixed stalled tests, editor truncation, large-file edits, invalid audit replies and environment/toolchain handling. Follow-up edits retain uploaded test commands; saved candidates survive chat Stop, and jobs can resume after call limits or failed downloads. A job stopped because the builder prompt no longer fits explains how to continue, and low call limits no longer reserve more verification calls than the job has.
+- **Follow-up requests** — for a project whose earlier evidence-gated job was accepted, a follow-up that changes or conflicts with those requirements is reconciled explicitly: the job card lists requirement changes, asks a scope question when the intent is unclear, and Continue accepts your clarification. A project that only has a **Ready for review** candidate cannot take a follow-up edit yet; use Continue on its existing job.
+- **Visual review** — optional AI visual review now covers evidence-gated jobs, with screenshots of the running app at the configured viewports; switching it on at Continue re-runs the checks.
+- **Progress and settings** — job cards stay visible throughout a run and show outcomes, file progress, check failures, call usage and review reasons. Shared context settings provide stage overrides, helper limits and compaction controls.
+- **Redesigned Daedalus settings** — grouped sections with switches and plain descriptions, a live readout of the working input each model call gets, per-stage overrides in one table, and a save bar that stays in view while there are unsaved changes.
+- **Larger builder context by default** — the Daedalus context window now defaults to 65,536 tokens (was 32,768): the agent builder's fixed prompt overhead left web-app repairs almost no working room in a 32K window.
+
+## Coding & Search
+
+- **Master Developer and Coder Docs** — conversational coding help includes refreshed SwiftUI references; incremental documentation updates preserve working references, code indentation and version notes.
+- **Code answers** — added Swift highlighting, clearer language labels and improved light/dark colors. Quick Search better recognizes pasted code, API names and coding follow-ups.
+- **Web search** — chat, research tools and councils share ranked results, relevant excerpts, bounded timeouts, partial results and clearer errors. SearXNG recovery fixes preserve VPN egress protection.
 
 ## Research
-- **Investigative Dossier** report template with a direct leak / FOIA / government / court source layer (`leak_sources.py`): DOJ, CourtListener, Archive.org, and WikiLeaks adapters plus SearXNG-scoped FBI Vault / CIA Reading Room / ICIJ / Cryptome / MuckRock / National Security Archive / GovernmentAttic sources. All results flow through the SSRF-guarded fetcher.
-- **Dossier citations now resolve** — the SOURCE INDEX is built in inline citation order and never truncates a cited source, so `[n]` in the text and `[n]` in the index always point at the same document (leaked-document citations previously fell off the index cap).
-- **Research reliability** — a shared Google-fallback budget and a concurrency cap keep the leak adapters from hammering SearXNG; direct sources are read in source-tier order; the leak wave is cancel-safe (Stop no longer orphans outbound requests); the report path scales its deadline by depth.
 
-## Calendar / CalDAV
-- **Recurrence survives sync** — pushed events now carry their `RRULE`, so recurring events are no longer wiped on the pull-back.
-- **No more phantom conflicts** — the pushed etag round-trips through the same parser the pull uses, so events without an end time (and cosmetic server rewrites) stop re-pulling every sync and stop raising false "calendar conflict" notifications. Legacy etags migrate silently on first sync.
-- Unparseable sync/poll timestamps are logged instead of silently forcing a full re-sync every tick.
+- **Investigative Dossier** — added direct and search-backed leak, FOIA, government and court sources, including DOJ, CourtListener, Archive.org and WikiLeaks, through the guarded fetcher.
+- **Citations and reliability** — source indexes retain every cited document in citation order. Bounded concurrency, shared fallback limits, depth-aware deadlines and cancellation cleanup improve report reliability.
 
-## UX / reliability
-- **Jarvis panels surface errors** — task / note / calendar / email mutations that fail now show why (and the security-sensitive autonomous email toggles snap back to the server's true state on failure) instead of silently no-oping.
-- **First-load skeletons** for Tasks / Notes / Calendar / Email — no more "nothing here yet" flashing before the data loads.
-- **Mobile pass** on the assistant panels (Tasks / Notes / Calendar / Email / Assistant / Analytics / Prompt Library): responsive padding, a mobile-first day view for the calendar, and de-crowded row actions.
-- **Model picker** is now keyboard-accessible (Tab / arrows / Enter / Escape), closes on scroll, and flips up when near the bottom of the viewport.
-- **Timestamps** on chat messages, artifacts, and research reports now render in your local time correctly (naive-UTC values were being read as local).
-- Runs whose record has been deleted stop polling instead of retrying forever; a transient network blip no longer tears down an in-progress image job.
+## Calendar & Assistant
+
+- **CalDAV sync** — recurring events survive round trips; normalized sync markers prevent repeated pulls and false conflicts. Invalid timestamps are logged instead of silently triggering repeated full syncs.
+- **Clearer feedback** — failed task, note, calendar and email changes show errors; failed autonomous-email toggle changes revert to server values. Loading placeholders prevent empty-state flashes.
+
+## Mobile & Interface
+
+- **iPhone home-screen app** — fixed the bottom white strip on load and keyboard-related layout shifts. New-chat composers stay at the bottom, above the keyboard when typing, with a compact greeting and corrected safe-area spacing.
+- **Responsive layouts** — improved landscape, large-text and assistant-panel layouts, including Calendar's mobile day view. Menus, Settings and sign-in forms, date fields, Analytics and artifact-editor controls fit narrow screens; attachment chips scroll without displacing the composer.
+- **Model picker** — supports keyboard navigation, stays within the visible viewport, flips above low controls and closes when scrolling or resizing.
+- **Everyday reliability** — message, artifact and report timestamps display correctly in local time. Deleted runs stop polling, temporary network failures preserve image jobs, and outdated tabs offer a one-click reload.
 
 </details>
 
 <details>
-<summary>Alpha v18.0 — July 12, 2026</summary>
+<summary>Alpha v18.0 — Sept 15, 2026</summary>
 
 > HyprChat becomes a personal assistant: scheduled agent tasks, a proactive Assistant with check-in briefs, an assistant dashboard, weather-aware briefings, event automations ("when X happens → do Y"), quiet hours, notifications, notes & todos, a calendar with CalDAV sync, and full email integration — plus a phone-friendly mobile layout, a customizable nav rail, and refreshed panels throughout.
 

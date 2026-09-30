@@ -85,7 +85,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const [loaded,setLoaded]=useState(false);
   // Phones default to day view — the 7-column month grid gives ~44px cells at
   // 360px wide. Switching back is still allowed; only week view is blocked.
-  const [view,setView]=useState(()=>(typeof window!=="undefined"&&window.innerWidth<700)?"day":"month");
+  const [view,setView]=useState(()=>isMobile?"day":"month");
   const [nowTick,setNowTick]=useState(()=>Date.now());
   const [anchor,setAnchor]=useState(()=>new Date());
   const [form,setForm]=useState(null);

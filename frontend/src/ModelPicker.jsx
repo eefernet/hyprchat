@@ -34,12 +34,16 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
       if(dropRef.current&&dropRef.current.contains(e.target))return;
       setOpen(false);
     };
-    document.addEventListener("mousedown",handler);
+    document.addEventListener("pointerdown",handler);
     window.addEventListener("resize",close);
+    window.visualViewport?.addEventListener("resize",close);
+    window.visualViewport?.addEventListener("scroll",close);
     window.addEventListener("scroll",onScroll,true);
     return()=>{
-      document.removeEventListener("mousedown",handler);
+      document.removeEventListener("pointerdown",handler);
       window.removeEventListener("resize",close);
+      window.visualViewport?.removeEventListener("resize",close);
+      window.visualViewport?.removeEventListener("scroll",close);
       window.removeEventListener("scroll",onScroll,true);
     };
   },[open]);
@@ -88,9 +92,13 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
       const left=Math.max(8,Math.min(r.left,window.innerWidth-maxW-8));
       // Flip up when the trigger sits low in the viewport (composer picker on
       // mobile) — otherwise a 360px menu opens straight off-screen.
-      const spaceBelow=window.innerHeight-r.bottom;
-      const up=spaceBelow<300&&r.top>spaceBelow;
-      const maxH=Math.max(160,Math.min(360,(up?r.top:spaceBelow)-12));
+      const vv=window.visualViewport;
+      const viewTop=vv?.offsetTop||0;
+      const viewBottom=viewTop+(vv?.height||window.innerHeight);
+      const spaceBelow=Math.max(0,viewBottom-r.bottom);
+      const spaceAbove=Math.max(0,r.top-viewTop);
+      const up=spaceBelow<300&&spaceAbove>spaceBelow;
+      const maxH=Math.max(0,Math.min(360,(up?spaceAbove:spaceBelow)-12));
       setDropPos({top:r.bottom+4,bottom:window.innerHeight-r.top+4,up,left,width,maxH});
     }
     const willOpen=!open;

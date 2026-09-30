@@ -49,24 +49,58 @@ SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
 WORKER_FILES = {
     "backend/openhands_worker.py", "backend/coder_worker_runtime.py", "backend/coder_sdk_runtime.py",
-    "backend/coder_repository.py", "backend/coder_inference.py", "backend/coder_checks.py", "backend/worker-requirements.txt",
+    "backend/coder_checks.py", "backend/worker-requirements.txt",
+    "backend/coder_browser.py", "backend/coder_browser_tool.py", "backend/coder_visual.py", "backend/coder_evidence.py",
+    "backend/coder_context.py",
 }
-WORKER_SHARED = {"backend/context_policy.py"}
+# coder_inference is imported by coder_policy7_ops at module level, which the HyprChat-side controller loads too.
+WORKER_SHARED = {"backend/context_policy.py", "backend/coder_inference.py", "backend/coder_verification.py", "backend/coder_contracts.py", "backend/coder_failures.py", "backend/coder_api_probe.py", "backend/coder_browser_schema.py"}
+WORKER_SHARED.update({'backend/'+name+'.py' for name in ('coder_file_probe','coder_check_schema','coder_contracts_v5','coder_response_recovery')})
+WORKER_SHARED.update({'backend/'+name+'.py' for name in ('coder_profiles','coder_native_checks','coder_review','coder_repository')})
+WORKER_SHARED.update({'backend/'+name+'.py' for name in (
+    'coder_policy7', 'coder_policy7_ops', 'coder_policy7_evidence', 'coder_patch_runtime', 'coder_project_runtime',
+    'coder_policy7_builder', 'coder_audit_hygiene', 'coder_page_guard', 'coder_frontend_guard',
+    'coder_process_evidence', 'coder_scope', 'coder_policy7_visual',
+    'coder_sandbox', 'coder_sandbox_agent', 'coder_sandbox_call', 'coder_sandbox_legacy',
+    'coder_assertion_outcomes', 'coder_criteria', 'coder_generated',
+    'coder_policy7_phases', 'coder_request_probes', 'coder_workflow_guard', 'coder_repair_packet', 'coder_skeletons', 'coder_policy7_prompt')})
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
+    **{path:("Coding Verification", REMOTE_BACKEND, True) for path in WORKER_SHARED},
     "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
+    "backend/coder_verification.py": ("Coding Verification", REMOTE_BACKEND, True),
+    "backend/coder_contracts.py": ("Coding Contracts", REMOTE_BACKEND, True),
+    "backend/coder_api_probe.py": ("API Probe Contract", REMOTE_BACKEND, True),
+    "backend/coder_browser_schema.py": ("Browser Contract", REMOTE_BACKEND, True),
+    "backend/coder_probe_audit.py": ("Verification Audit", REMOTE_BACKEND, True),
+    "backend/coder_failures.py": ("Coding Failures", REMOTE_BACKEND, True),
     "backend/coding_search.py": ("Coding Search Context", REMOTE_BACKEND, True),
     "backend/seed_kb/seed_coder_kb.py": ("Coder Docs Seeder", REMOTE_BACKEND + "seed_kb/", False),
     "backend/seed_kb/coder_sources.py": ("Coder Docs Sources", REMOTE_BACKEND + "seed_kb/", False),
     "backend/coder_jobs.py": ("Coding Controller", REMOTE_BACKEND, True),
+    "backend/coder_loop.py": ("Coding Loop", REMOTE_BACKEND, True),
+    "backend/coder_policy7_controller.py": ("Coding Policy 7 Controller", REMOTE_BACKEND, True),
+    "backend/coder_presentation.py": ("Coding Presentation", REMOTE_BACKEND, True),
+    "backend/coder_profiles.py": ("Execution Profiles", REMOTE_BACKEND, True),
+    "backend/coder_native_checks.py": ("Native Checks", REMOTE_BACKEND, True),
+    "backend/coder_review.py": ("Independent Review", REMOTE_BACKEND, True),
     "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
     "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
     **{path:("Coding Worker", REMOTE_OPENHANDS_WORKER, False) for path in WORKER_FILES},
     "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/DaedalusRequestOptions.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/daedalusJobs.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/daedalusJobStore.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/daedalusJob.css": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/daedalusSettings.css": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/DaedalusPlanPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/daedalusPlan.css": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/NewVersionBar.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/daedalusProgress.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/versionCheck.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
@@ -213,6 +247,11 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    "frontend/src/daedalusJobStore.js", "frontend/src/components/daedalusJob.css",
+    "frontend/src/components/daedalusSettings.css",
+    "frontend/src/components/DaedalusPlanPanel.jsx", "frontend/src/components/daedalusPlan.css",
+    "frontend/src/components/NewVersionBar.jsx", "frontend/src/daedalusProgress.js", "frontend/src/versionCheck.js",
+    "frontend/src/components/DaedalusRequestOptions.jsx",
     "frontend/src/components/DaedalusJobCard.jsx", "frontend/src/components/DaedalusSettings.jsx", "frontend/src/daedalusJobs.js",
     "frontend/src/main.jsx",
     "frontend/src/session.js",
@@ -748,7 +787,7 @@ def _bootstrap_codebox_host(cb):
         "set -u\n"
         "if command -v apt-get >/dev/null 2>&1; then\n"
         "  apt-get update -qq >/dev/null 2>&1 || true\n"
-        "  apt-get install -y -qq python3-pip python3-venv curl git >/dev/null 2>&1 || true\n"
+        "  apt-get install -y -qq python3-pip python3-venv curl git strace bubblewrap >/dev/null 2>&1 || true\n"
         "fi\n"
         "mkdir -p /opt/openhands-worker /root/projects /tmp/hyprchat-aider\n"
         "python3 -m pip install --break-system-packages -q -U "
@@ -757,6 +796,23 @@ def _bootstrap_codebox_host(cb):
         ">>/tmp/hyprchat-worker-pip.log 2>&1\n"
     )
     return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=300)
+
+
+def _ensure_codebox_sandbox_tools(cb):
+    """Daedalus runs project code under bubblewrap and traces audits with strace.
+
+    Checked separately from _codebox_host_ready: a host bootstrapped before the
+    sandbox existed passes that check and would never receive these two tools.
+    """
+    cmd = (
+        "command -v bwrap >/dev/null 2>&1 && command -v strace >/dev/null 2>&1 && exit 0\n"
+        "command -v apt-get >/dev/null 2>&1 || { echo 'SANDBOX_TOOLS_MISSING: install bubblewrap and strace manually'; exit 1; }\n"
+        "apt-get update -qq >/dev/null 2>&1 || true\n"
+        "apt-get install -y -qq strace bubblewrap >/dev/null 2>&1\n"
+        "command -v bwrap >/dev/null 2>&1 && command -v strace >/dev/null 2>&1 || "
+        "{ echo 'SANDBOX_TOOLS_MISSING: apt-get install strace bubblewrap failed'; exit 1; }\n"
+    )
+    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=180)
 
 
 def _ensure_openhands_worker_service(cb):
@@ -778,6 +834,17 @@ def _ensure_openhands_worker_service(cb):
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
+        "EOF\n"
+        "fi\n"
+        # Toolchains the checks need but systemd's minimal PATH lacks. .NET installs under /root/.dotnet with
+        # PATH/DOTNET_ROOT only in .bashrc: production C# builds failed every setup step with
+        # `dotnet: command not found` (live run 2026-09-22) while the login-shell evaluator found it.
+        "if [ ! -f /etc/systemd/system/openhands-worker.service.d/toolchains.conf ]; then\n"
+        "mkdir -p /etc/systemd/system/openhands-worker.service.d\n"
+        "cat > /etc/systemd/system/openhands-worker.service.d/toolchains.conf <<'EOF'\n"
+        "[Service]\n"
+        "Environment=DOTNET_ROOT=/root/.dotnet\n"
+        "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet:/root/.dotnet/tools\n"
         "EOF\n"
         "fi\n"
         "systemctl daemon-reload\n"
@@ -948,8 +1015,10 @@ def deploy_changes(changed, cfg):
         print(f"  {G}\u2713{RST} HyprChat host ready")
 
     cb_ready, _out, cb_err = _codebox_host_ready(cb)
+    cb_reachable = cb_ready
     if not cb_ready:
         ok, out, err = _bootstrap_codebox_host(cb)
+        cb_reachable = ok
         if ok:
             print(f"  {G}\u2713{RST} Codebox host bootstrapped")
         else:
@@ -959,6 +1028,12 @@ def deploy_changes(changed, cfg):
 
     changed = list(changed)
     if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
+        if cb_reachable:
+            ok, out, err = _ensure_codebox_sandbox_tools(cb)
+            if not ok and "SANDBOX_TOOLS_MISSING" in (out or ""):
+                print(f"  {Y}!{RST} Codebox is missing bubblewrap/strace; Daedalus jobs will fail as isolation unavailable: {out[:200]}")
+            elif not ok:
+                print(f"  {Y}!{RST} Could not verify bubblewrap/strace on Codebox: {(err or out)[:200]}")
         present = {path for path, _ in changed}
         for path in WORKER_FILES | WORKER_SHARED:
             if path not in present:

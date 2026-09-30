@@ -19,7 +19,7 @@ const HERO_CSS=`
 
 const rise=d=>({animation:`hcHeroRise .5s cubic-bezier(.22,.9,.28,1) ${d}s both`});
 
-export default function ChatHero({t,font,user,tagline,isCouncil,lifted}){
+export default function ChatHero({t,font,user,tagline,isCouncil,lifted,compact=false,mobile=false}){
   const [now,setNow]=useState(()=>new Date());
   useEffect(()=>{const id=setInterval(()=>setNow(new Date()),60000);return()=>clearInterval(id);},[]);
   const dp=daypartOf(now.getHours());
@@ -27,7 +27,8 @@ export default function ChatHero({t,font,user,tagline,isCouncil,lifted}){
   const greeting=dp==="night"
     ?(name?`Up late, ${name}?`:"Up late?")
     :`Good ${dp}${name?`, ${name}`:""}.`;
-  const rootS={display:"flex",flexDirection:"column",alignItems:"center",gap:14,fontFamily:font,
+  const rootS={display:"flex",flexDirection:"column",alignItems:"center",gap:compact?8:14,fontFamily:font,
+    width:mobile?"100%":undefined,maxWidth:mobile?500:undefined,minWidth:0,padding:mobile?"12px 20px":0,textAlign:"center",overflowWrap:"anywhere",
     transform:lifted?"translateY(-40px)":"none",transition:"transform .35s ease"};
   if(isCouncil)return <div className="hc-hero" style={rootS}>
     <style>{HERO_CSS}</style>
@@ -37,7 +38,7 @@ export default function ChatHero({t,font,user,tagline,isCouncil,lifted}){
   return <div className="hc-hero" style={rootS}>
     <style>{HERO_CSS}</style>
     {/* Logo mark with a slow orbital accent ring behind it */}
-    <div style={{position:"relative",width:68,height:68,...rise(0)}}>
+    {!compact&&<div style={{position:"relative",width:68,height:68,...rise(0)}}>
       <div style={{position:"absolute",left:-9,top:-9,width:86,height:86,borderRadius:"50%",
         background:`conic-gradient(from 0deg, transparent 0 68%, ${t.acc}55 84%, ${t.acc2}33 94%, transparent)`,
         filter:"blur(5px)",opacity:.85,animation:"spin 14s linear infinite"}}/>
@@ -49,15 +50,15 @@ export default function ChatHero({t,font,user,tagline,isCouncil,lifted}){
           <div style={{position:"absolute",right:23,bottom:18,width:10,height:32,borderRadius:2,background:t.warm,opacity:.9}}/>
         </div>
       </div>
-    </div>
-    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-      <div style={{fontSize:34,fontWeight:800,letterSpacing:1.2,lineHeight:1,
+    </div>}
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,maxWidth:"100%"}}>
+      <div style={{fontSize:compact?22:34,fontWeight:800,letterSpacing:1.2,lineHeight:1,
         backgroundImage:`linear-gradient(115deg, ${t.text}, ${t.acc} 45%, ${t.acc2})`,
         WebkitBackgroundClip:"text",backgroundClip:"text",color:"transparent",
         filter:`drop-shadow(0 2px 16px ${t.acc}22)`,...rise(.08)}}>HyprChat</div>
       <div style={{fontSize:15.5,fontWeight:650,color:t.text,letterSpacing:.3,...rise(.16)}}>{greeting}</div>
       <div style={{width:150,height:1,background:`linear-gradient(90deg,transparent,${t.acc}88,${t.acc2}66,transparent)`,...rise(.22)}}/>
-      <div key={tagline} style={{fontSize:12.5,color:t.dim,letterSpacing:.5,textAlign:"center",maxWidth:460,lineHeight:1.65,...rise(.3)}}>{tagline}</div>
+      {!compact&&<div key={tagline} style={{fontSize:12.5,color:t.dim,letterSpacing:.5,textAlign:"center",maxWidth:mobile?"100%":460,lineHeight:1.65,...rise(.3)}}>{tagline}</div>}
     </div>
   </div>;
 }

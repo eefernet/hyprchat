@@ -4947,6 +4947,8 @@ async def upsert_coding_project(project_id: str, name: str, conversation_id: str
                 (project_id, user_id, name, description, language, manifest_json, last_plan,
                  conversation_id, openhands_project_id, now, now)
             )
+        if conversation_id:
+            await db.execute("UPDATE conversations SET active_coding_project_id=? WHERE id=? AND user_id=?", (project_id, conversation_id, user_id))
         await db.commit()
     finally:
         await db.close()
@@ -4957,8 +4959,10 @@ async def get_coding_project_by_conv(conversation_id: str):
     db = await get_db()
     try:
         rows = await db.execute_fetchall(
-            "SELECT * FROM coding_projects WHERE conversation_id = ? AND user_id=? ORDER BY updated_at DESC LIMIT 1",
-            (conversation_id, user_id)
+            "SELECT p.* FROM coding_projects p JOIN conversations c ON c.id=? AND c.user_id=p.user_id "
+            "WHERE p.user_id=? AND (p.id=c.active_coding_project_id OR "
+            "(COALESCE(c.active_coding_project_id,'')='' AND p.conversation_id=c.id)) "
+            "ORDER BY p.updated_at DESC LIMIT 1", (conversation_id, user_id)
         )
         if not rows:
             return None
@@ -4987,6 +4991,31 @@ async def get_coding_project(project_id: str):
         return p
     finally:
         await db.close()
+
+
+async def list_coding_projects():
+    connection = await get_db()
+    try:
+        rows = await connection.execute_fetchall(
+            "SELECT id,name,description,language,accepted_job_id,accepted_revision_id,accepted_artifact_id,updated_at FROM coding_projects WHERE user_id=? ORDER BY updated_at DESC", (_scope_user(),))
+        return [dict(row) for row in rows]
+    finally:
+        await connection.close()
+
+
+async def select_coding_project(conversation_id: str, project_id: str):
+    connection = await get_db()
+    try:
+        rows = await connection.execute_fetchall("SELECT id FROM coding_projects WHERE id=? AND user_id=?", (project_id,_scope_user()))
+        if not rows:
+            raise LookupError("Project not found")
+        result = await connection.execute("UPDATE conversations SET active_coding_project_id=? WHERE id=? AND user_id=?", (project_id,conversation_id,_scope_user()))
+        if not result.rowcount:
+            raise LookupError("Conversation not found")
+        await connection.commit()
+    finally:
+        await connection.close()
+    return await get_coding_project(project_id)
 
 
 # ============================================================

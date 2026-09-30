@@ -137,9 +137,9 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
   const hasSelection=selInfo.from!==selInfo.to;
 
   return createPortal(
-    <div style={{position:"fixed",inset:0,zIndex:9000,background:`${t.bgDeep}F2`,backdropFilter:"blur(4px)",display:"flex",flexDirection:"column",fontFamily:font}}>
+    <div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:9000,background:`${t.bgDeep}F2`,backdropFilter:"blur(4px)",display:"flex",flexDirection:"column",fontFamily:font,paddingTop:"env(safe-area-inset-top, 0px)",paddingBottom:"var(--hc-safe-bottom, 0px)"}}>
       {/* Header */}
-      <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",borderBottom:`1px solid ${t.brd}30`,background:t.bgDeep}}>
+      <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",borderBottom:`1px solid ${t.brd}30`,background:t.bgDeep}}>
         <span style={{fontSize:13,fontWeight:900,color:t.text}}>✏️ Canvas</span>
         <span style={{fontSize:11,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0}}>
           {a.filename}{dirty&&<span style={{color:t.warm,fontWeight:800}}> • unsaved</span>}
@@ -149,11 +149,11 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
       </div>
 
       {/* AI edit bar */}
-      <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}66`}}>
+      <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}66`}}>
         <span style={{fontSize:10,color:hasSelection?t.acc:t.mut,fontWeight:800,whiteSpace:"nowrap"}}>
           {hasSelection?`✨ ${selInfo.to-selInfo.from} chars selected`:"✨ whole document"}
         </span>
-        <input
+        <input className="hc-canvas-instruction"
           value={instruction}
           onChange={e=>setInstruction(e.target.value)}
           onFocus={refreshSelection}
@@ -180,8 +180,8 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
       </div>
 
       {/* Diff preview */}
-      {pendingEdit&&<div style={{position:"absolute",inset:"auto 16px 16px 16px",maxHeight:"55%",display:"flex",flexDirection:"column",gap:8,background:t.bgDeep,border:`1px solid ${t.acc}55`,borderRadius:12,padding:14,boxShadow:"0 12px 40px rgba(0,0,0,.5)"}}>
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
+      {pendingEdit&&<div style={{position:"absolute",inset:"auto 16px calc(16px + var(--hc-safe-bottom, 0px)) 16px",maxHeight:"55%",display:"flex",flexDirection:"column",gap:8,background:t.bgDeep,border:`1px solid ${t.acc}55`,borderRadius:12,padding:14,boxShadow:"0 12px 40px rgba(0,0,0,.5)"}}>
+        <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:8}}>
           <span style={{fontSize:11,fontWeight:900,color:t.acc}}>✨ Proposed edit</span>
           <span style={{fontSize:10,color:t.mut,flex:1}}>{pendingEdit.original.length} → {pendingEdit.replacement.length} chars</span>
           <button onClick={applyEdit} style={btn(t.ok,true)}>Apply</button>

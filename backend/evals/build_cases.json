@@ -1,0 +1,47 @@
+[
+ {
+  "name": "python-wordfreq",
+  "language": "python",
+  "task": "Build a Python command-line tool called wordfreq. Running `python3 wordfreq.py <file>` prints the most frequent words in a text file, one per line as `word count`, sorted by count descending then word ascending. Words are case-insensitive and punctuation is ignored. Support `--top N` (default 10) to limit the number of lines and `--json` to print a JSON object mapping word to count instead. A missing file prints an error to stderr and exits with code 2. Include executable unit tests and a README with usage."
+ },
+ {
+  "name": "java-unitconv",
+  "language": "java",
+  "task": "Build a Java 17 Maven project for a command-line unit converter. Main class `app.UnitConv`. Running it with arguments `<value> <from> <to>` prints only the converted number with exactly two decimal places. Support length units m, km, ft, mi and temperature units c, f, k. An unknown unit or incompatible pair prints an error to stderr and exits with code 2. Include JUnit 5 tests run by `mvn test` and a README with build and usage instructions."
+ },
+ {
+  "name": "c-rpncalc",
+  "language": "c",
+  "task": "Build a C11 command-line reverse Polish notation calculator named rpncalc using CMake. Running `rpncalc \"3 4 + 2 *\"` prints the result with exactly two decimal places (14.00). Support + - * / on doubles. Division by zero or a malformed expression prints an error to stderr and exits with code 2. Put the evaluator in its own source file with a header, add assert-based tests registered with CTest (enable_testing and add_test), and a README with build and usage instructions."
+ },
+ {
+  "name": "cpp-matrixtool",
+  "language": "cpp",
+  "task": "Build a C++17 command-line tool named matrixtool using CMake. `matrixtool det \"1,2;3,4\"` prints the determinant of a square matrix with exactly two decimal places (-2.00); `matrixtool transpose \"1,2;3,4\"` prints the transposed matrix in the same `a,b;c,d` format with integer formatting when values are whole (1,3;2,4). Rows are separated by ; and values by commas. A non-square matrix for det or malformed input prints an error to stderr and exits with code 2. Put the matrix logic in its own class with a header, add assert-based tests registered with CTest, and a README."
+ },
+ {
+  "name": "csharp-csvstats",
+  "language": "csharp",
+  "task": "Build a C# .NET 8 solution named CsvStats with a console app project `CsvStats` and an xUnit test project `CsvStats.Tests`. Running the app with `<file.csv> --column <name>` reads a CSV with a header row and prints three lines for that numeric column: `min X`, `max X`, `mean X`, each with exactly two decimal places. An unknown column or missing file prints an error to stderr and exits with code 2. Put the statistics logic in its own class used by both the app and the tests. Include a README with build and usage instructions."
+ },
+ {
+  "name": "go-logsummary",
+  "language": "go",
+  "task": "Build a Go command-line tool (module name logsummary). Running `go run . <logfile>` reads a log file whose lines start with a level (INFO, WARN or ERROR) followed by a space and a message, and prints one line per level present, sorted alphabetically, as `LEVEL count`. Support `--level NAME` to print only that level's count. A missing file prints an error to stderr and exits with code 2. Put the counting logic in a function covered by `go test`, and include a README."
+ },
+ {
+  "name": "rust-base64tool",
+  "language": "rust",
+  "task": "Build a Rust command-line tool with Cargo, package name base64tool, implementing standard Base64 without external crates. `base64tool encode <text>` prints the Base64 encoding and `base64tool decode <base64>` prints the decoded text. Invalid Base64 input prints an error to stderr and exits with code 2. Reject wrong or missing padding and impossible lengths as invalid. Put the codec in src/lib.rs, add integration tests under tests/ run by `cargo test`, and include a README."
+ },
+ {
+  "name": "node-mdtoc",
+  "language": "node",
+  "task": "Build a Node.js command-line tool named mdtoc with no runtime dependencies. Running `node mdtoc.js <file.md>` prints a table of contents for the Markdown headings: one line per heading as two spaces of indentation per level below 1, then `- [Title](#slug)`, where the slug is the lowercased title with spaces replaced by hyphens and characters other than letters, digits and hyphens removed. Support `--max-depth N` to ignore deeper headings. A missing file prints an error to stderr and exits with code 2. Headings inside fenced code blocks are not headings and must not appear. Include tests run by `npm test` using node:test, and a README."
+ },
+ {
+  "name": "kanban-live",
+  "language": "kanban",
+  "task": "Build a full-stack web application called Local Task Board with the following specifications:\n\n**Tech Stack:**\n- Node.js + Express (backend)\n- SQLite (database)\n- Vanilla HTML/CSS/JavaScript (frontend - no frameworks like React/Vue)\n- Minimal dependencies\n\n**Features:**\n1. Three-column Kanban board layout: Todo, In Progress, Done\n2. Task creation with fields: Title, Description, Priority (Low/Medium/High)\n3. Each task displays: Title, Description, Priority, Creation date\n4. CRUD operations: Create, Edit, Delete tasks\n5. Move tasks between columns via drag-and-drop\n6. Data persistence in SQLite database\n\n**REST API Endpoints:**\n- GET /api/tasks - List all tasks\n- POST /api/tasks - Create a new task\n- PUT /api/tasks/:id - Update an existing task\n- DELETE /api/tasks/:id - Delete a task\n\n**Database Requirements:**\n- Auto-create SQLite database and tasks table if they don't exist\n- Store: id, title, description, priority, status (todo/in_progress/done), created_at, updated_at\n\n**Frontend:**\n- Serve from /public directory\n- Clean, simple interface with dark-mode styling\n- Drag-and-drop support for moving tasks between columns\n- Form to create/edit tasks\n- Display all tasks organized by status column\n\n**Project Structure:**\nlocal-task-board/\n\u251c\u2500\u2500 server.js          # Express app setup and routes\n\u251c\u2500\u2500 database.js        # SQLite connection and table creation\n\u251c\u2500\u2500 package.json       # Dependencies and scripts\n\u251c\u2500\u2500 README.md          # Installation and startup instructions\n\u2514\u2500\u2500 public/\n    \u251c\u2500\u2500 index.html     # Main HTML page\n    \u251c\u2500\u2500 style.css      # Dark-mode styling\n    \u2514\u2500\u2500 app.js         # Frontend JavaScript (API calls, drag-drop)\n\n**Code Quality:**\n- Use async/await throughout\n- Validate API input\n- Handle database errors properly\n- Modular code (not one giant file)\n- Comments only where useful\n- No placeholder code or TODO sections\n\n**Startup Commands:**\nnpm install\nnpm start\n\nBuild the complete working application with all files functional and integrated."
+ }
+]
