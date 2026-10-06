@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { API } from '../session.js';
+import { API,userScopedUrl } from '../session.js';
 import { parseUtcishMs } from '../datetime.js';
 import useIsMobile from '../useIsMobile.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
+import OfficePreview from './OfficePreview.jsx';
 import EmptyState from './EmptyState.jsx';
 import { Skeleton, SkeletonGrid } from './Skeleton.jsx';
 
@@ -14,6 +15,9 @@ const artifactKindMeta=(kind,t,metadata={})=>{
   const isProject=k==="archive"&&(metadata.project_id||metadata.artifact_status);
   if(isProject)return{label:"Project",icon:IC.Cube,color:t.warm};
   const map={
+    document:{label:"Word",icon:IC.Paperclip,color:t.acc},
+    presentation:{label:"Slides",icon:IC.Paperclip,color:t.warm},
+    spreadsheet:{label:"Spreadsheet",icon:IC.Database,color:t.ok},
     image:{label:"Image",icon:IC.Image,color:t.f1},
     html:{label:"HTML",icon:IC.Code,color:t.acc},
     markdown:{label:"Markdown",icon:IC.Paperclip,color:t.pink},
@@ -36,9 +40,10 @@ function ArtifactPreviewBlock({preview,t,font}){
   useEffect(()=>{setMode("rendered");setFilter("");setArchiveDir("");setArchiveQuery("");setEntryPreview(null);},[preview?.id,preview?.updated_at,preview?.preview_type]);
   if(!preview)return <div style={{padding:18,color:t.mut,fontSize:12}}>Loading preview...</div>;
   const type=preview.preview_type||"metadata";
+  if(type==="office")return <OfficePreview key={preview.id} preview={preview} t={t} font={font}/>;
   if(type==="missing")return <div style={{padding:14,border:`1px solid ${t.err}35`,background:`${t.err}08`,borderRadius:8,color:t.err,fontSize:12}}>File metadata is retained, but the physical file is missing.</div>;
-  if(type==="image")return <img src={`${API}${preview.download_url||preview.url}`} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
-  if(type==="pdf")return <iframe src={`${API}${preview.download_url||preview.url}`} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
+  if(type==="image")return <img src={userScopedUrl(preview.download_url||preview.url)} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
+  if(type==="pdf")return <iframe src={userScopedUrl(preview.download_url||preview.url)} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
   if(type==="archive"){
     const raw=(preview.preview?.entries||[]).filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/");
     const norm=raw.map(e=>{const path=(e.path||String(e.name||"").replace(/\/$/,"")).replace(/^\.\/+/,"");const parent=e.parent??(path.includes("/")?path.split("/").slice(0,-1).join("/"):"");const base=e.display_name||String(e.name||path).replace(/\/$/,"").split("/").pop()+(e.is_dir?"/":"");return{...e,path,parent,display_name:base};});
@@ -501,7 +506,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   const curMeta=(cur&&cur.metadata)||{};
   const metaLine=(m)=>`seed ${m.seed} · ${m.steps} steps · ${m.width}×${m.height}${m.checkpoint?` · ${String(m.checkpoint).replace(/\.(safetensors|ckpt)$/i,"")}`:""}`;
   const actionChips=(a,m)=>(<div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"center"}}>
-    <a href={`${API}/api/artifacts/${a.id}/download`} download={a.filename} style={smallBtn(t.ok)}><IC.Download/>Download</a>
+    <a href={userScopedUrl(`/api/artifacts/${a.id}/download`)} download={a.filename} style={smallBtn(t.ok)}><IC.Download/>Download</a>
     <button onClick={()=>useInChat({artifact_id:a.id})} style={smallBtn(t.acc)}><IC.Send/>Use in chat</button>
     <button onClick={()=>reuseParams(m)} title="Load this image's prompt and settings back into the form" style={smallBtn(t.acc2)}><IC.Refresh/>Reuse</button>
     {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}><IC.Star/>Seed</button>}
@@ -818,7 +823,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
         <div style={{display:"flex",flexDirection:"column",gap:5}}>{workspaces.map(w=>{const checked=(a.workspace_ids||[]).includes(w.id);return <label key={w.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:checked?t.text:t.mut}}><input type="checkbox" checked={checked} onChange={e=>{const cur=new Set(a.workspace_ids||[]);if(e.target.checked)cur.add(w.id);else cur.delete(w.id);patch({workspace_ids:Array.from(cur)});}}/> {w.name}</label>;})}</div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Lineage</div>
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={`${API}/api/artifacts/${v.id}/download`} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={userScopedUrl(`/api/artifacts/${v.id}/download`)} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Provenance</div>
         <div style={{fontSize:11,color:t.dim,lineHeight:1.7,wordBreak:"break-word"}}>
@@ -884,9 +889,9 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
       </div>}
     </div>
     <div style={{display:"grid",gridTemplateColumns:`repeat(${primaryCount},1fr)`,gap:6}}>
-      {onPreview&&<button onClick={()=>onPreview(a.filename,a.url)} style={primaryBtn(t.acc)}>Preview</button>}
+      {onPreview&&<button onClick={()=>["document","presentation","spreadsheet"].includes(a.kind)&&onDetails?onDetails(a.id):onPreview(a.filename,a.url)} style={primaryBtn(t.acc)}>Preview</button>}
       {onDetails&&<button onClick={()=>onDetails(a.id)} style={primaryBtn(t.f1)}>Details</button>}
-      <a href={a.id?`${API}/api/artifacts/${a.id}/download`:`${API}${a.url}`} download={a.filename} style={primaryBtn(t.ok)}>Download</a>
+      <a href={userScopedUrl(a.id?`/api/artifacts/${a.id}/download`:a.url)} download={a.filename} style={primaryBtn(t.ok)}>Download</a>
     </div>
     <div style={{display:"flex",gap:6}}>
       {a.conversation_id?<button onClick={()=>onOpenConv?.(a.conversation_id)} style={utilBtn(t.acc,false)}>Chat</button>:<div style={{flex:1}}/>}
@@ -913,13 +918,14 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
   const [selected,setSelected]=useState(()=>new Set());
   const filters=[
     ["all","All"],["pinned","Pinned"],["recent","Recent"],["project","Projects"],
+    ["document","Word"],["presentation","Slides"],["spreadsheet","Sheets"],
     ["image","Images"],["data","Data"],["code","Code"],["archived","Archived"]
   ];
   const viewParams=(v)=>{
     if(v==="pinned")return{pinned:"true"};
     if(v==="archived")return{status:"archived"};
     if(v==="project")return{kind:"project"};
-    if(["image","data","code"].includes(v))return{kind:v};
+    if(["document","presentation","spreadsheet","image","data","code"].includes(v))return{kind:v};
     return{};
   };
   const load=useCallback(async()=>{

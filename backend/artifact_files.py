@@ -409,6 +409,9 @@ def extract_indexable_text(
     filename: str | None = None,
 ) -> str:
     display_name = filename or os.path.basename(filepath)
+    if os.path.splitext(display_name.lower())[1] in {".docx", ".pptx", ".xlsx"}:
+        from document_formats import extract_text
+        return extract_text(filepath, max_chars=max_chars)
     lower = display_name.lower()
     kind = (kind or db.artifact_kind_for_filename(display_name, mime_type)).lower()
     try:

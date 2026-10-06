@@ -42,6 +42,30 @@ _LEAK_TRANSITION_MARKERS = ("<|channel|>", "<channel|>", "<|message|>")
 _FENCE_LINE_RE = re.compile(r"(?m)^[ \t]*```")
 
 
+def _merge_stream_tool_calls(collected: list, incoming) -> list:
+    """Accumulate native tool calls across stream chunks.
+
+    Ollama (verified on 0.35.0 with qwen3-coder:30b, qwen3.8:27b and laguna-xs-2.1) emits each parsed tool
+    call in its OWN chunk, so a round that calls two tools arrives as two chunks. Assigning the chunk's list
+    kept only the last call and silently dropped the first. A repeated (name, arguments) pair is treated as
+    the same call re-announced (a final chunk may restate the list), not as a second invocation.
+    """
+    if not incoming:
+        return collected
+    seen = {(json.dumps((tc.get("function") or {}).get("name"), sort_keys=True),
+             json.dumps((tc.get("function") or {}).get("arguments"), sort_keys=True, default=str)) for tc in collected}
+    for tc in incoming:
+        if not isinstance(tc, dict):
+            continue
+        key = (json.dumps((tc.get("function") or {}).get("name"), sort_keys=True),
+               json.dumps((tc.get("function") or {}).get("arguments"), sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        collected.append(tc)
+    return collected
+
+
 def _in_open_fence(text: str) -> bool:
     return len(_FENCE_LINE_RE.findall(text)) % 2 == 1
 
@@ -1779,7 +1803,21 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     connector_tool_id_map = connector_tool_id_map or {}
     connector_tool_name_map = connector_tool_name_map or {}
 
+    from document_tools import DOCUMENT_TOOLS, DOCUMENT_INSTRUCTIONS
+    import documents as document_service
+    _documents_available = not ephemeral and document_service.enabled()
+    if _documents_available and "documents" not in requested_tool_ids:
+        # Existing attachments/revisions keep document tools available on later turns.
+        if await document_service.has_documents(conv_id):
+            requested_tool_ids = [*requested_tool_ids, "documents"]
     for tid in requested_tool_ids:
+        if tid == "documents":
+            if _documents_available:
+                for tname, tdef in DOCUMENT_TOOLS.items():
+                    ollama_tools.append(tdef)
+                    _extra_text_tool_defs.append(tdef)
+                    available_tool_names.add(tname)
+            continue
         if tid == "codeagent":
             for tname, tdef in CODEAGENT_TOOLS.items():
                 if tname not in ("deep_research", "conspiracy_research"):
@@ -1962,6 +2000,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
             messages[0]["content"] += _viz_hint
         else:
             messages.insert(0, {"role": "system", "content": _viz_hint.strip()})
+
+    if "document_read" in available_tool_names:
+        messages.append({"role": "system", "content": DOCUMENT_INSTRUCTIONS})
 
     if "save_memory" in available_tool_names:
         _mem_hint = (
@@ -2167,6 +2208,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     # selfie rescue + exec loop.
     _sfw_persona = persona_rating_key in ("G", "PG", "PG-13")
     _oom_retries = 0               # OOM context halving retries
+    _document_argument_failures = {}
     _tools_ran_this_turn = 0       # Real exec_tool runs this turn (phantom-completion guard)
     _phantom_nudges = 0            # How many times we re-prompted a tool-less completion claim
     # Effort-level self-review rounds: 0=off, capped at 3
@@ -2716,10 +2758,8 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens})}\n\n"
 
                         if msg_chunk.get("tool_calls"):
-                            tool_calls = msg_chunk["tool_calls"]
+                            tool_calls = _merge_stream_tool_calls(tool_calls, msg_chunk["tool_calls"])
                         if chunk.get("done"):
-                            if msg_chunk.get("tool_calls"):
-                                tool_calls = msg_chunk["tool_calls"]
                             break
 
                     # Clean up the drain task
@@ -3025,6 +3065,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         "round": round_num,
                         "run_ids": _stream_run_ids,
                         "run_roles": _stream_run_roles,
+                        "run_types": {r["id"]: r.get("role", "") for r in _stream_runs_now},
                         "has_full_product_build": _stream_has_full_product_build,
                     })
             except Exception as _use:
@@ -3358,6 +3399,28 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                         tool_result = _tf.result()
                     except Exception as te:
                         tool_result = f"**Tool error ({tool_name}):** {str(te)}"
+
+                    if tool_name.startswith("document_"):
+                        from document_tools import apply_argument_retry
+                        tool_result = apply_argument_retry(tool_name, tool_result, _document_argument_failures,
+                                                           available_tool_names, ollama_tools)
+                        if _document_argument_failures.get(tool_name, 0) >= 2:
+                            # End this request instead of letting the model bypass the
+                            # document validator through code tools or a source-file read.
+                            _failure_text = "I couldn’t finish the document request because the generated document content was invalid after one correction. Existing files are unchanged. Please retry the request."
+                            _doc_runs = [r for r in await db.get_runs_by_conversation(conv_id, limit=100)
+                                         if r.get("started_at", "") >= _stream_started_at]
+                            if _assistant_msg_id is not None:
+                                await db.update_message(_assistant_msg_id, content=_failure_text, metadata={
+                                    "in_progress": False, "document_error": True,
+                                    "run_ids": [r["id"] for r in _doc_runs],
+                                    "run_types": {r["id"]: r.get("role", "") for r in _doc_runs},
+                                    "has_full_product_build": _stream_has_full_product_build})
+                            yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'token', 'content': _failure_text})}\n\n"
+                            await events.emit(conv_id, "complete", {"status": "Document failed"})
+                            yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'document_error': True})}\n\n"
+                            return
 
                     # ── Inline image injection ──
                     # generate_image returns ![..](url) markdown intended for the

@@ -243,6 +243,7 @@ def test_streamed_report_tokens_filter_thinking_leaks(tmp_path, monkeypatch):
 
     async def fake_stream_provider_chat(*_args, **_kwargs):
         yield {"type": "token", "content": "cloud hidden</think>\n# Cloud Report\n\nBody"}
+        yield {"type": "finish", "reason": "stop"}
 
     monkeypatch.setattr(research, "is_cloud_model", lambda m: str(m).startswith("openai:"))
     monkeypatch.setattr(research, "stream_provider_chat", fake_stream_provider_chat)

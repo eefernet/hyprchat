@@ -270,6 +270,9 @@ async def preview_artifact_ep(artifact_id: str, max_chars: int = Query(200000, g
         }
 
     kind = (artifact.get("kind") or "file").lower()
+    if kind in {"document", "presentation", "spreadsheet"}:
+        from documents import preview_payload
+        return await preview_payload(artifact)
     lower_name = (safe_name or artifact.get("filename") or "").lower()
     file_meta = artifact_file_metadata(filepath)
     if kind == "archive":
@@ -436,6 +439,8 @@ async def use_artifact_in_chat_ep(artifact_id: str, req: ArtifactUseInChatReques
         "artifact_id": artifact_id,
         "url": artifact.get("url"),
     }
+    if artifact.get("kind") in {"document", "presentation", "spreadsheet"}:
+        attachment.update({"type": "office", "artifactId": artifact_id, "sha256": artifact.get("sha256", "")})
     return {
         "artifact_id": artifact_id,
         "conversation_id": req.conversation_id,

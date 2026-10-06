@@ -18,6 +18,7 @@ router = APIRouter()
 async def list_builtin_tools():
     """Return the integrated tool suites."""
     return [
+        {"id": "documents", "name": "Documents", "description": "Read, compose, edit and export Word, PowerPoint and Excel files (requires Documents in Settings)", "icon": "file", "builtin": True},
         {"id": "codeagent", "name": "⚡ CodeAgent", "description": "Code execution, shell, file management, downloads", "icon": "cpu", "builtin": True},
         {"id": "deep_research", "name": "🔬 Agent Research", "description": "Agent-focused web research for current APIs, coding blockers, repeated errors, and concise implementation guidance", "icon": "search", "builtin": True},
         {"id": "conspiracy_research", "name": "🕵️ Conspiracy Research", "description": "Uncensored deep-dive across leak archives, FOIA vaults, court dockets, and gov records — grouped by source class", "icon": "search", "builtin": True},

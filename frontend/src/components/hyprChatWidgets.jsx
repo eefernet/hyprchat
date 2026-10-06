@@ -1,3 +1,4 @@
+import {isDocumentEvent} from "../documentFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
@@ -635,7 +636,7 @@ function DaedalusSummary(props){
     return <>{jobs.map(workflow=><DaedalusJobCard key={workflow.id} workflow={workflow} t={props.t} font={props.font} md={props.md} onOpenArtifact={props.onOpenArtifact}/>)}
       {attachments.length>0&&<ToolStatus evts={attachments} t={props.t} font={props.font} md={props.md} historical onPreview={props.onPreview} onOpenArtifact={props.onOpenArtifact} msgContent={props.msgContent}/>}</>;
   }
-  return <LegacyDaedalusSummary {...props}/>;
+  return <LegacyDaedalusSummary {...props} savedEvents={(props.savedEvents||[]).filter(e=>!isDocumentEvent(e))} liveEvts={(props.liveEvts||[]).filter(e=>!isDocumentEvent(e))}/>;
 }
 
 const LegacyWorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
@@ -954,6 +955,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   // useState after an early return only avoided crashing because of the
   // remount. Keep its state here.
   const [slExpanded,setSlExpanded]=useState(false);
+  evts=evts.filter(e=>!isDocumentEvent(e));
+  savedEvts=(savedEvts||[]).filter(e=>!isDocumentEvent(e));
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive

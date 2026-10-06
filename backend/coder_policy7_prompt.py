@@ -16,13 +16,15 @@ OVERHEAD_TOKENS = 15000
 # Room the session needs for its own work (file reads, tool results) before the bridge's limit: the v2 Kanban repair
 # sessions started at ~22K tokens and overflowed on the ninth call without compaction ever firing.
 HEADROOM_TOKENS = 8000
-EXCLUDED = {'node_modules', '.venv', 'venv', '.git', 'target', 'build', 'obj', 'bin', 'dist', '__pycache__', '.daedalus'}
+EXCLUDED = {'node_modules', '.venv', 'venv', '.git', 'target', 'build', 'obj', 'bin', 'dist', '__pycache__', '.pytest_cache', '.daedalus'}
 # (listing chars, focused-defect chars or None for unbounded, evidence catalog budget divisor)
 TIERS = ((12000, None, 3), (3000, 2500, 12), (1500, 1200, 24), (600, 600, 48))
 
 
 def file_listing(root, limit):
-    names = [str(p.relative_to(root)) for p in sorted(root.rglob('*')) if p.is_file() and not set(p.parts) & EXCLUDED]
+    # Exclusions apply to the path INSIDE the project: the worker's own root is /root/.daedalus/jobs/<id>/workspace,
+    # so matching against the absolute path emptied every production repair prompt (live laguna run, 2026-09-30).
+    names = [str(p.relative_to(root)) for p in sorted(root.rglob('*')) if p.is_file() and not set(p.relative_to(root).parts) & EXCLUDED]
     text = ', '.join(names)
     return text if len(text) <= limit else text[:limit].rsplit(', ', 1)[0] + f', … ({len(names)} files)'
 

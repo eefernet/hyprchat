@@ -1,3 +1,6 @@
+import DocumentActivity from "./components/DocumentActivity.jsx";
+import DocumentPreviewPanel from "./components/DocumentPreviewPanel.jsx";
+import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles.js";
 // HyprChat frontend entry.
 //
 // This file is the former inline `<script type="text/babel">` body from
@@ -10,11 +13,15 @@
 // component code below — which references window.Prism / window.katex etc. —
 // keeps working untouched.
 import './vendor.js';
+import {mergeResearchReport,researchRevision,researchTerminal,researchHeadings,linkResearchCitations,researchExportMarkdown} from './researchState.js';
 import { parseCodeFence } from './syntaxHighlight.js';
 
 import React from 'react';
 import DaedalusSettings from './components/DaedalusSettings.jsx';
 import DaedalusRequestOptions from './components/DaedalusRequestOptions.jsx';
+import ComposerToolsMenu from './components/ComposerToolsMenu.jsx';
+import DocumentSettings from './components/DocumentSettings.jsx';
+import {isOfficeFile,isSpreadsheetFile,documentAttachmentContext} from './documentFiles.js';
 import {DaedalusStatusStrip} from './components/DaedalusJobCard.jsx';
 import NewVersionBar from './components/NewVersionBar.jsx';
 import {isDaedalusPersona,codingRequestFields,workflowIds,backgroundJob,cancellableWorkflowIds} from './daedalusJobs.js';
@@ -127,6 +134,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const CHAT_HISTORY_RENDER_CHUNK = 80;
 // Service-status "degraded" amber — deliberately theme-independent (t.warm equals t.err in some themes, which would make degraded indistinguishable from down).
 const STATUS_DEGRADED = "#f0a030";
+const searchHealthSample = s => s?.search_checked_at ? `Search sampled ${new Date(s.search_checked_at).toLocaleTimeString()}; refreshed at most every 15 minutes` : "";
 
 const normalizePrompts = (value) => {
   if(!Array.isArray(value))return [];
@@ -258,6 +266,7 @@ function HyprChat(){
   const [changelogContent,setChangelogContent]=useState(null);
   const [ollamaUrl,setOllamaUrl]=useState("");
   const [codeboxUrl,setCodeboxUrl]=useState("");
+  const [documentsEnabled,setDocumentsEnabled]=useState(false);
   const [searxngUrl,setSearxngUrl]=useState("");
   const [n8nUrl,setN8nUrl]=useState("");
   const [comfyuiUrl,setComfyuiUrl]=useState("");
@@ -314,7 +323,6 @@ function HyprChat(){
   const [slashVarFill,setSlashVarFill]=useState(null); // {title, content, vars:[{name,value}]} — {{var}} fill-in card
   const [slashDismissed,setSlashDismissed]=useState(false); // Esc closes the slash menu until inp stops starting with "/"
   const [showQuickMenu,setShowQuickMenu]=useState(false);
-  const [showConnectorPicker,setShowConnectorPicker]=useState(false);
   const [showEffortPicker,setShowEffortPicker]=useState(false);
   const [pendingEffort,setPendingEffort]=useState(null);
   const [pendingPersona,setPendingPersona]=useState(null);
@@ -324,7 +332,6 @@ function HyprChat(){
   const effortPickerRef=useRef(null);
   const exportMenuRef=useRef(null);
   const [promptSearch,setPromptSearch]=useState("");
-  const [connectorSearch,setConnectorSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
   const validPrompts=useMemo(()=>normalizePrompts(prompts),[prompts]);
 
@@ -717,6 +724,12 @@ function HyprChat(){
 
   // Deep Research workspace state
   const [researchTemplates,setResearchTemplates]=useState([]);
+  const researchSelectedRef=useRef(null);
+  const researchAppliedRef=useRef(null);
+  const researchEvidenceRequestRef=useRef(0);
+  const researchRequestRef=useRef(0);
+  const researchRevisionRef=useRef(0);
+  const [researchEvidence,setResearchEvidence]=useState(null);
   const [researchReports,setResearchReports]=useState([]);
   const [activeResearchId,setActiveResearchId]=useState(null);
   const [activeResearch,setActiveResearch]=useState(null);
@@ -759,7 +772,7 @@ function HyprChat(){
   const [currentRunNotice,setCurrentRunNotice]=useState(null); // {type,label,detail,at}
   const [composerFocused,setComposerFocused]=useState(false);
 
-  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),connectorPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
+  const chatEnd=useRef(null),inpRef=useRef(null),abortR=useRef(null),sseR=useRef(null),fileRef=useRef(null),loadReqRef=useRef(0),chatScrollRef=useRef(null),dlPanelRef=useRef(null),quickMenuRef=useRef(null),promptPickerRef=useRef(null),actIdRef=useRef(actId),titleSearchRef=useRef(null),ftsRef=useRef(null),importRef=useRef(null),charCardImportRef=useRef(null);
   actIdRef.current=actId;
   useEffect(()=>{
     const prep=sendPrepRef.current;
@@ -1302,15 +1315,6 @@ function HyprChat(){
     for (const tl of tools) { if (!seen.has(tl.id)) { seen.add(tl.id); merged.push({id:tl.id, name:tl.name, description:tl.description||tl.filename, icon:"code"}); } }
     return merged;
   })();
-  const connectorOperationTools=allTools.filter(tl=>tl.connector);
-  const activeConnectorTools=connectorOperationTools.filter(tl=>activeToolIds.includes(tl.id));
-  const activeConnectorCount=activeConnectorTools.length;
-  const composerToolChips=allTools.filter(tl=>!tl.connector).concat(activeConnectorTools.slice(0,3));
-  const filteredConnectorTools=connectorOperationTools.filter(tl=>{
-    const q=connectorSearch.trim().toLowerCase();
-    if(!q)return true;
-    return String(tl.name||"").toLowerCase().includes(q)||String(tl.description||"").toLowerCase().includes(q)||String(tl.id||"").toLowerCase().includes(q);
-  });
   const toggleToolId=(toolId)=>{
     if(!toolId)return;
     if(!actId){
@@ -1325,6 +1329,7 @@ function HyprChat(){
     setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
+    researchSelectedRef.current=null;researchAppliedRef.current=null;researchEvidenceRequestRef.current++;researchRequestRef.current++;researchRevisionRef.current=0;setResearchEvidence(null);
     setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
     setCouncils([]);setActiveCouncilId(null);setCouncilReport(null);setQuickResults([]);setSearchLoading(false);setQuickSearchError(null);
     setCoderWorkflows([]);setCoderProjInfo(null);setAttachments([]);setFtsResults([]);setArtifactFocusId(null);setPanel("chat");setLoadingConv(false);
@@ -1553,6 +1558,7 @@ function HyprChat(){
     fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
     fetch(`${API}/api/model-providers`).then(r=>r.json()).then(d=>{const map={};(d.providers||[]).forEach(p=>{map[p.provider]=p;});setModelProviders(map);}).catch(()=>{});
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{
+      setDocumentsEnabled(d.document_tools_enabled===true);
       if(d.current_ollama_url)setOllamaUrl(d.current_ollama_url);
       if(d.current_codebox_url)setCodeboxUrl(d.current_codebox_url);
       if(d.current_searxng_url)setSearxngUrl(d.current_searxng_url);
@@ -1687,70 +1693,106 @@ function HyprChat(){
     }catch(e){console.error("Research report refresh failed",e);}
   },[researchReportFilter]);
 
+  const applyResearchReport=useCallback(d=>{
+    if(researchSelectedRef.current!==d.id||researchRevision(d)<researchRevisionRef.current)return;
+    const merged=mergeResearchReport(researchAppliedRef.current,d);
+    if(merged===researchAppliedRef.current)return;
+    d=merged;researchAppliedRef.current=d;
+    researchRevisionRef.current=researchRevision(d);
+    setActiveResearch(p=>mergeResearchReport(p,d));
+    setResearchEvents(d.events_log||[]);
+    setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||""));
+    setResearchRunning(!researchTerminal(d.status));
+    setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);
+  },[]);
+
   const loadResearchReport=useCallback(async(id,{openPanel=true}={})=>{
     if(!id)return;
+    if(!openPanel&&researchSelectedRef.current&&researchSelectedRef.current!==id)return;
+    if(researchSelectedRef.current!==id){
+      researchSelectedRef.current=id;researchRevisionRef.current=0;
+      researchAppliedRef.current=null;
+      setResearchLiveMarkdown("");setActiveResearch(null);setResearchEvidence(null);setResearchEvents([]);
+    }
+    setActiveResearchId(id);
+    const request=++researchRequestRef.current;
     setResearchLoading(true);
     try{
       const r=await fetch(`${API}/api/research/reports/${id}`);
       if(!r.ok)throw new Error(`HTTP ${r.status}`);
       const d=await r.json();
-      setActiveResearchId(id);setActiveResearch(d);
-      setResearchEvents(d.events_log||[]);
-      setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||""));
-      setResearchRunning(["queued","running"].includes(d.status));
+      if(request!==researchRequestRef.current||researchSelectedRef.current!==id)return;
+      applyResearchReport(d);
       if(openPanel)setPanel("research");
-    }catch(e){console.error("Research report load failed",e);notify({type:"error",text:"Research report failed to load",detail:e.message||String(e)});}
-    setResearchLoading(false);
-  },[notify]);
+    }catch(e){if(request===researchRequestRef.current)notify({type:"error",text:"Research report failed to load",detail:e.message||String(e)});}
+    finally{if(request===researchRequestRef.current)setResearchLoading(false);}
+  },[notify,applyResearchReport]);
 
   useEffect(()=>{if(activeResearchId)loadResearchReport(activeResearchId,{openPanel:false});},[activeResearchId]);
 
   useEffect(()=>{
-    if(researchEventRef.current){researchEventRef.current.close();researchEventRef.current=null;}
     if(!activeResearchId||!researchRunning)return;
     let closed=false;
     const es=new EventSource(userScopedUrl(`/api/events/${activeResearchId}`));
     es.onmessage=e=>{try{
+      if(closed||researchSelectedRef.current!==activeResearchId)return;
       const ev=JSON.parse(e.data);
       if(ev.type==="heartbeat"||ev.type==="keepalive")return;
+      if(ev.type==="research_snapshot"){
+        if(Number(ev.data?.revision)<=researchRevisionRef.current)return;
+        researchRevisionRef.current=Number(ev.data.revision);
+        researchAppliedRef.current={...researchAppliedRef.current,report_markdown:ev.data.report_markdown,metrics:ev.data.metrics};
+        setResearchLiveMarkdown(cleanResearchMarkdown(ev.data.report_markdown||""));
+        setActiveResearch(p=>p?.id===activeResearchId?{...p,report_markdown:ev.data.report_markdown,metrics:ev.data.metrics}:p);
+        return;
+      }
+      if(ev.type==="research_token"){
+        if(!researchRevisionRef.current&&ev.data?.content)setResearchLiveMarkdown(p=>p+ev.data.content);
+        return;
+      }
       setResearchEvents(p=>[...p.slice(-300),ev]);
-      if(ev.type==="research_token"&&ev.data?.content)setResearchLiveMarkdown(p=>p+ev.data.content);
       if(ev.type==="research_done"||ev.type==="research_error"){
         setResearchRunning(false);
-        setTimeout(()=>{refreshResearchReports();loadResearchReport(activeResearchId,{openPanel:false});},600);
+        refreshResearchReports();loadResearchReport(activeResearchId,{openPanel:false});
       }
     }catch{}};
-    es.onerror=()=>{if(!closed)console.warn("Research event stream disconnected");};
+    es.onerror=()=>{if(!closed)console.warn("Research stream reconnecting; saved snapshots remain available");};
     researchEventRef.current=es;
     return()=>{closed=true;es.close();if(researchEventRef.current===es)researchEventRef.current=null;};
   },[activeResearchId,researchRunning,refreshResearchReports,loadResearchReport]);
 
   useEffect(()=>{
     if(!activeResearchId||!researchRunning)return;
-    let closed=false,timer=null;
+    let closed=false,busy=false;
     const sync=async()=>{
+      if(busy)return;busy=true;
       try{
         const r=await fetch(`${API}/api/research/reports/${activeResearchId}`);
+        if(closed||researchSelectedRef.current!==activeResearchId)return;
+        if(r.status===404){setResearchRunning(false);return;}
         if(!r.ok)return;
         const d=await r.json();
-        if(closed)return;
-        setActiveResearch(d);
-        setResearchEvents(d.events_log||[]);
-        if(d.report_markdown)setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||""));
-        setResearchReports(p=>{
-          const rest=p.filter(x=>x.id!==d.id);
-          return [d,...rest];
-        });
-        if(["complete","failed","cancelled"].includes(String(d.status||"").toLowerCase())){
-          setResearchRunning(false);
-          refreshResearchReports();
-        }
+        if(!closed&&researchSelectedRef.current===d.id)applyResearchReport(d);
       }catch(e){console.warn("Research report poll failed",e);}
+      finally{busy=false;}
     };
-    timer=setInterval(sync,5000);
-    const first=setTimeout(sync,2500);
+    const timer=setInterval(sync,5000),first=setTimeout(sync,1000);
     return()=>{closed=true;clearInterval(timer);clearTimeout(first);};
-  },[activeResearchId,researchRunning,refreshResearchReports]);
+  },[activeResearchId,researchRunning,applyResearchReport]);
+
+  const inspectResearchEvidence=async(sourceId,offset=0)=>{
+    const id=researchSelectedRef.current;
+    const request=++researchEvidenceRequestRef.current;
+    try{
+      const r=await fetch(`${API}/api/research/reports/${id}/evidence/${sourceId}?offset=${offset}`);
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      if(researchSelectedRef.current===id&&request===researchEvidenceRequestRef.current){
+        setResearchEvidence({...d,source_id:sourceId,offset});
+        requestAnimationFrame(()=>document.getElementById('research-evidence-inspector')?.scrollIntoView({behavior:'smooth',block:'start'}));
+      }
+    }catch(e){notify({type:"error",text:"Evidence unavailable",detail:e.message});}
+  };
 
   const startResearchReport=async()=>{
     const query=(researchDraft.query||"").trim();
@@ -1759,47 +1801,60 @@ function HyprChat(){
     const inputs=[...(researchDraft.inputs||[])];
     if(notes)inputs.push({name:"Pasted notes",type:"notes",content:notes});
     const body={...researchDraft,query,depth:parseInt(researchDraft.depth)||3,model:researchDraft.model||researchSelectableModels[0]||models[0]||"",inputs};
+    const request=++researchRequestRef.current;
+    researchSelectedRef.current=null;researchAppliedRef.current=null;setActiveResearchId(null);setActiveResearch(null);
     setResearchRunning(true);setResearchEvents([]);setResearchLiveMarkdown("");setResearchLoading(true);
     try{
       const r=await fetch(`${API}/api/research/reports`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       if(!r.ok){const txt=await r.text().catch(()=>r.statusText);throw new Error(`HTTP ${r.status}: ${txt}`);}
       const d=await r.json();
+      if(request!==researchRequestRef.current)return;
+      researchSelectedRef.current=d.id;researchRevisionRef.current=researchRevision(d);setResearchEvidence(null);
+      researchAppliedRef.current=d;
       setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);
       setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);
       setResearchDraft(p=>({...p,query:"",focus:"",inputs:[]}));
       setResearchInputText("");
       setPanel("research");
       setResearchView("reports");
-    }catch(e){setResearchRunning(false);notify({type:"error",text:"Research failed to start",detail:e.message||String(e)});}
-    setResearchLoading(false);
+    }catch(e){if(request===researchRequestRef.current){setResearchRunning(false);notify({type:"error",text:"Research failed to start",detail:e.message||String(e)});}}
+    finally{if(request===researchRequestRef.current)setResearchLoading(false);}
   };
 
   const cancelResearchReport=async(id=activeResearchId)=>{
     if(!id)return;
-    try{await fetch(`${API}/api/research/reports/${id}/cancel`,{method:"POST"});}catch{}
-    setResearchRunning(false);
-    setResearchReports(p=>p.map(r=>r.id===id?{...r,status:"cancelled",error:"Cancelled by user"}:r));
-    if(activeResearchId===id)setActiveResearch(p=>p?{...p,status:"cancelled",error:"Cancelled by user"}:p);
+    try{
+      const r=await fetch(`${API}/api/research/reports/${id}/cancel`,{method:"POST"});
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      if(researchSelectedRef.current===id)await loadResearchReport(id,{openPanel:false});
+      refreshResearchReports();
+    }catch(e){notify({type:"error",text:"Could not stop research",detail:e.message});}
   };
 
   const rerunResearchReport=async(id=activeResearchId)=>{
     if(!id)return;
+    const request=++researchRequestRef.current;
+    researchSelectedRef.current=null;researchAppliedRef.current=null;setActiveResearchId(null);setActiveResearch(null);
     setResearchRunning(true);setResearchEvents([]);setResearchLiveMarkdown("");
     try{
       const r=await fetch(`${API}/api/research/reports/${id}/rerun`,{method:"POST"});
       if(!r.ok)throw new Error(`HTTP ${r.status}`);
       const d=await r.json();
+      if(request!==researchRequestRef.current)return;
+      researchSelectedRef.current=d.id;researchRevisionRef.current=researchRevision(d);setResearchEvidence(null);
+      researchAppliedRef.current=d;
       setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);setPanel("research");
-    }catch(e){setResearchRunning(false);notify({type:"error",text:"Research rerun failed",detail:e.message||String(e)});}
+    }catch(e){if(request===researchRequestRef.current){setResearchRunning(false);notify({type:"error",text:"Research rerun failed",detail:e.message||String(e)});}}
   };
 
   const deleteResearchReport=async(id)=>{
     if(!id)return;
-    const ok=await confirmAction({title:"Delete research report?",body:"This removes the saved report and source metadata.",confirmLabel:"Delete",tone:"danger"});
+    const ok=await confirmAction({title:"Delete research report?",body:"This removes the saved report, sources, and retained evidence.",confirmLabel:"Delete",tone:"danger"});
     if(!ok)return;
-    try{await fetch(`${API}/api/research/reports/${id}`,{method:"DELETE"});}catch{}
+    try{const r=await fetch(`${API}/api/research/reports/${id}`,{method:"DELETE"});if(!r.ok)throw new Error(`HTTP ${r.status}`);}
+    catch(e){notify({type:"error",text:"Could not delete report",detail:e.message});return;}
     setResearchReports(p=>p.filter(r=>r.id!==id));
-    if(activeResearchId===id){setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);}
+    if(researchSelectedRef.current===id){researchSelectedRef.current=null;researchAppliedRef.current=null;researchEvidenceRequestRef.current++;researchRequestRef.current++;researchRevisionRef.current=0;setResearchEvidence(null);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);}
   };
 
   const addResearchReportToWorkspace=async(reportId,wsId)=>{
@@ -2019,7 +2074,7 @@ function HyprChat(){
       sources.length?`${sources.length} sources`:metrics.source_count?`${metrics.source_count} sources`:"",
       metrics.pages_read?`${metrics.pages_read} pages read`:"",
       metrics.searches?`${metrics.searches} searches`:"",
-      metrics.coverage_score!==undefined?`coverage ${metrics.coverage_score}/100`:"",
+      metrics.coverage_score!==undefined?`model assessment ${metrics.coverage_score}/100`:"",
       stamp?new Date(_parseUtcishMs(stamp)).toLocaleString():new Date().toLocaleString(),
     ].filter(Boolean);
     return <div className="research-print-page">
@@ -2029,12 +2084,12 @@ function HyprChat(){
         {report?.query&&<div className="query">{report.query}</div>}
         {!!meta.length&&<div className="meta">{meta.map((x,i)=><span key={i}>{x}</span>)}</div>}
       </header>
-      <section className="research-rendered-report markdown-print"><MDWrap>{md(bodyMd,{printMode:true,theme:researchPrintTheme})}</MDWrap></section>
+      <section className="research-rendered-report markdown-print"><MDWrap>{md(linkResearchCitations(bodyMd,sources),{printMode:true,theme:researchPrintTheme})}</MDWrap></section>
       {!!sources.length&&<section className="sources">
         <h2>Sources</h2>
         <ol>{sources.map((src,i)=>{
           const idx=src.index||src.source_index||i+1;
-          return <li key={idx+"-"+(src.url||i)}>
+          return <li id={`research-source-S${idx}`} key={idx+"-"+(src.url||i)}>
             <div className="source-title">[S{idx}] {src.title||src.url||"Source"}</div>
             {src.url&&<div className="source-url">{src.url}</div>}
             {src.credibility_score!==undefined&&<div className="source-url">Credibility: {src.credibility_score}/100{(src.credibility_factors||[]).length?` — ${(src.credibility_factors||[]).join(", ")}`:""}</div>}
@@ -2061,7 +2116,7 @@ function HyprChat(){
     const report=activeResearch;
     const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();
     if(!body)return;
-    const blob=new Blob([body],{type:"text/markdown"});
+    const blob=new Blob([researchExportMarkdown(report,body)],{type:"text/markdown"});
     const url=URL.createObjectURL(blob);
     const a=document.createElement("a");
     a.href=url;a.download=researchExportName("md");
@@ -2082,7 +2137,7 @@ function HyprChat(){
     try{
       root.render(<>
         <style>{researchPrintCss()}</style>
-        <ResearchPrintPage report={report} markdown={body}/>
+        <ResearchPrintPage report={report} markdown={researchExportMarkdown(report,body)}/>
       </>);
       await waitForResearchRender(host);
       await window.html2pdf().set({
@@ -2117,7 +2172,7 @@ function HyprChat(){
     try{
       root.render(<>
         <style>{researchPrintCss()}</style>
-        <ResearchPrintPage report={report} markdown={body}/>
+        <ResearchPrintPage report={report} markdown={researchExportMarkdown(report,body)}/>
       </>);
       await waitForResearchRender(host);
       const page=host.querySelector(".research-print-page").cloneNode(true);
@@ -2142,7 +2197,7 @@ function HyprChat(){
       w.document.open();
       w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
         ${researchPrintCss()}
-      </style></head><body><main>${buildResearchPrintHtml(report,body)}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
+      </style></head><body><main>${buildResearchPrintHtml(report,researchExportMarkdown(report,body))}</main><script>setTimeout(()=>{window.focus();window.print();},250);<\/script></body></html>`);
       w.document.close();
     }finally{
       try{root.unmount();}catch{}
@@ -2266,7 +2321,7 @@ function HyprChat(){
   useEffect(()=>{
     const handler=(e)=>{
       if(e.key!=="Escape")return;
-      setDownloadsExpanded(false);setShowPromptPicker(false);setShowQuickMenu(false);setShowConnectorPicker(false);setShowEffortPicker(false);setShowExportMenu(false);setShowSysPromptPicker(false);setShowNavMore(false);setRegenPopover(null);setQuickSearchError(null);
+      setDownloadsExpanded(false);setShowPromptPicker(false);setShowQuickMenu(false);setShowEffortPicker(false);setShowExportMenu(false);setShowSysPromptPicker(false);setShowNavMore(false);setRegenPopover(null);setQuickSearchError(null);
       setConfirmDialog(d=>{if(d?.resolve)d.resolve(false);return null;});
       if(panel==="chat")setTimeout(()=>{try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}},0);
     };
@@ -2285,12 +2340,6 @@ function HyprChat(){
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[showQuickMenu]);
-  useEffect(()=>{
-    if(!showConnectorPicker)return;
-    const handler=(e)=>{if(connectorPickerRef.current&&!connectorPickerRef.current.contains(e.target))setShowConnectorPicker(false);};
-    document.addEventListener("mousedown",handler);
-    return()=>document.removeEventListener("mousedown",handler);
-  },[showConnectorPicker]);
   useEffect(()=>{
     if(!showExportMenu)return;
     const handler=(e)=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setShowExportMenu(false);};
@@ -2934,6 +2983,7 @@ function HyprChat(){
 
       const ctrl=new AbortController();abortR.current=ctrl;
       const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null),use_memories:!isGhostSend&&(cv?.use_memories==="1"||cv?.use_memories===1||cv?.use_memories===true)};
+      if(overrides.documents&&!body.tool_ids.includes("documents"))body.tool_ids=[...body.tool_ids,"documents"];
       Object.assign(body,codingRequestFields(codingOptions,cv));
       if(isGhostSend)body.ephemeral=true;
       const _wsForChat=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&wsDetail.conversations.some(wc=>wc.id===cid))?wsDetail:null;
@@ -3025,7 +3075,7 @@ function HyprChat(){
       let _msgMeta = (_savedEvts.length || refinementsCount > 0 || _streamRunIds.length || _streamWorkflowIds.length) ? {
         ...(_savedEvts.length?{saved_events:_savedEvts}:{}),
         ...(refinementsCount>0?{refinements:refinementsCount}:{}),
-        ...(_streamRunIds.length?{run_ids:_streamRunIds}:{}),
+        ...(_streamRunIds.length?{run_ids:_streamRunIds,run_types:Object.fromEntries(_rawEvts.filter(e=>e.data?.run_id&&e.data?.run_role).map(e=>[e.data.run_id,e.data.run_role]))}:{}),
         ...(_streamWorkflowIds.length?{workflow_ids:_streamWorkflowIds}:{}),
         ...(_doneStats?{stats:_doneStats}:{}),
         has_full_product_build: _streamHasFullProductBuild,
@@ -3063,8 +3113,8 @@ function HyprChat(){
     sendPrepRef.current=prep;
     setPreparingSend("Preparing message…");
     try{
-      const hasDataFiles=attachments.some(a=>a.type==="data"&&a.file);
-      if(hasDataFiles&&(ghostMode||isGhostConv(convs.find(c=>c.id===actId)))){
+      const hasDataFiles=attachments.some(a=>["data","office"].includes(a.type)&&a.file);
+      if((hasDataFiles||attachments.some(a=>a.type==="office"))&&(ghostMode||isGhostConv(convs.find(c=>c.id===actId)))){
         throw new Error("Data-file uploads require a saved conversation. Switch off Ghost mode or remove the data attachment.");
       }
       let cid=actId;
@@ -3073,6 +3123,7 @@ function HyprChat(){
       if(!cid){createdConv=await newChat(true,{returnConv:true,sendPreparation:prep});cid=createdConv?.id;if(!cid)return;}
       if(prep.controller.signal.aborted)return;
       const cv=createdConv||convs.find(c=>c.id===cid);
+      const useDocumentAssets=documentsEnabled&&(attachments.some(a=>a.type==="office")||(cv?.tool_ids||[]).includes("documents"))&&!ghostMode&&!isGhostConv(cv);
       // Route council chats to council sender
       if(cv?.is_council){prep.preparing=false;setPreparingSend("");await sendCouncil();return;}
       // Stage data-file attachments (CSV/Excel/JSON) into the Codebox sandbox so
@@ -3080,6 +3131,13 @@ function HyprChat(){
       // inline paste. Keep the whole draft if any attachment cannot be staged.
       if(hasDataFiles)setPreparingSend("Uploading attachments…");
       const atts=await Promise.all(attachments.map(async a=>{
+        if((a.type==="office"||(useDocumentAssets&&a.type==="image"&&/\.(png|jpe?g)$/i.test(a.name)))&&a.file){
+          const fd=new FormData();fd.append("file",a.file);fd.append("conversation_id",cid);
+          const r=await fetch(`${API}/api/documents/upload`,{method:"POST",body:fd,signal:prep.controller.signal});
+          const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||`Could not upload ${a.name}`);
+          if(!d.artifact_id||!d.sha256)throw new Error(`Could not upload ${a.name}: missing document identity`);
+          return {...a,artifactId:d.artifact_id,sha256:d.sha256,sandboxPath:d.sandbox_path};
+        }
         if(a.type!=="data"||!a.file)return a;
         try{
           const fd=new FormData();fd.append("file",a.file);fd.append("conversation_id",cid);
@@ -3110,11 +3168,14 @@ function HyprChat(){
         const imageNames = [];
         for(const a of atts){
           if(a.type==="image"){
+            if(a.artifactId)fileParts.push(`Image asset **${a.name}**: artifact ID \`${a.artifactId}\` for document composition.`);
             imageAttachments.push({name:a.name,dataUrl:a.dataUrl,mime:a.mime});
             // Strip "data:image/png;base64," prefix → raw base64 for Ollama
             const b64=(a.dataUrl||"").split(",")[1]||"";
             if(b64) imageBase64s.push(b64);
             imageNames.push(a.name);
+          }else if(a.type==="office"&&a.artifactId){
+            fileParts.push(documentAttachmentContext(a));
           }else if(a.type==="pdf"){
             if(a.error)continue;
             pdfParts.push(`📄 **${a.name}** (${a.pages||"?"} pages):\n${a.content}`);
@@ -3154,6 +3215,7 @@ function HyprChat(){
       setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"});},0);
       const am=[...(cv?.messages||[]),um];
       const sendOverrides={};
+      if(atts.some(a=>a.type==="office"))sendOverrides.documents=true;
       if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
       if(createdConv){sendOverrides.conversation=createdConv;sendOverrides.freshChat=true;}
       prep.preparing=false;setPreparingSend("");
@@ -3332,7 +3394,7 @@ function HyprChat(){
           const dataUrl=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(rd.result);rd.onerror=rej;rd.readAsDataURL(file);});
           // Friendly default name for clipboard pastes (browser provides "image.png")
           const niceName=file.name||`screenshot-${new Date().toISOString().replace(/[:.]/g,"-").slice(0,19)}.png`;
-          newAttachments.push({name:niceName,dataUrl,type:"image",size:file.size,mime:file.type||"image/png"});
+          newAttachments.push({name:niceName,file,dataUrl,type:"image",size:file.size,mime:file.type||"image/png"});
         }catch(e){console.error("Image read failed:",e);notify({type:"error",text:"Image read failed",detail:e.message||String(e)});}
         continue;
       }
@@ -3351,6 +3413,12 @@ function HyprChat(){
           setAttachments(p=>p.map(a=>a.name===file.name&&a.loading?{name:file.name,content:"",type:"pdf",pages:0,loading:false,error:e.message,file}:a));
           notify({type:"error",text:"PDF extraction failed",detail:file.name});
         }
+        continue;
+      }
+      if(isOfficeFile(file.name)&&!(isSpreadsheetFile(file.name)&&!documentsEnabled&&!/m$/i.test(file.name))){
+        if(!documentsEnabled){notify({type:"warning",text:"Documents is disabled",detail:"Enable Documents in Settings → Connections before uploading Office files."});continue;}
+        if(file.size>50*1024*1024){notify({type:"warning",text:"File skipped",detail:`${file.name} is larger than 50MB.`});continue;}
+        newAttachments.push({name:file.name,file,type:"office",size:file.size});
         continue;
       }
       if(isData(file)){
@@ -3393,6 +3461,8 @@ function HyprChat(){
   };
 
   const openPreview=async(filename,url)=>{
+    const artifactId=documentArtifactId(url);
+    if(artifactId){setPreviewFile({filename,url,type:(filename||"document").split(".").pop().toLowerCase(),artifactId});setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);return;}
     const isExternal=url.startsWith("http://") || url.startsWith("https://");
     const fn=(filename||"").toLowerCase();
     const isArchive=!isExternal&&(fn.endsWith(".tar.gz")||fn.endsWith(".tgz")||fn.endsWith(".zip")||fn.endsWith(".tar"));
@@ -3438,6 +3508,7 @@ function HyprChat(){
     }
   };
   const closePreview=()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);};
+  useEffect(()=>{closePreview();},[actId,currentUserId]);
   const openArtifact=(artifactId)=>{
     if(artifactId)setArtifactFocusId(artifactId);
     setWsPanel(false);
@@ -4154,14 +4225,14 @@ function HyprChat(){
           return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} style={{...linkStyle,fontWeight:700}}>{num}</a></sup>;
         }
         const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
-        if(boldLinkMatch){const[,lt,lu]=boldLinkMatch;return <strong key={k}><a href={lu.startsWith("/api/downloads/")?`${API}${lu}`:lu} target="_blank" rel="noopener" style={linkStyle}>{lt}</a></strong>;}
+        if(boldLinkMatch){const[,lt,lu]=boldLinkMatch;return <strong key={k}><a href={(lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))?userScopedUrl(lu):lu} target={lu.startsWith("#")?undefined:"_blank"} rel="noopener" style={linkStyle}>{lt}</a></strong>;}
         if(s.startsWith("**")&&s.endsWith("**")&&s.length>4)return <strong key={k} style={{color:"#161b22",fontWeight:700}}>{s.slice(2,-2)}</strong>;
         if((s.startsWith("*")&&s.endsWith("*")&&s.length>2)||(s.startsWith("_")&&s.endsWith("_")&&s.length>2))return <em key={k} style={{fontStyle:"italic"}}>{s.slice(1,-1)}</em>;
         const linkMatch=s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-        if(linkMatch){const[,lt,lu]=linkMatch;return <a key={k} href={lu.startsWith("/api/downloads/")?`${API}${lu}`:lu} target="_blank" rel="noopener" style={linkStyle}>{lt}</a>;}
+        if(linkMatch){const[,lt,lu]=linkMatch;return <a key={k} href={(lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))?userScopedUrl(lu):lu} target={lu.startsWith("#")?undefined:"_blank"} rel="noopener" style={linkStyle}>{lt}</a>;}
         if(s.match(/^https?:\/\//)){
           const lu=s.replace(/[.,;:!?)]+$/,"");const trail=s.slice(lu.length);
-          return <span key={k}><a href={lu} target="_blank" rel="noopener" style={linkStyle}>{lu}</a>{trail}</span>;
+          return <span key={k}><a href={lu} target={lu.startsWith("#")?undefined:"_blank"} rel="noopener" style={linkStyle}>{lu}</a>{trail}</span>;
         }
         if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)return <span key={k} style={{color:"#92400e",fontStyle:"italic"}}>{s}</span>;
         if(s.startsWith("<kbd>")&&s.endsWith("</kbd>"))return <kbd key={k} style={{display:"inline-block",padding:"0 4px",border:"1px solid #d7dde8",borderRadius:3,background:"#f8fafc",fontFamily:font,fontSize:"0.82em",color:"#364152"}}>{s.slice(5,-6)}</kbd>;
@@ -4187,10 +4258,10 @@ function HyprChat(){
       const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
       if(boldLinkMatch){
         const [,lt,lu]=boldLinkMatch;
-        if(lu.startsWith("/api/downloads/")){
-          const fn=lu.split("/").pop();
+        if((lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))){
+          const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):lu.split("/").pop();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
-            <a href={`${API}${lu}`} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
+            <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
               <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
             </a>
             <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
@@ -4216,10 +4287,11 @@ function HyprChat(){
       const linkMatch=s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if(linkMatch){
         const [,lt,lu]=linkMatch;
-        if(lu.startsWith("/api/downloads/")){
-          const fn=lu.split("/").pop();
+        if(lu.startsWith("#research-source-"))return <a key={k} href={lu} onClick={e=>{e.preventDefault();document.getElementById(lu.slice(1))?.scrollIntoView({behavior:'smooth',block:'center'});}} style={{color:t.acc,textDecoration:'underline'}}>{lt}</a>;
+        if((lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))){
+          const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):lu.split("/").pop();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
-            <a href={`${API}${lu}`} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
+            <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
               <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
             </a>
             <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
@@ -4382,7 +4454,7 @@ function HyprChat(){
         if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
         if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
         if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
-        if(ln.match(/^## /))return <div key={j} style={{fontSize:15,fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
+        if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:15,fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
         if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
         /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
         const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
@@ -4505,7 +4577,7 @@ function HyprChat(){
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{setPanel(p);if(isMobile)setSidebar(false);}} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
-  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
+  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -5441,7 +5513,7 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return `Audit complete${d.coverage_score!==undefined?` - coverage ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return d.summary?`Report complete - ${d.summary}`:"Report complete";if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=[...(report?.outline?.sections||[])].map(s=>s.heading||s).filter(Boolean);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,...(isMobile?{flexWrap:"wrap",rowGap:6}:{})}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
       {researchView==="reports"&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
@@ -5480,6 +5552,7 @@ function HyprChat(){
               <option value={4}>📚 Comprehensive</option>
               <option value={5}>🧠 Exhaustive</option>
             </select>
+            <div style={{fontSize:10,color:t.mut,gridColumn:'1 / -1'}}>{(()=>{const b=tmpl.depth_budgets?.[researchDraft.depth];return b?`Up to ${b.queries} searches · ${b.page_reads} page reads · ${b.word_target?.join('–')} words when evidence supports it`:"Depth increases search breadth and full-page reading.";})()}</div>
           </div>
           <div style={cardS}>
             <span style={cardHeadS}>Sources & Notes</span>
@@ -5528,15 +5601,13 @@ function HyprChat(){
             <label style={{...cardHeadS,color:t.mut,display:"block"}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
             <input type="number" min="1" step="1" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
             <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.4}}>
-              {researchNumCtx<=16384?<><b style={{color:t.acc}}>Compact (&le;16K)</b> — evidence is clamped hard; fine for depth 1–2 reports.</>
-              :researchNumCtx<=65536?<><b style={{color:t.acc}}>Recommended (32–64K)</b> — full evidence budgets through depth 4 fit without truncation.</>
-              :<><b style={{color:t.acc}}>Maximum (64–128K)</b> — full depth-5 evidence; uses more VRAM while a report runs.</>}
+              Relevant passages are retrieved for each writing step. A larger context fits more evidence per step and uses more memory; collected evidence stays with the report.
             </div>
             <div style={{fontSize:9,color:selectedResearchIsCloud?t.pink:(selectedResearchCtx&&researchNumCtx>selectedResearchCtx?t.warm:t.mut),marginTop:5,lineHeight:1.4}}>
               {selectedResearchIsCloud?<>Cloud model selected — local context window only affects Ollama role models.</>
               :selectedResearchCtx&&researchNumCtx>selectedResearchCtx?<><b>Context exceeds selected model ({formatModelCtx(selectedResearchCtx)} ctx).</b> <button onClick={()=>setResearchNumCtx(clampResearchCtx(selectedResearchCtx))} style={{background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:9,padding:0}}>Clamp</button></>
               :selectedResearchIsMoe?<><b style={{color:t.acc}}>MoE expert model</b> — active experts are lighter than dense parameter size, but long research contexts still use KV cache.</>
-              :parseInt(researchDraft.depth||3)>=4&&selectedResearchCtx&&selectedResearchCtx<=40960?<><b style={{color:t.warm}}>Depth {researchDraft.depth} on {formatModelCtx(selectedResearchCtx)} ctx</b> — evidence may be clamped; use a larger-context model for exhaustive reports.</>
+              :parseInt(researchDraft.depth||3)>=4?<><b style={{color:t.acc}}>Section-by-section writing</b> — depth {researchDraft.depth} retrieves evidence separately for each section.</>
               :<>Selected model context: {selectedResearchCtx?`${formatModelCtx(selectedResearchCtx)} ctx`:"unknown"}.</>}
             </div>
           </div>
@@ -5544,7 +5615,7 @@ function HyprChat(){
         </div>
       </div>
     </div>
-    :<div style={{flex:1,display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"290px minmax(0,1fr) 320px",overflow:isMobile?"auto":"hidden",minHeight:0}}>
+    :<div style={{flex:1,display:isMobile?"flex":"grid",flexDirection:isMobile?"column":undefined,gridTemplateColumns:isMobile?undefined:"290px minmax(0,1fr) 320px",overflow:isMobile?"auto":"hidden",minHeight:0}}>
       {!(isMobile&&activeResearchId)&&<div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
         <div style={{display:"flex",alignItems:"center",gap:6}}>
           <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
@@ -5566,15 +5637,15 @@ function HyprChat(){
           {!filteredReports.length&&<EmptyState t={t} font={font} compact icon={<IC.Search/>} title="No research reports yet" hint="Run a deep research report and it will be saved here." action={<button onClick={()=>setResearchView("new")} style={{...btnS(t.acc),fontSize:10}}><IC.Plus/> New Report</button>}/>}
         </div>
       </div>}
-      {(!isMobile||activeResearchId)&&<div style={{overflowY:"auto",padding:isMobile?"16px 12px":"18px 26px",minWidth:0}}>
-        {isMobile&&<button onClick={()=>{setActiveResearchId(null);setActiveResearch(null);}} style={{...btnS(t.mut),marginBottom:12}}>← All reports</button>}
+      {(!isMobile||activeResearchId)&&<div style={{overflowY:isMobile?"visible":"auto",flexShrink:isMobile?0:undefined,padding:isMobile?"16px 12px":"18px 26px",minWidth:0}}>
+        {isMobile&&<button onClick={()=>{researchSelectedRef.current=null;researchAppliedRef.current=null;researchRequestRef.current++;setActiveResearchId(null);setActiveResearch(null);setResearchRunning(false);}} style={{...btnS(t.mut),marginBottom:12}}>← All reports</button>}
         {report?<div style={{maxWidth:960,margin:"0 auto"}}>
           <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${t.brd}22`}}>
             <div style={{minWidth:0}}>
               <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
                 <span style={{fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.7,color:activeStatus[0]}}>{activeStatus[1]}</span>
                 <span style={{fontSize:10,color:t.mut}}>{report.report_type}</span>
-                {metrics.coverage_score!==undefined&&<span title="Evidence coverage score" style={{fontSize:10,color:t.acc}}>coverage {metrics.coverage_score}/100</span>}
+                {metrics.coverage_score!==undefined&&<span title="Model assessment of evidence; not a factual accuracy score" style={{fontSize:10,color:t.acc}}>model assessment {metrics.coverage_score}/100</span>}
                 {activeResearchId&&workspaces.length>0&&<select value="" title="Add report to workspace" onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(activeResearchId,wsId);}} style={{fontSize:9,padding:"2px 5px",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Add to workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
               </div>
               <h1 style={{fontSize:isMobile?20:24,lineHeight:1.15,margin:"0 0 6px",color:t.text,letterSpacing:0}}>{report.title||report.query}</h1>
@@ -5582,19 +5653,25 @@ function HyprChat(){
             </div>
           </div>
           {sectionHeadings.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
-            {sectionHeadings.slice(0,10).map((h,i)=><span key={i} style={{fontSize:9,padding:"3px 7px",borderRadius:7,background:`${t.acc}10`,border:`1px solid ${t.acc}22`,color:t.acc}}>{h}</span>)}
+            {sectionHeadings.map((h,i)=><button key={i} onClick={()=>{const el=[...document.querySelectorAll('.research-report-print [data-research-heading]')].find(n=>n.textContent===h);el?.scrollIntoView({behavior:'smooth',block:'start'});}} style={{fontSize:9,padding:"3px 7px",borderRadius:7,background:`${t.acc}10`,border:`1px solid ${t.acc}22`,color:t.acc,cursor:"pointer",fontFamily:font}}>{h}</button>)}
           </div>}
+          <div style={{fontSize:11,color:t.mut,marginBottom:12}}>{metrics.word_count||0} words{metrics.word_target?` · target ${metrics.word_target.join('–')}`:''}{metrics.writing_sections?` · sections ${metrics.writing_completed||0}/${metrics.writing_sections}`:''}</div>
+          {report.error&&<div role="alert" style={{color:t.err,marginBottom:12}}>{report.error}</div>}
+          {(metrics.completion_checks?.issues||[]).map((issue,i)=><div key={i} style={{color:t.warm,fontSize:11,marginBottom:5}}>{issue}</div>)}
+          {metrics.quality==='limited'&&<div style={{color:t.warm,fontSize:11,marginBottom:8}}>Evidence coverage is limited. Review the reported gaps before relying on conclusions.</div>}
+          {metrics.pages_read===0&&<div style={{color:t.warm,fontSize:11,marginBottom:8}}>No full web pages were read. Web evidence may be limited to snippets.</div>}
           {body?<div className="research-report-print" style={{fontSize:fontSize,lineHeight:1.72,color:t.text}}>
-            <MDWrap>{md(body)}</MDWrap>
+            <MDWrap>{md(linkResearchCitations(body,sources),{streaming:reportLive})}</MDWrap>
           </div>:<ResearchLiveStatus t={t} font={font} events={researchEvents} metrics={metrics} sources={sources} researchRunning={researchRunning} elapsedLabel={elapsedLabel} eventLabel={eventLabel}/>}
         </div>:<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:t.mut,fontSize:12}}>Select a report or start a new research run.</div>}
       </div>}
-      {(!isMobile||activeResearchId)&&<div style={{borderLeft:isMobile?"none":`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12,...(isMobile?{borderTop:`1px solid ${t.brd}24`}:{})}}>
+      {(!isMobile||activeResearchId)&&<div style={{borderLeft:isMobile?"none":`1px solid ${t.brd}24`,overflowY:isMobile?"visible":"auto",flexShrink:isMobile?0:undefined,padding:14,display:"flex",flexDirection:"column",gap:12,...(isMobile?{borderTop:`1px solid ${t.brd}24`}:{})}}>
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
           {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
             <div style={{fontSize:18,fontWeight:900,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.7,marginTop:5}}>{l}</div>
           </div>)}
         </div>
+        {metrics.final_review&&<details style={{border:`1px solid ${t.warm}24`,borderRadius:8,padding:11}}><summary style={{fontSize:11,color:t.warm,cursor:'pointer'}}>Draft review</summary><div style={{fontSize:10,color:t.mut,marginTop:7}}>{metrics.final_review.scope||'Advisory model review'}</div>{['missing_questions','unsupported_claims','contradictions'].flatMap(k=>(metrics.final_review[k]||[]).map((x,i)=><div key={`${k}-${i}`} style={{fontSize:10,color:t.dim,marginTop:6}}>{fmtAudit(x)}</div>))}</details>}
         {audit&&Object.keys(audit).length>0&&<div style={{border:`1px solid ${t.warm}24`,borderRadius:8,padding:11,background:`${t.warm}08`}}>
           <div style={{fontSize:10,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Audit</div>
           {audit.audit_method==="deterministic_fallback"&&<div style={{fontSize:10,color:t.warm,lineHeight:1.4,marginBottom:8}}>Audit generated from deterministic fallback</div>}
@@ -5620,17 +5697,29 @@ function HyprChat(){
             {!findings.length&&<div style={{fontSize:11,color:t.mut}}>Findings appear after extraction.</div>}
           </div>
         </div>
+        {researchEvidence&&<div id="research-evidence-inspector" style={{padding:12,border:`1px solid ${t.acc}44`,borderRadius:8}}>
+          <div style={{display:'flex',justifyContent:'space-between'}}><b>{researchEvidence.source_id} evidence</b><button onClick={()=>{researchEvidenceRequestRef.current++;setResearchEvidence(null);}} style={btnS(t.mut)}>Close</button></div>
+          <div style={{fontSize:10,color:t.mut,marginTop:6}}>{researchEvidence.metadata?.kind||''}{researchEvidence.metadata?.truncated?' · source text was truncated':''}</div>
+          {!researchEvidence.available&&<p style={{fontSize:11}}>Archived evidence is unavailable for this older report.</p>}
+          {(researchEvidence.chunks||[]).map(c=><div key={c.id} style={{fontSize:11,lineHeight:1.55,whiteSpace:'pre-wrap',marginTop:12}}><b>{c.heading||`Passage ${c.ordinal+1}`}</b><div>{c.text}</div></div>)}
+          <div style={{display:'flex',gap:6,marginTop:8}}>
+            {researchEvidence.offset>0&&<button style={btnS(t.mut)} onClick={()=>inspectResearchEvidence(researchEvidence.source_id,Math.max(0,researchEvidence.offset-10))}>Previous</button>}
+            {researchEvidence.offset+10<researchEvidence.total&&<button style={btnS(t.acc)} onClick={()=>inspectResearchEvidence(researchEvidence.source_id,researchEvidence.offset+10)}>More passages</button>}
+          </div>
+        </div>}
         <div>
           <div style={{fontSize:10,fontWeight:900,color:t.f1,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Sources</div>
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {sources.slice(0,35).map(src=>{const tm=tierMeta(src.tier);return <a key={`${src.index}-${src.url||src.title}`} href={src.url||undefined} target={src.url?"_blank":undefined} rel="noreferrer" style={{textDecoration:"none",padding:9,border:`1px solid ${t.brd}22`,borderRadius:8,background:`${t.surface}66`,display:"block"}}>
+            {sources.map(src=>{const tm=tierMeta(src.tier);return <div id={`research-source-S${src.index||src.source_index}`} key={`${src.index}-${src.url||src.title}`} onClick={()=>inspectResearchEvidence(`S${src.index||src.source_index}`)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter")inspectResearchEvidence(`S${src.index||src.source_index}`);}} style={{cursor:"pointer",textDecoration:"none",padding:9,border:`1px solid ${t.brd}22`,borderRadius:8,background:`${t.surface}66`,display:"block"}}>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
                 <span style={{fontSize:9,fontWeight:900,color:t.f1,flexShrink:0}}>[S{src.index||src.source_index}]</span>
                 <span style={{fontSize:10,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{src.title||src.url||"Uploaded source"}</span>
                 <span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${tm[1]}10`,border:`1px solid ${tm[1]}22`,color:tm[1],flexShrink:0}}>{tm[0]}</span>
               </div>
               <div style={{fontSize:9,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{src.snippet||src.url||""}</div>
-            </a>;})}
+              <div style={{fontSize:9,color:t.acc,marginTop:5}}>Inspect saved evidence</div>
+              {src.url&&<a href={src.url} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:9,color:t.mut}}>Open original source ↗</a>}
+            </div>;})}
             {!sources.length&&<div style={{fontSize:11,color:t.mut}}>Sources appear during search.</div>}
           </div>
         </div>
@@ -6914,6 +7003,7 @@ function HyprChat(){
 
       {/* TILE: Connections */}
       <div style={{display:settingsTab==="connections"?"block":"none",animation:"fadeIn .18s ease"}}>
+        <DocumentSettings enabled={documentsEnabled} onChange={setDocumentsEnabled} t={t} font={font}/>
         {settingSection("Service Status",
             <button onClick={async()=>{
               const next=!showHealthMonitor;
@@ -6923,14 +7013,14 @@ function HyprChat(){
               <span style={{fontSize:13}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:12}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:12}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
               {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:`${STATUS_DEGRADED}20`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:9,fontWeight:800,color:STATUS_DEGRADED}}>Limited</span>}
             </div>;})}
           </div>
-        ,"Runtime endpoint health at a glance.")}
+        ,<div>Runtime endpoint health at a glance.{health.searxng?.search_summary&&<div role="status" style={{marginTop:6,color:health.searxng.status==="ok"?t.dim:STATUS_DEGRADED,overflowWrap:"anywhere"}}>{health.searxng.search_summary}<div style={{fontSize:10,color:t.mut,marginTop:3}}>{searchHealthSample(health.searxng)}</div></div>}</div>)}
         {settingSection("Cloud Models",<button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:10,padding:"5px 9px"}}><IC.Refresh/> Refresh</button>,
           <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10}}>
             {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"],["custom","Custom","(optional key)","Any OpenAI-compatible endpoint — OpenRouter, Groq, vLLM, llama.cpp..."]].map(([provider,label,placeholder,hint])=>{
@@ -7940,7 +8030,6 @@ function HyprChat(){
               const liveEventsForMsg=isLastAssistant?evts:[];
               const messageWorkflowIds=!isU?[...new Set([...workflowIds(meta,liveEventsForMsg),...coderWorkflows.filter(w=>w.origin_message_id&&String(w.origin_message_id)===String(msg.id)).map(w=>w.id)])]:[];
               const messageWorkflows=messageWorkflowIds.map(id=>coderWorkflows.find(w=>w.id===id)||{id,workflow_version:3,state:'queued'});
-              if(!messageWorkflows.length&&isLastAssistant)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
               // For the message that is ACTIVELY streaming, derive run ids from
               // the UNCAPPED stream buffer (same source the finalize PATCH
               // uses): the live `evts` state keeps only the last 200 events, so
@@ -7952,6 +8041,10 @@ function HyprChat(){
               // trigger these renders (same pattern as the finalize _rawEvts).
               const runIdEvts=!isU&&msg.isS&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:evts;
               const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,runIdEvts):[];
+              const docRunIds=!isU?documentRunIds(meta,runIdEvts===evts?liveEventsForMsg:runIdEvts):[];
+              const documentEvents=[...savedEvents,...liveEventsForMsg];
+              const hasDocumentActivity=docRunIds.length>0||documentEvents.some(isDocumentEvent);
+              if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
               const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
@@ -7986,7 +8079,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :isDaedalusOutput?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
+                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -8003,11 +8096,12 @@ function HyprChat(){
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                     {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
                   </div>
+                  {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
                   {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
                   {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {!msg.isS&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
                   {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const isLast=isLastAssistant;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU||isDaedalusOutput)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {(()=>{if(isU||isDaedalusOutput||hasDocumentActivity)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
                   {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
                       Sources, in priority: explicit metadata.run_ids (written server-side at
                       each round boundary — survives mid-stream reload), then live events
@@ -8021,7 +8115,7 @@ function HyprChat(){
                     const seen = new Set();
                     const runIds = [];
                     for(const r of [...ridsFromMeta, ...ridsFromEvts]){
-                      if(r && !seen.has(r)){seen.add(r); runIds.push(r);}
+                      if(r && !docRunIds.includes(r) && !seen.has(r)){seen.add(r); runIds.push(r);}
                     }
                     if(!runIds.length) return null;
                     return runIds.map(rid =>
@@ -8137,40 +8231,6 @@ function HyprChat(){
         <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
           {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
           {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
-        {/* TOOL TOGGLES BAR + QUICK SEARCH */}
-        <div style={{padding:"0 16px",flexShrink:0}}>
-          <div ref={connectorPickerRef} style={{maxWidth:chatWidth,margin:"0 auto",position:"relative"}}>
-            <div style={{display:"flex",gap:6,overflowX:"auto",padding:"6px 0",alignItems:"center",minHeight:32}}>
-              {!act?.is_council&&composerToolChips.map(tl=>{
-                const on=activeToolIds.includes(tl.id);
-                const isQs=tl.id==="quick_search";
-                const col=isQs?t.f1:tl.connector?t.acc:t.warm;
-                return <button key={tl.id} title={tl.description||tl.name} onClick={()=>toggleToolId(tl.id)} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:on?700:500,cursor:"pointer",whiteSpace:"nowrap",background:on?`${col}18`:`${t.surface}D9`,border:`1px solid ${on?col:t.brd}44`,color:on?col:t.mut,transition:"all .15s",boxShadow:"none",maxWidth:tl.connector?180:"none",overflow:"hidden",textOverflow:"ellipsis",flexShrink:0}}>
-                  {isQs&&searchLoading?<span style={{display:"inline-block",animation:"spin .8s linear infinite",flexShrink:0}}>⟳</span>:(on?<IC.ToggleOn/>:<IC.ToggleOff/>)}<span style={{overflow:"hidden",textOverflow:"ellipsis"}}>{tl.name}</span>
-                </button>;
-              })}
-              {!act?.is_council&&connectorOperationTools.length>0&&<button onClick={()=>{setShowConnectorPicker(p=>!p);setConnectorSearch("");}} title="Connector tools" style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:8,fontSize:10,fontWeight:showConnectorPicker||activeConnectorCount?800:600,cursor:"pointer",whiteSpace:"nowrap",background:showConnectorPicker||activeConnectorCount?`${t.acc}18`:`${t.surface}D9`,border:`1px solid ${showConnectorPicker||activeConnectorCount?t.acc:t.brd}44`,color:showConnectorPicker||activeConnectorCount?t.acc:t.mut,transition:"all .15s",boxShadow:"none",flexShrink:0}}>
-                <IC.Tool/> Connectors{activeConnectorCount?` ${activeConnectorCount}`:""}
-              </button>}
-            </div>
-            {!act?.is_council&&showConnectorPicker&&connectorOperationTools.length>0&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"calc(100% + 6px)",left:0,zIndex:310,width:300,maxWidth:"calc(100vw - 32px)",maxHeight:260,overflow:"hidden",background:`${t.bgDeep}F7`,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 10px 28px #0009`,padding:8,display:"flex",flexDirection:"column",gap:7,backdropFilter:"blur(8px)",animation:"fadeIn .16s ease"}}>
-              <div style={{display:"flex",alignItems:"center",gap:7}}>
-                <div style={{fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.7,whiteSpace:"nowrap"}}>Connectors</div>
-                <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{activeConnectorCount} active · {connectorOperationTools.length} available</div>
-                <button onClick={()=>setShowConnectorPicker(false)} title="Close" style={{background:"transparent",border:"none",color:t.mut,cursor:"pointer",padding:2,fontSize:13,lineHeight:1}}>×</button>
-              </div>
-              <input value={connectorSearch} onChange={e=>setConnectorSearch(e.target.value)} placeholder="Search connector tools" style={{...inputS,fontSize:10,padding:"6px 8px",height:30,boxSizing:"border-box"}}/>
-              <div style={{overflowY:"auto",display:"flex",flexDirection:"column",gap:3,paddingRight:2}}>
-                {filteredConnectorTools.slice(0,80).map(tl=>{const on=activeToolIds.includes(tl.id);const label=String(tl.name||"").replace(/^([^:]{1,28}):\s*/,"");return <button key={tl.id} onClick={()=>toggleToolId(tl.id)} title={`${tl.name}\n${tl.description||""}`} style={{display:"grid",gridTemplateColumns:"16px 1fr",gap:6,alignItems:"center",width:"100%",minHeight:29,padding:"5px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}22`,background:on?`${t.acc}13`:`${t.surface}55`,color:on?t.acc:t.dim,cursor:"pointer",fontFamily:"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",textAlign:"left",boxSizing:"border-box"}}>
-                  <span style={{display:"flex",color:on?t.acc:t.mut,transform:"scale(.82)"}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
-                  <span style={{minWidth:0,display:"block",fontSize:10,fontWeight:on?750:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.2}}>{label}</span>
-                </button>;})}
-                {filteredConnectorTools.length>80&&<div style={{fontSize:9,color:t.mut,textAlign:"center",padding:6}}>Showing first 80. Search to narrow.</div>}
-                {!filteredConnectorTools.length&&<div style={{fontSize:10,color:t.mut,textAlign:"center",padding:14}}>No connector tools match.</div>}
-              </div>
-            </div>}
-          </div>
-        </div>
         {/* INPUT */}
         <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
           <div className="hc-composer-extras">
@@ -8281,6 +8341,7 @@ function HyprChat(){
                 {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
               </div>}
             </div>
+            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS}/>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
             {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
               {showPromptPicker&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
@@ -8346,7 +8407,7 @@ function HyprChat(){
       </>}
       </div>{/* end inner panel column */}
       {/* Preview panel — outside panel ternary so it renders alongside any panel */}
-      {previewFile&&<div style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
+      {previewFile&&<div role="complementary" aria-label="Preview panel" style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
             {/* Drag handle */}
             {!isMobile&&<div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
             {/* Header */}
@@ -8355,17 +8416,20 @@ function HyprChat(){
               <span style={{fontSize:9,color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
               {previewFile.isExternal
                 ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:4,flexShrink:0}}>↗ open</a>
-                :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>}
-              <button onClick={closePreview} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
+                :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>}
+              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
             </div>
             {/* Content */}
             <div style={{flex:1,overflowY:"auto",padding:14}}>
-              {previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
+              {previewFile.artifactId?<DocumentPreviewPanel key={previewFile.artifactId} artifactId={previewFile.artifactId} events={evts} t={t} font={font} onRevision={a=>setPreviewFile(p=>p?{...p,artifactId:a.artifact_id,filename:a.filename,url:a.url,type:a.filename.split(".").pop().toLowerCase()}:p)}/>
+              :previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
                 <div style={{fontWeight:700,fontSize:12}}>⚠ {previewError}</div>
                 {previewFile.isExternal
                   ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
-                  :<a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
+                  :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
               </div>
+              :!previewFile.isExternal&&previewFile.type==="pdf"
+                ?<iframe src={userScopedUrl(previewFile.url)} title={previewFile.filename} style={{width:"100%",height:"100%",minHeight:500,border:0,background:"white"}}/>
               :previewFile.isExternal&&previewFile.type==="pdf"
                 ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:6,minHeight:500}} title={previewFile.filename}/>
               :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
@@ -8380,7 +8444,7 @@ function HyprChat(){
                       <div style={{fontSize:12,fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
                       <div style={{fontSize:10,color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
                     </div>
-                    <a href={`${API}${previewFile.url}`} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,fontWeight:600}}>⬇ Download</a>
+                    <a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,fontWeight:600}}>⬇ Download</a>
                   </div>
                   <div style={{borderRadius:8,border:`1px solid ${t.brd}22`,overflow:"hidden"}}>
                     {previewArchive.entries.filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/").map((entry,i)=>{

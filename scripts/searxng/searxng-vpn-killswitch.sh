@@ -13,6 +13,7 @@ TABLE="${SEARXNG_VPN_TABLE:-100}"
 MARK="${SEARXNG_VPN_MARK:-0x1}"
 BLOCK_PRIORITY="${SEARXNG_VPN_BLOCK_PRIORITY:-101}"
 CHAIN6="SEARXNG_VPN6_OUT"
+DNS_CHAIN="SEARXNG_VPN_DNS"
 LAN_CIDR="${SEARXNG_LAN_CIDR:-192.168.1.0/24}"
 LAN_DEV="${SEARXNG_LAN_DEV:-eth0}"
 LAN6_CIDR="${SEARXNG_LAN6_CIDR:-fd73:a49c:ce1b:4f7a::/64}"
@@ -60,7 +61,24 @@ ensure_block_rule() {
     fi
 }
 
+apply_dns_guard() {
+    # The LAN route is needed for API replies, but must never carry service DNS.
+    # In particular, the root recovery resolver must not become a DNS escape.
+    iptables -N "$DNS_CHAIN" 2>/dev/null || true
+    iptables-restore --noflush <<EOF
+*filter
+-F $DNS_CHAIN
+-A $DNS_CHAIN ! -o $VPN_DEV -p udp --dport 53 -j REJECT
+-A $DNS_CHAIN ! -o $VPN_DEV -p tcp --dport 53 -j REJECT
+COMMIT
+EOF
+    if ! iptables -C OUTPUT -m owner --uid-owner "$UID_NUM" -j "$DNS_CHAIN" 2>/dev/null; then
+        iptables -I OUTPUT 1 -m owner --uid-owner "$UID_NUM" -j "$DNS_CHAIN"
+    fi
+}
+
 apply_ipv4() {
+    apply_dns_guard
     ensure_block_rule
     cleanup_old_ipv4_filter_chain
     ensure_rule mangle OUTPUT -m owner --uid-owner "$UID_NUM" -j MARK --set-mark "$MARK"
@@ -91,6 +109,8 @@ apply_ipv6() {
     ip6tables-restore --noflush <<EOF
 *filter
 -F $CHAIN6
+-A $CHAIN6 ! -o $VPN_DEV -p udp --dport 53 -j REJECT
+-A $CHAIN6 ! -o $VPN_DEV -p tcp --dport 53 -j REJECT
 -A $CHAIN6 -o lo -j ACCEPT
 -A $CHAIN6 -d $LAN6_CIDR -j ACCEPT
 -A $CHAIN6 -j REJECT --reject-with icmp6-adm-prohibited
@@ -114,6 +134,7 @@ case "$ACTION" in
         set_vpn_dns_if_ready
         ;;
     down)
+        apply_dns_guard
         ensure_block_rule
         cleanup_old_ipv4_filter_chain
         ensure_rule mangle OUTPUT -m owner --uid-owner "$UID_NUM" -j MARK --set-mark "$MARK"

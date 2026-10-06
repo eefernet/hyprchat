@@ -54,6 +54,9 @@ OUTBOUND_PROXY_URL = (
     or os.getenv("WEB_FETCH_PROXY_URL")
     or ""
 ).strip()
+# Opt in only for the maintained proxy that validates and pins destination DNS.
+# Matching the exact configured URL prevents an arbitrary proxy from being trusted.
+TRUSTED_WEB_PROXY_URL = os.getenv("HYPRCHAT_TRUSTED_WEB_PROXY", "").strip()
 
 # ============================================================
 # SERVER
@@ -89,6 +92,7 @@ SANDBOX_WORKSPACE_DIR = os.path.join(SANDBOX_DIR, "workspace")  # temp working d
 SETTINGS_PATH = os.getenv("SETTINGS_PATH", data_path("settings.json"))
 CONNECTOR_SECRETS_PATH = os.getenv("CONNECTOR_SECRETS_PATH", data_path("connector_secrets.json"))
 DEFAULT_SETTINGS = {
+    "document_tools_enabled": False,
     "file_cleanup_days": 30,  # 0 = never clean
     "ollama_url": "",  # empty = use OLLAMA_URL from env/default
     "codebox_url": "",  # empty = use CODEBOX_URL from env/default

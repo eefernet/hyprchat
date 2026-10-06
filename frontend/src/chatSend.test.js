@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import {documentAttachmentContext} from './documentFiles.js';
 
 // Exercise the actual root-owned handlers without moving app state or adding
 // a DOM framework. Delayed fetches expose races hidden by instant mocks.
@@ -32,6 +33,7 @@ function setup(overrides = {}) {
     inp: 'Analyze this', attachments: [attachment()], actId: 'conv-1', currentUserId: 'user-1',
     convs: [{id: 'conv-1', messages: []}], sendPrepRef: {current: null},
     ghostMode: false, isGhostConv: c => !!c?.ephemeral,
+    documentsEnabled: false, documentAttachmentContext,
     pendingEffort: null, pendingToolIds: [], pendingPersona: null, pendingUseMemories: false,
     pendingChatModel: '', modelChoiceRef: {current: {byConv: {}}},
     storedLastModel: () => '', models: ['local-model'], API: '', quickSearch: false,

@@ -8,7 +8,7 @@ User=hyprchat
 Group=hyprchat
 WorkingDirectory=/opt/hyprchat/backend
 EnvironmentFile=/opt/hyprchat/.env
-ExecStart=/usr/bin/python3 -m uvicorn main:app --host ${HOST} --port ${PORT} --workers 1
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host ${HOST} --port ${PORT} --workers 1 --timeout-graceful-shutdown 15
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

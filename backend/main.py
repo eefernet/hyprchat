@@ -187,9 +187,13 @@ async def _cleanup_loop():
     while True:
         await asyncio.sleep(6 * 3600)
         await asyncio.to_thread(_run_cleanup_sync)
+        from research_evidence import retry_cleanup
+        await retry_cleanup()
 
 
 events = EventBus()
+import documents
+documents.configure(events)
 
 
 # ============================================================
@@ -202,6 +206,7 @@ _scheduler_task_ref = None
 # Without this, the event loop only weakly references a bare create_task() result,
 # so an in-flight job can be garbage-collected and silently cancelled mid-run.
 _BG_TASKS: set = set()
+_RESEARCH_TASKS: dict = {}
 
 
 def _bg_task_done(t):
@@ -477,6 +482,8 @@ async def lifespan(app: FastAPI):
     # Run cleanup once on startup to clear any stale files — in a worker
     # thread so a big outputs dir doesn't stall the first requests.
     _track_bg(asyncio.to_thread(_run_cleanup_sync))
+    from research_evidence import retry_cleanup as retry_research_cleanup
+    _track_bg(retry_research_cleanup())
     # Start background cleanup loop
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
@@ -517,11 +524,16 @@ async def lifespan(app: FastAPI):
     coder_jobs.configure(http, events)
     await coder_jobs.start()
     yield
-    await coder_jobs.shutdown()
+    # Stop producers before settling their owned work and closing transports.
     for task in [_cleanup_task_ref, _health_task_ref, _scheduler_task_ref]:
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    research_tasks = list(_RESEARCH_TASKS.values())
+    for task in research_tasks:
+        task.cancel()
+    await asyncio.gather(documents.shutdown(), *research_tasks, return_exceptions=True)
+    await coder_jobs.shutdown()
     await close_web_fetch_client()
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
@@ -552,6 +564,7 @@ _USER_SCOPED_PREFIXES = (
     "/api/tools",
     "/api/model-configs",
     "/api/workspaces",
+    "/api/documents",
     "/api/memory",
     "/api/research/reports",
     "/api/councils",
@@ -1726,7 +1739,9 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
         finally:
             db.reset_current_user_id(token)
 
-    _track_bg(_runner())
+    task = _track_bg(_runner())
+    _RESEARCH_TASKS[report_id] = task
+    task.add_done_callback(lambda finished: _RESEARCH_TASKS.pop(report_id, None))
     return await db.get_research_report(report_id)
 
 
@@ -1754,8 +1769,27 @@ async def get_research_report(report_id: str):
     return report
 
 
+@app.get("/api/research/reports/{report_id}/evidence/{source_id}")
+async def get_research_evidence(report_id: str, source_id: str,
+                                offset: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=50)):
+    from research_evidence import inspect_source
+    evidence = await inspect_source(report_id, source_id, offset=offset, limit=limit)
+    if evidence is None:
+        raise HTTPException(404, "Research report not found")
+    return evidence
+
+
 @app.delete("/api/research/reports/{report_id}")
 async def delete_research_report(report_id: str):
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    import cancel_registry
+    cancel_registry.signal(report_id)
+    task = _RESEARCH_TASKS.get(report_id)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     await db.delete_research_report(report_id)
     return {"ok": True}
 
@@ -1764,10 +1798,10 @@ async def delete_research_report(report_id: str):
 async def cancel_research_report(report_id: str):
     import cancel_registry
 
-    signaled = cancel_registry.signal(report_id)
     report = await db.get_research_report(report_id)
     if not report:
         raise HTTPException(404, "Research report not found")
+    signaled = cancel_registry.signal(report_id)
     marked = False
     if report.get("status") in ("queued", "running"):
         marked = True
@@ -1860,6 +1894,8 @@ async def cancel_run(run_id: str):
         raise HTTPException(404, "Run not found")
     if row.get("workflow_id") and await coder_job_store.get(row["workflow_id"]):
         return await coder_jobs.cancel(row["workflow_id"])
+    if row.get("role") == "documents":
+        return await documents.cancel_run(http, run_id)
     signaled = cancel_registry.signal(run_id)
 
     db_marked = False

@@ -12,6 +12,9 @@ router = APIRouter()
 async def download_file_endpoint(filename: str):
     """Serve tool-generated files. Looks in sandbox/outputs first, falls back to legacy UPLOAD_DIR."""
     filepath, safe_name = resolve_download_path(filename)
+    if safe_name.startswith("hc-document-"):
+        # Managed documents are served only by the owner-scoped artifact endpoint.
+        raise HTTPException(404, "File not found")
     if filepath:
         return FileResponse(filepath, filename=safe_name)
     return JSONResponse({"error": "File not found"}, status_code=404)
@@ -21,6 +24,8 @@ async def download_file_endpoint(filename: str):
 async def archive_contents(filename: str):
     """List files inside a .tar.gz or .zip archive for preview."""
     filepath, safe_name = resolve_download_path(filename)
+    if safe_name.startswith("hc-document-"):
+        raise HTTPException(415, "Use the document preview")
     if not filepath:
         return JSONResponse({"error": "File not found"}, status_code=404)
     try:

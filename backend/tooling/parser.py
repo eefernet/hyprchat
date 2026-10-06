@@ -1,4 +1,5 @@
 """Text/native fallback tool-call parsing helpers."""
+import ast
 import json
 import re
 
@@ -159,7 +160,12 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
             pkey = p_match.group(1).strip()
             pval = p_match.group(2).strip()
             # Coerce obvious literals so numeric/bool params still work
-            if pval.lower() in ("true", "false"):
+            if fname.startswith("document_") and pval.startswith(("{", "[")):
+                try:
+                    args[pkey] = json.loads(pval)
+                except (ValueError, RecursionError):
+                    args[pkey] = pval  # Document validation returns a precise error.
+            elif pval.lower() in ("true", "false"):
                 args[pkey] = (pval.lower() == "true")
             else:
                 try:
@@ -293,6 +299,18 @@ def _extract_balanced_parens(text: str, start: int) -> str | None:
 def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
     """Parse Python function arguments into a tool arguments dict."""
     raw_args = raw_args.strip()
+    if tool_name.startswith("document_"):
+        # Structured document parameters must survive fallback parsing intact.
+        # Never execute expressions or degrade malformed dictionaries into strings.
+        if len(raw_args) > 2 * 1024 * 1024:
+            return None
+        try:
+            call = ast.parse("f(" + raw_args + ")", mode="eval").body
+            if call.args or any(k.arg is None for k in call.keywords):
+                return None
+            return {k.arg: ast.literal_eval(k.value) for k in call.keywords}
+        except (ValueError, SyntaxError, RecursionError, MemoryError):
+            return None
     if not raw_args:
         return {}
 

@@ -63,6 +63,11 @@ def parse_file(filepath: str, filename: str) -> str:
 
     if ext == ".pdf":
         return _parse_pdf(filepath)
+    elif ext in {".docx", ".pptx", ".xlsx"}:
+        from document_formats import extract_text
+        return extract_text(filepath)
+    elif ext in {".doc", ".ppt", ".xls", ".docm", ".pptm", ".xlsm"}:
+        raise ValueError("Convert this file to DOCX, PPTX, or XLSX with Documents before indexing")
     else:
         # Plain text, markdown, code, etc.
         try:

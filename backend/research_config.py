@@ -76,6 +76,13 @@ RESEARCH_DEPTH_BUDGETS = {
 }
 
 
+WRITING_TARGETS = {1: (400, 700), 2: (700, 1200), 3: (1200, 2000), 4: (2000, 3000), 5: (3000, 5000)}
+for _depth, _budget in RESEARCH_DEPTH_BUDGETS.items():
+    _budget.update(word_target=list(WRITING_TARGETS[_depth]), retrieval_chunks={1: 6, 2: 8, 3: 10, 4: 14, 5: 18}[_depth])
+for _template in REPORT_TEMPLATES:
+    _template["depth_budgets"] = RESEARCH_DEPTH_BUDGETS
+
+
 def research_depth_budget(depth: int) -> dict:
     return RESEARCH_DEPTH_BUDGETS.get(max(1, min(5, int(depth or 3))), RESEARCH_DEPTH_BUDGETS[3])
 

@@ -1,6 +1,8 @@
 """Health check routes and background health polling."""
 import asyncio
 import time
+from copy import deepcopy
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Query
@@ -38,34 +40,82 @@ async def _check_service(name: str, url: str, timeout: float = 8) -> dict:
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
 
 
-async def _check_searxng() -> dict:
-    """Check SearXNG: healthz for uptime, then a test search for rate-limit detection."""
-    t0 = time.time()
+_SEARCH_HEALTH_TTL = 900
+_search_samples = {}
+_search_probes = {}
+
+
+async def _sample_search(url, http):
+    """One bounded upstream query, shared by background and browser checks."""
+    from search_runtime import diagnose_response, classify_failure
+    started = time.monotonic()
     try:
-        r = await _http().get(f"{config.SEARXNG_URL}/healthz", timeout=8)
+        response = await http.get(
+            f"{url}/search",
+            params={"q": "united states population 2024", "format": "json"}, timeout=10,
+        )
+        diagnosis = diagnose_response(response.status_code, response.json() if response.status_code < 400 else None)
+    except Exception as exc:
+        diagnosis = {"status": "invalid_response" if isinstance(exc, ValueError) else classify_failure(type(exc).__name__ + ": " + str(exc)),
+                     "result_count": 0, "engines": []}
+    sample = {
+        "diagnosis": diagnosis,
+        "search_checked_at": datetime.now(timezone.utc).isoformat(),
+        "search_response_ms": int((time.monotonic() - started) * 1000),
+    }
+    _search_samples[url] = (time.monotonic(), sample)
+    # Runtime endpoint changes must not grow this process-local cache forever.
+    while len(_search_samples) > 4:
+        _search_samples.pop(next(iter(_search_samples)))
+    return sample
+
+
+async def _search_sample(url):
+    cached = _search_samples.get(url)
+    if cached and time.monotonic() - cached[0] < _SEARCH_HEALTH_TTL:
+        return deepcopy(cached[1]), int(time.monotonic() - cached[0]), True
+    task = _search_probes.get(url)
+    if task is None:
+        task = asyncio.create_task(_sample_search(url, _http()))
+        _search_probes[url] = task
+
+        def completed(done):
+            if _search_probes.get(url) is done:
+                _search_probes.pop(url, None)
+
+        task.add_done_callback(completed)
+    # A browser disconnect must not cancel the probe shared by other callers.
+    return deepcopy(await asyncio.shield(task)), 0, False
+
+
+async def _check_searxng() -> dict:
+    """Check listener availability now; reuse a dated search sample for 15 min."""
+    t0 = time.time()
+    url = config.SEARXNG_URL.rstrip("/")
+    try:
+        r = await _http().get(f"{url}/healthz", timeout=8)
         ms = int((time.time() - t0) * 1000)
         if r.status_code >= 400:
             return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
     except Exception as e:
         ms = int((time.time() - t0) * 1000)
         return {"status": "error", "response_ms": ms, "error": str(e)[:200]}
-    from search_runtime import diagnose_response, classify_failure
-    try:
-        search = await _http().get(
-            f"{config.SEARXNG_URL}/search",
-            params={"q": "united states population 2024", "format": "json"}, timeout=10,
-        )
-        diagnosis = diagnose_response(search.status_code, search.json() if search.status_code < 400 else None)
-    except Exception as exc:
-        diagnosis = {"status": "invalid_response" if isinstance(exc, ValueError) else classify_failure(type(exc).__name__ + ": " + str(exc)),
-                     "result_count": 0, "engines": []}
+    sample, age, cached = await _search_sample(url)
+    diagnosis = sample.pop("diagnosis")
+    errors = "; ".join(f"{e['engine']}: {e['error']}" for e in diagnosis["engines"])
+    label = "Partial results" if diagnosis["status"] == "partial" else "Search available" if diagnosis["status"] == "ok" else "Search unavailable"
+    summary = f"{label}: {diagnosis['result_count']} results" + (f"; {errors}" if errors else "")
     return {
+        **sample,
+        "search_sample_age_seconds": age, "search_sample_cached": cached,
+        "search_summary": summary,
         "status": "ok" if diagnosis["status"] == "ok" else "degraded",
         "response_ms": int((time.time() - t0) * 1000),
         "rate_limited": diagnosis["status"] == "rate_limited" or any(e["kind"] == "rate_limited" for e in diagnosis["engines"]),
         "search_status": diagnosis["status"], "result_count": diagnosis["result_count"],
         "unresponsive_engines": [e["engine"] for e in diagnosis["engines"]],
         "engine_errors": diagnosis["engines"],
+        "error": summary[:500] if diagnosis["status"] != "ok" else "",
     }
 
 
@@ -181,4 +231,3 @@ async def health_history(days: int = Query(default=90, ge=1, le=365)):
         return {"services": summary, "period_days": days}
     finally:
         await conn.close()
-

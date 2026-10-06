@@ -112,7 +112,9 @@ async def update_app_settings(body: dict = Body(...)):
         body = {**body, **context_policy.validate_patch(body, {**context_policy.runtime_settings(), **settings})}
     except (ValueError, TypeError) as error:
         raise HTTPException(422, str(error)) from error
-    allowed = {"file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
+    if "document_tools_enabled" in body and type(body["document_tools_enabled"]) is not bool:
+        raise HTTPException(422, "document_tools_enabled must be a boolean")
+    allowed = {"document_tools_enabled", "file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
                "workspace_model", "context_compaction", "history_recall", "rag_reranker", "model_routing",

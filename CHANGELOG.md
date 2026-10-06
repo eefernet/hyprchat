@@ -1,4 +1,43 @@
 <details open>
+<summary>Alpha v18.1.1 — Sept 30, 2026</summary>
+
+> A tidier composer, Office document tools with split previews, Ollama 0.35.0 with Qwen 3.8, and chat and coding fixes.
+
+## Chat
+
+- **Tool toggles moved into the composer** — the row of tool chips above the message box is gone. A wrench icon next to **+** carries a count badge and opens a menu with a switch per tool (built-in, custom and, when configured, a searchable Connectors section). The menu closes on Escape, outside click, conversation switch and send; it is full-width on phones and keeps the large-text layout intact.
+- **Multiple tool calls per turn** — when a model calls two tools in one response (Ollama streams them one per chunk), both now run. Previously only the last one survived.
+
+## Documents
+
+- **Word, PowerPoint and Excel tools** — read, create, make targeted edits and export Office files from chat. Edits save as linked revisions while retaining original uploads. Google Docs, Slides and Sheets can be used through Office file export and import.
+- **Preview beside chat** — the eye button opens a resizable document preview alongside the conversation, follows saved revisions and renders missing previews on demand. On phones, the preview opens full-screen and closes back to chat.
+- **Working file delivery** — document jobs show compact status rows with Download and Preview controls instead of the Daedalus project timeline. File controls survive refresh, and failed operations remain visible even when a later read succeeds.
+- **Chat-to-PDF export** — full Markdown reports can become Word documents and downloadable PDFs, preserving headings, tables and later sections without rebuilding them as nested JSON. Invalid arguments get one corrective attempt, then a clear failure instead of a false completion.
+
+## Deep Research
+
+- **More complete reports** — deeper research writes section by section using retained source passages, with evidence inspection and clearer citations. Saved drafts survive refresh, incomplete reports carry warnings through export, and charts and diagrams recover as streaming finishes.
+
+## Bug fixes
+
+- Fixed document export previews, missing PDF recovery, and Stop status.
+- Fixed research draft recovery, citation checks and deleted-profile evidence cleanup, model selection, and deployment/restart reliability.
+
+## Daedalus
+
+- **Repair prompts list the project files again** — production workspaces live under `/root/.daedalus/…`, which the file-listing filter excluded wholesale, so every repair prompt said "Current files:" with nothing after it and the builder had to rediscover the tree. The listing also skips `.pytest_cache/` now.
+- **Thinking levels on on/off-only models** — a stage configured with a thinking level (low/medium/high) now sends `on` to models that only accept on/off, such as Laguna, instead of failing the operation with an Ollama error.
+- **Model catalog** — HyprFit no longer reports the `qwen3` cards as installed because `qwen3.8` is.
+
+## Infrastructure
+
+- **Ollama 0.35.0** — upgraded from 0.30.7 (Qwen 3.8 support, clean JSON mode on `/api/chat`, thinking controls in `/api/show`). A small `llama-server --poll 0` shim restores full throughput: the newer llama.cpp busy-polls its CPU threads, which halved generation speed on the 8-core container. The upgrade, rollback and shim runbook is in the agent guide.
+- **Models** — the planning model is now `qwen3.8:27b` (≈85 tok/s with speculative decoding; passed every plan/verify/accept stage measured today). The coder model stays `qwen3-coder:30b`: in an isolated A/B, `laguna-xs-2.1` built correct programs but parked every repair round unless builder thinking was on, at roughly twice the calls and time.
+
+</details>
+
+<details>
 <summary>Alpha v18.1 — Sept 30, 2026</summary>
 
 > More reliable Daedalus builds, stronger research and calendar sync, and a smoother mobile interface.

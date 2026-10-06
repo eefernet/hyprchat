@@ -473,6 +473,40 @@ CREATE TABLE IF NOT EXISTS research_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_research_sources_report ON research_sources(report_id);
 
+-- Report-owned evidence. Text is durable; Chroma is a rebuildable index.
+CREATE TABLE IF NOT EXISTS research_documents (
+    report_id TEXT NOT NULL REFERENCES research_reports(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(report_id, source_id)
+);
+CREATE TABLE IF NOT EXISTS research_chunks (
+    id TEXT PRIMARY KEY,
+    report_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    start_char INTEGER NOT NULL,
+    end_char INTEGER NOT NULL,
+    heading TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    embedded INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(report_id, source_id) REFERENCES research_documents(report_id, source_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_research_chunks_report ON research_chunks(report_id, source_id, ordinal);
+CREATE VIRTUAL TABLE IF NOT EXISTS research_chunks_fts USING fts5(
+    text, title, heading, chunk_id UNINDEXED, report_id UNINDEXED
+);
+CREATE TRIGGER IF NOT EXISTS research_chunks_fts_delete AFTER DELETE ON research_chunks BEGIN
+    DELETE FROM research_chunks_fts WHERE chunk_id=old.id;
+END;
+CREATE TABLE IF NOT EXISTS research_index_cleanup (
+    collection_name TEXT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Coder Bot v2 hybrid workflow state. A workflow is the user-facing unit of
 -- work; runs remain the per-agent invocations attached to that workflow.
 CREATE TABLE IF NOT EXISTS coder_workflows (

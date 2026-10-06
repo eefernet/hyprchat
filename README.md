@@ -54,6 +54,7 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 | 📚 Knowledge | Hybrid RAG, inline `[n]` citations, optional reranking, URL ingestion, scanned-PDF OCR, and maintained coding references |
 | 🧠 Memory | Global user memory, workspace memory with reviewed suggestions, cross-chat history recall, and Ghost Mode for unsaved chats |
 | 📁 Artifacts | Artifact Studio tracks delivered files, projects, and images — plus a full-screen Canvas editor with AI-assisted edits |
+| 📄 Documents | Read, compose and revise Word, PowerPoint and Excel files, with PDF previews and exports; [setup and supported operations](docs/documents.md) |
 | 🗳️ Councils | Run multiple models in parallel, debate answers, vote, and synthesize the result |
 | 📦 Models | Ollama model browser, HuggingFace GGUF downloads, HyprFit hardware-fit recommendations, capability badges |
 | 🧩 Profiles | Task agents and conversational personas, per-profile models, tools, knowledge bases, and appearance settings |

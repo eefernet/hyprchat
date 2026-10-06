@@ -45,6 +45,9 @@ REMOTE_TOOLING = REMOTE_BACKEND + "tooling/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
+REMOTE_DOCUMENT_WORKER = "/opt/hyprchat-documents/"
+DOCUMENT_WORKER_FILES = {"backend/document_worker.py", "backend/document_runtime.py", "backend/document-requirements.txt"}
+DOCUMENT_SHARED = {"backend/document_formats.py"}
 SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
 WORKER_FILES = {
@@ -68,6 +71,7 @@ WORKER_SHARED.update({'backend/'+name+'.py' for name in (
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
+    **{path:("Document Worker", REMOTE_DOCUMENT_WORKER, False) for path in DOCUMENT_WORKER_FILES},
     **{path:("Coding Verification", REMOTE_BACKEND, True) for path in WORKER_SHARED},
     "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
     "backend/coder_verification.py": ("Coding Verification", REMOTE_BACKEND, True),
@@ -92,6 +96,9 @@ WATCHED = {
     "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusRequestOptions.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/components/ComposerToolsMenu.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/composerTools.js": ("Frontend (build)", REMOTE_FRONTEND, False),
+    "frontend/src/researchState.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/daedalusJobs.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/daedalusJobStore.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/daedalusJob.css": ("Frontend (build)", REMOTE_FRONTEND, False),
@@ -107,7 +114,14 @@ WATCHED = {
     "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
     "backend/artifact_files.py":    ("Artifact Files",   REMOTE_BACKEND,            True),
     "backend/artifact_service.py":  ("Artifact Service", REMOTE_BACKEND,            True),
+    "backend/document_validation.py": ("Document Validation", REMOTE_BACKEND, True),
+    "backend/documents.py": ("Documents", REMOTE_BACKEND, True),
+    "backend/document_formats.py": ("Document Formats", REMOTE_BACKEND, True),
+    "backend/document_tools.py": ("Document Tools", REMOTE_BACKEND, True),
+    "backend/routes/documents.py": ("Document Routes", REMOTE_ROUTES, True),
     "backend/research_config.py":   ("Research Config",  REMOTE_BACKEND,            True),
+    "backend/research_evidence.py": ("Research Evidence", REMOTE_BACKEND, True),
+    "backend/research_writer.py": ("Research Writer", REMOTE_BACKEND, True),
     "backend/model_management.py":  ("Model Management", REMOTE_BACKEND,            True),
     "backend/backup.py":            ("Backup Service",   REMOTE_BACKEND,            True),
     "backend/db/__init__.py":       ("Database Package", REMOTE_DB,                 True),
@@ -247,13 +261,16 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    "frontend/src/components/DocumentActivity.jsx", "frontend/src/components/DocumentPreviewPanel.jsx", "frontend/src/daedalusTimeline.js", "frontend/src/documentFiles.js", "frontend/src/components/OfficePreview.jsx", "frontend/src/components/DocumentSettings.jsx",
     "frontend/src/daedalusJobStore.js", "frontend/src/components/daedalusJob.css",
     "frontend/src/components/daedalusSettings.css",
     "frontend/src/components/DaedalusPlanPanel.jsx", "frontend/src/components/daedalusPlan.css",
     "frontend/src/components/NewVersionBar.jsx", "frontend/src/daedalusProgress.js", "frontend/src/versionCheck.js",
     "frontend/src/components/DaedalusRequestOptions.jsx",
+    "frontend/src/components/ComposerToolsMenu.jsx", "frontend/src/composerTools.js",
     "frontend/src/components/DaedalusJobCard.jsx", "frontend/src/components/DaedalusSettings.jsx", "frontend/src/daedalusJobs.js",
     "frontend/src/main.jsx",
+    "frontend/src/researchState.js",
     "frontend/src/session.js",
     "frontend/src/theme.js",
     "frontend/src/modelHelpers.js",
@@ -301,6 +318,8 @@ FRONTEND_SRC_FILES = {
     "frontend/public/icons/icon-512-maskable.png",
     "frontend/public/icons/apple-touch-icon.png",
 }
+
+WATCHED.update({path: ("Frontend (build)", REMOTE_FRONTEND, False) for path in FRONTEND_SRC_FILES})
 
 CHECK_INTERVAL = 1
 
@@ -855,6 +874,8 @@ def _ensure_openhands_worker_service(cb):
 
 def _deploy_target(filepath, remote_dir, hypr, cb):
     """Return (target_server, remote_dir) for a watched file."""
+    if filepath in DOCUMENT_WORKER_FILES:
+        return cb, REMOTE_DOCUMENT_WORKER
     if filepath in WORKER_FILES:
         return cb, REMOTE_OPENHANDS_WORKER
     return hypr, remote_dir
@@ -1095,6 +1116,17 @@ def deploy_changes(changed, cfg):
                                "tmp":final+".deploy-tmp","final":final,"digest":file_digest(filepath),"restart_flag":False})
             else:
                 stage_failed.append(("Worker Context Policy",filepath,err,cb))
+
+    if any(path in DOCUMENT_WORKER_FILES | DOCUMENT_SHARED for path, _ in changed):
+        dir_ok, dir_err = _ensure_remote_dir(cb, REMOTE_DOCUMENT_WORKER)
+        for filepath in DOCUMENT_SHARED:
+            final = REMOTE_DOCUMENT_WORKER + os.path.basename(filepath)
+            ok, err = scp(filepath, cb["ip"], final + ".deploy-tmp", cb["user"], cb["pass"]) if dir_ok else (False, dir_err)
+            if ok:
+                staged.append({"filepath":filepath,"label":"Document Formats","target":cb,
+                               "tmp":final+".deploy-tmp","final":final,"digest":file_digest(filepath),"restart_flag":False})
+            else:
+                stage_failed.append(("Document Formats", filepath, err, cb))
 
     if stage_failed:
         # Abort the whole backend batch: the live tree stays untouched,

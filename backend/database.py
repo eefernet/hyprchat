@@ -695,6 +695,14 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
     await conn.execute("DELETE FROM workspace_conversations WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    # Profile deletion uses the same durable index cleanup as report deletion.
+    # Queue before removing ownership rows so a Chroma outage cannot orphan text.
+    from research_evidence import collection_name
+    from research import _evidence_collection_name
+    reports = await conn.execute_fetchall("SELECT id FROM research_reports WHERE user_id=?", (uid,))
+    for report in reports:
+        for name in (collection_name(report["id"]), _evidence_collection_name(report["id"])):
+            await conn.execute("INSERT OR IGNORE INTO research_index_cleanup(collection_name) VALUES(?)", (name,))
     await conn.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM research_events WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?))", (uid,))
@@ -4914,10 +4922,18 @@ async def delete_research_report(report_id: str) -> None:
         await db.execute("DELETE FROM workspace_research_reports WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_events WHERE report_id=?", (report_id,))
+        from research_evidence import collection_name
+        from research import _evidence_collection_name
+        for name in (collection_name(report_id), _evidence_collection_name(report_id)):
+            await db.execute("INSERT OR IGNORE INTO research_index_cleanup(collection_name) VALUES(?)", (name,))
         await db.execute("DELETE FROM research_reports WHERE id=? AND user_id=?", (report_id, user_id))
         await db.commit()
     finally:
         await db.close()
+    from research import _REPORT_EVIDENCE_CACHE
+    _REPORT_EVIDENCE_CACHE.pop(report_id, None)
+    from research_evidence import retry_cleanup
+    await retry_cleanup()
 
 
 # ============================================================
@@ -5237,7 +5253,7 @@ async def reap_stale_runs() -> dict:
             )
             reports_reaped += 1
         rows = await db.execute_fetchall(
-            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running') "
+            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running','cancelling') "
             "AND COALESCE(workflow_id,'') NOT IN (SELECT id FROM coder_workflows WHERE workflow_version=3)"
         )
         for row in rows:

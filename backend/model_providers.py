@@ -880,6 +880,8 @@ async def _stream_openai(
                     "prompt_tokens": int(usage.get("input_tokens") or 0),
                     "gen_tokens": int(usage.get("output_tokens") or 0),
                 }
+                if typ == "response.completed":
+                    yield {"type": "finish", "reason": "stop"}
                 if typ == "response.incomplete":
                     reason = (resp_obj.get("incomplete_details") or {}).get("reason") or "max_output_tokens"
                     # Surfaced as a finish event so the chat loop can offer
@@ -1033,8 +1035,7 @@ async def _stream_openai_compat(
                     usage_seen = True
             if usage_seen:
                 yield {"type": "usage", "prompt_tokens": prompt_tokens, "gen_tokens": gen_tokens}
-            if finish_reason == "length":
-                yield {"type": "finish", "reason": "length"}
+            yield {"type": "finish", "reason": finish_reason or "unexpected_eof"}
             return
 
 
@@ -1072,8 +1073,7 @@ async def _anthropic_stream_events(
             stop_reason = str((obj.get("delta") or {}).get("stop_reason") or stop_reason)
         elif typ == "message_stop":
             yield {"type": "usage", "prompt_tokens": input_tokens, "gen_tokens": output_tokens}
-            if stop_reason == "max_tokens":
-                yield {"type": "finish", "reason": "length"}
+            yield {"type": "finish", "reason": "length" if stop_reason == "max_tokens" else (stop_reason or "stop")}
         elif typ == "error" or obj.get("error"):
             err = obj.get("error") or {}
             msg = err.get("message") if isinstance(err, dict) else str(err)

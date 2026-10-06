@@ -345,6 +345,18 @@ def test_sweep_cpp_spent_allowance_during_repair_is_resumable_not_no_progress():
     assert 'Continue grants' in spent['reason']
 
 
+def test_repair_prompt_lists_files_when_the_worker_root_lives_under_a_dot_daedalus_dir(tmp_path):
+    # Live laguna run (2026-09-30): production workspaces are /root/.daedalus/jobs/<id>/workspace, and the listing
+    # matched EXCLUDED against the ABSOLUTE path, so every repair prompt said "Current files: " and the builder had
+    # to rediscover the tree (it looped on directory views and parked as no_progress).
+    from coder_policy7_prompt import file_listing
+    root = tmp_path / '.daedalus' / 'jobs' / 'cw3-x' / 'workspace'
+    (root / 'src').mkdir(parents=True); (root / 'node_modules' / 'pkg').mkdir(parents=True); (root / '.daedalus').mkdir()
+    (root / 'wordfreq.py').write_text('x'); (root / 'src' / 'app.py').write_text('x')
+    (root / 'node_modules' / 'pkg' / 'index.js').write_text('x'); (root / '.daedalus' / 'state.json').write_text('{}')
+    assert file_listing(root, 12000) == 'src/app.py, wordfreq.py'
+
+
 def test_sweep_kanban_repair_prompt_is_bounded_to_the_input_budget(tmp_path):
     # Sweep Kanban (2026-09-25): the round-2 repair prompt exceeded the bridge's input budget at its first call.
     from types import SimpleNamespace

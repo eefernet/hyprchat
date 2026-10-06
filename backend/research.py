@@ -54,6 +54,11 @@ def _outbound_proxy_url() -> str:
     return (getattr(config, "OUTBOUND_PROXY_URL", "") or "").strip()
 
 
+def _proxy_validates_destinations() -> bool:
+    trusted = (getattr(config, "TRUSTED_WEB_PROXY_URL", "") or "").strip()
+    return bool(trusted and trusted == _outbound_proxy_url())
+
+
 def _web_fetch_client(http):
     """Return the normal client or a proxy-scoped client for public web fetches."""
     proxy = _outbound_proxy_url()
@@ -264,7 +269,7 @@ def _url_safe_for_direct_fetch(url: str, *, resolve_dns: bool = False) -> bool:
     """Guard user-provided and search-result URLs before network fetches."""
     try:
         p = urllib.parse.urlsplit(url)
-        if p.scheme not in {"http", "https"} or not p.hostname:
+        if p.scheme not in {"http", "https"} or not p.hostname or p.username is not None or p.password is not None:
             return False
         host = p.hostname.lower().rstrip(".")
         if _host_blocked(host):
@@ -279,7 +284,7 @@ def _url_safe_for_direct_fetch(url: str, *, resolve_dns: bool = False) -> bool:
 async def _url_safe_for_fetch(url: str, *, resolve_dns: bool = False) -> bool:
     if not _url_safe_for_direct_fetch(url, resolve_dns=False):
         return False
-    if not resolve_dns:
+    if not resolve_dns or _proxy_validates_destinations():
         return True
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
@@ -939,6 +944,69 @@ async def _fetch_page(http, url: str) -> dict | None:
         return None
 
 
+async def _fetch_report_page(http, url: str, diagnostics: list) -> dict | None:
+    """Report fetches retain bounded source text and explain unreadable sources."""
+    entry = {"url": url, "status": "failed"}
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        if any(host == h or host.endswith("." + h) for h in ("youtube.com", "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com")):
+            entry.update(status="unsupported", reason="Social/video page requires a specialized reader")
+            return None
+        status, headers, final_url, body = await fetch_bytes_safely(http, url, timeout=15,
+            max_bytes=_RESEARCH_PAGE_MAX_BYTES, headers={"User-Agent": "Mozilla/5.0 (compatible; HyprChatResearch)"})
+        if status >= 400:
+            entry.update(reason=f"HTTP {status}")
+            return None
+        content_type = headers.get("content-type", "").lower()
+        def extract():
+            if "pdf" in content_type or body.startswith(b"%PDF"):
+                from io import BytesIO
+                from pypdf import PdfReader
+                reader = PdfReader(BytesIO(body))
+                parts, size = [], 0
+                for i, page in enumerate(reader.pages[:100]):
+                    extracted = (page.extract_text() or "").strip()
+                    if not extracted:
+                        continue
+                    part = f"## Page {i + 1}\n" + extracted
+                    parts.append(part)
+                    size += len(part)
+                    if size >= _RESEARCH_PAGE_MAX_CLEAN_CHARS:
+                        break
+                return "\n\n".join(parts)[:_RESEARCH_PAGE_MAX_CLEAN_CHARS]
+            if not any(t in content_type for t in ("text", "json", "xml")):
+                raise ValueError("Unsupported content type: " + content_type)
+            charset = re.search(r"charset=([^;\s]+)", content_type)
+            encoding = charset.group(1).strip("\"'") if charset else "utf-8"
+            try:
+                raw = body.decode(encoding, errors="replace")[:_RESEARCH_PAGE_MAX_CLEAN_CHARS]
+            except LookupError:
+                raw = body.decode("utf-8", errors="replace")[:_RESEARCH_PAGE_MAX_CLEAN_CHARS]
+            if "html" in content_type:
+                try:
+                    import trafilatura
+                    parsed = trafilatura.extract(raw, include_tables=True, include_comments=False, output_format="txt")
+                    if parsed:
+                        return parsed
+                except ImportError:
+                    pass
+                return _clean_html_text(raw)
+            return raw
+        text = await asyncio.to_thread(extract)
+        if len(text.strip()) < 200:
+            entry.update(status="unreadable", reason="Insufficient readable text; scanned PDFs require OCR")
+            return None
+        entry.update(status="read", final_url=final_url, chars=len(text))
+        return {"url": _normalize_url(final_url), "requested_url": _normalize_url(url), "content": text}
+    except Exception as exc:
+        entry["reason"] = str(exc)[:240]
+        if isinstance(exc, ValueError) and "Unsafe" in str(exc):
+            entry["status"] = "blocked"
+        return None
+    finally:
+        diagnostics.append(entry)
+
+
 async def _fetch_gov_doc_index(http, url: str) -> dict | None:
     """Fetch government document index pages (including PDF links) for conspiracy research."""
     try:
@@ -1076,7 +1144,7 @@ def _extract_entities(text: str, topic_words: set) -> set:
     return entities
 
 
-def _rank_urls(findings: list, exclude: set = None) -> list:
+def _rank_urls(findings: list, exclude: set = None, *, allow_pdf: bool = False) -> list:
     """Rank URLs by source quality."""
     exclude = exclude or set()
     scores = {}
@@ -1087,7 +1155,10 @@ def _rank_urls(findings: list, exclude: set = None) -> list:
         url = f.get("url", "")
         if not url or url in exclude:
             continue
-        score = f.get("score", 0) or 0
+        try:
+            score = float(f.get("score", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0.0
         tier = _source_tier(url)
         credibility = _score_source_credibility(url, f.get("type", "web"), tier).get("score", 50)
         score += credibility / 12
@@ -1098,7 +1169,7 @@ def _rank_urls(findings: list, exclude: set = None) -> list:
                 break
         if len(f.get("content", "")) > 200:
             score += 3
-        skip = ["youtube.com","twitter.com","facebook.com",".pdf","linkedin.com"]
+        skip = ["youtube.com","twitter.com","facebook.com","linkedin.com"] + ([] if allow_pdf else [".pdf"])
         if any(p in url.lower() for p in skip):
             score -= 100
         if url not in scores or score > scores[url]:
@@ -1381,14 +1452,12 @@ def _build_report_evidence_records(
         brief = " ".join([src.get("title", ""), src.get("snippet", ""), src.get("url", "")]).strip()
         add("source_brief", brief, src)
     for page in pages or []:
-        src = None
-        try:
-            sid = int(page.get("source_index") or 0)
-            src = source_by_index.get(sid)
-        except Exception:
-            src = None
-        if not src and page.get("url"):
-            src = source_by_url.get(_normalize_url(page.get("url", "")))
+        src = source_by_url.get(_normalize_url(page.get("url", "")))
+        if not page.get("url"):
+            try:
+                src = source_by_index.get(int(page.get("source_index") or 0))
+            except (TypeError, ValueError):
+                src = None
         add("full_page", page.get("content", ""), src, title=page.get("title", ""), url=page.get("url", ""))
     return records
 
@@ -1777,11 +1846,8 @@ def _validate_report_citations(markdown: str, sources: list[dict]) -> dict:
             idx = i
         if idx > 0:
             allowed.add(f"S{idx}")
-    used = []
-    for match in re.findall(r"\[S\s*(\d+)\]", markdown or "", flags=re.I):
-        sid = f"S{int(match)}"
-        if sid not in used:
-            used.append(sid)
+    from research_writer import citation_ids
+    used = citation_ids(markdown)
     invalid = [sid for sid in used if sid not in allowed]
     return {
         "valid": not invalid,
@@ -2066,7 +2132,7 @@ def _normalize_followup_queries(raw_queries, existing_queries: set[str], topic: 
 
 def _normalize_report_sources(
     input_sources: list[dict], direct_sources: list[dict],
-    all_results: list[dict], budget: dict,
+    all_results: list[dict], budget: dict, registry: dict | None = None,
 ) -> list[dict]:
     seen_urls = {s.get("url") for s in direct_sources if s.get("url")}
     sources: list[dict] = []
@@ -2107,9 +2173,28 @@ def _normalize_report_sources(
     out = []
     for src in list(input_sources or []) + list(direct_sources or []) + sources:
         out.append(_apply_source_quality(dict(src)))
+    if registry is not None:
+        for src in out:
+            key = _normalize_url(src.get("url", "")) or str(src.get("metadata", {}).get("evidence_key") or src.get("title"))
+            if key not in registry:
+                registry[key] = {**src, "index": len(registry) + 1}
+            else:
+                registry[key].update({k: v for k, v in src.items() if k != "index"})
+        return list(registry.values())
     for i, src in enumerate(out, start=1):
         src["index"] = i
     return out
+
+
+def _report_result_relevant(item: dict, query: str) -> bool:
+    """Reject obvious query drift, not judge source truth or viewpoint."""
+    generic = {'compare', 'comparison', 'official', 'documentation', 'specification', 'benchmark',
+               'best', 'practice', 'detail', 'explain', 'source', 'report', 'research', 'include'}
+    tokens = _evidence_tokens(query) - generic
+    if not tokens:
+        return True
+    text = ' '.join(str(item.get(k) or '') for k in ('title', 'content', 'url'))
+    return len(tokens & _evidence_tokens(text)) >= min(2, len(tokens))
 
 
 def _normalize_adaptive_research_state(obj, max_learnings: int = 10) -> dict:
@@ -2158,9 +2243,13 @@ Rules:
 - Prefer primary sources, official docs/data, benchmarks, contradictions, and missing viewpoints.
 - Do not repeat a query already implied by the evidence summary.
 - Return at most {remaining_queries} follow_up_queries."""
+    from research_writer import fit_prompt
+    output_tokens = min(1800, max(128, _research_num_ctx() // 4))
+    prompt, _ = fit_prompt(prompt.replace(evidence_summary[:24000], "[Evidence follows.]"),
+        [{"id": str(i), "source_id": "context", "text": chunk} for i, chunk in enumerate(_chunk_evidence_text(evidence_summary[:24000]))], output_tokens)
     obj = await _ask_ollama_json(
         http, ollama_url, prompt, model=model, default_model=default_model,
-        max_tokens=1800, fallback={}, expected_type=dict,
+        max_tokens=output_tokens, fallback={}, expected_type=dict,
     )
     return _normalize_adaptive_research_state(obj)
 
@@ -2168,7 +2257,7 @@ Rules:
 # High-volume streaming events that are never read back after the run —
 # the full text lands in report_markdown, so persisting each token chunk
 # only burns a DB write cycle per 240 chars and bloats report GET payloads.
-_EPHEMERAL_REPORT_EVENTS = {"research_token"}
+_EPHEMERAL_REPORT_EVENTS = {"research_token", "research_snapshot"}
 
 
 async def _emit_report_event(events, report_id: str, event_type: str, data: dict):
@@ -2190,79 +2279,81 @@ async def _emit_report_event(events, report_id: str, event_type: str, data: dict
 async def _ask_report_streamed(
     http, ollama_url: str, events, report_id: str, prompt: str,
     model: str = None, default_model: str = "qwen3.5:27b",
-    max_tokens: int = 6144,
-) -> str:
-    """Stream final report tokens to the dedicated research workspace."""
+    max_tokens: int = 6144, *, structured=False, on_update=None,
+):
+    """Preserve partial text and require a successful terminal provider frame."""
     import cancel_registry
+    from research_writer import SynthesisResult
 
-    _num_ctx = _research_num_ctx()
-    model_id = model or default_model
+    result = SynthesisResult()
     accumulated = ""
     emitted_len = 0
-    token_buf = ""
+    model_id = model or default_model
 
-    async def emit_safe(final: bool = False) -> None:
-        nonlocal emitted_len, token_buf
-        safe_text = _streamable_report_text(accumulated, final=final)
-        if len(safe_text) < emitted_len:
-            emitted_len = 0
-            token_buf = ""
-        delta = safe_text[emitted_len:]
-        if not delta:
-            if final and token_buf:
-                await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
-                token_buf = ""
-            return
-        emitted_len = len(safe_text)
-        token_buf += delta
-        if final or len(token_buf) >= 240:
-            await _emit_report_event(events, report_id, "research_token", {"content": token_buf})
-            token_buf = ""
+    async def publish(final=False):
+        nonlocal emitted_len
+        text = _streamable_report_text(accumulated, final=final)
+        result.text = text
+        if on_update:
+            await on_update(text)
+        elif final or len(text) - emitted_len >= 240:
+            delta = text[emitted_len:]
+            if delta:
+                await _emit_report_event(events, report_id, "research_token", {"content": delta})
+                emitted_len = len(text)
 
     try:
         if is_cloud_model(model_id):
-            async for ev in stream_provider_chat(
-                http,
-                model_id,
-                [{"role": "user", "content": prompt}],
-                options={"temperature": 0.25, "num_predict": max_tokens},
-            ):
+            async for ev in stream_provider_chat(http, model_id, [{"role": "user", "content": prompt}],
+                                                  options={"temperature": .25, "num_predict": max_tokens}):
                 if cancel_registry.is_cancelled(report_id):
                     raise cancel_registry.RunCancelled(report_id)
-                if ev.get("type") == "token" and ev.get("content"):
+                if ev.get("type") == "token":
                     accumulated += ev.get("content", "")
-                    await emit_safe()
-            await emit_safe(final=True)
-            return _clean_research_model_text(accumulated)
-
-        async with http.stream("POST", f"{ollama_url}/api/generate", json={
-            "model": model_id,
-            "prompt": prompt,
-            "stream": True,
-            "think": False,
-            "options": {"temperature": 0.25, "num_predict": max_tokens, "num_ctx": _num_ctx},
-        }, timeout=420) as stream:
-            async for line in stream.aiter_lines():
-                if cancel_registry.is_cancelled(report_id):
-                    raise cancel_registry.RunCancelled(report_id)
-                if not line.strip():
-                    continue
-                try:
+                    await publish()
+                elif ev.get("type") == "usage":
+                    result.usage = {k: v for k, v in ev.items() if k != "type"}
+                elif ev.get("type") == "finish":
+                    result.finish_reason = ev.get("reason") or "unexpected_eof"
+                elif ev.get("type") == "error":
+                    raise RuntimeError(ev.get("error") or ev.get("message") or "Provider stream error")
+        else:
+            async with http.stream("POST", f"{ollama_url}/api/generate", json={
+                "model": model_id, "prompt": prompt, "stream": True, "think": False,
+                "options": {"temperature": .25, "num_predict": max_tokens, "num_ctx": _research_num_ctx()},
+            }, timeout=420) as stream:
+                if getattr(stream, "status_code", 200) >= 400:
+                    raise RuntimeError(f"Model server HTTP {stream.status_code}")
+                async for line in stream.aiter_lines():
+                    if cancel_registry.is_cancelled(report_id):
+                        raise cancel_registry.RunCancelled(report_id)
+                    if not line.strip():
+                        continue
                     chunk = json.loads(line)
-                except Exception:
-                    continue
-                piece = chunk.get("response", "") or ""
-                if piece:
-                    accumulated += piece
-                    await emit_safe()
-                if chunk.get("done"):
-                    break
-        await emit_safe(final=True)
-        return _clean_research_model_text(accumulated)
+                    if chunk.get("error"):
+                        raise RuntimeError(str(chunk["error"]))
+                    accumulated += chunk.get("response", "") or ""
+                    await publish()
+                    if chunk.get("done"):
+                        result.finish_reason = chunk.get("done_reason") or "stop"
+                        result.usage = {k: chunk[k] for k in ("eval_count", "prompt_eval_count") if k in chunk}
+                        break
+        await publish(final=True)
+        if not result.text.strip():
+            result.error = "Model returned no report text"
     except cancel_registry.RunCancelled:
         raise
-    except Exception as e:
-        raise RuntimeError(f"Report synthesis failed: {e}") from e
+    except Exception as exc:
+        result.error = str(exc)
+        result.finish_reason = "error"
+        result.text = _streamable_report_text(accumulated, final=True)
+        if on_update and result.text:
+            await on_update(result.text)
+    if structured:
+        return result
+    if not result.complete:
+        raise RuntimeError(f"Report synthesis failed: {result.error or result.finish_reason}")
+    return result.text
 
 
 async def run_research_report(
@@ -2291,6 +2382,14 @@ async def run_research_report(
     current_date = datetime.utcnow().date().isoformat()
     kb_ids = kb_ids or []
     inputs = inputs or []
+    from research_evidence import store_documents, index_pending, evidence_stats
+    from research_writer import compose_report
+    source_registry = {}
+    evidence_documents = {}
+    fetch_diagnostics = []
+    search_diagnostics = []
+    metrics = {}
+    report = ""
     searxng_url = config.SEARXNG_URL
     cancel_registry.register(report_id)
 
@@ -2344,9 +2443,14 @@ Return strict JSON with:
 }}
 
 Prefer precise search queries, primary sources, recent sources when freshness matters, diverse viewpoints, and enough query diversity to use the collection budget.
+Use short search queries (roughly 4–10 words), preserving exact names and identifiers from the request.
+You have not seen evidence yet. Frame uncertain specifications and compatibility as questions to verify; do not assert them in the outline or bake guessed specifications into searches.
 Use the current date above as authoritative; do not infer "current real-world knowledge" from model training cutoffs."""
+        from research_writer import fit_prompt
+        planning_tokens = min(1800, max(128, _research_num_ctx() // 4))
+        plan_prompt, _ = fit_prompt(plan_prompt, [], planning_tokens)
         plan_text = await cancel_registry.await_cancellable(
-            _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=1800),
+            _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=planning_tokens),
             report_id,
         )
         plan = _safe_json_obj(plan_text, {})
@@ -2370,25 +2474,32 @@ Use the current date above as authoritative; do not infer "current real-world kn
         await phase("context", "Loading user context", "Reading uploaded notes and knowledge bases", 12)
         input_context_parts = []
         input_sources = []
-        for item in inputs[:12]:
+        for input_no, item in enumerate(inputs[:12]):
             name = _one_line(item.get("name") or item.get("filename") or "Uploaded input", 120)
             content = (item.get("content") or item.get("text") or "").strip()
             if not content:
                 continue
-            content = content[:16000]
+            content = content[:100000]
             input_sources.append({
                 "index": 0, "title": f"Uploaded: {name}", "url": "",
                 "snippet": _one_line(content, 240), "type": item.get("type", "file"),
-                "tier": 0, "tier_label": _source_tier_label(0), "metadata": {"name": name},
+                "tier": 0, "tier_label": _source_tier_label(0), "metadata": {"name": name, "evidence_key": f"input:{input_no}"},
             })
-            input_context_parts.append(f"### Uploaded input: {name}\n{content}")
+            evidence_documents[f"input:{input_no}"] = content
+            input_context_parts.append(f"### Uploaded input: {name}\n{content[:16000]}")
         kb_context = ""
         if kb_ids and query:
             try:
-                chunks = await rag.query(kb_ids, query, top_k=8)
+                chunks = await rag.hybrid_query(kb_ids, query, top_k=budget["retrieval_chunks"])
                 if chunks:
                     kb_context = rag.format_context(chunks, max_chars=8000)
                     input_context_parts.append(f"### Knowledge base context\n{kb_context}")
+                    for ci, chunk in enumerate(chunks):
+                        key = f"kb:{chunk.get('kb_id', '')}:{chunk.get('filename', '')}:{chunk.get('chunk_index', ci)}"
+                        evidence_documents[key] = chunk.get("text", "")
+                        input_sources.append({"index": 0, "title": "KB: " + str(chunk.get("filename") or "Excerpt"),
+                            "url": "", "snippet": _one_line(chunk.get("text", ""), 240), "type": "kb",
+                            "tier": 0, "metadata": {"evidence_key": key, "kb_id": chunk.get("kb_id"), "chunk_index": chunk.get("chunk_index")}})
             except Exception as e:
                 await _emit_report_event(events, report_id, "research_audit", {
                     "level": "warning", "message": f"KB context unavailable: {e}",
@@ -2411,8 +2522,10 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 page = await _fetch_github_repo_snapshot(http, url)
                 if page:
                     return "github_repo", page
-            return "direct_url", await _fetch_page(http, url)
+            return "direct_url", await _fetch_report_page(http, url, fetch_diagnostics)
 
+        initial_page_budget = budget["page_reads"] if depth == 1 else max(1, int(budget["page_reads"] * .6))
+        safe_seeds = safe_seeds[:initial_page_budget]
         await check_cancel()
         seed_results = await asyncio.gather(
             *[_fetch_seed(u) for u in safe_seeds], return_exceptions=True,
@@ -2473,7 +2586,7 @@ Use the current date above as authoritative; do not infer "current real-world kn
             except Exception:
                 leak_items = []
             existing_direct_urls = {s.get("url") for s in direct_sources if s.get("url")}
-            leak_fetch_budget = 6 if depth >= 4 else 4
+            leak_fetch_budget = min(6 if depth >= 4 else 4, max(0, initial_page_budget - len(direct_pages)))
             for item in leak_items:
                 await check_cancel()
                 item_url = _normalize_url(item.get("url") or "")
@@ -2504,7 +2617,7 @@ Use the current date above as authoritative; do not infer "current real-world kn
             leak_read_urls = [s["url"] for s in leak_srcs][:leak_fetch_budget]
             if leak_read_urls:
                 leak_pages = await asyncio.gather(
-                    *[_fetch_page(http, u) for u in leak_read_urls], return_exceptions=True,
+                    *[_fetch_report_page(http, u, fetch_diagnostics) for u in leak_read_urls], return_exceptions=True,
                 )
                 _by_url = {s["url"]: s for s in direct_sources}
                 for u, page in zip(leak_read_urls, leak_pages):
@@ -2556,7 +2669,16 @@ Use the current date above as authoritative; do not infer "current real-world kn
 
             async def one(q):
                 time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
-                items = await _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state)
+                diagnostic = {"query": q}
+                items = await _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state, diagnostics=diagnostic)
+                relevant = [item for item in items if _report_result_relevant(item, q)]
+                diagnostic.update(discarded_results=len(items) - len(relevant), retained_results=len(relevant))
+                search_diagnostics.append(diagnostic)
+                if diagnostic.get('status') not in (None, 'ok') or len(relevant) < len(items):
+                    await _emit_report_event(events, report_id, 'research_audit', {
+                        'level': 'warning', 'message': f"Search retained {len(relevant)}/{len(items)} relevant results; provider status: {diagnostic.get('status', 'unknown')}",
+                        'diagnostics': diagnostic})
+                items = relevant
                 for item in items:
                     item["query"] = q
                 return items
@@ -2575,9 +2697,30 @@ Use the current date above as authoritative; do not infer "current real-world kn
         def remap_page_source_indices(current_sources: list[dict]) -> None:
             by_url = {_normalize_url(s.get("url", "")): s for s in current_sources if s.get("url")}
             for page in pages:
-                src = by_url.get(_normalize_url(page.get("url", "")))
+                src = by_url.get(_normalize_url(page.get("requested_url") or page.get("url", ""))) or by_url.get(_normalize_url(page.get("url", "")))
                 if src:
                     page["source_index"] = src.get("index", 0)
+
+        async def archive_evidence():
+            page_by_url = {}
+            for p in pages:
+                page_by_url[_normalize_url(p.get("requested_url") or p.get("url", ""))] = p
+                page_by_url[_normalize_url(p.get("url", ""))] = p
+            docs = []
+            for src in sources:
+                key = src.get("metadata", {}).get("evidence_key")
+                page = page_by_url.get(_normalize_url(src.get("url", "")))
+                content = evidence_documents.get(key) if key else None
+                kind = ("kb" if src.get("type") == "kb" else "uploaded") if key else "snippet"
+                if page:
+                    content, kind = page.get("content", ""), "full_page"
+                docs.append({"source_id": f"S{src['index']}", "title": src.get("title", ""),
+                    "url": src.get("url", ""), "content": content or src.get("snippet", ""),
+                    "metadata": {**src.get("metadata", {}), "kind": kind, "source_type": src.get("type", "web")}})
+            await check_cancel()
+            if not await store_documents(report_id, docs):
+                raise cancel_registry.RunCancelled(report_id)
+            await cancel_registry.await_cancellable(index_pending(report_id), report_id)
 
         async def emit_new_sources(current_sources: list[dict]) -> None:
             for src in current_sources:
@@ -2588,15 +2731,17 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 await _emit_report_event(events, report_id, "research_source_found", src)
 
         async def fetch_ranked_pages(current_sources: list[dict], max_new_pages: int) -> None:
+            max_new_pages = min(max_new_pages, budget["page_reads"] - len(pages), budget["page_reads"] * 2 - len(fetch_diagnostics))
             if max_new_pages <= 0:
                 return
             await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
-            web_results = [r for r in all_results if r.get("url")]
-            top_urls = [u for u in _rank_urls(web_results, fetched_urls) if _normalize_url(u) not in fetched_urls][:max_new_pages]
+            registered_urls = {src.get("url") for src in current_sources}
+            web_results = [r for r in all_results if _normalize_url(r.get("url", "")) in registered_urls]
+            top_urls = [u for u in _rank_urls(web_results, fetched_urls, allow_pdf=True) if _normalize_url(u) not in fetched_urls][:max_new_pages]
             for i in range(0, len(top_urls), 4):
                 await check_cancel()
                 batch = top_urls[i:i + 4]
-                fetched = await asyncio.gather(*[_fetch_page(http, u) for u in batch], return_exceptions=True)
+                fetched = await asyncio.gather(*[_fetch_report_page(http, u, fetch_diagnostics) for u in batch], return_exceptions=True)
                 for u, page in zip(batch, fetched):
                     # Record the requested URL even on failure so adaptive
                     # rounds never re-rank/re-fetch it (redirects used to leave
@@ -2622,14 +2767,16 @@ Use the current date above as authoritative; do not infer "current real-world kn
                 "target_queries": budget["queries"], "target_sources": budget["target_sources"],
                 "target_pages": budget["page_reads"], "depth": depth,
                 "adaptive_learnings": len(adaptive_learnings),
-                "adaptive_followup_queries": len(adaptive_followups),
+                "adaptive_followup_queries": len(adaptive_followups), "fetch_diagnostics": list(fetch_diagnostics),
+                "search_diagnostics": list(search_diagnostics),
             }
             if extra:
                 m.update(extra)
+            metrics.update(m)
             return m
 
         await run_search_queries(qset, 20, 18, "initial")
-        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget)
+        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
         remap_page_source_indices(sources)
         await emit_new_sources(sources)
         await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
@@ -2639,7 +2786,8 @@ Use the current date above as authoritative; do not infer "current real-world kn
             raise RuntimeError("No usable sources found. Check SearXNG or provide files/KB context.")
 
         # Phase 4: read pages, then adaptively search gaps.
-        await fetch_ranked_pages(sources, max(0, budget["page_reads"] - len(pages)))
+        await fetch_ranked_pages(sources, max(0, initial_page_budget - len(pages)))
+        await archive_evidence()
         await db.update_research_report(report_id, metrics=current_metrics(sources))
 
         max_adaptive_rounds = max(0, min(4, depth - 1))
@@ -2699,17 +2847,27 @@ Use the current date above as authoritative; do not infer "current real-world kn
                     "pct": 56 + min(12, round_no * 3),
                 })
                 await run_search_queries(followups, 56 + min(12, round_no * 3), 4, f"adaptive round {round_no}")
-                sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget)
+                sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
                 remap_page_source_indices(sources)
                 await emit_new_sources(sources)
                 await db.replace_research_sources(report_id, sources)
             if remaining_pages > 0:
-                await fetch_ranked_pages(sources, remaining_pages)
+                rounds_left = max(1, max_adaptive_rounds - round_no + 1)
+                await fetch_ranked_pages(sources, max(1, remaining_pages // rounds_left))
+            await archive_evidence()
             await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
 
-        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget)
+        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
         remap_page_source_indices(sources)
         await db.replace_research_sources(report_id, sources)
+
+        # Spend unused read allowance on remaining ranked sources, with bounded retries.
+        for _ in range(2):
+            remaining = budget["page_reads"] - len(pages)
+            if remaining <= 0 or len(fetched_urls) >= budget["page_reads"] * 2:
+                break
+            await fetch_ranked_pages(sources, min(remaining, budget["page_reads"] * 2 - len(fetched_urls)))
+        await archive_evidence()
 
         # Build bounded evidence context.
         source_briefs = []
@@ -2741,18 +2899,14 @@ Use the current date above as authoritative; do not infer "current real-world kn
             "\n\nFULL TEXT EXTRACTS\n" + "\n\n".join(page_context)
         )[:_effective_context_chars(budget)]
 
-        evidence_records = _build_report_evidence_records(report_id, query, user_context, sources, pages)
-        evidence_index = await cancel_registry.await_cancellable(
-            _index_report_evidence(report_id, evidence_records),
-            report_id,
-        )
+        evidence_index = await evidence_stats(report_id)
         section_queries = [query, focus] + [
             str(q) for q in (plan.get("research_questions") or [])[:10]
         ] + [
             f"{o.get('heading','')} {o.get('goal','')}" for o in outline[:10] if isinstance(o, dict)
         ] + adaptive_followups[:8]
         targeted_evidence = await cancel_registry.await_cancellable(
-            _retrieve_report_evidence(report_id, section_queries, top_k=min(18, max(8, budget["findings"]))),
+            __import__("research_evidence").retrieve(report_id, section_queries, top_k=budget["retrieval_chunks"]),
             report_id,
         )
         targeted_evidence_context = _format_targeted_evidence(targeted_evidence, max_chars=16000)
@@ -2807,11 +2961,16 @@ Rules:
 - Consider credibility scores and factors when assigning evidence_strength; low-score sources can support dispute coverage but should not carry strong claims alone.
 - Do not write "studies show" unless the cited source_ids contain peer-reviewed papers, official benchmarks, or primary empirical studies.
 - Mark community discussions, blogs, GitHub issues, and vendor docs as moderate, thin, or anecdotal unless they contain direct data."""
+        findings_tokens = min(5200, 1900 + budget["findings"] * 150, max(128, _research_num_ctx() // 3))
+        findings_instructions = findings_prompt.replace(evidence_context, "[Original excerpts follow.]")
+        if targeted_evidence_context:
+            findings_instructions = findings_instructions.replace(targeted_evidence_context, "[See original excerpts below.]")
+        findings_prompt, _ = fit_prompt(findings_instructions, targeted_evidence, findings_tokens)
         findings_obj = await cancel_registry.await_cancellable(
             _ask_ollama_json(
                 http, ollama_url, findings_prompt, model=run_model,
                 default_model=default_model,
-                max_tokens=min(5200, 1900 + budget["findings"] * 150),
+                max_tokens=findings_tokens,
                 fallback=[], expected_type=(list, dict),
             ),
             report_id,
@@ -2861,11 +3020,16 @@ Return strict JSON:
   "missing_evidence": ["..."],
   "source_quality_notes": ["..."]
 }}"""
+        audit_tokens = min(4200, 2000 + budget["findings"] * 100, max(128, _research_num_ctx() // 4))
+        audit_instructions = audit_prompt.replace(chr(10).join(source_briefs[:budget["source_briefs"]]), "[See original excerpts below.]")
+        if targeted_evidence_context:
+            audit_instructions = audit_instructions.replace(targeted_evidence_context, "[See original excerpts below.]")
+        audit_prompt, _ = fit_prompt(audit_instructions, targeted_evidence, audit_tokens)
         audit_obj = await cancel_registry.await_cancellable(
             _ask_ollama_json(
                 http, ollama_url, audit_prompt, model=audit_model,
                 default_model=default_model,
-                max_tokens=min(4200, 2000 + budget["findings"] * 100),
+                max_tokens=audit_tokens,
                 fallback=None, expected_type=dict,
             ),
             report_id,
@@ -2896,6 +3060,7 @@ Return strict JSON:
             "adaptive_gaps": adaptive_gaps[:20],
             "adaptive_followup_queries": adaptive_followups[:30],
             "evidence_index": evidence_index,
+            "search_diagnostics": list(search_diagnostics),
             "targeted_evidence_count": len(targeted_evidence),
             "tiers": {
                 "primary": len([s for s in sources if s.get("tier") == 0]),
@@ -2910,72 +3075,16 @@ Return strict JSON:
             },
         }
 
-        # Phase 7: synthesize final report.
-        await phase("synthesis", "Writing final report", "Streaming the report into the viewer", 86)
-        visual_guidance = "\n".join(f"- {line}" for line in _VISUAL_REPORT_GUIDANCE.strip().splitlines())
-        final_prompt = f"""Write a polished, advanced research report.
-
-Topic: {query}
-Focus: {focus or "none"}
-Report type: {template["label"]}
-Required sections: {", ".join(template["sections"])}
-Title: {title}
-Current date: {current_date}
-
-Research plan:
-{json.dumps({"questions": plan.get("research_questions", []), "criteria": plan.get("inclusion_criteria", [])}, indent=2)}
-
-Findings:
-{json.dumps(findings[:budget["findings"]], indent=2)}
-
-Audit:
-{json.dumps(audit, indent=2)}
-
-Adaptive learnings and follow-up searches:
-{json.dumps({"learnings": adaptive_learnings[:24], "gaps": adaptive_gaps[:16], "follow_up_queries": adaptive_followups[:24]}, indent=2)}
-
-Targeted evidence retrieved from the per-report evidence index:
-{targeted_evidence_context or "[No targeted snippets retrieved; use findings/source briefs only.]"}
-
-Source credibility summary:
-{json.dumps(metrics.get("credibility", {}), indent=2)}
-
-Write in Markdown. Requirements:
-- Start with "# {title}".
-- Include a compact "Method" section explaining web/files/KB coverage.
-- Use inline citations like [S1], [S2] after claims.
-- Do not cite a source id unless it appears in the evidence.
-- Use the current date above as authoritative. Do not describe source dates on or before that date as future-dated, and do not mention training cutoffs.
-- Include uncertainty, contradictions, and missing-evidence caveats.
-- Use "Finding #N" only when referring to extracted findings; use "[S#]" only when citing sources.
-- Do not use "studies show", "proves", "significantly improves", "reduces hallucinations", "sub-second", or other strong empirical language unless the cited finding has strong empirical, benchmark, peer-reviewed, or primary-source support.
-- When evidence comes mostly from community posts, blogs, GitHub repos, or vendor/project docs, write it as reported practice, implementation guidance, or anecdotal evidence.
-- When a Source type "github_repo" snapshot is present, use it for repository-specific claims and do not say no direct repository review was performed.
-- If the audit coverage score is under 70 or the source set is mostly general/community sources, add an "Evidence Strength" section before recommendations.
-- Include credibility-calibrated language: low-score sources may show claims/disputes, but do not present them as established facts unless corroborated.
-- Use tables where comparisons are clearer than prose.
-{visual_guidance}
-- End with "Source Notes" summarizing source quality and follow-up searches.
-- Keep it rigorous and decision-useful, not a search-result dump."""
-        report = await cancel_registry.await_cancellable(
-            _ask_report_streamed(http, ollama_url, events, report_id, final_prompt, model=run_model, default_model=default_model),
-            report_id,
-        )
+        # Phase 7: retrieve and write each substantive section, preserving checkpoints.
+        metrics["fetch_diagnostics"] = fetch_diagnostics
+        await phase("synthesis", "Writing final report", "Retrieving evidence for report sections", 86)
+        report, final_status = await compose_report(
+            http=http, ollama_url=ollama_url, events=events, report_id=report_id,
+            query=query, focus=focus, title=title, template=template, depth=depth,
+            model=run_model, default_model=default_model, auditor_model=audit_model,
+            plan=plan, sources=sources, findings=findings, audit=audit, metrics=metrics)
         citation_audit = _validate_report_citations(report, sources)
         renderable_audit = _report_renderable_audit(report)
-        if not citation_audit.get("valid"):
-            warning = (
-                "\n\n> [!WARNING]\n"
-                "> Citation audit rejected invented source IDs: "
-                + ", ".join(citation_audit.get("invalid", []))
-                + ". Treat those references as unsupported unless they are corrected against the source list."
-            )
-            report = report.rstrip() + warning + "\n"
-            await _emit_report_event(events, report_id, "research_audit", {
-                "level": "warning",
-                "message": "Final report contained invented citations.",
-                "citation_audit": citation_audit,
-            })
         summary = _one_line(re.sub(r"^# .+?\n", "", report.strip(), flags=re.DOTALL), 320)
         if not summary:
             summary = f"{template['label']} on {query}"
@@ -2984,7 +3093,7 @@ Write in Markdown. Requirements:
         metrics["citation_audit"] = citation_audit
         metrics["renderable_audit"] = renderable_audit
         wrote = await db.update_research_report(
-            report_id, status="complete", report_markdown=report, summary=summary,
+            report_id, status=final_status, report_markdown=report, summary=summary,
             sources=sources, findings=findings, metrics={**metrics, "audit": audit},
             completed_at=datetime.utcnow().isoformat(),
             unless_status="cancelled",
@@ -2997,23 +3106,34 @@ Write in Markdown. Requirements:
             return {"id": report_id, "status": "cancelled"}
         await db.replace_research_sources(report_id, sources)
         await _emit_report_event(events, report_id, "research_done", {
-            "status": "complete", "summary": summary, "metrics": metrics,
+            "status": final_status, "summary": summary, "metrics": metrics,
         })
         # Event-triggered tasks: research_completed was declared in
         # scheduler.EVENT_NAMES but never fired anywhere until now.
         try:
             import scheduler
-            await scheduler.fire_event("research_completed", user_id=db.current_user_id())
+            if final_status == "complete":
+                await scheduler.fire_event("research_completed", user_id=db.current_user_id())
         except Exception as _fe:
             print(f"[RESEARCH] fire_event(research_completed) failed: {_fe}")
         return {
-            "id": report_id, "status": "complete", "report": report, "sources": sources,
+            "id": report_id, "status": final_status, "report": report, "sources": sources,
             "findings": findings, "metrics": metrics,
         }
+    except asyncio.CancelledError:
+        # Keep the last durable draft, including on service shutdown.
+        saved = await db.get_research_report(report_id)
+        if saved and saved.get("status") in {"queued", "pending", "running"}:
+            await db.update_research_report(
+                report_id, status="failed", error="Research interrupted; saved draft retained", unless_status="cancelled",
+                metrics={**metrics, "elapsed": time.time() - t_start},
+                completed_at=datetime.utcnow().isoformat(),
+            )
+        raise
     except cancel_registry.RunCancelled:
         await db.update_research_report(
             report_id, status="cancelled", error="Cancelled by user",
-            metrics={"elapsed": time.time() - t_start},
+            metrics={**metrics, "elapsed": time.time() - t_start},
             completed_at=datetime.utcnow().isoformat(),
         )
         await _emit_report_event(events, report_id, "research_error", {
@@ -3022,8 +3142,8 @@ Write in Markdown. Requirements:
         return {"id": report_id, "status": "cancelled"}
     except Exception as e:
         await db.update_research_report(
-            report_id, status="failed", error=str(e),
-            metrics={"elapsed": time.time() - t_start},
+            report_id, status="failed", error=str(e), unless_status="cancelled",
+            metrics={**metrics, "elapsed": time.time() - t_start},
             completed_at=datetime.utcnow().isoformat(),
         )
         await _emit_report_event(events, report_id, "research_error", {

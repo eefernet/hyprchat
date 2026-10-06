@@ -1054,6 +1054,11 @@ async def _url_safe(url: str) -> bool:
     Async: getaddrinfo runs in a thread so a slow/unresponsive DNS server
     can't stall the (single-worker) event loop.
     """
+    # The maintained proxy resolves through Proton, rejects non-public answers,
+    # and pins the connected IP. Do not leak a duplicate DNS lookup locally.
+    from research import _proxy_validates_destinations, _url_safe_for_direct_fetch
+    if _proxy_validates_destinations():
+        return _url_safe_for_direct_fetch(url, resolve_dns=False)
     try:
         parsed = urllib.parse.urlparse(url)
     except Exception:

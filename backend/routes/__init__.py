@@ -3,6 +3,7 @@ from fastapi import FastAPI
 
 from .context import configure_context
 from . import coder_workflows
+from . import documents
 from . import artifacts, assistant, audio, backup, calendar, catalog, chat_files, downloads, email, health, hf, model_configs, model_providers, notes, notifications, ollama_models, scheduler, settings, tools_connectors, users
 
 
@@ -63,3 +64,4 @@ def register_extracted_routes(
     app.include_router(calendar.router)
     app.include_router(email.router)
     app.include_router(chat_files.router)
+    app.include_router(documents.router)

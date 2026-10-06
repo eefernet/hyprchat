@@ -433,6 +433,9 @@ activate_vpn_proxy() {
 
 main() {
   need_root
+  if [ -e /etc/systemd/system/protonvpn-rotate.service ] || [ -x /usr/local/sbin/searxng-vpn-killswitch.sh ]; then
+    die "Existing rotating ProtonVPN stack detected. This legacy installer cannot replace it; use scripts/searxng/README.md."
+  fi
   [ -n "$HYPRCHAT_IP" ] || die "HYPRCHAT_IP is required."
   valid_ip_or_empty "$HYPRCHAT_IP" || die "HYPRCHAT_IP must be an IPv4 address."
   valid_ip_or_empty "$DEV_IP" || die "DEV_IP must be empty or an IPv4 address."

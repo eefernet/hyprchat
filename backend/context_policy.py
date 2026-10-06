@@ -244,7 +244,13 @@ def thinking_options(role, payload, details):
         if mode == "off":
             raise ValueError("This model cannot disable thinking; select a thinking level in Settings")
         return {"think": "medium" if mode == "on" else mode}, mode
-    return {"think": {"on": True, "off": False}.get(mode, mode)}, mode
+    think = {"on": True, "off": False}.get(mode, mode)
+    values = (details.get("thinking") or {}).get("values") or []
+    if isinstance(think, str) and values and not any(isinstance(v, str) for v in values):
+        # Boolean-only thinking model (laguna-xs-2.1 advertises [false, true]): a level cannot be expressed and
+        # Ollama rejects a string, which would fail the operation. Report the effective mode instead.
+        return {"think": True}, "on"
+    return {"think": think}, mode
 
 
 def helper_context(profile="workspace") -> int:
