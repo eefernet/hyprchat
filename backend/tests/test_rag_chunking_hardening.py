@@ -80,7 +80,10 @@ def test_index_file_upsert_is_sliced_below_chroma_cap(monkeypatch, tmp_path):
 
     f = tmp_path / "big.txt"
     f.write_text("content")
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(rag.db,"kb_index_record",AsyncMock())
     result = _run(rag.index_file("kb-test", "big.txt", str(f)))
+    rag.db.kb_index_record.assert_awaited_once()
 
     assert result["chunks"] == n_chunks
     assert sum(upsert_sizes) == n_chunks

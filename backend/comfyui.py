@@ -711,7 +711,7 @@ async def get_history(prompt_id: str) -> dict | None:
     return data.get(prompt_id)
 
 
-async def queue_position(prompt_id: str) -> int | None:
+async def queue_position(prompt_id: str, *, strict: bool = False) -> int | None:
     """0 = running now, N = waiting behind N jobs, None = not in queue."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -725,7 +725,8 @@ async def queue_position(prompt_id: str) -> int | None:
             if len(item) > 1 and item[1] == prompt_id:
                 return i + 1
     except Exception:
-        pass
+        if strict:
+            raise
     return None
 
 
@@ -939,15 +940,14 @@ async def cleanup_outputs() -> dict | None:
 
 
 async def forget_job(prompt_id: str):
-    """Erase a finished job's traces on ComfyUI — history entry + saved file
-    copies. Called after HyprChat has downloaded the images, so HyprChat holds
-    the only remaining copy. File cleanup is skipped while ANY other job is in
-    flight (the cleanup node deletes all hyprchat-prefixed files, which would
-    destroy a not-yet-downloaded sibling job's output)."""
+    """Remove only this completed job's history after durable publication.
+
+    Bulk cleanup is reserved for explicit maintenance: process-local tracking
+    cannot prove that another persisted job has downloaded its outputs after
+    a restart, so clearing every upstream file here can lose retryable data.
+    """
     finish_job(prompt_id)
     await delete_history(prompt_id)
-    if not _ACTIVE_JOBS:
-        await cleanup_outputs()
 
 
 async def list_checkpoints() -> list[str]:

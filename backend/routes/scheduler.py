@@ -162,7 +162,7 @@ async def run_task(task_id: str):
     run_id = await scheduler.run_task_now(task_id)
     if not run_id:
         raise HTTPException(404, "Task not found")
-    return {"status": "started", "run_id": run_id}
+    return {"status": "queued", "run_id": run_id}
 
 
 @router.post("/api/tasks/{task_id}/pause")
@@ -195,10 +195,9 @@ async def cancel_task_run(run_id: str):
     run = await db.get_task_run(run_id)
     if not run:
         raise HTTPException(404, "Run not found")
-    cancel_registry.signal(run_id)
-    if run.get("status") == "running":
-        await db.finish_task_run(run_id, "cancelled", error="cancelled by user")
-    return {"status": "cancelled"}
+    import task_queue
+    result = await task_queue.cancel(run_id)
+    return {"status": result['status']}
 
 
 _PARSE_PROMPT = """Convert the user's request into a scheduled-task draft. Reply with ONLY a JSON object:

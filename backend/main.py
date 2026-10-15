@@ -25,9 +25,10 @@ from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Que
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import backup as backup_svc
+import image_job_store
 import config
 import context_policy
 import coder_jobs
@@ -163,23 +164,8 @@ def _run_cleanup_sync() -> dict:
     if cleanup_days == 0:
         return {"deleted": 0, "freed_bytes": 0, "skipped": "cleanup disabled"}
 
-    cutoff = time.time() - (cleanup_days * 86400)
-    deleted, freed = 0, 0
-    try:
-        for entry in os.scandir(config.SANDBOX_OUTPUTS_DIR):
-            if entry.is_file(follow_symlinks=False):
-                try:
-                    if entry.stat().st_mtime < cutoff:
-                        freed += entry.stat().st_size
-                        os.remove(entry.path)
-                        deleted += 1
-                except Exception as e:
-                    print(f"[Cleanup] Could not remove {entry.path}: {e}")
-    except Exception:
-        pass
-    if deleted:
-        print(f"[Cleanup] Removed {deleted} files, freed {freed // 1024} KB")
-    return {"deleted": deleted, "freed_bytes": freed}
+    from durable_storage import cleanup_outputs
+    return cleanup_outputs(time.time() - cleanup_days * 86400)
 
 
 async def _cleanup_loop():
@@ -187,9 +173,13 @@ async def _cleanup_loop():
     while True:
         await asyncio.sleep(6 * 3600)
         await asyncio.to_thread(_run_cleanup_sync)
+        from research_evidence import retry_cleanup
+        await retry_cleanup()
 
 
 events = EventBus()
+import documents
+documents.configure(events)
 
 
 # ============================================================
@@ -202,6 +192,7 @@ _scheduler_task_ref = None
 # Without this, the event loop only weakly references a bare create_task() result,
 # so an in-flight job can be garbage-collected and silently cancelled mid-run.
 _BG_TASKS: set = set()
+_RESEARCH_TASKS: dict = {}
 
 
 def _bg_task_done(t):
@@ -289,11 +280,14 @@ async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
     # Staged backup restore must land BEFORE init_db so an older-schema backup
     # is migrated by the normal idempotent migrations right after.
-    try:
-        backup_svc.apply_pending_restore()
-    except Exception as _bre:
-        print(f"[Backup] apply_pending_restore crashed (continuing): {_bre}")
+    backup_svc.apply_pending_restore()
     await db.init_db()
+    import notification_delivery
+    await notification_delivery.reconcile()
+    import indexing_jobs
+    await indexing_jobs.reconcile()
+    from durable_storage import migrate_references
+    print(f"[Storage] {await asyncio.to_thread(migrate_references)}")
     try:
         _reaped = await db.reap_stale_runs()
         if _reaped.get("runs_reaped") or _reaped.get("workflows_blocked"):
@@ -477,6 +471,8 @@ async def lifespan(app: FastAPI):
     # Run cleanup once on startup to clear any stale files — in a worker
     # thread so a big outputs dir doesn't stall the first requests.
     _track_bg(asyncio.to_thread(_run_cleanup_sync))
+    from research_evidence import retry_cleanup as retry_research_cleanup
+    _track_bg(retry_research_cleanup())
     # Start background cleanup loop
     _cleanup_task_ref = asyncio.create_task(_cleanup_loop())
     # Start health check loop (every 5 min)
@@ -494,15 +490,17 @@ async def lifespan(app: FastAPI):
         print(f"[Startup] gatherer imports failed (check-ins degrade): {_ge}")
     # Start the Jarvis scheduled-task loop
     global _scheduler_task_ref
-    _scheduler_task_ref = scheduler_svc.start(
+    _scheduler_task_ref = None if os.environ.get('HYPRCHAT_DEPLOY_QUALIFICATION') == '1' else scheduler_svc.start(
         http, events,
         create_research_report=lambda payload: _create_and_start_research_report(
             ResearchReportCreate(**payload)),
+        cancel_research_report=cancel_research_report,
     )
     # Load RAG settings from persistent config — clamped like the PATCH path,
     # so a legacy settings.json with junk values (e.g. chunk_size -5) can't
     # poison the runtime chunker after a restart.
     _rag_cfg = _settings.get("rag", {})
+    config.RAG_RETRIEVAL_DEADLINE_SECONDS = config.coerce_int(_rag_cfg.get("retrieval_deadline_seconds"), 3, minimum=1, maximum=30)
     if _rag_cfg.get("embed_model"):
         rag.EMBED_MODEL = _rag_cfg["embed_model"]
     if _rag_cfg.get("chunk_size"):
@@ -510,18 +508,37 @@ async def lifespan(app: FastAPI):
     if _rag_cfg.get("chunk_overlap") is not None:
         rag.CHUNK_OVERLAP = config.coerce_int(_rag_cfg["chunk_overlap"], rag.CHUNK_OVERLAP, minimum=0, maximum=2000)
     # Ensure RAG embedding model is available (non-blocking pull)
-    _track_bg(rag.ensure_embed_model())
+    if os.environ.get('HYPRCHAT_DEPLOY_QUALIFICATION') != '1':
+        _track_bg(rag.ensure_embed_model())
     # Backfill the kb_chunks_fts keyword index from existing Chroma documents
     # (no-op once populated; non-blocking)
     _track_bg(rag.backfill_fts())
     coder_jobs.configure(http, events)
-    await coder_jobs.start()
+    if os.environ.get('HYPRCHAT_DEPLOY_QUALIFICATION') != '1':
+        await coder_jobs.start()
+    await image_job_store.reconcile_submissions()
+    image_monitor = None if os.environ.get('HYPRCHAT_DEPLOY_QUALIFICATION') == '1' else asyncio.create_task(_image_monitor_loop())
     yield
-    await coder_jobs.shutdown()
+    # Stop producers before settling their owned work and closing transports.
+    await scheduler_svc.stop()
+    import mcp_runtime
+    await mcp_runtime.close()
+    if image_monitor:
+        image_monitor.cancel()
+        await asyncio.gather(image_monitor, return_exceptions=True)
     for task in [_cleanup_task_ref, _health_task_ref, _scheduler_task_ref]:
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+    research_tasks = list(_RESEARCH_TASKS.values())
+    for task in research_tasks:
+        task.cancel()
+    await asyncio.gather(documents.shutdown(), *research_tasks, return_exceptions=True)
+    await coder_jobs.shutdown()
+    background = list(_BG_TASKS)
+    for task in background:
+        task.cancel()
+    await asyncio.gather(*background, return_exceptions=True)
     await close_web_fetch_client()
 
 app = FastAPI(title="HyprChat", version="2.0.0", lifespan=lifespan)
@@ -541,31 +558,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-HyprChat-User", "X-HyprChat-Session"],
 )
 
-_USER_SCOPED_PREFIXES = (
-    "/api/conversations",
-    "/api/artifacts",
-    "/api/chat/stream",
-    "/api/council/chat/stream",
-    "/api/coder",
-    "/api/runs",
-    "/api/knowledge-bases",
-    "/api/tools",
-    "/api/model-configs",
-    "/api/workspaces",
-    "/api/memory",
-    "/api/research/reports",
-    "/api/councils",
-    "/api/analytics",
-    "/api/danger-zone",
-    "/api/events",
-    "/api/prefs",
-    "/api/tasks",
-    "/api/notifications",
-    "/api/assistant",
-    "/api/notes",
-    "/api/calendar",
-    "/api/email",
-)
 
 
 def _request_user_id(request: Request) -> str:
@@ -586,10 +578,6 @@ def _request_session_token(request: Request) -> str:
     )
 
 
-def _is_user_scoped_path(path: str) -> bool:
-    return any(path.startswith(prefix) for prefix in _USER_SCOPED_PREFIXES)
-
-
 async def _validated_request_user(request: Request) -> dict:
     user_id = _request_user_id(request)
     user = await db.get_user_private(user_id)
@@ -602,17 +590,14 @@ async def _validated_request_user(request: Request) -> dict:
 
 @app.middleware("http")
 async def user_context_middleware(request: Request, call_next):
-    user_id = _request_user_id(request)
-    user = await db.get_user_private(user_id)
-    if not user:
-        user_id = db.DEFAULT_USER_ID
-        user = await db.get_user_private(user_id)
-    valid = True
-    if user and user.get("password_hash"):
-        valid = await db.validate_user_session(user_id, _request_session_token(request))
-    if _is_user_scoped_path(request.url.path) and not valid:
-        return JSONResponse({"detail": "Password required"}, status_code=401)
-    token = db.set_current_user_id(user_id if valid else db.DEFAULT_USER_ID)
+    if os.environ.get('HYPRCHAT_DEPLOY_QUALIFICATION') == '1' and request.method not in {'GET','HEAD','OPTIONS'} and request.url.path != '/api/users/login':
+        return JSONResponse({'detail':'Release qualification in progress; retry shortly'},status_code=503,headers={'Retry-After':'30'})
+    from access_policy import request_policy, authorize
+    policy = request_policy(app, request.scope)
+    user_id, error = await authorize(policy, _request_user_id(request), _request_session_token(request), db)
+    if error:
+        return JSONResponse({"detail": error[1]}, status_code=error[0])
+    token = db.set_current_user_id(user_id)
     try:
         return await call_next(request)
     finally:
@@ -749,6 +734,8 @@ class CouncilUpdate(BaseModel):
     host_system_prompt: Optional[str] = None
     debate_rounds: Optional[int] = None
     kb_ids: Optional[list[str]] = None
+    cloud_enabled: Optional[bool] = None
+    cost_limit_usd: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
 
 class CouncilMemberCreate(BaseModel):
     model: str
@@ -1635,11 +1622,23 @@ async def n8n_execute(req: N8nRequest):
 # SSE — STATUS EVENT STREAM
 # ============================================================
 @app.get("/api/events/{conversation_id}")
-async def event_stream(conversation_id: str):
+async def event_stream(conversation_id: str, after: int = 0):
     """SSE endpoint — clients connect to receive real-time status events."""
     # Ghost/local ids never exist server-side; anything else must be a
     # conversation or research report owned by the requesting user, or a
     # foreign user could tap another profile's live event stream by id.
+    if conversation_id == 'jobs':
+        import job_registry
+        async def job_changes():
+            cursor = max(0, after)
+            while True:
+                for change in await job_registry.changes(cursor):
+                    cursor = change['seq']
+                    yield f"id: {cursor}\ndata: {json.dumps({'type': 'job_update', 'data': change})}\n\n"
+                yield ': heartbeat\n\n'
+                await asyncio.sleep(2)
+        return StreamingResponse(job_changes(), media_type='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     if not conversation_id.startswith(("ghost-", "l-")):
         if not await db.owns_event_channel(conversation_id):
             raise HTTPException(404, "Unknown event channel")
@@ -1726,7 +1725,9 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
         finally:
             db.reset_current_user_id(token)
 
-    _track_bg(_runner())
+    task = _track_bg(_runner())
+    _RESEARCH_TASKS[report_id] = task
+    task.add_done_callback(lambda finished: _RESEARCH_TASKS.pop(report_id, None))
     return await db.get_research_report(report_id)
 
 
@@ -1754,8 +1755,27 @@ async def get_research_report(report_id: str):
     return report
 
 
+@app.get("/api/research/reports/{report_id}/evidence/{source_id}")
+async def get_research_evidence(report_id: str, source_id: str,
+                                offset: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=50)):
+    from research_evidence import inspect_source
+    evidence = await inspect_source(report_id, source_id, offset=offset, limit=limit)
+    if evidence is None:
+        raise HTTPException(404, "Research report not found")
+    return evidence
+
+
 @app.delete("/api/research/reports/{report_id}")
 async def delete_research_report(report_id: str):
+    report = await db.get_research_report(report_id)
+    if not report:
+        raise HTTPException(404, "Research report not found")
+    import cancel_registry
+    cancel_registry.signal(report_id)
+    task = _RESEARCH_TASKS.get(report_id)
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     await db.delete_research_report(report_id)
     return {"ok": True}
 
@@ -1764,27 +1784,81 @@ async def delete_research_report(report_id: str):
 async def cancel_research_report(report_id: str):
     import cancel_registry
 
-    signaled = cancel_registry.signal(report_id)
     report = await db.get_research_report(report_id)
     if not report:
         raise HTTPException(404, "Research report not found")
+    signaled = cancel_registry.signal(report_id)
     marked = False
-    if report.get("status") in ("queued", "running"):
+    if report.get("status") in ("queued", "running", "cancelling"):
         marked = True
+        task = _RESEARCH_TASKS.get(report_id)
+        status = 'cancelling' if task and not task.done() else 'cancelled'
         await db.update_research_report(
             report_id,
-            status="cancelled",
-            error="Cancelled by user",
-            completed_at=datetime.utcnow().isoformat(),
+            status=status,
+            error="Cancellation requested" if status == 'cancelling' else "Cancelled by user",
+            completed_at=None if status == 'cancelling' else datetime.utcnow().isoformat(),
         )
+        if task and not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=5)
+            status = (await db.get_research_report(report_id) or {}).get('status', status)
         ev = {
             "type": "research_error",
-            "data": {"status": "cancelled", "error": "Cancelled by user"},
+            "data": {"status": status, "error": "Cancelled by user" if status == 'cancelled' else "Cancellation requested"},
             "timestamp": time.time(),
         }
         await db.append_research_event(report_id, ev)
         await events.emit(report_id, "research_error", ev["data"])
     return {"report_id": report_id, "signaled": signaled, "marked": marked}
+
+
+@app.post('/api/research/reports/{report_id}/resume')
+async def resume_research_report(report_id: str):
+    import research_checkpoints
+    report=await db.get_research_report(report_id)
+    if not report:raise HTTPException(404,'Research report not found')
+    if report.get('status') not in {'interrupted','failed','partial','cancelled'}:
+        raise HTTPException(409,'This report is already active or complete')
+    try:
+        checkpoint=await research_checkpoints.load(report_id)
+        from research_config import research_num_ctx
+        if checkpoint['settings'].get('num_ctx')!=research_num_ctx():
+            raise ValueError('Research context settings changed; restore the original setting or start a fresh rerun')
+    except ValueError as exc:raise HTTPException(409,str(exc)) from exc
+    if report_id in _RESEARCH_TASKS and not _RESEARCH_TASKS[report_id].done():raise HTTPException(409,'Report is already active')
+    conn=await db.get_db()
+    try:
+        claimed=await conn.execute("UPDATE research_reports SET status='queued',error='',completed_at=NULL WHERE id=? AND user_id=? AND status IN ('interrupted','failed','partial','cancelled')",(report_id,db.current_user_id()))
+        await conn.commit()
+        if not claimed.rowcount:raise HTTPException(409,'Report is already active')
+    finally:await conn.close()
+    task=_track_bg(research_checkpoints.resume(http,config.OLLAMA_URL,events,report_id))
+    _RESEARCH_TASKS[report_id]=task
+    task.add_done_callback(lambda finished:_RESEARCH_TASKS.pop(report_id,None))
+    return await db.get_research_report(report_id)
+
+
+@app.get('/api/research/reports/{report_id}/versions')
+async def research_versions(report_id: str):
+    import research_checkpoints
+    try:return await research_checkpoints.versions(report_id)
+    except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+
+
+@app.get('/api/research/reports/{report_id}/compare')
+async def research_compare(report_id: str, older: int, newer: int):
+    import research_checkpoints
+    try:return await research_checkpoints.compare(report_id,older,newer)
+    except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+
+
+@app.post('/api/research/reports/{report_id}/question')
+async def research_question(report_id: str, body: dict):
+    import research_checkpoints
+    try:return await research_checkpoints.question(http,report_id,str(body.get('question') or ''))
+    except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:raise HTTPException(400,str(exc)) from exc
 
 
 @app.post("/api/research/reports/{report_id}/rerun")
@@ -1860,6 +1934,8 @@ async def cancel_run(run_id: str):
         raise HTTPException(404, "Run not found")
     if row.get("workflow_id") and await coder_job_store.get(row["workflow_id"]):
         return await coder_jobs.cancel(row["workflow_id"])
+    if row.get("role") == "documents":
+        return await documents.cancel_run(http, run_id)
     signaled = cancel_registry.signal(run_id)
 
     db_marked = False
@@ -2225,19 +2301,9 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 
     file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content), file.content_type or "")
 
-    # Start background RAG indexing so the upload response returns immediately
-    status_key = f"{kb_id}:{safe_name}"
-    _set_indexing_status(status_key, {"status": "indexing", "filename": safe_name})
-
-    async def _bg_index():
-        try:
-            result = await rag.index_file(kb_id, safe_name, filepath)
-            _set_indexing_status(status_key, {"status": "done", "filename": safe_name, **result})
-        except Exception as e:
-            print(f"[RAG] Indexing failed for {safe_name}: {e}")
-            _set_indexing_status(status_key, {"status": "error", "filename": safe_name, "error": str(e)})
-
-    _track_bg(_bg_index())
+    import indexing_jobs
+    indexing_id = await indexing_jobs.submit(kb_id,safe_name,filepath)
+    _track_bg(indexing_jobs.execute(indexing_id))
 
     return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
 
@@ -2347,18 +2413,9 @@ async def ingest_kb_url(kb_id: str, body: dict = Body(...)):
         file_id = await db.add_kb_file(kb_id, safe_name, filepath, len(content_bytes), file_type,
                                        source_url=final_url or url)
 
-    status_key = f"{kb_id}:{safe_name}"
-    _set_indexing_status(status_key, {"status": "indexing", "filename": safe_name})
-
-    async def _bg_index():
-        try:
-            result = await rag.index_file(kb_id, safe_name, filepath)
-            _set_indexing_status(status_key, {"status": "done", "filename": safe_name, **result})
-        except Exception as e:
-            print(f"[RAG] Indexing failed for {safe_name}: {e}")
-            _set_indexing_status(status_key, {"status": "error", "filename": safe_name, "error": str(e)})
-
-    _track_bg(_bg_index())
+    import indexing_jobs
+    indexing_id = await indexing_jobs.submit(kb_id,safe_name,filepath)
+    _track_bg(indexing_jobs.execute(indexing_id))
 
     return {"id": file_id, "filename": safe_name, "file_size": len(content_bytes),
             "indexing": True, "source_url": final_url or url, "replaced": bool(existing)}
@@ -2372,6 +2429,10 @@ async def get_file_index_status(kb_id: str, filename: str):
         raise HTTPException(404, "KB not found")
     status_key = f"{kb_id}:{filename}"
     status = _indexing_status.get(status_key)
+    import indexing_jobs
+    persisted = await indexing_jobs.latest(kb_id,filename)
+    if persisted:
+        return persisted
     if status:
         # Evict terminal statuses on read so the dict doesn't grow unbounded
         if status.get("status") in ("done", "error"):
@@ -2625,7 +2686,6 @@ async def query_knowledge_bases(body: dict):
 # ============================================================
 # In-process job registry (restart-lossy, same posture as cancel_registry).
 # On a cache miss after restart, GET falls back to ComfyUI history directly.
-_image_jobs: dict[str, dict] = {}
 _image_checkpoints_cache: dict = {"ts": 0.0, "checkpoints": []}
 
 
@@ -2681,7 +2741,13 @@ async def generate_image_job(body: dict = Body(...)):
             vae=vae,
             loras=loras,
         )
-        prompt_id = await comfyui.submit(workflow)
+        submission = await image_job_store.create(body)
+        try:
+            prompt_id = await comfyui.submit(workflow)
+        except BaseException:
+            submission.update(status="interrupted", error="Submission outcome uncertain; inspect ComfyUI before resubmitting")
+            await asyncio.shield(image_job_store.save(submission))
+            raise
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -2699,39 +2765,68 @@ async def generate_image_job(body: dict = Body(...)):
         "workflow": wf_name,
         "loras": loras,
     }
-    _image_jobs[prompt_id] = {"status": "queued", "params": params, "created": time.time()}
-    return {"job_id": prompt_id, "seed": seed, "params": params}
+    submission.update(status="queued", params=params, prompt_id=prompt_id)
+    await image_job_store.save(submission)
+    return {"job_id": submission["id"], "seed": seed, "params": params}
+
+
+async def _image_monitor_loop():
+    while True:
+        for owner, identity in await image_job_store.pending():
+            token = db.set_current_user_id(owner)
+            try:
+                await asyncio.wait_for(get_image_job(identity), 30)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Known submissions may be polled again safely; transfer
+                # failures persist an explicit retryable state for the owner.
+                pass
+            finally:
+                db.reset_current_user_id(token)
+        await asyncio.sleep(3)
 
 
 @app.get("/api/images/jobs/{job_id}")
+@image_job_store.serialized
 async def get_image_job(job_id: str):
     if not config.COMFYUI_URL:
         raise HTTPException(503, "ComfyUI is not configured")
-    # was_known=False means the in-memory registry lost this job to a backend
-    # restart — params get recovered from ComfyUI history on the done path.
-    was_known = job_id in _image_jobs
-    job = _image_jobs.get(job_id) or {"status": "queued", "params": {}, "created": time.time()}
+    job = await image_job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, "Image job not found")
+    prompt_id = job.get("prompt_id")
+    if not prompt_id:
+        return {"status": "error", "error": job.get("error") or "Submission outcome uncertain; inspect ComfyUI before resubmitting"}
+    if job.get("status") == "cancelled":
+        return {"status": "error", "error": "cancelled"}
     if job.get("status") == "done":
         return {"status": "done", "images": job.get("images", []), "params": job.get("params", {})}
     if job.get("status") == "error":
         return {"status": "error", "error": job.get("error", ""), "params": job.get("params", {})}
     try:
-        history = await comfyui.get_history(job_id)
+        history = await comfyui.get_history(prompt_id)
     except Exception as e:
         raise HTTPException(502, f"ComfyUI unreachable: {str(e)[:200]}")
     if not history:
-        qpos = await comfyui.queue_position(job_id)
-        status = "running" if qpos == 0 else "queued"
+        qpos = await comfyui.queue_position(prompt_id)
+        status = "cancelling" if job.get("status") == "cancelling" else "running" if qpos == 0 else "queued"
         out = {"status": status, "params": job.get("params", {})}
         if qpos and qpos > 0:
             out["queue_position"] = qpos
-        _image_jobs[job_id] = {**job, "status": status}
+        job.update(status="cancelling" if job.get("status") == "cancelling" else status)
+        await image_job_store.save(job)
         return out
     if history.get("status", {}).get("status_str") == "error":
         job.update(status="error", error="ComfyUI workflow error (check checkpoint and VRAM)")
-        _image_jobs[job_id] = job
-        comfyui.finish_job(job_id)
+        await image_job_store.save(job)
+        comfyui.finish_job(prompt_id)
         return {"status": "error", "error": job["error"], "params": job.get("params", {})}
+    if job.get("status") == "cancelling":
+        job["status"] = "cancelled"
+        await image_job_store.save(job)
+        comfyui.finish_job(prompt_id)
+        return {"status": "error", "error": "cancelled"}
     outputs = comfyui.outputs_from_history(history)
     if not outputs:
         return {"status": "running", "params": job.get("params", {})}
@@ -2739,20 +2834,26 @@ async def get_image_job(job_id: str):
     os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
     images = []
     params = job.get("params", {})
-    if not was_known and not params:
-        params = comfyui.params_from_history(history)
-        job["params"] = params
     for i, img in enumerate(outputs):
-        filename = f"comfy_{job_id[:8]}_{i}.png"
+        filename = f"comfy_{job_id}_{i}.png"
         filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
         try:
             if not os.path.exists(filepath):
                 data = await comfyui.fetch_image(img)
-                with open(filepath, "wb") as f:
+                import io
+                from PIL import Image
+                with Image.open(io.BytesIO(data)) as decoded:
+                    decoded.verify()
+                temporary = filepath + ".part"
+                with open(temporary, "wb") as f:
                     f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, filepath)
         except Exception as e:
-            print(f"[IMAGE STUDIO] fetch failed: {e}")
-            continue
+            job.update(error="Image transfer failed; poll again to retry", retryable=True)
+            await image_job_store.save(job)
+            raise HTTPException(502, job["error"]) from e
         url = f"/api/downloads/{filename}"
         artifact_id = None
         try:
@@ -2778,29 +2879,45 @@ async def get_image_job(job_id: str):
                 )
                 artifact_id = (artifact or {}).get("id")
         except Exception as e:
-            print(f"[IMAGE STUDIO] artifact create failed: {e}")
+            job.update(error="Artifact publication failed; poll again to retry", retryable=True)
+            await image_job_store.save(job)
+            raise HTTPException(502, job["error"]) from e
+        if not artifact_id:
+            raise HTTPException(502, "Artifact publication failed; retry is available")
         images.append({"filename": filename, "url": url, "artifact_id": artifact_id})
-    job.update(status="done", images=images)
-    _image_jobs[job_id] = job
+    job.update(status="done", images=images, error='', retryable=False)
+    await image_job_store.save(job)
     # First completed poll only (cached afterwards): release VRAM back to Ollama
     _track_bg(comfyui.free_memory())
     # HyprChat now holds the only needed copy — erase ComfyUI's traces of this
     # job (history entry + hyprchat-prefixed file copies, when the cleanup
     # node is installed).
-    _track_bg(comfyui.forget_job(job_id))
+    _track_bg(comfyui.forget_job(prompt_id))
     return {"status": "done", "images": images, "params": params}
 
 
 @app.post("/api/images/jobs/{job_id}/cancel")
+@image_job_store.serialized
 async def cancel_image_job(job_id: str):
-    if not config.COMFYUI_URL:
-        raise HTTPException(503, "ComfyUI is not configured")
-    await comfyui.cancel(job_id)
-    comfyui.finish_job(job_id)
-    if job_id in _image_jobs:
-        _image_jobs[job_id]["status"] = "error"
-        _image_jobs[job_id]["error"] = "cancelled"
-    return {"status": "cancelled"}
+    job = await image_job_store.get(job_id)
+    if not job:
+        raise HTTPException(404, "Image job not found")
+    if job.get("status") in {"done", "cancelled", "error"}:
+        return {"status": job["status"]}
+    job["status"] = "cancelling"
+    await image_job_store.save(job)
+    prompt_id = job.get("prompt_id")
+    if not prompt_id:
+        return {"status": "cancelling", "error": "Submission outcome needs review"}
+    # Queue deletion is targeted. Global /interrupt can stop somebody else's
+    # generation after a queue race, so a running job settles before discard.
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(f"{config.COMFYUI_URL.rstrip('/')}/queue", json={"delete": [prompt_id]})
+        response.raise_for_status()
+    if await comfyui.queue_position(prompt_id, strict=True) is None:
+        job["status"] = "cancelled"
+        await image_job_store.save(job)
+    return {"status": job["status"]}
 
 
 @app.post("/api/images/free-memory")
@@ -3032,17 +3149,8 @@ async def purge_image_studio():
             await db.vacuum_database()
         except Exception as e:
             print(f"[IMAGE PURGE] vacuum failed: {e}")
-    # Drop finished jobs from the in-process registry so a stale poll can't
-    # resurrect deleted image URLs. In-flight jobs stay.
-    active = False
-    for jid in list(_image_jobs.keys()):
-        status = _image_jobs[jid].get("status")
-        if status in ("done", "error"):
-            _image_jobs.pop(jid, None)
-        else:
-            active = True
-    # Chat-tool generations aren't in _image_jobs — comfyui._ACTIVE_JOBS
-    # tracks every in-flight submit regardless of caller.
+    # Persisted unfinished/uncertain jobs also protect upstream outputs after restart.
+    active = await image_job_store.purge_finished()
     if comfyui._ACTIVE_JOBS:
         active = True
     history_cleared = False
@@ -3088,7 +3196,8 @@ async def purge_image_studio():
     if not journal_cleared:
         notes.append("Journal scrub helper not installed — old server log lines remain "
                      "(run scripts/install-journal-scrub.sh on the server once).")
-    note = " ".join(notes) or "All traces removed."
+    notes.append("Retained legacy storage copies may remain pending ownership review.")
+    note = " ".join(notes)
     return {
         "status": "purged",
         "deleted_artifacts": deleted_artifacts,
@@ -4208,6 +4317,15 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
     council = await db.get_council(req.council_id)
     if not council:
         raise HTTPException(status_code=404, detail="Council not found")
+    if not await db.get_conversation(req.conversation_id):
+        raise HTTPException(404, 'Conversation not found')
+    from council_runtime import Budget
+    from council import _resolve_member_personas
+    members = await _resolve_member_personas(council.get('members', []))
+    try:
+        Budget(council, [council.get('host_model') or config.DEFAULT_MODEL, *[m.get('model','') for m in members]])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     # Merge kb_ids from council config and request
     kb_ids = list(set((council.get("kb_ids") or []) + (req.kb_ids or [])))
@@ -4435,6 +4553,39 @@ class _FrontendStaticFiles(StaticFiles):
         else:
             resp.headers["Cache-Control"] = "no-cache"
         return resp
+
+
+import job_registry
+import task_queue
+import indexing_jobs
+job_registry.configure_actions({
+    ('indexing', 'retry'): lambda identity, _: indexing_jobs.retry(identity, _track_bg),
+    ('research', 'cancel'): lambda identity, _: cancel_research_report(identity),
+    ('research', 'rerun'): lambda identity, _: rerun_research_report(identity),
+    ('research', 'resume'): lambda identity, _: resume_research_report(identity),
+    ('document', 'cancel'): lambda identity, _: documents.cancel_run(http, identity),
+    ('scheduled', 'cancel'): lambda identity, _: task_queue.cancel(identity),
+    ('image', 'cancel'): lambda identity, _: cancel_image_job(identity),
+    ('image', 'retry'): lambda identity, _: get_image_job(identity),
+    ('coding', 'cancel'): lambda identity, _: coder_jobs.cancel(identity),
+    ('coding', 'resume'): lambda identity, opts: coder_jobs.resume(identity,
+        candidate_revision=opts.get('candidate_revision'), clarification=opts.get('clarification')),
+})
+
+
+@app.get('/api/kb/{kb_id}/index-health')
+async def kb_index_health(kb_id: str):
+    if not await db.get_kb(kb_id):raise HTTPException(404,'Knowledge base not found')
+    conn=await db.get_db()
+    try:
+        files=await conn.execute_fetchall('SELECT filename,file_size FROM kb_files WHERE kb_id=?',(kb_id,))
+        indexed=await conn.execute_fetchall('SELECT * FROM kb_index_metadata WHERE kb_id=?',(kb_id,))
+        keyword=await conn.execute_fetchall('SELECT count(*) AS count FROM kb_chunks_fts WHERE kb_id=?',(kb_id,))
+        return {'files':[dict(r) for r in files],'indexes':[dict(r) for r in indexed],
+            'keyword_chunks':keyword[0]['count'],'expected_model':rag.EMBED_MODEL,'expected_version':rag.INDEX_VERSION,
+            'retrieval_deadline_seconds':config.RAG_RETRIEVAL_DEADLINE_SECONDS,
+            'legacy_metadata_unavailable':max(0,len(files)-len(indexed))}
+    finally:await conn.close()
 
 
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")

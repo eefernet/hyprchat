@@ -1,3 +1,4 @@
+import {isDocumentEvent} from "../documentFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
@@ -635,7 +636,7 @@ function DaedalusSummary(props){
     return <>{jobs.map(workflow=><DaedalusJobCard key={workflow.id} workflow={workflow} t={props.t} font={props.font} md={props.md} onOpenArtifact={props.onOpenArtifact}/>)}
       {attachments.length>0&&<ToolStatus evts={attachments} t={props.t} font={props.font} md={props.md} historical onPreview={props.onPreview} onOpenArtifact={props.onOpenArtifact} msgContent={props.msgContent}/>}</>;
   }
-  return <LegacyDaedalusSummary {...props}/>;
+  return <LegacyDaedalusSummary {...props} savedEvents={(props.savedEvents||[]).filter(e=>!isDocumentEvent(e))} liveEvts={(props.liveEvts||[]).filter(e=>!isDocumentEvent(e))}/>;
 }
 
 const LegacyWorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
@@ -954,6 +955,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   // useState after an early return only avoided crashing because of the
   // remount. Keep its state here.
   const [slExpanded,setSlExpanded]=useState(false);
+  evts=evts.filter(e=>!isDocumentEvent(e));
+  savedEvts=(savedEvts||[]).filter(e=>!isDocumentEvent(e));
   if(!evts.length) return null;
 
   // Stable string key for expandedPill — avoids collapse when new events arrive
@@ -2504,8 +2507,8 @@ function CitationChip({n, src, theme, font}){
   const sourceTitle=isQuick?(src.title||src.domain||src.url||"Source"):(src.filename||"Source");
   const sourceMeta=isQuick
     ? [src.domain,src.engine||src.type,src.published_date||src.freshness,typeof src.score==="number"?Math.round(src.score):null].filter(v=>v!==undefined&&v!==null&&v!=="").join(" · ")
-    : `chunk ${src.chunk_index}${typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}`;
-  const titleText=isQuick?[sourceTitle,src.domain||src.url].filter(Boolean).join(" - "):`${src.filename} (chunk ${src.chunk_index})`;
+    : `${src.location||`chunk ${src.chunk_index}`}${typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}`;
+  const titleText=isQuick?[sourceTitle,src.domain||src.url].filter(Boolean).join(" - "):`${src.filename} (${src.location||`chunk ${src.chunk_index}`})`;
   return <sup ref={ref} style={{fontSize:"0.72em",lineHeight:0,margin:"0 1px",position:"relative",display:"inline-block"}}>
     <button onClick={()=>setOpen(o=>!o)} title={titleText} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
     {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:11,lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>

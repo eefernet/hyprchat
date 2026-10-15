@@ -333,3 +333,12 @@ def test_ollama_scan_ssh_settings_masks_password_and_derives_host():
     assert public["ollama_scan_ssh_has_password"] is True
     assert "ollama_scan_ssh_password" not in public
     assert private["ollama_scan_ssh_password"] == "secret"
+
+
+def test_installed_match_preserves_tags_and_defaults_only_to_latest():
+    assert hyprfit.installed_match('qwen3:32b', ['qwen3:14b', 'qwen3:32b']) == 'qwen3:32b'
+    assert hyprfit.installed_match('qwen3:32b', ['qwen3:14b']) == ''
+    assert hyprfit.installed_match('qwen3', ['qwen3:14b', 'qwen3:latest']) == 'qwen3:latest'
+    assert hyprfit.installed_match('qwen3:latest', ['qwen3']) == 'qwen3'
+    assert hyprfit.installed_match('qwen3', ['qwen3.8:latest']) == ''
+    assert hyprfit.installed_match('registry:5000/team/model', ['registry:5000/team/model:latest']) == 'registry:5000/team/model:latest'

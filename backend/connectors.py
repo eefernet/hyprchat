@@ -180,7 +180,8 @@ def _parse_spec_text(text: str) -> dict:
 async def _fetch_spec(http: httpx.AsyncClient, url: str, allow_private: bool,
                       headers: dict | None = None, params: dict | None = None) -> dict:
     await assert_url_allowed(url, allow_private=allow_private)
-    r = await http.get(url, headers=headers or None, params=params or None, timeout=20)
+    from connector_http import request
+    r = await request(http, "GET", url, allow_private=allow_private, headers=headers or None, params=params or None, timeout=20)
     r.raise_for_status()
     return _parse_spec_text(r.text)
 
@@ -208,184 +209,9 @@ def mcp_tool_to_connector(server: dict, tool: dict) -> dict:
     }
 
 
-def _jsonrpc_message(message: dict) -> bytes:
-    # MCP stdio transport is newline-delimited JSON (NOT LSP Content-Length framing).
-    return json.dumps(message, separators=(",", ":")).encode("utf-8") + b"\n"
-
-
-async def _read_mcp_message(stream: asyncio.StreamReader, timeout: float = 20) -> dict:
-    first = await asyncio.wait_for(stream.readline(), timeout=timeout)
-    if not first:
-        raise ConnectorError("MCP server closed stdout")
-    if first.strip().startswith(b"{"):
-        return json.loads(first.decode("utf-8"))
-    headers = {}
-    line = first
-    while line and line.strip():
-        text = line.decode("utf-8", errors="replace").strip()
-        if ":" in text:
-            k, v = text.split(":", 1)
-            headers[k.lower()] = v.strip()
-        line = await asyncio.wait_for(stream.readline(), timeout=timeout)
-    length = int(headers.get("content-length") or "0")
-    if length <= 0:
-        raise ConnectorError("MCP message missing Content-Length")
-    raw = await asyncio.wait_for(stream.readexactly(length), timeout=timeout)
-    return json.loads(raw.decode("utf-8"))
-
-
-async def _mcp_stdio_exchange(server: dict, method: str, params: dict | None = None) -> dict:
-    command = (server.get("command") or "").strip()
-    if not command:
-        raise ConnectorError("MCP stdio server requires command")
-    env = os.environ.copy()
-    env.update(expand_placeholders(server.get("env") or {}, required=True, plain_names=True))
-    args = [str(a) for a in (server.get("args") or [])]
-    proc = await asyncio.create_subprocess_exec(
-        command,
-        *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    next_id = 1
-
-    # Drain stderr continuously — a server that logs more than the OS pipe
-    # buffer would otherwise block and deadlock the stdout read loop.
-    stderr_tail = bytearray()
-
-    async def _drain_stderr():
-        assert proc.stderr is not None
-        while True:
-            chunk = await proc.stderr.read(4096)
-            if not chunk:
-                return
-            stderr_tail.extend(chunk)
-            del stderr_tail[:-2048]
-
-    stderr_task = asyncio.create_task(_drain_stderr())
-
-    async def request(req_method: str, req_params: dict | None = None, read_timeout: float = 20) -> dict:
-        nonlocal next_id
-        req_id = next_id
-        next_id += 1
-        payload = {"jsonrpc": "2.0", "id": req_id, "method": req_method, "params": req_params or {}}
-        assert proc.stdin is not None
-        proc.stdin.write(_jsonrpc_message(payload))
-        await proc.stdin.drain()
-        while True:
-            assert proc.stdout is not None
-            msg = await _read_mcp_message(proc.stdout, timeout=read_timeout)
-            if msg.get("id") == req_id:
-                if msg.get("error"):
-                    raise ConnectorError(str(msg["error"]))
-                return msg.get("result") or {}
-
-    try:
-        await request("initialize", {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "HyprChat", "version": "connector-mvp"},
-        })
-        assert proc.stdin is not None
-        proc.stdin.write(_jsonrpc_message({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}))
-        await proc.stdin.drain()
-        return await request(method, params or {}, read_timeout=120)
-    except Exception as e:
-        tail = stderr_tail.decode("utf-8", errors="replace").strip()
-        if tail:
-            raise ConnectorError(f"{e or type(e).__name__} | server stderr: {tail[-400:]}") from e
-        raise
-    finally:
-        stderr_task.cancel()
-        try:
-            proc.terminate()
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-
-
-async def _mcp_http_exchange(http: httpx.AsyncClient, server: dict, method: str, params: dict | None = None) -> dict:
-    url = (server.get("url") or "").strip()
-    if not url:
-        raise ConnectorError("MCP HTTP server requires URL")
-    await assert_url_allowed(url, allow_private=bool(server.get("allow_private")))
-    headers = {
-        "Accept": "application/json, text/event-stream",
-        "Content-Type": "application/json",
-    }
-    headers.update(expand_placeholders(server.get("headers") or {}, required=True))
-    session_id = ""
-
-    async def post(req_id: int, req_method: str, req_params: dict | None = None, timeout: float = 30) -> tuple[dict, httpx.Headers]:
-        request_headers = dict(headers)
-        if session_id:
-            request_headers["Mcp-Session-Id"] = session_id
-        r = await http.post(
-            url,
-            json={"jsonrpc": "2.0", "id": req_id, "method": req_method, "params": req_params or {}},
-            headers=request_headers,
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        text = r.text.strip()
-        if text.startswith(("event:", "data:", "id:", ":")) or "\ndata:" in text:
-            # SSE data may span multiple consecutive `data:` lines; join the
-            # first event's data lines instead of taking only the first one.
-            data_lines: list[str] = []
-            for line in text.splitlines():
-                if line.startswith("data:"):
-                    data_lines.append(line[5:].lstrip())
-                elif not line.strip() and data_lines:
-                    break
-            if data_lines:
-                text = "\n".join(data_lines)
-        msg = json.loads(text)
-        if msg.get("error"):
-            raise ConnectorError(str(msg["error"]))
-        return msg.get("result") or {}, r.headers
-
-    init_result, init_headers = await post(1, "initialize", {
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {"name": "HyprChat", "version": "connector-mvp"},
-    })
-    session_id = init_headers.get("mcp-session-id", "")
-    # Spec requires this header on every request after initialize; echo the negotiated version.
-    headers["MCP-Protocol-Version"] = str(init_result.get("protocolVersion") or "2025-06-18")
-    try:
-        request_headers = dict(headers)
-        if session_id:
-            request_headers["Mcp-Session-Id"] = session_id
-        await http.post(
-            url,
-            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-            headers=request_headers,
-            timeout=10,
-        )
-    except Exception:
-        pass
-    result, _ = await post(2, method, params or {}, timeout=120)
-    return result
-
-
 async def mcp_exchange(http: httpx.AsyncClient, server: dict, method: str, params: dict | None = None) -> dict:
-    transport = (server.get("transport") or "stdio").strip().lower()
-    if transport == "stdio":
-        return await _mcp_stdio_exchange(server, method, params)
-    if transport == "sse":
-        raise ConnectorError(
-            "Legacy HTTP+SSE MCP transport is not supported. Set the server's transport to "
-            "streamable_http and point the URL at its MCP endpoint — servers on protocol "
-            "2025-03-26 or newer all support streamable HTTP."
-        )
-    if transport in {"http", "streamable_http"}:
-        return await _mcp_http_exchange(http, server, method, params)
-    raise ConnectorError(f"Unsupported MCP transport: {transport}")
+    from mcp_runtime import exchange
+    return await exchange(http,server,method,params)
 
 
 async def discover_mcp_server(http: httpx.AsyncClient, server_id: str) -> dict:
@@ -395,6 +221,14 @@ async def discover_mcp_server(http: httpx.AsyncClient, server_id: str) -> dict:
     try:
         result = await mcp_exchange(http, server, "tools/list", {})
         raw_tools = result.get("tools") or []
+        seen=set()
+        while result.get('nextCursor'):
+            cursor=result['nextCursor']
+            if cursor in seen or len(seen)>=100 or len(raw_tools)>10000:
+                raise ConnectorError('MCP pagination exceeded safe limits')
+            seen.add(cursor)
+            result=await mcp_exchange(http,server,'tools/list',{'cursor':cursor})
+            raw_tools.extend(result.get('tools') or [])
         tools = [mcp_tool_to_connector(server, t) for t in raw_tools if isinstance(t, dict)]
         await db.replace_connector_tools("mcp", server_id, tools)
         await db.update_mcp_server(
@@ -713,7 +547,8 @@ async def execute_openapi_tool(http: httpx.AsyncClient, tool: dict, args: dict) 
     _apply_auth(headers, query, connector.get("auth") or {})
     await assert_url_allowed(url, allow_private=bool(connector.get("allow_private")))
 
-    r = await http.request(method, url, params=query, headers=headers, json=body, timeout=45)
+    from connector_http import request
+    r = await request(http, method, url, allow_private=bool(connector.get("allow_private")), params=query, headers=headers, json=body, timeout=45)
     content_type = r.headers.get("content-type", "")
     summary = {
         "status_code": r.status_code,

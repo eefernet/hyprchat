@@ -1,4 +1,42 @@
 <details open>
+<summary>Alpha v18.1.1 — Oct 15, 2026</summary>
+
+> Office document tools, a Jobs panel, searchable saved work, and more reliable chat, research and scheduling.
+
+## Chat & Search
+
+- **Composer tools** — manage tools from the wrench menu beside **+**. Multiple tool calls in one reply now run correctly.
+- **Library search** — find chats, notes, research and artifacts with type, workspace and date filters.
+- **Response context** — inspect the model, settings, memories, sources and tools used for a reply.
+- **Councils & retrieval** — councils support selected local and cloud models with cloud spending caps. Search and knowledge-base retrieval handle slow services better and show clearer source locations.
+
+## Documents & Research
+
+- **Office tools** — read, create, edit and export Word, PowerPoint and Excel files from chat, with previews beside the conversation and PDF export.
+- **Document revisions** — compare versions, restore earlier content as a new revision, and export files in batches while preserving originals.
+- **Research recovery** — deeper reports use saved evidence and clearer citations. Resume interrupted work, compare drafts and ask follow-up questions using saved sources.
+
+## Jobs, Calendar & Email
+
+- **Jobs panel** — track background work, progress, downloads and available cancel, retry or resume actions across refreshes and devices.
+- **Scheduling & notifications** — queued tasks survive restarts, recurring runs avoid overlap, and failed or uncertain deliveries remain visible.
+- **Calendar & email** — improved recurring events, reminders and sync-conflict handling. Appointments extracted from email need confirmation before entering your calendar.
+- **Image Studio & connectors** — retry failed image downloads, cancel individual queued jobs, and use more reliable MCP connections.
+
+## Reliability & Voice
+
+- **Saved files & backups** — durable artifact storage and fuller backups protect documents and downloads; interrupted restores can recover database and files together.
+- **Profiles & mobile** — stronger access controls, fewer stale updates after switching profiles, clearer errors and refreshed app caching. Main gets an operations overview.
+- **Voice** — navigation stops recording and playback; failed transcriptions retain the recording for an explicit retry.
+
+## Daedalus & Models
+
+- Fixed repair file listings, thinking controls and model-catalog matching.
+- Updated Ollama to **0.35.0** with restored generation throughput. Planning uses **qwen3.8:27b**; coding remains on **qwen3-coder:30b**.
+
+</details>
+
+<details>
 <summary>Alpha v18.1 — Sept 30, 2026</summary>
 
 > More reliable Daedalus builds, stronger research and calendar sync, and a smoother mobile interface.

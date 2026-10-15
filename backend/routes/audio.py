@@ -7,6 +7,7 @@ from fastapi import APIRouter, Body, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 import config
+import database as db
 import voice
 
 
@@ -79,6 +80,7 @@ async def create_speech_request(body: dict = Body(...)):
     _cleanup_tts_requests()
     request_id = uuid.uuid4().hex
     _tts_requests[request_id] = {
+        "user_id": db.current_user_id(),
         "text": text,
         "voice": (body.get("voice") or "").strip(),
         "expires_at": time.time() + _TTS_REQUEST_TTL,
@@ -97,7 +99,7 @@ async def stream_speech_request(request_id: str):
         raise HTTPException(503, "Text-to-speech is not configured. Set the TTS URL in Settings → Connections.")
     _cleanup_tts_requests()
     req = _tts_requests.get(request_id)
-    if not req:
+    if not req or req.get("user_id") != db.current_user_id():
         raise HTTPException(404, "Speech request expired or was not found")
     return await _tts_streaming_response(req["text"], req.get("voice", ""), request_id=request_id)
 

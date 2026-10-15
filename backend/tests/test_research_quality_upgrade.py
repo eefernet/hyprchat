@@ -358,7 +358,7 @@ def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
     assert "ResearchPrintPage" in index
     # PDF export wraps the report markdown through the React renderer with
     # print-mode + theme args (repinned after the renderer gained options).
-    assert re.search(r"<MDWrap>\{md\(bodyMd,\{printMode:true", index)
+    assert re.search(r"<MDWrap>\{md\(linkResearchCitations\(bodyMd,sources\),\{printMode:true", index)
     assert 'lang==="chart"||lang==="pygraph"' in index
     assert 'looksLikeChartConfig(code)' in index
     assert 'function sanitizeMermaidCode' in markdown_blocks
@@ -370,10 +370,11 @@ def test_pdf_export_uses_react_markdown_renderer_and_pygraph_alias():
 def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
     index = (_BACKEND.parent / "frontend" / "src" / "main.jsx").read_text()
 
-    # Live SSE appends token chunks, while polling replaces from durable
-    # report_markdown. That keeps the two paths from duplicating the body.
+    # Revisioned snapshots replace the body; legacy token streams remain supported.
+    # Behavioral ordering/citation checks live in researchState.test.js.
     assert "setResearchLiveMarkdown(p=>p+ev.data.content)" in index
-    assert "if(d.report_markdown)setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||\"\"))" in index
+    assert "researchRevision(d)<researchRevisionRef.current" in index
+    assert 'ev.type==="research_snapshot"' in index
     assert "cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||\"\")" in index
     assert "isMoeModelName" in index
     assert "Cloud Research" in index
@@ -381,7 +382,7 @@ def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
 
     # All terminal states release the running flag.
     assert "if(ev.type===\"research_done\"||ev.type===\"research_error\")" in index
-    assert "[\"complete\",\"failed\",\"cancelled\"].includes(String(d.status||\"\").toLowerCase())" in index
+    assert "researchTerminal(d.status)" in index
     assert "setResearchRunning(false);" in index
 
     # Rerun switches to the new id without overwriting an existing report row.

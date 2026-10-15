@@ -425,6 +425,11 @@ async def list_users() -> list[dict]:
     db = await get_db()
     try:
         await _ensure_default_user_conn(db)
+        existing_email = {r[1] for r in await db.execute_fetchall('PRAGMA table_info(email_messages)')}
+        for name, definition in {'triage_status':"TEXT NOT NULL DEFAULT ''",'triage_error':"TEXT NOT NULL DEFAULT ''",
+                'triage_attempts':'INTEGER NOT NULL DEFAULT 0','triage_retry_at':"TEXT NOT NULL DEFAULT ''"}.items():
+            if name not in existing_email:
+                await db.execute(f'ALTER TABLE email_messages ADD COLUMN {name} {definition}')
         await db.commit()
         rows = await db.execute_fetchall("SELECT * FROM users ORDER BY CASE id WHEN 'default' THEN 0 ELSE 1 END, name COLLATE NOCASE")
         users = []
@@ -695,6 +700,14 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
     await conn.execute("DELETE FROM workspace_conversations WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM workspace_research_reports WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM workspace_research_reports WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
+    # Profile deletion uses the same durable index cleanup as report deletion.
+    # Queue before removing ownership rows so a Chroma outage cannot orphan text.
+    from research_evidence import collection_name
+    from research import _evidence_collection_name
+    reports = await conn.execute_fetchall("SELECT id FROM research_reports WHERE user_id=?", (uid,))
+    for report in reports:
+        for name in (collection_name(report["id"]), _evidence_collection_name(report["id"])):
+            await conn.execute("INSERT OR IGNORE INTO research_index_cleanup(collection_name) VALUES(?)", (name,))
     await conn.execute("DELETE FROM research_sources WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM research_events WHERE report_id IN (SELECT id FROM research_reports WHERE user_id=?)", (uid,))
     await conn.execute("DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?))", (uid,))
@@ -1031,7 +1044,8 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_workspace_memory_blocks_ws ON workspace_memory_blocks(workspace_id);
         """)
         # Migrate council_configs: add debate_rounds and kb_ids columns
-        for col, coltype, default in [("debate_rounds", "INTEGER", "0"), ("kb_ids", "TEXT", "'[]'")]:
+        for col, coltype, default in [("debate_rounds", "INTEGER", "0"), ("kb_ids", "TEXT", "'[]'"),
+                                     ('cloud_enabled','INTEGER','0'), ('cost_limit_usd','REAL','0')]:
             try:
                 await db.execute(f"ALTER TABLE council_configs ADD COLUMN {col} {coltype} DEFAULT {default}")
             except Exception as e:
@@ -1107,6 +1121,14 @@ async def init_db():
         await db.commit()
         from db.coder_jobs import migrate as migrate_coder_jobs
         await migrate_coder_jobs(db)
+        from job_registry import migrate as migrate_jobs
+        await migrate_jobs(db)
+        from research_checkpoints import migrate as migrate_research_checkpoints
+        await migrate_research_checkpoints(db)
+        from calendar_resources import migrate as migrate_calendar
+        await migrate_calendar(db)
+        from library_search import migrate as migrate_library
+        await migrate_library(db)
     finally:
         await db.close()
 
@@ -2566,6 +2588,8 @@ async def add_artifact(
             status = "draft"
         exists_status = (exists_status or "unknown").strip().lower() or "unknown"
         content_text = _scrub_surrogates(str(content_text or ""))[:800000]
+        from durable_storage import retain
+        storage_path = await asyncio.to_thread(retain, storage_path, url, filename, sha256)
         now = datetime.utcnow().isoformat()
         artifact_id = artifact_id or f"art-{uuid.uuid4().hex[:12]}"
         await db.execute(
@@ -2652,6 +2676,8 @@ async def add_conversation_file(
             status = "draft"
         exists_status = (exists_status or "unknown").strip().lower() or "unknown"
         content_text = _scrub_surrogates(str(content_text or ""))[:800000]
+        from durable_storage import retain
+        storage_path = await asyncio.to_thread(retain, storage_path, url, filename, sha256)
         artifact_id = f"art-{uuid.uuid4().hex[:12]}"
         metadata = {**(metadata or {}), "conversation_file_id": id}
         await db.execute(
@@ -3269,16 +3295,16 @@ async def count_artifacts_with_storage_path(storage_path: str, exclude_id: str =
 
 
 async def find_artifact_by_storage_path(storage_path: str) -> dict | None:
-    """Newest artifact row referencing this file. Cross-user like
-    count_artifacts_with_storage_path — the post-restart image-job dedupe must
-    fire regardless of which session's poll lands first."""
+    """Newest owned artifact; migration retains lookup by a legacy source path."""
     if not storage_path:
         return None
+    from durable_storage import retain
+    retained = await asyncio.to_thread(retain, storage_path, "", "")
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT * FROM artifacts WHERE storage_path=? ORDER BY created_at DESC LIMIT 1",
-            (storage_path,),
+            "SELECT * FROM artifacts WHERE storage_path IN (?,?) AND user_id=? ORDER BY created_at DESC LIMIT 1",
+            (storage_path, retained, _scope_user()),
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
@@ -4304,7 +4330,7 @@ async def get_council(council_id: str):
 
 
 async def update_council(council_id: str, **kwargs):
-    allowed = {"name", "host_model", "host_system_prompt", "debate_rounds", "kb_ids"}
+    allowed = {"name", "host_model", "host_system_prompt", "debate_rounds", "kb_ids", 'cloud_enabled', 'cost_limit_usd'}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if "kb_ids" in fields:
         fields["kb_ids"] = json.dumps(fields["kb_ids"] if isinstance(fields["kb_ids"], list) else [])
@@ -4447,6 +4473,15 @@ def _fts_match_expr(query: str, max_terms: int = 12) -> str:
     return " OR ".join(f'"{t}"' for t in tokens)
 
 
+async def kb_index_record(kb_id,filename,index_version,embedding_model,chunk_count,warnings):
+    conn=await get_db()
+    try:
+        await conn.execute('INSERT OR REPLACE INTO kb_index_metadata(kb_id,filename,index_version,embedding_model,chunk_count,warnings_json) VALUES(?,?,?,?,?,?)',
+            (kb_id,filename,index_version,embedding_model,chunk_count,json.dumps(warnings)))
+        await conn.commit()
+    finally:await conn.close()
+
+
 async def kb_fts_replace_file(kb_id: str, filename: str, chunks: list[dict]):
     """Replace all FTS rows for one file. chunks: [{chunk_id, text, chunk_index}]."""
     db = await get_db()
@@ -4465,6 +4500,7 @@ async def kb_fts_remove_file(kb_id: str, filename: str):
     db = await get_db()
     try:
         await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=? AND filename=?", (kb_id, filename))
+        await db.execute("DELETE FROM kb_index_metadata WHERE kb_id=? AND filename=?", (kb_id, filename))
         await db.commit()
     finally:
         await db.close()
@@ -4474,6 +4510,7 @@ async def kb_fts_delete_kb(kb_id: str):
     db = await get_db()
     try:
         await db.execute("DELETE FROM kb_chunks_fts WHERE kb_id=?", (kb_id,))
+        await db.execute("DELETE FROM kb_index_metadata WHERE kb_id=?", (kb_id,))
         await db.commit()
     finally:
         await db.close()
@@ -4751,6 +4788,8 @@ async def update_research_report(report_id: str, *, unless_status: str | None = 
     if unless_status is not None:
         where += " AND status != ?"
         vals.append(unless_status)
+        if unless_status == 'cancelled' and kwargs.get('status') != 'cancelled':
+            where += " AND status != 'cancelling'"
     db = await get_db()
     try:
         cursor = await db.execute(f"UPDATE research_reports SET {', '.join(sets)} WHERE {where}", tuple(vals))
@@ -4914,10 +4953,18 @@ async def delete_research_report(report_id: str) -> None:
         await db.execute("DELETE FROM workspace_research_reports WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_sources WHERE report_id=?", (report_id,))
         await db.execute("DELETE FROM research_events WHERE report_id=?", (report_id,))
+        from research_evidence import collection_name
+        from research import _evidence_collection_name
+        for name in (collection_name(report_id), _evidence_collection_name(report_id)):
+            await db.execute("INSERT OR IGNORE INTO research_index_cleanup(collection_name) VALUES(?)", (name,))
         await db.execute("DELETE FROM research_reports WHERE id=? AND user_id=?", (report_id, user_id))
         await db.commit()
     finally:
         await db.close()
+    from research import _REPORT_EVIDENCE_CACHE
+    _REPORT_EVIDENCE_CACHE.pop(report_id, None)
+    from research_evidence import retry_cleanup
+    await retry_cleanup()
 
 
 # ============================================================
@@ -5227,17 +5274,17 @@ async def reap_stale_runs() -> dict:
         # Research reports run via asyncio.create_task and are in-process only —
         # a restart strands them 'queued'/'running' forever. Mark them failed.
         rrows = await db.execute_fetchall(
-            "SELECT id FROM research_reports WHERE status IN ('queued','pending','running')"
+            "SELECT id FROM research_reports WHERE status IN ('queued','pending','running','cancelling')"
         )
         for rrow in rrows:
             await db.execute(
-                "UPDATE research_reports SET status='failed', "
-                "error='Orphaned by backend restart', updated_at=?, completed_at=? WHERE id=?",
+                "UPDATE research_reports SET status='interrupted', "
+                "error='Backend restarted; saved draft retained', updated_at=?, completed_at=? WHERE id=?",
                 (now, now, rrow["id"]),
             )
             reports_reaped += 1
         rows = await db.execute_fetchall(
-            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running') "
+            "SELECT id, result_envelope FROM runs WHERE status IN ('queued','pending','running','cancelling') "
             "AND COALESCE(workflow_id,'') NOT IN (SELECT id FROM coder_workflows WHERE workflow_version=3)"
         )
         for row in rows:
@@ -5631,10 +5678,10 @@ async def reap_stale_task_runs() -> int:
     try:
         now = datetime.utcnow().isoformat()
         cursor = await db.execute(
-            "UPDATE task_runs SET status='failed', error='Orphaned by backend restart', "
-            "finished_at=? WHERE status='running'", (now,))
+            "UPDATE task_runs SET status='interrupted', error='Backend restarted; review external effects before rerunning', "
+            "finished_at=? WHERE status IN ('running','cancelling')", (now,))
         await db.execute(
-            "UPDATE scheduled_tasks SET last_status='failed' WHERE last_status='running'")
+            "UPDATE scheduled_tasks SET last_status='interrupted' WHERE last_status='running'")
         await db.commit()
         return cursor.rowcount
     finally:
@@ -5643,7 +5690,7 @@ async def reap_stale_task_runs() -> int:
 
 async def add_notification(title: str, body: str = "", *, kind: str = "task",
                            source_task_id: str = "", conversation_id: str = "",
-                           user_id: str | None = None) -> int:
+                           user_id: str | None = None, delivery_channels=(), urgent=False) -> int:
     uid = _scope_user(user_id)
     db = await get_db()
     try:
@@ -5652,6 +5699,11 @@ async def add_notification(title: str, body: str = "", *, kind: str = "task",
                conversation_id, created_at) VALUES(?,?,?,?,?,?,?)""",
             (uid, title[:300], body[:2000], kind, source_task_id or "",
              conversation_id or "", datetime.utcnow().isoformat()))
+        for channel in delivery_channels:
+            if channel not in {'ntfy', 'email'}:
+                raise ValueError('Unknown notification channel')
+            await db.execute('INSERT INTO notification_deliveries(notification_id,user_id,channel,urgent) VALUES(?,?,?,?)',
+                             (cursor.lastrowid, uid, channel, int(urgent)))
         await db.commit()
         return cursor.lastrowid or 0
     finally:
@@ -5722,7 +5774,7 @@ async def prune_jarvis_history(*, notification_days: int = 30,
         notif_cur = await db.execute(
             "DELETE FROM notifications WHERE seen=1 AND created_at < ?", (cutoff,))
         runs_cur = await db.execute(
-            """DELETE FROM task_runs WHERE id NOT IN (
+            """DELETE FROM task_runs WHERE status IN ('succeeded','failed','cancelled') AND id NOT IN (
                  SELECT id FROM task_runs AS tr
                  WHERE tr.task_id = task_runs.task_id
                  ORDER BY tr.started_at DESC LIMIT ?)""",
@@ -5817,7 +5869,7 @@ async def user_last_seen_at(user_id: str | None = None) -> str | None:
 # ============================================================
 
 _NOTE_FIELDS = {"kind", "title", "content", "done", "due_at", "remind_at", "reminded", "tags"}
-_EVENT_FIELDS = {"title", "description", "location", "start_at", "end_at", "all_day",
+_EVENT_FIELDS = {"resource_ics", "timezone", "title", "description", "location", "start_at", "end_at", "all_day",
                  "remind_minutes", "reminded", "rrule", "caldav_account_id",
                  "caldav_uid", "caldav_etag", "sync_state"}
 
@@ -5934,6 +5986,7 @@ async def create_calendar_event(event_id: str, *, title: str, start_at: str,
                                 remind_minutes: int | None = None, rrule: str = "",
                                 caldav_account_id: str = "", caldav_uid: str = "",
                                 caldav_etag: str = "", sync_state: str = "local",
+                                resource_ics: str = "", timezone: str = "",
                                 user_id: str | None = None) -> dict | None:
     uid = _scope_user(user_id)
     now = datetime.utcnow().isoformat()
@@ -5942,12 +5995,12 @@ async def create_calendar_event(event_id: str, *, title: str, start_at: str,
         await db.execute(
             """INSERT INTO calendar_events(id, user_id, title, description, location,
                start_at, end_at, all_day, remind_minutes, rrule, caldav_account_id,
-               caldav_uid, caldav_etag, sync_state, created_at, updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               caldav_uid, caldav_etag, sync_state, created_at, updated_at, resource_ics, timezone)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (event_id, uid, title[:300], description[:5000], location[:300],
              start_at, end_at, 1 if all_day else 0, remind_minutes, rrule or "",
              caldav_account_id or "", caldav_uid or "", caldav_etag or "",
-             sync_state or "local", now, now))
+             sync_state or "local", now, now, resource_ics, timezone))
         await db.commit()
     finally:
         await db.close()
@@ -5990,7 +6043,7 @@ async def list_calendar_events(start: str = "", end: str = "", limit: int = 500,
 
 
 async def update_calendar_event(event_id: str, fields: dict,
-                                user_id: str | None = None) -> dict | None:
+                                user_id: str | None = None, *, expected_updated_at: str | None = None) -> dict | None:
     uid = _scope_user(user_id)
     sets, vals = [], []
     for key, value in fields.items():
@@ -6006,23 +6059,30 @@ async def update_calendar_event(event_id: str, fields: dict,
     sets.append("updated_at=?")
     vals.append(datetime.utcnow().isoformat())
     vals.extend([event_id, uid])
+    condition = ''
+    if expected_updated_at is not None:
+        condition = ' AND updated_at=?'
+        vals.append(expected_updated_at)
     db = await get_db()
     try:
-        await db.execute(
-            f"UPDATE calendar_events SET {', '.join(sets)} WHERE id=? AND user_id=?",
+        changed = await db.execute(
+            f"UPDATE calendar_events SET {', '.join(sets)} WHERE id=? AND user_id=?" + condition,
             tuple(vals))
         await db.commit()
+        if not changed.rowcount:
+            return None
     finally:
         await db.close()
     return await get_calendar_event(event_id, user_id=uid)
 
 
-async def delete_calendar_event(event_id: str, user_id: str | None = None) -> bool:
+async def delete_calendar_event(event_id: str, user_id: str | None = None, *, expected_updated_at: str | None = None) -> bool:
     uid = _scope_user(user_id)
     db = await get_db()
     try:
         cursor = await db.execute(
-            "DELETE FROM calendar_events WHERE id=? AND user_id=?", (event_id, uid))
+            "DELETE FROM calendar_events WHERE id=? AND user_id=?" + (' AND updated_at=?' if expected_updated_at is not None else ''),
+            (event_id, uid, expected_updated_at) if expected_updated_at is not None else (event_id, uid))
         await db.commit()
         return cursor.rowcount > 0
     finally:
@@ -6044,7 +6104,8 @@ async def due_reminders(now_iso: str) -> dict:
             ") LIMIT 50", (now_iso, now_iso))
         event_rows = await db.execute_fetchall(
             "SELECT * FROM calendar_events WHERE reminded=0 AND remind_minutes IS NOT NULL "
-            "AND sync_state != 'deleted' AND start_at IS NOT NULL "
+            "AND sync_state != 'deleted' AND start_at IS NOT NULL AND rrule='' "
+            "AND resource_ics NOT LIKE '%RRULE:%' AND resource_ics NOT LIKE '%RDATE:%' "
             "AND datetime(start_at, '-' || remind_minutes || ' minutes') <= datetime(?) "
             "AND datetime(start_at, '+1 day') >= datetime(?) LIMIT 50",
             (now_iso, now_iso))
@@ -6377,7 +6438,7 @@ async def update_email_message(message_id: str, fields: dict,
                                user_id: str | None = None) -> dict | None:
     uid = _scope_user(user_id)
     allowed = {"unread", "archived", "urgency", "summary", "draft_reply",
-               "extracted_event_id", "notified"}
+               "extracted_event_id", "notified", 'triage_status','triage_error','triage_attempts','triage_retry_at'}
     sets, vals = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -6437,8 +6498,8 @@ async def untriaged_email_messages(account_id: str, limit: int = 25,
     try:
         rows = await db.execute_fetchall(
             "SELECT * FROM email_messages WHERE account_id=? AND user_id=? AND urgency='' "
-            "AND archived=0 ORDER BY COALESCE(date_at, created_at) DESC LIMIT ?",
-            (account_id, uid, limit))
+            "AND archived=0 AND triage_attempts<4 AND triage_retry_at<=? ORDER BY COALESCE(date_at, created_at) DESC LIMIT ?",
+            (account_id, uid, datetime.utcnow().isoformat(), limit))
         return [_row_to_email(r) for r in rows]
     finally:
         await db.close()

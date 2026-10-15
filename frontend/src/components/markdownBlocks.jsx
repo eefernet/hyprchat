@@ -208,18 +208,18 @@ export function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=fa
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
       </div>}
     </div>
-    {err?<div>
+    {err&&<div>
       <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Mermaid render error: {err}</div>
       <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    </div>
-    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div style={{position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
+    </div>}
+    {showSrc&&<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>}
+    <div style={{display:err||showSrc?"none":undefined,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
       <div ref={containerRef} className="mermaid-container" style={{background:printMode?"#ffffff":t.bgDeep,minHeight:streaming&&pending?120:undefined,opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
       {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
         <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
         rendering diagram...
       </div>}
-    </div>}
+    </div>
     {!printMode&&fs&&createPortal(
       <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
         <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
@@ -280,6 +280,7 @@ export function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,s
   useEffect(()=>{
     if(!window.Chart){window.ensureChart&&window.ensureChart().then(()=>setTick(x=>x+1));if(streaming)setPending(true);return;}
     if(!canvasRef.current||showSrc){if(streaming&&!showSrc)setPending(true);return;}
+    setErr(null);
     let cfg;
     try{cfg=parseChartConfig(code);}
     catch(e){
@@ -356,18 +357,18 @@ export function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,s
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
       </div>}
     </div>
-    {err?<div>
+    {err&&<div>
       <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
       <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    </div>
-    :showSrc?<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
-    :<div style={{padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
+    </div>}
+    {showSrc&&<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>}
+    <div style={{display:err||showSrc?"none":undefined,padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
       <canvas ref={canvasRef} style={{opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
       {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
         <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
         rendering chart...
       </div>}
-    </div>}
+    </div>
   </div>;
 }
 

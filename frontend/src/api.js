@@ -9,7 +9,13 @@ export async function apiJson(path, opts = {}) {
   if (init.body != null && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
   if (init.body != null) init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
   const r = await fetch(`${API}${path}`, init);
-  const data = await r.json().catch(() => null);
+  let data;
+  try { data = await r.json(); }
+  catch (error) {
+    if (error.name === 'AbortError') throw error;
+    if (r.ok) throw new Error('The server returned an unreadable response. Retry the request.');
+    data = null;
+  }
   if (!r.ok) {
     const detail = data?.detail;
     const message = typeof detail === 'string' ? detail : Array.isArray(detail)

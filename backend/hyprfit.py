@@ -1131,12 +1131,13 @@ def model_key(name: str) -> str:
 
 
 def installed_match(pull_name: str, installed: list[str]) -> str:
-    wanted = model_key((pull_name or "").split(":")[0])
-    for name in installed:
-        key = model_key(name)
-        if wanted and wanted in key:
-            return name
-    return ""
+    def reference(name):
+        value = (name or "").strip().lower()
+        if value and ":" not in value.rsplit("/", 1)[-1]:
+            value += ":latest"
+        return value
+    wanted = reference(pull_name)
+    return next((name for name in installed if wanted and reference(name) == wanted), "")
 
 
 def clean_categories(values: Any) -> list[str]:

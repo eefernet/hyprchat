@@ -1,0 +1,54 @@
+--- a/searx/engines/brave.py
++++ b/searx/engines/brave.py
+@@ -256,7 +256,51 @@
+     return data
+ 
+ 
++def _parse_html_results(resp: "SXNG_Response") -> EngineResults:
++    """Read Brave's rendered results when Svelte data uses function wrappers.
++
++    Selectors follow the previously deployed 272833136 HTML parser. Never
++    execute page JavaScript or treat an unrecognized page as a healthy result.
++    """
++    from urllib.parse import urlsplit
++    from searx.utils import extract_text
++
++    dom = resp.html()
++    news = brave_category == "news"
++    selector = "//div[contains(@class, 'results')]//div[@data-type='news']" if news else "//div[contains(concat(' ', @class, ' '), ' snippet ')]"
++    results = EngineResults()
++    count = 0
++    for node in dom.xpath(selector):
++        urls = node.xpath(".//a[contains(@class, 'result-header')]/@href" if news else ".//a/@href")
++        titles = node.xpath(".//span[contains(@class, 'snippet-title')]" if news else ".//div[contains(@class, 'title')]")
++        if not urls or not titles:
++            continue
++        url = urlsplit(urls[0])
++        if url.scheme not in ("https", "http") or not url.netloc:
++            continue
++        title = extract_text(titles[0])
++        if not title:
++            continue
++        content = node.xpath(".//p[contains(@class, 'desc')]" if news else ".//div[contains(concat(' ', @class, ' '), ' content ')]")
++        images = node.xpath(".//div[contains(@class, 'image-wrapper')]//img/@src" if news else ".//a[contains(@class, 'thumbnail')]//img/@src")
++        published = None
++        if not news and content:
++            dates = content[0].xpath(".//span[contains(@class, 't-secondary')]")
++            if dates:
++                published = _extract_published_date(extract_text(dates[0]))
++        results.add(MainResult(
++            title=title, url=urls[0], content=extract_text(content),
++            thumbnail=images[0] if images else "", publishedDate=published,
++        ))
++        count += 1
++    if not count:
++        raise SearxEngineResponseException("Brave HTML format contained no recognizable results")
++    return results
++
++
+ def response(resp: "SXNG_Response") -> EngineResults:
++    if brave_category in ("search", "goggles", "news") and "data: [(function(" in resp.text:
++        return _parse_html_results(resp)
+     # delegate the response to the appropriate parser based on search type
+ 
+     match brave_category:

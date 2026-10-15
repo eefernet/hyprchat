@@ -3,7 +3,8 @@
 Quick Search, the model's `research` tool, council chat, and the standalone
 Quick Search endpoint use `quick_search.run_quick_search_for_chat` and
 `search_agent.run_search_agent`. Deep Research keeps its iterative workflow
-and shares the SearXNG provider and safe fetcher.
+and shares the SearXNG provider and safe fetcher. Saved reports use
+[report-owned evidence retrieval and section writing](deep-research.md).
 
 ## Execution
 
@@ -68,6 +69,21 @@ diagnostics distinguish no matches, connection failures, proxy failures,
 timeouts, HTTP errors, invalid responses, rate limits, suspended engines and
 partial success. Health checks use the same classifier. An HTTP 200 listener
 with failing engines is degraded, not automatically “rate limited.”
+
+`/api/health` checks the SearXNG listener on each call but shares one upstream
+search sample per endpoint for 15 minutes, including across concurrent browser
+and background checks. `search_checked_at`, `search_sample_age_seconds`, and
+`search_sample_cached` distinguish this sample from current listener health.
+Settings and service tooltips show the result count, individual engine errors,
+and sample time. Partial results remain degraded even when useful results exist;
+the UI does not describe access denials as rate limits unless the engine does.
+
+For the maintained CT 114 proxy only, `HYPRCHAT_TRUSTED_WEB_PROXY` can match
+`HYPRCHAT_OUTBOUND_PROXY` exactly to delegate DNS/address validation to that
+proxy. This avoids page-fetch DNS on the HyprChat host while preserving private
+address rejection, redirect checks, and connection address pinning at the proxy.
+The opt-in defaults off. See the operations guide before enabling it or rolling
+back the proxy. Service DNS outside the VPN is blocked even during recovery.
 
 Existing tool names and schemas remain unchanged. Automatic and council search
 keep `tool_done` and `source: quick_search`; model `research` keeps `tool_end`

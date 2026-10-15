@@ -2,11 +2,10 @@
 CalDAV calendar (iCloud, Nextcloud, Radicale, Fastmail, ...).
 
 Rules:
-- Pull first. Remote wins on conflict (phone edits are authoritative); a
-  clobbered local edit is surfaced as a notification.
+- Pull first. Conflicts preserve both versions and require an explicit choice.
 - Local rows with sync_state='dirty' push after the pull; 'deleted' tombstones
   delete the remote event then hard-delete the row.
-- VEVENT only. RRULE is stored as text (no expansion in v1).
+- Preserve full resources, including time zones and recurrence exceptions.
 
 The `caldav` package is synchronous — every network call runs inside
 asyncio.to_thread via `_sync_account_blocking`. The background loop rides the
@@ -79,6 +78,11 @@ def _event_fields_from_vevent(vevent, tz: ZoneInfo) -> dict | None:
 
 def _build_ics(event: dict, tz: ZoneInfo) -> str:
     from icalendar import Calendar, Event as IcsEvent, vRecur
+    if event.get("resource_ics"):
+        cal = Calendar.from_ical(event["resource_ics"])
+        for component in cal.walk("VEVENT"):
+            component["UID"] = event["caldav_uid"]
+        return cal.to_ical().decode()
     cal = Calendar()
     cal.add("prodid", "-//HyprChat//Jarvis//EN")
     cal.add("version", "2.0")
@@ -94,8 +98,8 @@ def _build_ics(event: dict, tz: ZoneInfo) -> str:
         # omitting it here made the pull-back wipe local recurrence.
         try:
             ics["RRULE"] = vRecur.from_ical(event["rrule"])
-        except Exception:
-            pass  # a malformed stored rule must not block the push
+        except Exception as exc:
+            raise ValueError("Invalid recurrence rule") from exc
     start = datetime.fromisoformat(event["start_at"]).replace(tzinfo=ZoneInfo("UTC"))
     if event.get("all_day"):
         # Stored start is local-midnight-converted-to-UTC; convert back to the
@@ -106,10 +110,10 @@ def _build_ics(event: dict, tz: ZoneInfo) -> str:
                if event.get("end_at") else start + timedelta(days=1))
         ics.add("dtend", end.astimezone(tz).date())
     else:
-        ics.add("dtstart", start)
+        ics.add("dtstart", start.astimezone(tz))
         end_raw = event.get("end_at")
-        ics.add("dtend", (datetime.fromisoformat(end_raw).replace(tzinfo=ZoneInfo("UTC"))
-                          if end_raw else start + timedelta(hours=1)))
+        ics.add("dtend", (datetime.fromisoformat(end_raw).replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+                          if end_raw else (start + timedelta(hours=1)).astimezone(tz)))
     ics.add("dtstamp", datetime.now(ZoneInfo("UTC")))
     cal.add_component(ics)
     return cal.to_ical().decode("utf-8")
@@ -135,6 +139,9 @@ def _content_hash(fields: dict) -> str:
     change and could clobber a dirty local edit with a false conflict.
     Normalizes both sides: all_day bool-vs-0/1, datetime second-precision, and
     the same caps _event_fields_from_vevent applies."""
+    if fields.get("resource_ics"):
+        from calendar_resources import semantic_hash
+        return semantic_hash(fields["resource_ics"])
     basis = "\x1f".join((
         str(fields.get("title") or "")[:300],
         str(fields.get("description") or "")[:5000],
@@ -153,6 +160,9 @@ def _pushed_content_hash(ics_text: str, payload: dict, tz: ZoneInfo) -> str:
     computes for identical content (synthesized DTEND, all-day date snapping,
     RRULE normalization included). Without this, an event pushed with
     end_at=None hash-mismatched forever and re-pulled on every sync."""
+    if payload.get("resource_ics"):
+        from calendar_resources import semantic_hash
+        return semantic_hash(ics_text)
     try:
         from icalendar import Calendar
         for comp in Calendar.from_ical(ics_text).walk("VEVENT"):
@@ -169,7 +179,7 @@ def _remote_snapshot_blocking(account: dict, tz: ZoneInfo) -> list[dict]:
     stand-in — real etags aren't uniformly exposed across servers)."""
     import caldav
     client = caldav.DAVClient(url=account["url"], username=account["username"],
-                              password=account["password"])
+                              password=account["password"], timeout=30)
     if account.get("calendar_url"):
         calendar = caldav.Calendar(client=client, url=account["calendar_url"])
     else:
@@ -180,21 +190,25 @@ def _remote_snapshot_blocking(account: dict, tz: ZoneInfo) -> list[dict]:
     out = []
     for remote in calendar.events():
         try:
-            for comp in remote.icalendar_instance.walk("VEVENT"):
+            resource = remote.icalendar_instance
+            components = resource.walk("VEVENT")
+            for comp in sorted(components, key=lambda c: bool(c.get("RECURRENCE-ID"))):
                 fields = _event_fields_from_vevent(comp, tz)
                 if fields and fields["start_at"]:
+                    fields["resource_ics"] = resource.to_ical().decode()
+                    fields["timezone"] = str(comp["DTSTART"].params.get("TZID") or getattr(getattr(comp["DTSTART"].dt,"tzinfo",None),"key","") or tz)
                     fields["hash"] = _content_hash(fields)
                     out.append(fields)
-                break  # first VEVENT per resource; recurrence expansion is out of scope
+                break  # one resource row; exceptions remain in resource_ics
         except Exception as e:
-            print(f"[CALDAV] skipping unparseable remote event: {e}")
+            raise ValueError("Remote calendar contains an unreadable resource; sync retained local data") from e
     return out
 
 
 def _push_blocking(account: dict, ics_text: str) -> None:
     import caldav
     client = caldav.DAVClient(url=account["url"], username=account["username"],
-                              password=account["password"])
+                              password=account["password"], timeout=30)
     calendar = (caldav.Calendar(client=client, url=account["calendar_url"])
                 if account.get("calendar_url")
                 else client.principal().calendars()[0])
@@ -204,7 +218,7 @@ def _push_blocking(account: dict, ics_text: str) -> None:
 def _delete_remote_blocking(account: dict, uid: str) -> None:
     import caldav
     client = caldav.DAVClient(url=account["url"], username=account["username"],
-                              password=account["password"])
+                              password=account["password"], timeout=30)
     calendar = (caldav.Calendar(client=client, url=account["calendar_url"])
                 if account.get("calendar_url")
                 else client.principal().calendars()[0])
@@ -222,7 +236,7 @@ async def test_account(account: dict) -> dict:
     def _blocking():
         import caldav
         client = caldav.DAVClient(url=account["url"], username=account["username"],
-                                  password=account["password"])
+                                  password=account["password"], timeout=30)
         return [{"name": str(c.name or ""), "url": str(c.url)}
                 for c in client.principal().calendars()]
     calendars = await asyncio.to_thread(_blocking)
@@ -237,18 +251,27 @@ async def sync_account(account: dict) -> dict:
     import pim  # call-time import (module load order)
     tz = _safe_zone(await pim.user_timezone(user_id))
 
-    # 1) Tombstones → delete remote, then hard-delete local.
+    # Fetch before deleting so a remote edit cannot be erased by a local tombstone.
+    remote_events = await asyncio.to_thread(_remote_snapshot_blocking, account, tz)
+    remote_by_uid = {r["uid"]: r for r in remote_events}
+    # 1) Tombstones → delete unchanged remote resources.
     all_local = await db.list_calendar_events(include_deleted=True, user_id=user_id)
     mine = [e for e in all_local if (e.get("caldav_account_id") or "") in ("", account["id"])]
     for event in [e for e in mine if e.get("sync_state") == "deleted"]:
+        remote=remote_by_uid.get(event.get('caldav_uid'))
+        if remote and event.get('caldav_etag')!=remote['hash']:
+            from calendar_resources import preserve_conflict
+            await preserve_conflict(event,remote)
+            event['sync_state']='conflict'
+            conflicts+=1
+            continue
         if event.get("caldav_uid"):
             await asyncio.to_thread(_delete_remote_blocking, account, event["caldav_uid"])
-        await db.delete_calendar_event(event["id"], user_id=user_id)
+            remote_by_uid.pop(event['caldav_uid'],None)
+        await db.delete_calendar_event(event["id"], user_id=user_id, expected_updated_at=event['updated_at'])
         deleted += 1
 
-    # 2) Pull remote.
-    remote_events = await asyncio.to_thread(_remote_snapshot_blocking, account, tz)
-    remote_by_uid = {r["uid"]: r for r in remote_events}
+    # 2) Apply the complete remote snapshot.
     local_by_uid = {e["caldav_uid"]: e for e in mine
                     if e.get("caldav_uid") and e.get("sync_state") != "deleted"}
 
@@ -258,6 +281,7 @@ async def sync_account(account: dict) -> dict:
                   "location": remote["location"], "start_at": remote["start_at"],
                   "end_at": remote["end_at"], "all_day": remote["all_day"],
                   "rrule": remote["rrule"], "caldav_etag": remote["hash"],
+                  "resource_ics": remote.get("resource_ics", ""), "timezone": remote.get("timezone", str(tz)),
                   "caldav_account_id": account["id"], "sync_state": "synced"}
         if local is None:
             await db.create_calendar_event(
@@ -266,8 +290,11 @@ async def sync_account(account: dict) -> dict:
                 description=remote["description"], location=remote["location"],
                 all_day=remote["all_day"], rrule=remote["rrule"],
                 caldav_account_id=account["id"], caldav_uid=uid,
-                caldav_etag=remote["hash"], sync_state="synced", user_id=user_id)
+                caldav_etag=remote["hash"], sync_state="synced", user_id=user_id,
+                resource_ics=remote.get("resource_ics", ""), timezone=remote.get("timezone", str(tz)))
             pulled += 1
+        elif local.get("sync_state") == "conflict":
+            continue
         elif local.get("caldav_etag") != remote["hash"]:
             if _content_hash(local) == remote["hash"]:
                 # Content is identical — the etag mismatch is a scheme change
@@ -276,22 +303,38 @@ async def sync_account(account: dict) -> dict:
                 # local edit keeps its state for the push phase below.
                 await db.update_calendar_event(local["id"], {
                     "caldav_etag": remote["hash"],
-                    "caldav_account_id": account["id"]}, user_id=user_id)
+                    "caldav_account_id": account["id"]}, user_id=user_id, expected_updated_at=local['updated_at'])
                 continue
             if local.get("sync_state") == "dirty":
                 conflicts += 1
+                from calendar_resources import preserve_conflict
+                await preserve_conflict(local, remote)
                 await notifications.notify(
                     f"Calendar conflict: {remote['title']}",
-                    "Both HyprChat and the CalDAV server changed this event — the server version won.",
+                    "Both versions are saved. Choose which version to use in Calendar.",
                     kind="system", user_id=user_id)
-            await db.update_calendar_event(local["id"], fields, user_id=user_id)
-            pulled += 1
+                continue
+            changed=await db.update_calendar_event(local["id"], fields, user_id=user_id, expected_updated_at=local['updated_at'])
+            if changed:
+                pulled += 1
+            else:
+                from calendar_resources import preserve_conflict
+                await preserve_conflict(local,remote)
+                conflicts += 1
 
     # 3) Remote deletions → drop local synced rows whose uid vanished.
     for uid, local in local_by_uid.items():
+        if uid not in remote_by_uid and local.get('sync_state')=='dirty':
+            from calendar_resources import preserve_conflict
+            await preserve_conflict(local,{'deleted':True,'uid':uid,'hash':''})
+            conflicts+=1
         if uid not in remote_by_uid and local.get("sync_state") == "synced":
-            await db.delete_calendar_event(local["id"], user_id=user_id)
-            deleted += 1
+            if await db.delete_calendar_event(local["id"], user_id=user_id, expected_updated_at=local['updated_at']):
+                deleted += 1
+            else:
+                from calendar_resources import preserve_conflict
+                await preserve_conflict(local,{'deleted':True,'uid':uid,'hash':''})
+                conflicts += 1
 
     # 4) Push local dirty rows (new or edited-while-remote-unchanged).
     mine = [e for e in await db.list_calendar_events(user_id=user_id)
@@ -310,7 +353,7 @@ async def sync_account(account: dict) -> dict:
         await db.update_calendar_event(event["id"], {
             "caldav_uid": uid, "caldav_account_id": account["id"],
             "caldav_etag": _pushed_content_hash(ics_text, payload, tz),
-            "sync_state": "synced"}, user_id=user_id)
+            "sync_state": "synced"}, user_id=user_id, expected_updated_at=event['updated_at'])
         pushed += 1
 
     return {"pulled": pulled, "pushed": pushed, "deleted": deleted, "conflicts": conflicts}

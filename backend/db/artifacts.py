@@ -8,6 +8,9 @@ import re
 
 
 ARTIFACT_EXT_GROUPS = {
+    "document": {".docx", ".doc"},
+    "presentation": {".pptx", ".ppt"},
+    "spreadsheet": {".xlsx", ".xls"},
     "image": {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico", ".avif"},
     "html": {".html", ".htm"},
     "markdown": {".md", ".markdown", ".mdx"},
@@ -19,7 +22,7 @@ ARTIFACT_EXT_GROUPS = {
     },
     "data": {
         ".csv", ".tsv", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml",
-        ".parquet", ".ndjson", ".sqlite", ".db", ".xls", ".xlsx",
+        ".parquet", ".ndjson", ".sqlite", ".db",
     },
     "archive": {".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar"},
     "pdf": {".pdf"},

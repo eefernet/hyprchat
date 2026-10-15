@@ -36,7 +36,7 @@ function TimeGrid({t,days,byDay,todayKey,nowMin,evColor,onEventClick,onSlotClick
     {allDayRows.some(r=>r.evs.length>0)&&<div style={{display:"flex",borderBottom:`1px solid ${t.brd}22`}}>
       <div style={{width:gutterW,flexShrink:0,fontSize:8,color:t.mut,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:6}}>all-day</div>
       {allDayRows.map(({d,evs})=><div key={dkey(d)} style={{flex:1,minWidth:0,padding:2,display:"flex",flexDirection:"column",gap:2}}>
-        {evs.slice(0,2).map(e=>{const c=evColor(e);return <div key={e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={e.title} style={{fontSize:9,color:t.text,background:`${c}22`,borderLeft:`3px solid ${c}`,borderRadius:4,padding:"2px 4px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{e.title}</div>;})}
+        {evs.slice(0,2).map(e=>{const c=evColor(e);return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={e.title} style={{fontSize:9,color:t.text,background:`${c}22`,borderLeft:`3px solid ${c}`,borderRadius:4,padding:"2px 4px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{e.title}</div>;})}
         {evs.length>2&&<div style={{fontSize:8,color:t.mut}}>+{evs.length-2}</div>}
       </div>)}
     </div>}
@@ -65,7 +65,7 @@ function TimeGrid({t,days,byDay,todayKey,nowMin,evColor,onEventClick,onSlotClick
           return <div key={k} onClick={ev=>{const rect=ev.currentTarget.getBoundingClientRect();const hour=Math.max(0,Math.min(23,Math.floor((ev.clientY-rect.top)/HOUR_H)));onSlotClick(k,hour);}} style={{flex:1,minWidth:0,position:"relative",borderLeft:`1px solid ${t.brd}14`,background:isToday?`${t.acc}06`:"transparent",height:24*HOUR_H,cursor:"pointer"}} title="Click a slot to create an event">
             {Array.from({length:24},(_,h)=><div key={h} style={{position:"absolute",top:h*HOUR_H,left:0,right:0,borderTop:`1px solid ${t.brd}14`,pointerEvents:"none"}}/>)}
             {placed.map(({e,lane,s,en})=>{const c=evColor(e);const w=100/laneN;
-              return <div key={e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={`${(e.start_local||"").slice(11,16)} ${e.title}`} style={{position:"absolute",top:s/60*HOUR_H,height:Math.max((en-s)/60*HOUR_H,24)-2,left:`calc(${lane*w}% + 2px)`,width:`calc(${w}% - 4px)`,background:`${c}26`,borderLeft:`3px solid ${c}`,borderRadius:6,padding:"2px 5px",fontSize:10,color:t.text,overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:1}}>
+              return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={`${(e.start_local||"").slice(11,16)} ${e.title}`} style={{position:"absolute",top:s/60*HOUR_H,height:Math.max((en-s)/60*HOUR_H,24)-2,left:`calc(${lane*w}% + 2px)`,width:`calc(${w}% - 4px)`,background:`${c}26`,borderLeft:`3px solid ${c}`,borderRadius:6,padding:"2px 5px",fontSize:10,color:t.text,overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:1}}>
                 <div style={{fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.title}</div>
                 <div style={{fontSize:8,color:t.mut}}>{(e.start_local||"").slice(11,16)}{e.end_local?`–${(e.end_local||"").slice(11,16)}`:""}</div>
               </div>;})}
@@ -95,6 +95,8 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const [syncing,setSyncing]=useState(false);
   const [tz,setTz]=useState("");   // assistant-profile timezone (events are bucketed in it)
   const [err,setErr]=useState("");
+  const [proposals,setProposals]=useState([]);
+  const [conflicts,setConflicts]=useState([]);
 
   const load=useCallback(async()=>{
     let start,end;
@@ -110,6 +112,8 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
     }
     try{
       setEvents(await apiJson(`/api/calendar/events?start_local=${dkey(start)}T00:00&end_local=${dkey(end)}T23:59`));
+      setProposals(await apiJson('/api/calendar/proposals'));
+      setConflicts(await apiJson('/api/calendar/conflicts'));
     }catch(e){setErr(String(e.message||e));}
     finally{setLoaded(true);}
   },[anchor,view]);
@@ -131,8 +135,9 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
     // Cleared reminder on an existing event → explicit null (the backend
     // treats present-with-null as "clear"; omitting the key means "unchanged").
     const body={title:form.title,start_local:form.start_local,end_local:form.end_local||"",
+      ...(form.edit_scope==='occurrence'?{recurrence_id:form.recurrence_id}:{rrule:form.rrule||''}),
       location:form.location,description:form.description,
-      ...(form.remind_minutes!==""?{remind_minutes:Number(form.remind_minutes)}
+      ...(form.edit_scope==='occurrence'?{}:form.remind_minutes!==""?{remind_minutes:Number(form.remind_minutes)}
          :form.id?{remind_minutes:null}:{})};
     try{
       const r=await fetch(`${API}/api/calendar/events${form.id?`/${form.id}`:""}`,{
@@ -147,7 +152,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
     catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
     finally{load();}
   };
-  const openEdit=e=>setForm({id:e.id,title:e.title,start_local:e.start_local,end_local:e.end_local||"",location:e.location||"",description:e.description||"",remind_minutes:e.remind_minutes??""});
+  const openEdit=e=>setForm({id:e.series_id||e.id,rrule:e.rrule||'',series_start_local:e.series_start_local,series_end_local:e.series_end_local,recurrence_id:e.recurrence_id,edit_scope:e.rrule?'occurrence':'series',title:e.title,start_local:e.start_local,end_local:e.end_local||"",location:e.location||"",description:e.description||"",remind_minutes:e.remind_minutes??""});
   const saveAccount=async()=>{
     if(!acctForm?.url)return;
     setErr("");
@@ -203,6 +208,17 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const slotCreate=(k,hour)=>setForm({...EMPTY_EVENT,start_local:`${k}T${pad(hour)}:00`});
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    {conflicts.length>0&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}`}}><strong>Calendar conflicts</strong>{conflicts.map(c=><div key={c.id} style={{marginTop:8}}>
+      <div>Both versions are saved. Choose which to use:</div>{['local','remote'].map(choice=><button key={choice} style={{...btnS(t.acc),margin:4}} onClick={async()=>{try{await apiJson(`/api/calendar/conflicts/${c.id}/${choice}`,{method:'POST'});await load();}catch(e){setErr(e.message);}}}>{choice==='local'?'HyprChat':'Calendar server'}: {c[choice]?.title} · {c[choice]?.start_at}</button>)}
+    </div>)}</div>}
+    {proposals.length>0&&<div style={{padding:12,maxHeight:220,overflowY:'auto',borderBottom:`1px solid ${t.brd}`}}>
+      <strong>Appointments proposed from email</strong>
+      <p style={{fontSize:11,color:t.dim}}>Confirm an appointment to add it to your calendar and allow synchronization.</p>
+      {proposals.map(proposal=><div key={proposal.id} style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginTop:8}}>
+        <span style={{flex:1,fontSize:12}}>{proposal.title} · {new Date(proposal.start_at+'Z').toLocaleString(undefined,{timeZone:tz||'UTC'})}</span>
+        {['confirmed','rejected'].map(decision=><button key={decision} style={btnS(decision==='confirmed'?t.ok:t.mut)} onClick={async()=>{try{await apiJson(`/api/calendar/proposals/${proposal.id}/${decision}`,{method:'POST'});await load();}catch(e){if(e.name!=='AbortError')setErr(e.message);}}}>{decision==='confirmed'?'Confirm':'Reject'}</button>)}
+      </div>)}
+    </div>}
     <PanelHeader t={t} color={t.f1||t.acc} icon={<IC.Clock/>} title="Calendar"
       subtitle="Times shown in your assistant timezone. CalDAV keeps your phone in sync."
       nav={<>
@@ -257,6 +273,8 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
 
         {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.warm}55`}}>
           <div style={{fontSize:12,fontWeight:800,color:t.warm,marginBottom:10}}>{form.id?"Edit event":"New event"}</div>
+          {form.recurrence_id&&form.rrule&&<label style={{display:'block',marginBottom:8}}>Apply changes to <select value={form.edit_scope} onChange={e=>setForm(f=>({...f,edit_scope:e.target.value,...(e.target.value==='series'?{start_local:f.series_start_local||f.start_local,end_local:f.series_end_local||f.end_local}:{})}))} style={inputS}><option value="occurrence">This occurrence</option><option value="series">Entire series</option></select></label>}
+          {form.edit_scope!=='occurrence'&&<input aria-label="Recurrence rule" value={form.rrule||''} onChange={e=>setForm(f=>({...f,rrule:e.target.value}))} placeholder="Recurrence (optional): FREQ=WEEKLY;BYDAY=MO" style={{...inputS,marginBottom:8}}/>}
           <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,marginBottom:8}} autoFocus/>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8,alignItems:"flex-end"}}>
             <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Start (local)</div>
@@ -265,7 +283,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
               <input type="datetime-local" value={form.end_local||""} onChange={e=>setForm(f=>({...f,end_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
             <input value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))} placeholder="Location" style={{...inputS,flex:1,minWidth:140}}/>
             <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Remind (min before)</div>
-              <input type="number" min={0} value={form.remind_minutes} onChange={e=>setForm(f=>({...f,remind_minutes:e.target.value}))} style={{...inputS,width:90}}/></div>
+              <input type="number" min={0} disabled={form.edit_scope==='occurrence'} value={form.remind_minutes} onChange={e=>setForm(f=>({...f,remind_minutes:e.target.value}))} style={{...inputS,width:90}}/>{form.edit_scope==='occurrence'&&<small>Reminder applies to the series.</small>}</div>
           </div>
           <textarea value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Details (optional)" rows={2} style={{...inputS,marginBottom:10,resize:"vertical"}}/>
           <div style={{display:"flex",gap:8}}>
@@ -288,7 +306,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
               const k=dkey(d);const dayEvents=byDay[k]||[];const isToday=k===todayKey;
               return <div key={k} onClick={()=>{setForm({...EMPTY_EVENT,start_local:`${k}T09:00`});}} style={{minHeight:64,border:`1px solid ${isToday?t.acc:t.brd}${isToday?"":"22"}`,borderRadius:6,padding:4,cursor:"pointer",background:isToday?`${t.acc}0d`:"transparent",overflow:"hidden"}}>
                 <div onClick={ev=>{ev.stopPropagation();openDay(d);}} title="Open day view" style={{fontSize:9,fontWeight:800,color:isToday?t.acc:t.mut,display:"inline-block"}}>{d.getDate()}</div>
-                {dayEvents.slice(0,3).map(e=>{const c=evColor(e);return <div key={e.id} onClick={ev=>{ev.stopPropagation();openEdit(e);}} title={e.title} style={{fontSize:9,color:t.text,background:`${c}22`,border:`1px solid ${c}44`,borderRadius:3,padding:"2px 4px",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                {dayEvents.slice(0,3).map(e=>{const c=evColor(e);return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();openEdit(e);}} title={e.title} style={{fontSize:9,color:t.text,background:`${c}22`,border:`1px solid ${c}44`,borderRadius:3,padding:"2px 4px",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                   {(e.start_local||"").slice(11,16)} {e.title}
                 </div>;})}
                 {dayEvents.length>3&&<div onClick={ev=>{ev.stopPropagation();openDay(d);}} style={{fontSize:8,color:t.mut,marginTop:2}}>+{dayEvents.length-3} more</div>}
@@ -304,7 +322,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
         <div style={{...cardS}}>
           <div style={{fontSize:12,fontWeight:800,color:t.mut,marginBottom:8}}>Upcoming</div>
           {upcoming.length===0?<div style={{fontSize:11,color:t.mut}}>Nothing scheduled. Try: "dentist appointment Tuesday at 3pm" in chat.</div>
-          :upcoming.map(e=><div key={e.id} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 0",fontSize:12,color:t.dim,borderBottom:`1px solid ${t.brd}18`}}>
+          :upcoming.map(e=><div key={e.occurrence_id||e.id} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 0",fontSize:12,color:t.dim,borderBottom:`1px solid ${t.brd}18`}}>
             <span style={{width:9,height:9,borderRadius:3,background:evColor(e),flexShrink:0}}/>
             <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:11}}>{fmtLocalMinute(e.start_local)}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.title}{e.location?<span style={{color:t.mut}}> @ {e.location}</span>:null}</span>

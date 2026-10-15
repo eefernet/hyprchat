@@ -45,13 +45,20 @@ structural_up() {
 egress_ok() {
     runuser -u searxng -- curl -4 -sS --connect-timeout 8 --max-time 12 -o /dev/null https://1.1.1.1/ >/dev/null 2>&1
 }
-restart_searxng() { systemctl restart --no-block searxng || true; }
+check_searxng_listener() {
+    # Engine cooldowns belong to SearXNG. A healthy listener must not be
+    # restarted just because the VPN recovered or changed its public address.
+    if ! curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8888/healthz >/dev/null; then
+        log "VPN recovered but SearXNG listener is unhealthy — restarting service"
+        systemctl restart --no-block searxng || true
+    fi
+}
 
 if structural_up; then
     if egress_ok; then
         if [ "$last" != "up" ]; then
-            log "tunnel healthy (egress ok) — restarting searxng to clear engine suspensions"
-            restart_searxng
+            log "tunnel healthy (egress ok) — checking SearXNG listener; preserving engine cooldowns"
+            check_searxng_listener
         fi
         fails=0; cooldown_until=0; softfail=0; last="up"
         save_state
@@ -101,8 +108,8 @@ if printf '%s\n' "$rotation_result" | grep -Eq 'status=75([[:space:]/;}]|$)'; th
 fi
 
 if structural_up && egress_ok; then
-    log "recovered — restarting searxng"
-    restart_searxng
+    log "recovered — checking SearXNG listener; preserving engine cooldowns"
+    check_searxng_listener
     fails=0; cooldown_until=0; softfail=0; last="up"
     save_state
     exit 0

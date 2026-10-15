@@ -139,8 +139,13 @@ def test_recurring_task_with_failed_next_run_notifies_owner(monkeypatch):
     monkeypatch.setattr(scheduler.notifications, "notify", fake_notify)
     monkeypatch.setattr(scheduler, "resolve_task_timezone", fake_tz)
     monkeypatch.setattr(scheduler, "_user_active_recently", fake_active)
-    monkeypatch.setattr(scheduler, "_spawn_run",
-                        lambda task, **kw: state.__setitem__("spawned", True))
+    async def enqueue(task, **kw):
+        state.setdefault('updates', []).append((task['id'], kw['advance']))
+        return 'fixture-run'
+    async def launch(run_id):
+        state['spawned'] = True
+    monkeypatch.setattr(scheduler.task_queue, 'enqueue', enqueue)
+    monkeypatch.setattr(scheduler, '_launch_persisted', launch)
 
     task = {"id": "task-1", "title": "Broken cron", "user_id": "u1",
             "schedule_kind": "cron", "schedule_json": {"cron": "not a cron"},
@@ -173,8 +178,13 @@ def test_once_task_never_park_notifies(monkeypatch):
     monkeypatch.setattr(scheduler.notifications, "notify", fake_notify)
     monkeypatch.setattr(scheduler, "resolve_task_timezone", fake_tz)
     monkeypatch.setattr(scheduler, "_user_active_recently", fake_active)
-    monkeypatch.setattr(scheduler, "_spawn_run",
-                        lambda task, **kw: state.__setitem__("spawned", True))
+    async def enqueue(task, **kw):
+        state.setdefault('updates', []).append((task['id'], kw['advance']))
+        return 'fixture-run'
+    async def launch(run_id):
+        state['spawned'] = True
+    monkeypatch.setattr(scheduler.task_queue, 'enqueue', enqueue)
+    monkeypatch.setattr(scheduler, '_launch_persisted', launch)
 
     task = {"id": "task-2", "title": "One shot", "user_id": "u1",
             "schedule_kind": "once", "schedule_json": {"run_at": "2020-01-01T00:00"},

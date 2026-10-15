@@ -13,6 +13,7 @@ export const NAV_ITEMS = [
   { id: "images", label: "Image Studio", short: "Image Gen", icon: IC.Image },
   { id: "assistant", label: "Assistant", short: "Assistant", icon: IC.Bot },
   { id: "tasks", label: "Tasks", short: "Tasks", icon: IC.Clock },
+  { id: "jobs", label: "Jobs", short: "Jobs", icon: IC.Layers },
   { id: "calendar", label: "Calendar", short: "Calendar", icon: IC.Calendar },
   { id: "notes", label: "Notes", short: "Notes", icon: IC.Pencil },
   { id: "email", label: "Email", short: "Email", icon: IC.Send },
@@ -30,7 +31,7 @@ export const NAV_ITEM_MAP = Object.fromEntries(NAV_ITEMS.map((i) => [i.id, i]));
 export const DEFAULT_NAV_LAYOUT = {
   v: 1,
   bar: ["chat", "research", "council", "personas", "images"],
-  more: ["assistant", "tasks", "calendar", "notes", "email", "artifacts", "memory", "prompts", "kb", "tools", "models", "analytics"],
+  more: ["assistant", "tasks", "jobs", "calendar", "notes", "email", "artifacts", "memory", "prompts", "kb", "tools", "models", "analytics"],
   hidden: [],
 };
 

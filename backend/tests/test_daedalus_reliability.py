@@ -86,6 +86,12 @@ def test_stage_output_policy_preserves_old_jobs():
     assert resolve('reviewer',operation_settings({**payload,'policy_version':2})).num_predict==4096
     assert thinking_options('reviewer',payload,{'capabilities':[]})==({},'unsupported')
     assert thinking_options('reviewer',payload,{'capabilities':['thinking']})[0]=={'think':True}
+    # Live laguna switch (2026-09-30): a configured LEVEL reaches a model whose /api/show advertises boolean-only
+    # thinking values; send `true`, not a string Ollama rejects. Models that advertise levels keep the level.
+    level={'settings':{**DEFAULTS,**validate_patch({'daedalus_role_thinking':{'builder':'low'}},DEFAULTS)},'policy_version':7}
+    assert thinking_options('builder',level,{'capabilities':['thinking'],'thinking':{'values':[False,True],'default':True}})==({'think':True},'on')
+    assert thinking_options('builder',level,{'capabilities':['thinking'],'thinking':{'values':[False,'low','medium','xhigh'],'default':'medium'}})==({'think':'low'},'low')
+    assert thinking_options('builder',level,{'capabilities':['thinking']})==({'think':'low'},'low')   # older Ollama: no advertised values
     with pytest.raises(ValueError,match='cannot fit'):
         validate_patch({'daedalus_role_outputs':{'reviewer':DEFAULTS['openhands_num_ctx']}},DEFAULTS)
 

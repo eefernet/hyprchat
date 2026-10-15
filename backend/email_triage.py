@@ -12,7 +12,7 @@ from __future__ import annotations
 import context_policy
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
 import database as db
@@ -64,9 +64,14 @@ async def triage_new_messages(http, account: dict) -> int:
     tz_name = await pim.user_timezone(user_id)
     today_local = datetime.now(safe_zone(tz_name)).strftime("%Y-%m-%d")
     prompt = _TRIAGE_PROMPT.format(today=today_local, emails="\n".join(blocks))
-    raw = await model_providers.complete_chat(
-        http, model, prompt, num_ctx=context_policy.helper_context("extraction"), num_predict=2048, format_json=True,
-        timeout=120, ollama_url=config.OLLAMA_URL)
+    transport_failed = False
+    try:
+        raw = await model_providers.complete_chat(
+            http, model, prompt, num_ctx=context_policy.helper_context("extraction"), num_predict=2048, format_json=True,
+            timeout=120, ollama_url=config.OLLAMA_URL)
+    except Exception:
+        transport_failed = True
+        raw = ''
     try:
         verdicts = json.loads(raw or "{}")
     except json.JSONDecodeError:
@@ -76,33 +81,29 @@ async def triage_new_messages(http, account: dict) -> int:
 
     triaged = 0
     for i, msg in enumerate(pending, 1):
-        verdict = verdicts.get(str(i)) or {}
-        if not isinstance(verdict, dict):
-            verdict = {}
-        urgency = str(verdict.get("urgency") or "normal").lower()
-        if urgency not in ("urgent", "normal", "low"):
-            urgency = "normal"
-        fields = {"urgency": urgency,
-                  "summary": str(verdict.get("summary") or "")[:500]}
-
-        # Email → tentative calendar event
-        event = verdict.get("event")
-        if isinstance(event, dict) and event.get("title") and event.get("start"):
-            try:
-                import pim
-                created = await pim.create_event(
-                    title=str(event["title"])[:200],
-                    start_local=str(event["start"]),
-                    description=f"From email: {msg['subject']}",
-                    source=f"email {msg['from_addr']}", user_id=user_id)
-                if created:
-                    fields["extracted_event_id"] = created["id"]
-                    await notifications.notify(
-                        f"Tentative event from email: {event['title']}",
-                        f"Added from \"{msg['subject']}\" — check the Calendar panel.",
-                        kind="email", user_id=user_id)
-            except Exception as e:
-                print(f"[EMAIL TRIAGE] event extraction failed: {e}")
+        verdict = verdicts.get(str(i))
+        valid = (isinstance(verdict,dict) and verdict.get('urgency') in {'urgent','normal','low'}
+                 and isinstance(verdict.get('summary'),str) and 'event' in verdict
+                 and (verdict['event'] is None or isinstance(verdict['event'],dict)))
+        fields = {}
+        if valid:
+            fields = {'urgency':verdict['urgency'],'summary':verdict['summary'][:500],
+                      'triage_status':'succeeded','triage_error':''}
+            if verdict['event'] is not None:
+                try:
+                    import calendar_proposals
+                    await calendar_proposals.propose(msg,verdict['event'],tz_name)
+                except (ValueError,TypeError):
+                    valid = False
+        if not valid:
+            attempts=int(msg.get('triage_attempts') or 0)+1
+            await db.update_email_message(msg['id'],{
+                'triage_status':'retry_wait' if attempts<4 else 'failed',
+                'triage_error':('Model connection failed; retry scheduled' if transport_failed else 'Model returned invalid triage data; no classification or event was accepted'),
+                'triage_attempts':attempts,
+                'triage_retry_at':(datetime.utcnow()+timedelta(minutes=min(60,5*2**(attempts-1)))).isoformat()},user_id=user_id)
+            continue
+        urgency=fields['urgency']
 
         await db.update_email_message(msg["id"], fields, user_id=user_id)
         triaged += 1

@@ -4,6 +4,8 @@ ContextVar keeps concurrent chats isolated without changing the list-returning
 provider API used by deep research. No network calls or process-global budget.
 """
 import asyncio
+import time
+from weakref import WeakKeyDictionary
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,6 +41,21 @@ class SearchRun:
 
 
 current_run: ContextVar[SearchRun | None] = ContextVar("web_search_run", default=None)
+_provider_slots = WeakKeyDictionary()
+
+
+async def provider_get(http, url, *, diagnostics=None):
+    """Shared by chat, councils and research; queue time consumes the budget."""
+    loop = asyncio.get_running_loop()
+    slots = _provider_slots.setdefault(loop, asyncio.Semaphore(2))
+    run = current_run.get()
+    budget = min(12, run.remaining()) if run else 12
+    queued = time.monotonic()
+    async with asyncio.timeout(max(.001, budget)):
+        async with slots:
+            if diagnostics is not None:
+                diagnostics['queue_wait_ms'] = round((time.monotonic()-queued)*1000)
+            return await http.get(url, timeout=max(.001, budget-(time.monotonic()-queued)))
 
 
 def classify_failure(value: str) -> str:

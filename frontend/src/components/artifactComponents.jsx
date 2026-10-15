@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { API } from '../session.js';
+import { API,userScopedUrl } from '../session.js';
 import { parseUtcishMs } from '../datetime.js';
 import useIsMobile from '../useIsMobile.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
+import DocumentRevisionReview from './DocumentRevisionReview.jsx';
+import {apiJson} from '../api.js';
+import OfficePreview from './OfficePreview.jsx';
 import EmptyState from './EmptyState.jsx';
 import { Skeleton, SkeletonGrid } from './Skeleton.jsx';
 
@@ -14,6 +17,9 @@ const artifactKindMeta=(kind,t,metadata={})=>{
   const isProject=k==="archive"&&(metadata.project_id||metadata.artifact_status);
   if(isProject)return{label:"Project",icon:IC.Cube,color:t.warm};
   const map={
+    document:{label:"Word",icon:IC.Paperclip,color:t.acc},
+    presentation:{label:"Slides",icon:IC.Paperclip,color:t.warm},
+    spreadsheet:{label:"Spreadsheet",icon:IC.Database,color:t.ok},
     image:{label:"Image",icon:IC.Image,color:t.f1},
     html:{label:"HTML",icon:IC.Code,color:t.acc},
     markdown:{label:"Markdown",icon:IC.Paperclip,color:t.pink},
@@ -36,9 +42,10 @@ function ArtifactPreviewBlock({preview,t,font}){
   useEffect(()=>{setMode("rendered");setFilter("");setArchiveDir("");setArchiveQuery("");setEntryPreview(null);},[preview?.id,preview?.updated_at,preview?.preview_type]);
   if(!preview)return <div style={{padding:18,color:t.mut,fontSize:12}}>Loading preview...</div>;
   const type=preview.preview_type||"metadata";
+  if(type==="office")return <OfficePreview key={preview.id} preview={preview} t={t} font={font}/>;
   if(type==="missing")return <div style={{padding:14,border:`1px solid ${t.err}35`,background:`${t.err}08`,borderRadius:8,color:t.err,fontSize:12}}>File metadata is retained, but the physical file is missing.</div>;
-  if(type==="image")return <img src={`${API}${preview.download_url||preview.url}`} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
-  if(type==="pdf")return <iframe src={`${API}${preview.download_url||preview.url}`} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
+  if(type==="image")return <img src={userScopedUrl(preview.download_url||preview.url)} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
+  if(type==="pdf")return <iframe src={userScopedUrl(preview.download_url||preview.url)} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
   if(type==="archive"){
     const raw=(preview.preview?.entries||[]).filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/");
     const norm=raw.map(e=>{const path=(e.path||String(e.name||"").replace(/\/$/,"")).replace(/^\.\/+/,"");const parent=e.parent??(path.includes("/")?path.split("/").slice(0,-1).join("/"):"");const base=e.display_name||String(e.name||path).replace(/\/$/,"").split("/").pop()+(e.is_dir?"/":"");return{...e,path,parent,display_name:base};});
@@ -167,7 +174,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   const [comfyMemory,setComfyMemory]=useState(null);
   const [showAdvanced,setShowAdvanced]=useState(()=>{try{return localStorage.getItem("hc-img-adv")==="1";}catch{return false;}});
   const [error,setError]=useState("");
-  const pollRef=useRef(null);
+  const pollRef=useRef(null),retryPollRef=useRef(null);
   const wfUploadRef=useRef(null);
   const thumbsRef=useRef(null);
   const toggleAdvanced=()=>setShowAdvanced(p=>{const v=!p;try{localStorage.setItem("hc-img-adv",v?"1":"0");}catch{}return v;});
@@ -439,7 +446,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     if(seedLock&&seed===""&&d.params?.seed!=null)setSeed(String(d.params.seed));
     setJob({id:jid,started:Date.now(),status:"queued",params:d.params});
     let pollFails=0; // tolerate transient blips — the backend job keeps running
-    pollRef.current=setInterval(async()=>{
+    const poll=async()=>{
       try{
         const r=await fetch(`${API}/api/images/jobs/${jid}`);
         const s=await r.json();
@@ -458,15 +465,21 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
         }
       }catch(e){
         pollFails+=1;
-        if(pollFails>=3){stopPoll();setJob(null);setError(String(e.message||e));}
+        if(pollFails>=3){stopPoll();setJob(p=>p?{...p,status:"retry_required"}:p);setError(String(e.message||e));}
       }
-    },1000);
+    };
+    retryPollRef.current=()=>{pollFails=0;setError("");stopPoll();pollRef.current=setInterval(poll,1000);};
+    retryPollRef.current();
   };
   const cancelJob=async()=>{
     if(!job)return;
-    stopPoll();
-    try{await fetch(`${API}/api/images/jobs/${job.id}/cancel`,{method:"POST"});}catch{}
-    setJob(null);
+    try{
+      const response=await fetch(`${API}/api/images/jobs/${job.id}/cancel`,{method:"POST"});
+      const result=await response.json();
+      if(!response.ok)throw new Error(result.detail||`HTTP ${response.status}`);
+      if(result.status==="cancelled"){stopPoll();setJob(null);}
+      else{setJob(p=>p?{...p,status:result.status}:p);if(!pollRef.current)retryPollRef.current?.();}
+    }catch(e){setError(`Cancellation not confirmed: ${e.message}`);}
   };
   const useInChat=async(r)=>{
     if(!r.artifact_id)return;
@@ -501,7 +514,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   const curMeta=(cur&&cur.metadata)||{};
   const metaLine=(m)=>`seed ${m.seed} · ${m.steps} steps · ${m.width}×${m.height}${m.checkpoint?` · ${String(m.checkpoint).replace(/\.(safetensors|ckpt)$/i,"")}`:""}`;
   const actionChips=(a,m)=>(<div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"center"}}>
-    <a href={`${API}/api/artifacts/${a.id}/download`} download={a.filename} style={smallBtn(t.ok)}><IC.Download/>Download</a>
+    <a href={userScopedUrl(`/api/artifacts/${a.id}/download`)} download={a.filename} style={smallBtn(t.ok)}><IC.Download/>Download</a>
     <button onClick={()=>useInChat({artifact_id:a.id})} style={smallBtn(t.acc)}><IC.Send/>Use in chat</button>
     <button onClick={()=>reuseParams(m)} title="Load this image's prompt and settings back into the form" style={smallBtn(t.acc2)}><IC.Refresh/>Reuse</button>
     {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}><IC.Star/>Seed</button>}
@@ -522,6 +535,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
         {section("Prompt",IC.Pencil,<>
           <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Subject, style, lighting, mood" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:13.5,padding:"11px 13px"}}/>
           <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt" rows={1} style={{...inputS,resize:"vertical",fontSize:12,minHeight:38}}/>
+          {job?.status==="retry_required"&&<button onClick={()=>retryPollRef.current?.()} style={railBtn(t.warm)}>Retry image transfer</button>}
           <div style={grid2}>
             <button onClick={enhance} disabled={!prompt.trim()||enhancing||!!job} title="Enhance prompt" style={railBtn(t.acc2,{disabled:!prompt.trim()||enhancing||!!job})}>
               {enhancing?<div style={{width:11,height:11,border:`2px solid ${t.acc2}44`,borderTopColor:t.acc2,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>:<IC.Star/>}
@@ -671,7 +685,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
             <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}99`,border:`1px solid ${t.brd}30`,borderRadius:12,overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
               {cur&&(cur.exists_status==="missing"
                 ?<div style={{fontSize:12,color:t.mut}}>file missing on disk</div>
-                :<img src={`${API}${cur.url}`} alt={cur.filename} style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",display:"block"}}/>)}
+                :<img src={userScopedUrl(cur.url)} alt={cur.filename} style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",display:"block"}}/>)}
               {job&&<div style={{position:"absolute",top:10,left:10,display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:"rgba(0,0,0,.55)",border:`1px solid ${t.acc}40`,borderRadius:20,fontSize:11,color:t.text,backdropFilter:"blur(4px)"}}>
                 <div style={{width:11,height:11,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>Generating…
               </div>}
@@ -684,7 +698,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
                 {gallery.map((a,i)=><div key={a.id} data-idx={i} onClick={()=>setViewIdx(i)} title={(a.metadata||{}).prompt} style={{width:74,height:74,flexShrink:0,borderRadius:8,overflow:"hidden",cursor:"pointer",border:`2px solid ${i===viewIdx?t.acc:`${t.brd}40`}`,opacity:i===viewIdx?1:.6,transition:"opacity .15s, border-color .15s",background:t.bgDeep}}>
                   {a.exists_status==="missing"
                     ?<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:t.mut}}>missing</div>
-                    :<img src={`${API}${a.url}`} loading="lazy" alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>}
+                    :<img src={userScopedUrl(a.url)} loading="lazy" alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>}
                 </div>)}
               </div>
               {navBtn("▶",viewIdx>=gallery.length-1,()=>setViewIdx(i=>Math.min(gallery.length-1,i+1)))}
@@ -700,7 +714,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,maxWidth:"86vw",minWidth:0}}>
           {cur.exists_status==="missing"
             ?<div style={{padding:60,fontSize:13,color:t.mut}}>file missing on disk</div>
-            :<img src={`${API}${cur.url}`} alt={cur.filename} style={{maxWidth:"86vw",maxHeight:"78vh",objectFit:"contain",borderRadius:10,boxShadow:"0 8px 48px #000a"}}/>}
+            :<img src={userScopedUrl(cur.url)} alt={cur.filename} style={{maxWidth:"86vw",maxHeight:"78vh",objectFit:"contain",borderRadius:10,boxShadow:"0 8px 48px #000a"}}/>}
           <div style={{fontSize:11,color:t.dim,maxWidth:"80vw",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={curMeta.prompt}>{cur.filename} · {metaLine(curMeta)} · {viewIdx+1}/{gallery.length}</div>
           {actionChips(cur,curMeta)}
         </div>
@@ -761,6 +775,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
     </div>
     <div style={{flex:1,overflow:"auto",padding:14,display:"flex",flexDirection:"column",gap:14}}>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Preview</div><ArtifactPreviewBlock preview={preview} t={t} font={font}/></section>
+      {["document","presentation","spreadsheet"].includes(a.kind)&&<DocumentRevisionReview artifact={a} t={t} font={font} onOpen={onOpenArtifact}/>}
       <section style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:11,color:t.dim}}>
         <div><span style={{color:t.mut}}>Status</span><select value={a.status||"draft"} onChange={e=>patch({status:e.target.value})} style={{width:"100%",marginTop:4,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:11}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select></div>
         <div><span style={{color:t.mut}}>Health</span><div style={{marginTop:4,color:a.exists_status==="missing"?t.err:a.exists_status==="present"?t.ok:t.warm,fontWeight:800}}>{a.exists_status||"unknown"}</div></div>
@@ -818,7 +833,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
         <div style={{display:"flex",flexDirection:"column",gap:5}}>{workspaces.map(w=>{const checked=(a.workspace_ids||[]).includes(w.id);return <label key={w.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:11,color:checked?t.text:t.mut}}><input type="checkbox" checked={checked} onChange={e=>{const cur=new Set(a.workspace_ids||[]);if(e.target.checked)cur.add(w.id);else cur.delete(w.id);patch({workspace_ids:Array.from(cur)});}}/> {w.name}</label>;})}</div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Lineage</div>
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={`${API}/api/artifacts/${v.id}/download`} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:11,color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={userScopedUrl(`/api/artifacts/${v.id}/download`)} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
       </section>
       <section><div style={{fontSize:10,color:t.acc,fontWeight:900,textTransform:"uppercase",marginBottom:7}}>Provenance</div>
         <div style={{fontSize:11,color:t.dim,lineHeight:1.7,wordBreak:"break-word"}}>
@@ -884,9 +899,9 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
       </div>}
     </div>
     <div style={{display:"grid",gridTemplateColumns:`repeat(${primaryCount},1fr)`,gap:6}}>
-      {onPreview&&<button onClick={()=>onPreview(a.filename,a.url)} style={primaryBtn(t.acc)}>Preview</button>}
+      {onPreview&&<button onClick={()=>["document","presentation","spreadsheet"].includes(a.kind)&&onDetails?onDetails(a.id):onPreview(a.filename,a.url)} style={primaryBtn(t.acc)}>Preview</button>}
       {onDetails&&<button onClick={()=>onDetails(a.id)} style={primaryBtn(t.f1)}>Details</button>}
-      <a href={a.id?`${API}/api/artifacts/${a.id}/download`:`${API}${a.url}`} download={a.filename} style={primaryBtn(t.ok)}>Download</a>
+      <a href={userScopedUrl(a.id?`/api/artifacts/${a.id}/download`:a.url)} download={a.filename} style={primaryBtn(t.ok)}>Download</a>
     </div>
     <div style={{display:"flex",gap:6}}>
       {a.conversation_id?<button onClick={()=>onOpenConv?.(a.conversation_id)} style={utilBtn(t.acc,false)}>Chat</button>:<div style={{flex:1}}/>}
@@ -911,15 +926,17 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
   const [loading,setLoading]=useState(false);
   const [detail,setDetail]=useState(null);
   const [selected,setSelected]=useState(()=>new Set());
+  const [batchFormat,setBatchFormat]=useState("pdf");
   const filters=[
     ["all","All"],["pinned","Pinned"],["recent","Recent"],["project","Projects"],
+    ["document","Word"],["presentation","Slides"],["spreadsheet","Sheets"],
     ["image","Images"],["data","Data"],["code","Code"],["archived","Archived"]
   ];
   const viewParams=(v)=>{
     if(v==="pinned")return{pinned:"true"};
     if(v==="archived")return{status:"archived"};
     if(v==="project")return{kind:"project"};
-    if(["image","data","code"].includes(v))return{kind:v};
+    if(["document","presentation","spreadsheet","image","data","code"].includes(v))return{kind:v};
     return{};
   };
   const load=useCallback(async()=>{
@@ -990,6 +1007,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
         {filters.map(([id,label])=><button key={id} onClick={()=>setView(id)} style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${view===id?t.acc:t.brd}35`,background:view===id?`${t.acc}18`:"transparent",color:view===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:view===id?800:600}}>{label}</button>)}
       </div>
       <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search artifacts..." style={{marginLeft:"auto",minWidth:180,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:11,outline:"none"}}/>
+      {selected.size>0&&<><select aria-label="Batch export format" value={batchFormat} onChange={e=>setBatchFormat(e.target.value)}>{['pdf','txt','csv','docx','pptx','xlsx'].map(f=><option key={f}>{f}</option>)}</select><button onClick={async()=>{try{const ids=Array.from(selected);const conversationId=items.find(a=>selected.has(a.id))?.conversation_id;await apiJson('/api/documents/batch-export',{method:'POST',body:{artifact_ids:ids,format:batchFormat,conversation_id:conversationId}});notify?.({type:'success',text:'Batch export queued',detail:'Follow progress and per-file results in Jobs.'});}catch(e){notify?.({type:'error',text:'Export failed',detail:e.message});}}} style={{background:t.surface,color:t.text,border:`1px solid ${t.brd}`,borderRadius:6,padding:7}}>Export {selected.size}</button></>}
       {selected.size>0&&<button onClick={bundleSelected} style={{background:`${t.warm}16`,border:`1px solid ${t.warm}35`,color:t.warm,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:10,fontWeight:800}}>Bundle {selected.size}</button>}
       <button onClick={load} style={{background:`${t.surface}66`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:10,fontWeight:800}}>Refresh</button>
     </div>

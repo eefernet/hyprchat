@@ -142,6 +142,8 @@ def _mask_key(key: str) -> str:
 
 
 def _env_key(provider: str) -> str:
+    if db.current_user_id() != db.DEFAULT_USER_ID:
+        return ""
     env_name = SUPPORTED_PROVIDERS.get(provider, {}).get("env_key", "")
     return os.getenv(env_name, "") if env_name else ""
 
@@ -788,6 +790,30 @@ async def complete_chat(http, model_id: str, prompt: str, *,
     return text or "".join(thinking_parts).strip()
 
 
+async def stream_chat(http, model_id, messages, *, options=None, ollama_url=''):
+    """Normalized streaming for callers without chat tool dispatch."""
+    if is_cloud_model(model_id):
+        async for event in stream_provider_chat(http,model_id,messages,options=options):
+            yield event
+        return
+    _, model = split_model_id(model_id)
+    async with http.stream('POST',ollama_url.rstrip('/')+'/api/chat',json={
+            'model':model,'messages':messages,'stream':True,'think':False,
+            'options':options or {},'keep_alive':'30m'},timeout=180) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if not line.strip(): continue
+            data=json.loads(line)
+            if data.get('error'): raise ProviderError(str(data['error']),provider='ollama')
+            content=(data.get('message') or {}).get('content')
+            if content: yield {'type':'token','content':content}
+            if data.get('done'):
+                yield {'type':'usage','prompt_tokens':data.get('prompt_eval_count',0),'gen_tokens':data.get('eval_count',0)}
+                yield {'type':'finish'}
+                return
+        raise ProviderError('Model stream ended before completion',provider='ollama')
+
+
 async def stream_provider_chat(
     http: httpx.AsyncClient,
     model_id: str,
@@ -880,6 +906,8 @@ async def _stream_openai(
                     "prompt_tokens": int(usage.get("input_tokens") or 0),
                     "gen_tokens": int(usage.get("output_tokens") or 0),
                 }
+                if typ == "response.completed":
+                    yield {"type": "finish", "reason": "stop"}
                 if typ == "response.incomplete":
                     reason = (resp_obj.get("incomplete_details") or {}).get("reason") or "max_output_tokens"
                     # Surfaced as a finish event so the chat loop can offer
@@ -1033,8 +1061,7 @@ async def _stream_openai_compat(
                     usage_seen = True
             if usage_seen:
                 yield {"type": "usage", "prompt_tokens": prompt_tokens, "gen_tokens": gen_tokens}
-            if finish_reason == "length":
-                yield {"type": "finish", "reason": "length"}
+            yield {"type": "finish", "reason": finish_reason or "unexpected_eof"}
             return
 
 
@@ -1072,8 +1099,7 @@ async def _anthropic_stream_events(
             stop_reason = str((obj.get("delta") or {}).get("stop_reason") or stop_reason)
         elif typ == "message_stop":
             yield {"type": "usage", "prompt_tokens": input_tokens, "gen_tokens": output_tokens}
-            if stop_reason == "max_tokens":
-                yield {"type": "finish", "reason": "length"}
+            yield {"type": "finish", "reason": "length" if stop_reason == "max_tokens" else (stop_reason or "stop")}
         elif typ == "error" or obj.get("error"):
             err = obj.get("error") or {}
             msg = err.get("message") if isinstance(err, dict) else str(err)

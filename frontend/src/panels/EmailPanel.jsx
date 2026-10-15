@@ -185,6 +185,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       <button onClick={()=>setReader(null)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}><IC.X/></button>
     </div>
     {reader.msg.summary&&<div style={{fontSize:11,color:t.acc,marginBottom:8}}>AI summary: {reader.msg.summary}</div>}
+    {reader.msg.triage_error&&<div role="status" style={{fontSize:11,color:t.err,marginBottom:8}}>{reader.msg.triage_error} <button style={btnS(t.acc)} onClick={async()=>{try{const msg=await apiJson(`/api/email/messages/${reader.msg.id}/triage/retry`,{method:'POST'});setReader(p=>p?.msg.id===msg.id?{...p,msg}:p);}catch(e){if(e.name!=='AbortError')setErr(e.message);}}}>Retry triage</button></div>}
     {(()=>{
       const textBodyS={fontSize:12,color:t.dim,whiteSpace:"pre-wrap",maxHeight:isMobile?320:"46vh",overflowY:"auto",background:`${t.bgDeep}66`,border:`1px solid ${t.brd}22`,borderRadius:8,padding:12};
       if(reader.loading)return <div style={textBodyS}>Loading body from server...</div>;

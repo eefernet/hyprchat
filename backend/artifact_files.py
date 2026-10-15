@@ -349,16 +349,17 @@ def safe_local_artifact_path(path: str | None) -> str | None:
     if not path:
         return None
     try:
-        abs_path = os.path.abspath(os.path.expanduser(path))
+        abs_path = os.path.realpath(os.path.expanduser(path))
     except Exception:
         return None
     roots = [
+        config.ARTIFACT_DIR,
         config.SANDBOX_OUTPUTS_DIR,
         config.UPLOAD_DIR,
         config.KB_DIR,
     ]
     for root in roots:
-        root_abs = os.path.abspath(root)
+        root_abs = os.path.realpath(root)
         if abs_path == root_abs or abs_path.startswith(root_abs + os.sep):
             return abs_path
     return None
@@ -409,6 +410,9 @@ def extract_indexable_text(
     filename: str | None = None,
 ) -> str:
     display_name = filename or os.path.basename(filepath)
+    if os.path.splitext(display_name.lower())[1] in {".docx", ".pptx", ".xlsx"}:
+        from document_formats import extract_text
+        return extract_text(filepath, max_chars=max_chars)
     lower = display_name.lower()
     kind = (kind or db.artifact_kind_for_filename(display_name, mime_type)).lower()
     try:

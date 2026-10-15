@@ -4,8 +4,10 @@ Chunks documents, embeds via Ollama, stores in ChromaDB, retrieves relevant chun
 """
 import asyncio
 import hashlib
+import json
 import os
 import re
+import time
 from typing import Optional
 from weakref import WeakValueDictionary
 
@@ -21,6 +23,7 @@ import reranker
 _chroma_client: Optional[chromadb.ClientAPI] = None
 CHROMA_DIR = os.path.join(os.path.dirname(config.KB_DIR), "chroma_db")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+INDEX_VERSION = 2
 
 # Chunking settings
 CHUNK_SIZE = 500       # target tokens per chunk (~2000 chars)
@@ -63,6 +66,20 @@ def parse_file(filepath: str, filename: str) -> str:
 
     if ext == ".pdf":
         return _parse_pdf(filepath)
+    elif ext in {".docx", ".pptx", ".xlsx"}:
+        from document_formats import inspect_document
+        blocks=[];size=0
+        for item in inspect_document(filepath,_extract=True):
+            location = f"Slide {item['slide']}" if 'slide' in item else f"Sheet {item['sheet']}!{item['cell']}" if 'sheet' in item else item.get('target','')
+            value = item.get('value')
+            text=item.get('text') if 'text' in item else str(item.get('formula') or (value if value is not None else ''))
+            if text:
+                block=f'[Location: {location}]\n{text}'
+                blocks.append(block);size+=len(block)
+                if size>=500000:break
+        return '\n\n'.join(blocks)[:500000]
+    elif ext in {".doc", ".ppt", ".xls", ".docm", ".pptm", ".xlsm"}:
+        raise ValueError("Convert this file to DOCX, PPTX, or XLSX with Documents before indexing")
     else:
         # Plain text, markdown, code, etc.
         try:
@@ -251,6 +268,18 @@ def chunk_markdown(text: str, filename: str = "") -> list[dict]:
 def chunk_document(text: str, filename: str) -> list[dict]:
     """Route to appropriate chunker based on file type."""
     ext = os.path.splitext(filename)[1].lower()
+    if ext in {'.pdf','.docx','.pptx','.xlsx'}:
+        blocks=re.split(r'(?=^\[(?:Page \d+|Location: [^\n]+)\])',text,flags=re.M)
+        output=[]
+        for block in blocks:
+            match=re.match(r'^(\[(?:Page \d+|Location: [^\n]+)\])\s*',block)
+            marker=match[1] if match else ''
+            content=block[match.end():] if match else block
+            for chunk in chunk_text(content,filename):
+                chunk.update(chunk_index=len(output),location=marker.strip('[]').removeprefix('Location: '))
+                if marker:chunk['text']=marker+'\n'+chunk['text']
+                output.append(chunk)
+        return output
     code_exts = {".py", ".pyi", ".js", ".ts", ".jsx", ".tsx", ".java", ".go",
                  ".rs", ".c", ".cpp", ".h", ".hpp", ".rb", ".php", ".sh", ".bash"}
     if ext in code_exts:
@@ -266,7 +295,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed a batch of texts using Ollama's embedding endpoint.
 
     Tries the modern batched /api/embed endpoint (one HTTP call per batch),
-    falling back to per-prompt /api/embeddings for any batch that fails.
+    falling back to per-prompt /api/embeddings only for unsupported endpoints.
     Return shape is load-bearing: same length/order as input, None per
     failed item.
     """
@@ -284,9 +313,15 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
                     if isinstance(embs, list) and len(embs) == len(batch):
                         embeddings.extend(embs)
                         continue
-                print(f"[RAG] Batch embed failed (HTTP {resp.status_code}), falling back to per-prompt")
+                unsupported = resp.status_code in {405, 501} or (resp.status_code == 404 and
+                    resp.text.strip().lower() in {'404 page not found', 'not found'})
+                if not unsupported:
+                    embeddings.extend([None] * len(batch))
+                    continue
             except Exception as e:
-                print(f"[RAG] Batch embed error, falling back to per-prompt: {e}")
+                print(f"[RAG] Batch embedding unavailable: {type(e).__name__}")
+                embeddings.extend([None] * len(batch))
+                continue
             for text in batch:
                 try:
                     resp = await client.post(
@@ -352,6 +387,9 @@ async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
             "chunk_index": chunk["chunk_index"],
             "kb_id": kb_id,
             "char_count": len(chunk["text"]),
+            "index_version": INDEX_VERSION,
+            "embedding_model": EMBED_MODEL,
+            "location": chunk.get("location", ""),
         })
 
     # Embed all chunks
@@ -412,6 +450,7 @@ async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
         print(f"[RAG] FTS index error for {filename} in {kb_id}: {e}")
         warnings.append("keyword index update failed; vector index is available")
 
+    await db.kb_index_record(kb_id,filename,INDEX_VERSION,EMBED_MODEL,len(v_ids),warnings)
     print(f"[RAG] Indexed {filename} → {len(v_ids)} chunks in {kb_id}")
     return {"filename": filename, "chunks": len(v_ids), "total_chars": sum(len(t) for t in v_texts),
             **({"warnings": warnings} if warnings else {})}
@@ -516,6 +555,7 @@ def _vector_query(kb_ids: list[str], query_embedding: list[float], fetch_k: int)
                         "filename": meta.get("filename", "?"),
                         "kb_id": kb_id,
                         "chunk_index": meta.get("chunk_index", 0),
+                        "location": meta.get("location", ""),
                         "score": 1 - dist,  # cosine distance → similarity
                     })
         except Exception as e:
@@ -548,21 +588,25 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
 
     fetch_k = max(top_k * 3, 12)
 
-    # Vector leg
-    vector_results: list[dict] = []
-    query_embedding = await embed_single(query_text)
-    if query_embedding is not None:
-        vector_results = await asyncio.to_thread(_vector_query, kb_ids, query_embedding, fetch_k)
-        vector_results.sort(key=lambda x: x["score"], reverse=True)
-    else:
-        print("[RAG] Query embedding failed — keyword-only retrieval")
-
-    # Keyword leg (bm25 over kb_chunks_fts)
+    deadline = time.monotonic() + max(.01, config.RAG_RETRIEVAL_DEADLINE_SECONDS)
+    async def vector():
+        embedding = await embed_single(query_text)
+        if embedding is None: return []
+        results = await asyncio.to_thread(_vector_query, kb_ids, embedding, fetch_k)
+        return sorted(results, key=lambda item: item['score'], reverse=True)
+    # Start keyword work immediately: a stalled embedding service must not
+    # delay the only available retrieval leg.
+    tasks = [asyncio.create_task(vector()),
+             asyncio.create_task(db.kb_fts_search(kb_ids, query_text, limit=fetch_k))]
     try:
-        keyword_results = await db.kb_fts_search(kb_ids, query_text, limit=fetch_k)
-    except Exception as e:
-        print(f"[RAG] FTS leg error: {e}")
-        keyword_results = []
+        await asyncio.wait(tasks, timeout=max(0, deadline-time.monotonic()))
+        vector_results, keyword_results = [
+            task.result() if task.done() and not task.cancelled() and task.exception() is None else []
+            for task in tasks]
+    finally:
+        for task in tasks:
+            if not task.done(): task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     if not keyword_results and not vector_results:
         return []
@@ -580,6 +624,7 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
                     "filename": r["filename"],
                     "kb_id": r["kb_id"],
                     "chunk_index": int(r.get("chunk_index", 0)),
+                    "location": r.get("location") or location_from_text(r["text"]),
                     "score": 0.0,   # cosine similarity for display (filled below)
                     "_rrf": 0.0,
                 }
@@ -603,7 +648,12 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
     # Optional LLM rerank over the fused candidates (config RAG_RERANKER=llm).
     # Fails open inside rerank() — any error returns the RRF order unchanged.
     if reranker.enabled() and len(ordered) > top_k:
-        return await reranker.rerank(query_text, ordered, top_k)
+        remaining = deadline-time.monotonic()
+        if remaining > .01:
+            try:
+                return await asyncio.wait_for(reranker.rerank(query_text, ordered, top_k), remaining)
+            except asyncio.TimeoutError:
+                pass
 
     return ordered[:top_k]
 
@@ -674,7 +724,8 @@ def format_context(chunks: list[dict], max_chars: int = 6000, numbered: bool = F
         if total >= max_chars:
             break
         prefix = f"[{n}] " if numbered else ""
-        header = f"{prefix}[{chunk['filename']} (relevance: {chunk['score']:.0%})]"
+        location=chunk.get("location") or location_from_text(chunk["text"])
+        header = f"{prefix}[{chunk['filename']}{' — '+location if location else ''} (relevance: {chunk['score']:.0%})]"
         text = chunk["text"]
         if total + len(text) > max_chars:
             text = text[:max_chars - total]
@@ -1117,3 +1168,10 @@ async def query_history(user_id: str, query_text: str, top_k: int = 6,
     except Exception as e:
         print(f"[RAG] History query failed: {e}")
         return []
+
+
+def location_from_text(text):
+    match=re.search(r'^\[(Page \d+|Location: [^\n]+)\]',text or '',re.M)
+    if match:return match[1].removeprefix('Location: ')
+    heading=re.search(r'^#{1,6}\s+(.+)',text or '',re.M)
+    return 'Section: '+heading[1][:200] if heading else ''

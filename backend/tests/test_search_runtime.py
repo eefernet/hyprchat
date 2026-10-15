@@ -289,7 +289,8 @@ def test_embedding_timeout_does_not_fan_out_legacy_requests():
 
 def test_health_does_not_label_connection_outage_as_rate_limit(monkeypatch):
     pytest.importorskip("fastapi")
-    from routes import health
+    from .optional_deps import load_route_module
+    health = load_route_module(monkeypatch, "health")
     client = AsyncMock()
     client.get.side_effect = [httpx.Response(200), httpx.Response(200, json={
         "results": [], "unresponsive_engines": [["bing", "HTTP connection error"]]})]

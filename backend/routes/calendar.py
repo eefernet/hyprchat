@@ -23,9 +23,11 @@ class EventCreate(BaseModel):
     location: str = ""
     all_day: bool = False
     remind_minutes: Optional[int] = None
+    rrule: Optional[str] = None
 
 
 class EventUpdate(BaseModel):
+    recurrence_id: Optional[str] = None
     title: Optional[str] = None
     start_local: Optional[str] = None
     end_local: Optional[str] = None
@@ -33,6 +35,7 @@ class EventUpdate(BaseModel):
     location: Optional[str] = None
     all_day: Optional[bool] = None
     remind_minutes: Optional[int] = None
+    rrule: Optional[str] = None
 
 
 class CaldavAccountCreate(BaseModel):
@@ -55,6 +58,8 @@ class CaldavAccountUpdate(BaseModel):
 def _localized(event: dict, tz: str) -> dict:
     event["start_local"] = pim.utc_to_local(event.get("start_at") or "", tz)
     event["end_local"] = pim.utc_to_local(event.get("end_at") or "", tz)
+    event["series_start_local"] = pim.utc_to_local(event.get("series_start_at") or "", tz)
+    event["series_end_local"] = pim.utc_to_local(event.get("series_end_at") or "", tz)
     return event
 
 
@@ -63,7 +68,11 @@ async def list_events(start_local: str = "", end_local: str = ""):
     tz = await pim.user_timezone()
     start = pim.local_to_utc(start_local, tz) or ""
     end = pim.local_to_utc(end_local, tz) or ""
-    events = await db.list_calendar_events(start=start, end=end)
+    from calendar_resources import list_occurrences
+    try:
+        events = await list_occurrences(start=start, end=end)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return [_localized(e, tz) for e in events]
 
 
@@ -76,7 +85,7 @@ async def create_event(req: EventCreate):
         event = await pim.create_event(
             title=title, start_local=req.start_local, end_local=req.end_local,
             description=req.description, location=req.location,
-            all_day=req.all_day, remind_minutes=req.remind_minutes)
+            all_day=req.all_day, remind_minutes=req.remind_minutes, rrule=req.rrule or "")
     except ValueError as e:
         raise HTTPException(400, str(e))
     return _localized(event, await pim.user_timezone())
@@ -103,6 +112,23 @@ async def delete_event(event_id: str):
 
 
 # ── CalDAV accounts ──
+@router.get('/api/calendar/proposals')
+async def proposals(status: str = 'pending'):
+    import calendar_proposals
+    return await calendar_proposals.list_proposals(status)
+
+
+@router.post('/api/calendar/proposals/{proposal_id}/{decision}')
+async def decide_proposal(proposal_id: str, decision: str):
+    import calendar_proposals
+    try:
+        return await calendar_proposals.decide(proposal_id,decision)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
 
 @router.get("/api/calendar/caldav")
 async def list_caldav_accounts():
@@ -168,3 +194,20 @@ async def sync_now():
             results[account["id"]] = {"error": str(e)[:300]}
             await db.update_caldav_account(account["id"], {"last_error": str(e)[:500]})
     return results
+
+
+@router.get('/api/calendar/conflicts')
+async def calendar_conflicts():
+    import calendar_resources
+    return await calendar_resources.conflicts()
+
+
+@router.post('/api/calendar/conflicts/{conflict_id}/{choice}')
+async def resolve_calendar_conflict(conflict_id: int, choice: str):
+    import calendar_resources
+    try:
+        return await calendar_resources.resolve(conflict_id, choice)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc

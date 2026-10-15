@@ -133,6 +133,14 @@ async def list_messages(account_id: str = "", limit: int = 50,
                                         include_archived=include_archived)
 
 
+@router.post('/api/email/messages/{message_id}/triage/retry')
+async def retry_triage(message_id: str):
+    if not await db.get_email_message(message_id):
+        raise HTTPException(404,'Message not found')
+    return await db.update_email_message(message_id,{'triage_attempts':0,'triage_retry_at':'',
+        'triage_status':'queued','triage_error':'','urgency':''})
+
+
 @router.get("/api/email/messages/{message_id}/body")
 async def read_body(message_id: str):
     msg = await db.get_email_message(message_id)

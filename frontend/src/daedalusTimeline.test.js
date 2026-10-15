@@ -68,3 +68,22 @@ test('a persistent v3 job owns its message in every state, not only legacy-activ
   assert.equal(_isDaedalusOutput({ workflows: [{ id: 'cw-legacy', state: 'completed' }] }), false);
   assert.equal(_isDaedalusOutput({ workflows: [] }), false);
 });
+
+test('documents never become Daedalus from run IDs, live events or saved metadata',()=>{
+  const events=[{type:'tool_start',data:{tool:'document_create',run_id:'doc-1',run_role:'documents'}}];
+  for(const input of [
+    {liveEvents:events,runIds:['doc-1']},
+    {savedEvents:events,meta:{run_ids:['doc-1']}},
+    {savedEvents:[...events,{data:{tool:'download_file'}}]},
+    {meta:{run_ids:['doc-1','doc-2','doc-3'],run_roles:['documents']},runIds:['doc-1','doc-2','doc-3']},
+  ]){
+    assert.equal(_isDaedalusOutput(input),false);
+    assert.equal(_isDaedalusFullBuildOutput(input),false);
+  }
+  assert.equal(_isDaedalusOutput({runIds:['unknown-run']}),false);
+  assert.equal(_isDaedalusOutput({meta:{run_roles:['builder.feature']}}),true);
+});
+
+test('mixed document and coding events preserve genuine Daedalus classification',()=>{
+  assert.equal(_isDaedalusOutput({savedEvents:[{data:{tool:'document_create',run_id:'doc-a'}},{data:{tool:'generate_code',run_id:'run-b'}}]}),true);
+});

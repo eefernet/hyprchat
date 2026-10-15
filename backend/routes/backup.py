@@ -1,6 +1,7 @@
 """Backup export / staged-restore routes."""
 import asyncio
 import os
+import tempfile
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -40,10 +41,15 @@ async def restore_backup(file: UploadFile = File(...)):
     Never applies in-process — SQLite is live; apply_pending_restore runs at
     lifespan startup before init_db."""
     os.makedirs(backup_svc.BACKUP_DIR, exist_ok=True)
-    upload_path = os.path.join(backup_svc.BACKUP_DIR, "restore-upload.tar.gz")
+    fd, upload_path = tempfile.mkstemp(prefix="restore-upload-", suffix=".tar.gz", dir=backup_svc.BACKUP_DIR)
+    os.close(fd)
+    uploaded = 0
     try:
         with open(upload_path, "wb") as f:
             while chunk := await file.read(1024 * 1024):
+                uploaded += len(chunk)
+                if uploaded > backup_svc.MAX_ARCHIVE_BYTES:
+                    raise ValueError("Backup upload exceeds size limit")
                 # Disk write off the event loop — a multi-GB restore upload on
                 # slow storage otherwise stalls every other request.
                 await asyncio.to_thread(f.write, chunk)
@@ -63,13 +69,13 @@ async def restore_backup(file: UploadFile = File(...)):
 @router.delete("/api/backup/restore")
 async def cancel_staged_restore():
     """Cancel a staged restore before the restart applies it."""
-    import shutil
     try:
-        os.remove(backup_svc.RESTORE_MARKER)
-    except OSError:
+        await asyncio.to_thread(backup_svc.cancel_staged_restore)
+    except FileNotFoundError:
         raise HTTPException(404, "No restore is staged")
-    shutil.rmtree(backup_svc.RESTORE_PENDING_DIR, ignore_errors=True)
-    return {"cancelled": True}
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
 
 
 @router.get("/api/backup/status")

@@ -11,6 +11,7 @@ import urllib.parse
 import config
 import database as db
 from model_providers import strip_leaked_cot
+import council_runtime
 
 
 def _is_gibberish(text: str, threshold: float = 0.3) -> bool:
@@ -66,7 +67,7 @@ async def _resolve_member_personas(members: list[dict]) -> list[dict]:
             try:
                 mc = await db.get_model_config(mc_id)
                 if mc and _is_persona_config(mc):
-                    m["model"] = mc.get("base_model") or m.get("model") or config.DEFAULT_MODEL
+                    m["model"] = m.get("model") or mc.get("base_model") or config.DEFAULT_MODEL
                     m["system_prompt"] = mc.get("system_prompt") or m.get("system_prompt") or ""
                     m["persona_name"] = mc.get("name") or m.get("persona_name") or ""
                 elif mc:
@@ -123,23 +124,11 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
     debate_rounds = council.get("debate_rounds", 0) or 0
     messages = req_messages
 
-    # ── Validate all models exist in Ollama ──
-    try:
-        _tags_r = await http.get(f"{config.OLLAMA_URL}/api/tags", timeout=10)
-        if _tags_r.status_code == 200:
-            _available = {m["name"] for m in _tags_r.json().get("models", [])}
-            _fallback = next(iter(_available), config.DEFAULT_MODEL)
-            # Fix host model if deleted
-            if host_model not in _available:
-                print(f"[COUNCIL] Host model '{host_model}' not found, falling back to '{_fallback}'")
-                host_model = _fallback
-            # Fix member models if deleted
-            for member in members:
-                if member.get("model") and member["model"] not in _available:
-                    print(f"[COUNCIL] Member model '{member['model']}' not found, falling back to '{_fallback}'")
-                    member["model"] = _fallback
-    except Exception as _e:
-        print(f"[COUNCIL] Could not validate models: {_e}")
+    # Selected models are authoritative. Provider failures belong to that
+    # member; silently substituting an arbitrary local model changes the council.
+    budget = council_runtime.Budget(council, [host_model, *[m.get('model','') for m in members]])
+    member_errors = {}
+
 
     # ── RAG: Query attached knowledge bases for council context ──
     kb_context = ""
@@ -238,55 +227,26 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 if extra:
                     msgs.append({"role": "user", "content": extra})
 
-            payload = {
-                "model": model,
-                "messages": [{"role": "system", "content": sys_p}] + msgs,
-                "stream": True,
-                "think": False,
-                "options": {"num_ctx": context_policy.helper_context("extraction")},
-                "keep_alive": "30m",
-            }
             full = ""
-            max_attempts = 2
-            for attempt in range(max_attempts):
-                full = ""
-                try:
-                    async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
-                                           json=payload, timeout=180) as resp:
-                        async for line in resp.aiter_lines():
-                            if not line.strip():
-                                continue
-                            try:
-                                chunk = json.loads(line)
-                            except Exception:
-                                continue
-                            content = chunk.get("message", {}).get("content", "")
-                            if content:
-                                full += content
-                                await output_q.put({"type": "council_token",
-                                                    "member_id": mid, "model": model,
-                                                    "member_name": member_name,
-                                                    "content": content, "round": round_num,
-                                                    "round_label": label,
-                                                    "responding_to": responding_to})
-                            if chunk.get("done"):
-                                break
-                except Exception as e:
-                    print(f"[COUNCIL] Member {member.get('persona_name', model)} error (attempt {attempt+1}): {e}")
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(2)
-                        continue
-                    await output_q.put({"type": "council_token", "member_id": mid,
-                                        "model": model, "member_name": member_name,
-                                        "content": f"\n[Error: {e}]", "round": round_num,
-                                        "round_label": label,
-                                        "responding_to": responding_to})
-                # Got a non-empty response, break retry loop
-                if full.strip():
-                    break
-                elif attempt < max_attempts - 1:
-                    print(f"[COUNCIL] Member {member.get('persona_name', model)} empty response, retrying...")
-                    await asyncio.sleep(2)
+            try:
+                async for event in council_runtime.stream(http, model,
+                        [{"role":"system","content":sys_p}] + msgs, budget, conv_id):
+                    if event.get('type') == 'token':
+                        content = event.get('content','')
+                        full += content
+                        await output_q.put({"type":"council_token","member_id":mid,"model":model,
+                            "member_name":member_name,"content":content,"round":round_num,
+                            "round_label":label,"responding_to":responding_to})
+                    elif event.get('type') == 'usage':
+                        await output_q.put({"type":"council_usage","member_id":mid,"model":model,
+                                           "prompt_tokens":event.get("prompt_tokens",0),"gen_tokens":event.get("gen_tokens",0)})
+            except Exception as exc:
+                member_errors[mid] = str(exc)[:500]
+                await output_q.put({"type":"council_error","member_id":mid,"model":model,
+                    "member_name":member_name,"error":member_errors[mid],"round":round_num})
+                # Partial visible output stays available, but is labelled and
+                # never silently retried with another paid request.
+                full = (full + "\n\n" if full else '') + f"[Member failed: {member_errors[mid]}]"
             # Strip leaked CoT (Ollama 0.30 + gemma4) before the response
             # enters debate context, votes, synthesis, and DB persistence.
             # Live-streamed tokens may transiently show it; the stored and
@@ -299,19 +259,23 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
 
         tasks = [asyncio.create_task(query_member(m)) for m in members]
 
-        done_count = 0
-        total = len(members)
-        while done_count < total or not output_q.empty():
-            try:
-                item = await asyncio.wait_for(output_q.get(), timeout=0.05)
-                if item["type"] == "council_done":
-                    done_count += 1
-                yield item
-            except asyncio.TimeoutError:
-                if done_count >= total:
-                    break
+        try:
+            done_count = 0
+            total = len(members)
+            while done_count < total or not output_q.empty():
+                try:
+                    item = await asyncio.wait_for(output_q.get(), timeout=0.05)
+                    if item["type"] == "council_done":
+                        done_count += 1
+                    yield item
+                except asyncio.TimeoutError:
+                    if done_count >= total:
+                        break
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            for task in tasks:
+                if not task.done(): task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Update tracking — only overwrite if the member actually responded
         for mid, content in round_responses.items():
@@ -431,15 +395,11 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 f'REASON: [one specific sentence comparing the chosen response to at least one alternative]'
             )
             try:
-                r = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
-                    "model": member["model"],
-                    "messages": [{"role": "user", "content": vote_prompt}],
-                    "stream": False,
-                    "think": False,
-                    "options": {"temperature": 0.1, "num_ctx": context_policy.helper_context("extraction"), "num_predict": 120},
-                    "keep_alive": "30m",
-                }, timeout=30)
-                text = strip_leaked_cot(r.json()["message"]["content"].strip())[0]
+                text = ''
+                async for event in council_runtime.stream(http, member['model'],
+                        [{"role":"user","content":vote_prompt}], budget, conv_id, max_output=120):
+                    if event.get('type') == 'token': text += event.get('content','')
+                text = strip_leaked_cot(text.strip())[0]
                 vote_m = re.search(r'VOTE:\s*["\']?([^"\'\n\r]+)["\']?', text, re.IGNORECASE)
                 reason_m = re.search(r'REASON:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
                 voted_name = vote_m.group(1).strip() if vote_m else ""
@@ -535,26 +495,17 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
             {"role": "system", "content": host_system},
             {"role": "user", "content": f"Question: {last_user_msg}\n\n{debate_note}Council responses:\n{all_resp}{vote_summary}\n\nProvide a synthesis and final verdict in English. Reference the peer votes and how positions evolved during the debate if relevant."}
         ]
-        payload = {"model": host_model, "messages": host_msgs, "stream": True, "think": False, "options": {"num_ctx": context_policy.helper_context("extraction")}, "keep_alive": "30m"}
         host_full = ""
         try:
-            async with http.stream("POST", f"{config.OLLAMA_URL}/api/chat",
-                                   json=payload, timeout=180) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except Exception:
-                        continue
-                    content = chunk.get("message", {}).get("content", "")
-                    if content:
-                        host_full += content
-                        yield f"data: {json.dumps({'type': 'council_host_token', 'content': content})}\n\n"
-                    if chunk.get("done"):
-                        break
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'council_host_token', 'content': f'[Host error: {e}]'})}\n\n"
+            async for event in council_runtime.stream(http, host_model, host_msgs, budget, conv_id):
+                if event.get('type') == 'token':
+                    content = event.get('content','')
+                    host_full += content
+                    yield f"data: {json.dumps({'type':'council_host_token','content':content})}\n\n"
+        except Exception as exc:
+            failure = f"[Host failed: {str(exc)[:500]}]"
+            host_full += "\n\n" + failure
+            yield f"data: {json.dumps({'type':'council_host_token','content':failure})}\n\n"
         if host_full:
             _host_clean, _host_leaked = strip_leaked_cot(host_full)
             if _host_leaked:
@@ -562,7 +513,7 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                 host_full = _host_clean or host_full
             council_id = council.get("id", "")
             await db.add_message(conv_id, "assistant", host_full,
-                                 metadata={"council_host": True, "council_id": council_id,
+                                 metadata={"council_host": True, "council_id": council_id, "usage": budget.summary(), "member_errors": member_errors,
                                            "votes": vote_details, "tally": vote_tally,
                                            "winners": winners,
                                            "winner": winners[0] if winners else None,
@@ -570,4 +521,4 @@ async def stream_council_chat(http, events, council, req_messages, conv_id, quic
                                            "round_count": debate_rounds + 1,
                                            "round_label": "Moderator Verdict"})
 
-    yield f"data: {json.dumps({'type': 'council_complete'})}\n\n"
+    yield f"data: {json.dumps({'type': 'council_complete', 'usage': budget.summary(), 'member_errors': member_errors})}\n\n"
