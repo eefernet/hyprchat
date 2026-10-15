@@ -62,7 +62,10 @@ step "Checking repository layout..."
 [ -d "$APP_ROOT" ] || die "Expected HyprChat at $APP_ROOT. Clone or copy the repo there first."
 require_file "$APP_ROOT/.env.example"
 require_file "$APP_ROOT/backend/main.py"
-require_file "$APP_ROOT/backend/requirements.txt"
+require_file "$APP_ROOT/backend/requirements.lock.txt"
+if systemctl cat hyprchat >/dev/null 2>&1; then
+    die "Existing installation: use scripts/staged_release.py prepare/activate for a recoverable upgrade."
+fi
 require_file "$APP_ROOT/backend/hyprchat.service"
 if [ ! -f "$APP_ROOT/frontend/dist/index.html" ]; then
     fail "Frontend not found at $APP_ROOT/frontend/dist/index.html"
@@ -88,7 +91,7 @@ pass "Service user ready"
 # ── [3/7] System packages ──
 step "Installing system packages..."
 apt update -qq > /dev/null 2>&1
-apt install -y -qq python3-pip curl > /dev/null 2>&1
+apt install -y -qq python3-pip python3-venv curl > /dev/null 2>&1
 pass "System packages ready"
 
 # ── [4/7] Create directories and environment ──
@@ -113,7 +116,9 @@ pass "Directories and ownership ready"
 # ── [5/7] Install Python deps ──
 step "Installing Python dependencies..."
 cd "$APP_ROOT/backend"
-pip install -r requirements.txt --break-system-packages -q 2>&1 | tail -1
+python3 -m venv "$APP_ROOT/venv"
+"$APP_ROOT/venv/bin/python" -m pip install --require-hashes -r requirements.lock.txt
+"$APP_ROOT/venv/bin/python" -m pip check
 pass "Python deps installed (incl. pypdf, chromadb)"
 
 # ── [6/7] Verify frontend ──

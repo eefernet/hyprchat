@@ -60,7 +60,7 @@ def test_health_concurrent_requests_share_probe_and_preserve_diagnosis(monkeypat
         cached = await health._check_searxng()
         assert cached["search_sample_cached"]
         assert cached["engine_errors"]
-        assert sum(u.endswith("/search") for u in calls) == 1
+        assert sum(u.split("?",1)[0].endswith("/search") for u in calls) == 1
         assert sum(u.endswith("/healthz") for u in calls) == 9
     asyncio.run(check())
 
@@ -86,7 +86,7 @@ def test_health_expiry_endpoint_change_and_listener_outage(monkeypatch, health):
         assert not (await health._check_searxng())["search_sample_cached"]
         listener_ok[0] = False
         assert (await health._check_searxng())["status"] == "error"
-        assert sum(c.args[0].endswith("/search") for c in client.get.call_args_list) == 3
+        assert sum(c.args[0].split("?",1)[0].endswith("/search") for c in client.get.call_args_list) == 3
     asyncio.run(check())
 
 
@@ -112,7 +112,7 @@ def test_cancelled_health_caller_does_not_cancel_shared_probe(monkeypatch, healt
         r = await second
         assert r["rate_limited"]
         assert r["search_status"] == "rate_limited"
-        assert sum(c.args[0].endswith("/search") for c in client.get.call_args_list) == 1
+        assert sum(c.args[0].split("?",1)[0].endswith("/search") for c in client.get.call_args_list) == 1
     asyncio.run(check())
 
 

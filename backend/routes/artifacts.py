@@ -747,3 +747,26 @@ async def bundle_artifacts_ep(req: ArtifactBundleRequest):
             {"related_artifact_id": bundle.get("id"), "filename": safe_bundle},
         )
     return bundle
+
+
+@router.get('/api/artifacts/{artifact_id}/revisions')
+async def artifact_revisions(artifact_id: str):
+    import document_revisions
+    return await document_revisions.family(artifact_id)
+
+
+@router.get('/api/artifacts/{artifact_id}/compare')
+async def compare_artifacts(artifact_id: str, earlier_id: str):
+    import document_revisions
+    return await document_revisions.compare(artifact_id,earlier_id)
+
+
+class RestoreRevision(BaseModel):
+    earlier_id: str
+    expected_sha256: str
+
+
+@router.post('/api/artifacts/{artifact_id}/restore')
+async def restore_artifact(artifact_id: str, body: RestoreRevision):
+    import document_revisions
+    return await document_revisions.restore(artifact_id,body.earlier_id,body.expected_sha256)

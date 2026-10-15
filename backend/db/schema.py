@@ -63,6 +63,13 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS message_context (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL, payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(message_id,sequence)
+);
+
 CREATE TABLE IF NOT EXISTS kb_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kb_id TEXT NOT NULL,
@@ -84,6 +91,15 @@ CREATE TABLE IF NOT EXISTS tools (
     code TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS indexing_jobs (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kb_id TEXT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL, filepath TEXT NOT NULL, sha256 TEXT NOT NULL,
+    status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, ended_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -474,6 +490,12 @@ CREATE TABLE IF NOT EXISTS research_sources (
 CREATE INDEX IF NOT EXISTS idx_research_sources_report ON research_sources(report_id);
 
 -- Report-owned evidence. Text is durable; Chroma is a rebuildable index.
+CREATE TABLE IF NOT EXISTS kb_index_metadata (
+    kb_id TEXT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL, index_version INTEGER NOT NULL, embedding_model TEXT NOT NULL,
+    chunk_count INTEGER NOT NULL, warnings_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(kb_id,filename));
+
 CREATE TABLE IF NOT EXISTS research_documents (
     report_id TEXT NOT NULL REFERENCES research_reports(id) ON DELETE CASCADE,
     source_id TEXT NOT NULL,
@@ -571,6 +593,15 @@ CREATE TABLE IF NOT EXISTS task_runs (
 CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_task_runs_user ON task_runs(user_id, started_at);
 
+-- Execution inputs are immutable once queued; no credentials are copied here.
+CREATE TABLE IF NOT EXISTS task_run_inputs (
+    run_id TEXT PRIMARY KEY REFERENCES task_runs(id) ON DELETE CASCADE,
+    task_json TEXT NOT NULL,
+    extra_context TEXT NOT NULL DEFAULT '',
+    queued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    child_report_id TEXT NOT NULL DEFAULT ''
+);
+
 -- Jarvis suite: in-app notification queue polled by the frontend bell.
 CREATE TABLE IF NOT EXISTS notifications (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -584,6 +615,23 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user_seen ON notifications(user_id, seen, id);
+
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
+    urgent INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(notification_id,channel)
+);
+CREATE INDEX IF NOT EXISTS notification_deliveries_due ON notification_deliveries(status,next_attempt);
+CREATE TABLE IF NOT EXISTS notification_delivery_attempts (
+    delivery_id INTEGER NOT NULL REFERENCES notification_deliveries(id) ON DELETE CASCADE,
+    attempt INTEGER NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(delivery_id,attempt)
+);
 
 -- Jarvis suite: notes + todos. Times are naive UTC; tz conversion happens at
 -- the tool/panel edges using the assistant-profile timezone.
@@ -705,6 +753,14 @@ CREATE TABLE IF NOT EXISTS email_messages (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_messages_uid ON email_messages(account_id, folder, uid);
 CREATE INDEX IF NOT EXISTS idx_email_messages_user ON email_messages(user_id, date_at);
 
+CREATE TABLE IF NOT EXISTS calendar_proposals (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL, message_key TEXT NOT NULL, title TEXT NOT NULL,
+    start_at TEXT NOT NULL, end_at TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+    timezone TEXT NOT NULL DEFAULT 'UTC', status TEXT NOT NULL DEFAULT 'pending',
+    event_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, decided_at TEXT
+);
+
 -- Jarvis suite: per-user personal assistant profile. The persona itself is a
 -- model_configs row; this table pins the conversation and holds runtime knobs.
 CREATE TABLE IF NOT EXISTS assistant_profiles (
@@ -717,4 +773,10 @@ CREATE TABLE IF NOT EXISTS assistant_profiles (
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS image_jobs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    job_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS image_jobs_owner ON image_jobs(user_id);
 """

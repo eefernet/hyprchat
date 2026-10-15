@@ -33,13 +33,17 @@ import config
 import database as db
 import cancel_registry
 import notifications
+import task_queue
 
 _http = None
 _events = None
+_cancel_research_report = None
 _create_research_report = None  # async callable(dict) -> report row
 _loop_task: asyncio.Task | None = None
 _run_semaphore = asyncio.Semaphore(1)
 _bg_runs: set[asyncio.Task] = set()
+_run_ids: set[str] = set()
+_service_tasks: set[asyncio.Task] = set()
 
 TERMINAL_RUN_STATUSES = ("succeeded", "failed", "cancelled")
 EVENT_NAMES = ("email_received", "urgent_email_received",
@@ -208,40 +212,68 @@ async def validated_next_run(schedule_kind: str, schedule_json: dict | None,
 # lifecycle
 # ------------------------------------------------------------------
 
-def start(http, events, *, create_research_report=None) -> asyncio.Task:
+def start(http, events, *, create_research_report=None, cancel_research_report=None) -> asyncio.Task:
     """Called once from the lifespan after the reapers.
 
     SINGLE-WORKER INVARIANT: claim_due_tasks is a plain SELECT with no
     lease/claim column. Running Uvicorn with more than one worker starts N
     tick loops that each select the same due rows and double-fire every task.
     Keep --workers 1 (SQLite's single-writer rule requires it anyway)."""
-    global _http, _events, _create_research_report, _loop_task
+    global _http, _events, _create_research_report, _cancel_research_report, _loop_task
     _http = http
     _events = events
     _create_research_report = create_research_report
+    _cancel_research_report = cancel_research_report
     notifications.configure(http)
     _loop_task = asyncio.create_task(_tick_loop())
+    for name in ('reminders', 'calendar', 'email', 'notifications'):
+        child = asyncio.create_task(_subsystem_loop(name))
+        _service_tasks.add(child)
+        child.add_done_callback(_service_tasks.discard)
     return _loop_task
 
 
 async def stop() -> None:
-    if _loop_task and not _loop_task.done():
-        _loop_task.cancel()
+    children = [*list(_service_tasks), *list(_bg_runs)]
+    if _loop_task:
+        children.append(_loop_task)
+    for task in children:
+        task.cancel()
+    await asyncio.gather(*children, return_exceptions=True)
+
+
+async def _subsystem_loop(name):
+    while True:
         try:
-            await _loop_task
-        except (asyncio.CancelledError, Exception):
-            pass
+            if name == 'reminders':
+                import pim
+                work = pim.reminder_scan()
+            elif name == 'calendar':
+                import caldav_sync
+                work = caldav_sync.sync_due_accounts()
+            elif name == 'email':
+                import email_triage
+                work = email_triage.poll_due_accounts(_http)
+            else:
+                import notification_delivery
+                work = notification_delivery.deliver_due()
+            await asyncio.wait_for(work, SUBSYSTEM_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[SCHEDULER] {name} failed: {type(exc).__name__}")
+        await asyncio.sleep(config.SCHEDULER_TICK_SECONDS)
 
 
 async def _tick_loop():
     while True:
-        await asyncio.sleep(config.SCHEDULER_TICK_SECONDS)
         try:
             await _tick()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"[SCHEDULER] tick error: {e}")
+        await asyncio.sleep(config.SCHEDULER_TICK_SECONDS)
 
 
 # Hard bound on each tick piggyback. Sockets have their own timeouts (IMAP 30s
@@ -252,6 +284,7 @@ _last_retention_sweep = ""  # YYYY-MM-DD of the last daily prune
 
 
 async def _tick():
+    await task_queue.reconcile_children()
     now_iso = datetime.utcnow().isoformat()
     due = await db.claim_due_tasks(now_iso)
     for task in due:
@@ -259,23 +292,10 @@ async def _tick():
             await _handle_due_task(task)
         except Exception as e:
             print(f"[SCHEDULER] failed to dispatch task {task.get('id')}: {e}")
-    # PIM piggybacks on the tick: due note/event reminders + CalDAV sync
-    # (call-time imports keep scheduler import-light and cycle-free).
-    try:
-        import pim
-        await asyncio.wait_for(pim.reminder_scan(), SUBSYSTEM_TIMEOUT)
-    except Exception as e:
-        print(f"[SCHEDULER] reminder scan failed: {e}")
-    try:
-        import caldav_sync
-        await asyncio.wait_for(caldav_sync.sync_due_accounts(), SUBSYSTEM_TIMEOUT)
-    except Exception as e:
-        print(f"[SCHEDULER] caldav sync failed: {e}")
-    try:
-        import email_triage
-        await asyncio.wait_for(email_triage.poll_due_accounts(_http), SUBSYSTEM_TIMEOUT)
-    except Exception as e:
-        print(f"[SCHEDULER] email poll failed: {e}")
+    # Queued rows survive once-only schedule disablement and process restarts.
+    for pending in await task_queue.pending():
+        _launch_run(pending['task'], pending['id'], trigger=pending['trigger'],
+                    extra_context=pending['extra_context'])
     # Daily retention sweep — notifications and task_runs otherwise grow
     # without bound (one row per run + per notify, forever).
     global _last_retention_sweep
@@ -304,26 +324,19 @@ async def _handle_due_task(task: dict) -> None:
                 await db.update_scheduled_task(task["id"], {"next_run": deferred})
                 return
 
-        # Advance next_run BEFORE executing (crash-safe, no hot loops).
         tz_name = await resolve_task_timezone(task)
         nxt = compute_next_run(task["schedule_kind"], task.get("schedule_json") or {}, tz_name)
-        if task["schedule_kind"] == "once":
-            await db.update_scheduled_task(task["id"], {"next_run": None, "enabled": False})
-        else:
-            await db.update_scheduled_task(task["id"], {"next_run": nxt})
-            if nxt is None and task["schedule_kind"] not in ("event", "webhook"):
-                # A recurring task with no next_run is never re-selected — it
-                # would die silently. Tell the owner instead of vanishing.
-                print(f"[SCHEDULER] task {task['id']} ({task.get('title')}) could not compute next run — parking it")
-                try:
-                    await notifications.notify(
-                        "Scheduled task parked",
-                        f"\"{task.get('title') or task['id']}\" could not compute its next run "
-                        "time and will not fire again. Check its schedule in the Tasks panel.",
-                        kind="task", user_id=user_id)
-                except Exception as ne:
-                    print(f"[SCHEDULER] park notification failed: {ne}")
-        _spawn_run(task, trigger="schedule")
+        once = task["schedule_kind"] == "once"
+        advance = {"next_run": None if once else nxt}
+        if once:
+            advance['enabled'] = False
+        run_id = await task_queue.enqueue(task, trigger='schedule', advance=advance)
+        if run_id:
+            await _launch_persisted(run_id)
+        if run_id and not once and nxt is None and task["schedule_kind"] not in ('event', 'webhook'):
+            await notifications.notify("Scheduled task parked",
+                f"\"{task.get('title') or task['id']}\" could not compute its next run time. Check its schedule in the Tasks panel.",
+                kind='task', user_id=user_id)
     finally:
         db.reset_current_user_id(token)
 
@@ -343,13 +356,26 @@ async def _user_active_recently(user_id: str, seconds: int = 180) -> bool:
 # execution
 # ------------------------------------------------------------------
 
-def _spawn_run(task: dict, *, trigger: str, extra_context: str = "") -> str:
-    run_id = f"taskrun-{uuid.uuid4().hex[:10]}"
-    bg = asyncio.create_task(_execute_task(task, run_id, trigger=trigger,
-                                           extra_context=extra_context))
+def _launch_run(task, run_id, *, trigger, extra_context=''):
+    if run_id in _run_ids:
+        return
+    _run_ids.add(run_id)
+    bg = asyncio.create_task(_execute_task(task, run_id, trigger=trigger, extra_context=extra_context))
     _bg_runs.add(bg)
     bg.add_done_callback(_bg_runs.discard)
+    bg.add_done_callback(lambda _: _run_ids.discard(run_id))
+
+
+async def _spawn_run(task: dict, *, trigger: str, extra_context: str = "") -> str:
+    run_id = await task_queue.enqueue(task, trigger=trigger, extra_context=extra_context)
+    if run_id:
+        await _launch_persisted(run_id)
     return run_id
+
+
+async def _launch_persisted(run_id):
+    for row in await task_queue.pending(run_id):
+        _launch_run(row['task'], row['id'], trigger=row['trigger'], extra_context=row['extra_context'])
 
 
 async def run_task_now(task_id: str, *, trigger: str = "manual") -> str | None:
@@ -357,7 +383,7 @@ async def run_task_now(task_id: str, *, trigger: str = "manual") -> str | None:
     task = await db.get_scheduled_task(task_id)
     if not task:
         return None
-    return _spawn_run(task, trigger=trigger)
+    return await _spawn_run(task, trigger=trigger)
 
 
 async def _execute_task(task: dict, run_id: str, *, trigger: str,
@@ -366,32 +392,49 @@ async def _execute_task(task: dict, run_id: str, *, trigger: str,
     token = db.set_current_user_id(user_id)
     cancel_registry.register(run_id)
     status, result_text, error = "failed", "", ""
+    started = False
     try:
-        await db.add_task_run(run_id, task["id"], trigger=trigger)
-        await db.update_scheduled_task(task["id"], {
-            "last_run": datetime.utcnow().isoformat(), "last_status": "running"})
         async with _run_semaphore:
+            started = await task_queue.start_run(run_id)
+            if not started:
+                return
+            await db.update_scheduled_task(task['id'], {
+                'last_run': datetime.utcnow().isoformat(), 'last_status': 'running'})
             result_text = await asyncio.wait_for(
-                _dispatch(task, run_id, extra_context=extra_context),
+                cancel_registry.await_cancellable(_dispatch(task, run_id, extra_context=extra_context), run_id),
                 timeout=config.SCHEDULED_RUN_TIMEOUT,
             )
-        status = "succeeded"
+        child=await task_queue.child_report(run_id)
+        child_state=await db.get_research_report(child) if child else None
+        status = 'partial' if child_state and child_state['status']=='partial' else 'succeeded'
     except cancel_registry.RunCancelled:
         status, error = "cancelled", "cancelled by user"
+        child = await task_queue.child_report(run_id)
+        if child and _cancel_research_report:
+            try:
+                await _cancel_research_report(child)
+            except Exception:
+                status, error = 'cancelling', 'Child cancellation could not be confirmed; retry Stop'
+            child_state = await db.get_research_report(child)
+            if child_state and child_state['status'] in {'queued','running','cancelling'}:
+                status, error = 'cancelling', 'Waiting for child research cancellation acknowledgement'
     except asyncio.TimeoutError:
         error = f"timed out after {config.SCHEDULED_RUN_TIMEOUT}s"
     except asyncio.CancelledError:
-        # Shutdown mid-run — the startup reaper will mark the row failed.
+        status, error = 'interrupted', 'Backend stopped; external effects require review before rerunning'
         raise
     except Exception as e:
         error = str(e)[:2000]
     finally:
         cancel_registry.cleanup(run_id)
         try:
-            await db.finish_task_run(run_id, status,
-                                     result_text=result_text or "", error=error)
-            await db.update_scheduled_task(task["id"], {"last_status": status})
-            await _deliver_result(task, status, result_text, error)
+            # A task cancelled while waiting for the slot remains queued and
+            # can safely resume. Running work is never automatically repeated.
+            if started:
+                await db.finish_task_run(run_id, status, result_text=result_text or '', error=error)
+                await db.update_scheduled_task(task['id'], {'last_status': status})
+                if status not in {'interrupted','cancelling'}:
+                    await _deliver_result(task, status, result_text, error)
         except Exception as e:
             print(f"[SCHEDULER] finalize failed for {run_id}: {e}")
         db.reset_current_user_id(token)
@@ -399,8 +442,6 @@ async def _execute_task(task: dict, run_id: str, *, trigger: str,
 
 async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
     """Run the task body. Returns a short result summary for task_runs."""
-    from agents import assistant as assistant_mod  # call-time: avoids tools.py cycle
-
     task_type = task.get("task_type") or "llm"
     prompt = (task.get("prompt") or "").strip()
     if extra_context:
@@ -424,7 +465,19 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
             "query": prompt or task.get("title") or "scheduled research",
             "model": task.get("model") or "",
         })
-        return f"research report {report.get('id', '')} queued"
+        report_id = report['id']
+        await task_queue.attach_child(run_id, report_id)
+        while True:
+            current = await db.get_research_report(report_id)
+            if not current:
+                raise RuntimeError('Child research report is unavailable')
+            if current['status'] not in {'queued', 'running', 'cancelling'}:
+                if current['status'] not in {'complete', 'completed','partial'}:
+                    raise RuntimeError(f"Child research {current['status']}: {current.get('error') or 'Review the saved report'}")
+                return f"Research report {report_id} {current['status']}: {current.get('summary') or current.get('title') or ''}"
+            await asyncio.sleep(1)
+
+    from agents import assistant as assistant_mod  # call-time: avoids tools.py cycle
 
     if task_type == "check_in":
         # Self-heal: the pinned conversation may have been deleted since the
@@ -511,7 +564,7 @@ async def fire_event(event_name: str, user_id: str | None = None) -> int:
         trig["counter"] = counter
         await db.update_scheduled_task(task["id"], {"event_trigger_json": trig}, user_id=uid)
         if counter % every == 0:
-            _spawn_run(task, trigger="event")
+            await _spawn_run(task, trigger="event")
             fired += 1
     return fired
 
@@ -522,4 +575,4 @@ def new_webhook_token() -> str:
 
 async def fire_webhook(task: dict, body_text: str) -> str:
     """Called by the /api/hooks route AFTER it sets the owner contextvar."""
-    return _spawn_run(task, trigger="webhook", extra_context=body_text)
+    return await _spawn_run(task, trigger="webhook", extra_context=body_text)

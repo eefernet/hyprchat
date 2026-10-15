@@ -235,6 +235,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:12,fontWeight:n.seen?600:800,color:t.text}}>{n.title}</div>
               {n.body&&<div style={{fontSize:11,color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.body}</div>}
+              {(n.deliveries||[]).map(d=><div key={d.channel} style={{fontSize:10,color:d.status==='uncertain'||d.status==='failed'?t.err:t.dim,marginTop:4}}>{d.channel}: {d.status.replaceAll('_',' ')} · {d.attempts} attempt{d.attempts===1?'':'s'}{d.error?` · ${d.error}`:''}{d.status==='uncertain'?' — Check the destination before sending again.':''}</div>)}
               <div style={{fontSize:9,color:t.mut,marginTop:4}}>{n.kind} · {fmtTs(n.created_at)}</div>
             </div>
             <button onClick={async()=>{try{await apiJson(`/api/notifications/${n.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));}finally{loadNotifs();}}} style={{...btnS(t.mut),padding:"3px 7px",fontSize:10}}><IC.Trash/></button>

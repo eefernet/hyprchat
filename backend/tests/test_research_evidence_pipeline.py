@@ -460,7 +460,7 @@ def test_shutdown_retains_research_snapshot(isolated, monkeypatch, saved_status)
         with pytest.raises(asyncio.CancelledError):
             await task
         row = await db.get_research_report('r1')
-        assert row['status'] == ('failed' if saved_status == 'running' else saved_status)
+        assert row['status'] == ('interrupted' if saved_status == 'running' else saved_status)
         if saved_status == 'running':
             assert 'interrupted' in row['error']
         assert 'Retained draft' in row['report_markdown']

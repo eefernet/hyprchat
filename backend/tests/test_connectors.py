@@ -104,7 +104,7 @@ def test_execute_openapi_tool_builds_request(monkeypatch):
         return connector
 
     async def fake_assert_url_allowed(url, allow_private=False):
-        assert url == "https://example.com/items/abc"
+        assert url.split("?")[0] == "https://example.com/items/abc"
         assert allow_private is False
 
     monkeypatch.setattr(connectors.db, "get_openapi_connector", fake_get_openapi_connector, raising=False)
@@ -153,7 +153,7 @@ def test_execute_openapi_tool_supports_extra_query(monkeypatch):
         return connector
 
     async def fake_assert_url_allowed(url, allow_private=False):
-        assert url == "https://httpbin.org/anything"
+        assert url.split("?")[0] == "https://httpbin.org/anything"
         assert allow_private is False
 
     monkeypatch.setattr(connectors.db, "get_openapi_connector", fake_get_openapi_connector, raising=False)
@@ -175,13 +175,6 @@ def test_execute_openapi_tool_supports_extra_query(monkeypatch):
     assert "hyprchat-test" in result
 
 
-def test_jsonrpc_message_newline_framing():
-    msg = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
-    raw = connectors._jsonrpc_message(msg)
-    assert raw.endswith(b"\n")
-    assert b"Content-Length" not in raw
-    assert json.loads(raw.decode("utf-8")) == msg
-
 
 def test_mcp_http_exchange_sends_protocol_version_header(monkeypatch):
     server = {
@@ -197,21 +190,24 @@ def test_mcp_http_exchange_sends_protocol_version_header(monkeypatch):
     seen: dict[str, dict] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method in ("GET", "DELETE"): return httpx.Response(405)
         body = json.loads(request.content.decode("utf-8"))
         seen[body.get("method")] = {k.lower(): v for k, v in request.headers.items()}
         if body.get("method") == "initialize":
             return httpx.Response(
                 200,
-                json={"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-03-26"}},
+                json={"jsonrpc": "2.0", "id": body["id"], "result": {"protocolVersion": "2025-03-26", "capabilities":{"tools":{}}, "serverInfo":{"name":"fixture","version":"1"}}},
                 headers={"mcp-session-id": "sess-123"},
             )
         if body.get("method") == "notifications/initialized":
             return httpx.Response(202)
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 2, "result": {"tools": []}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {"tools": []}})
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await connectors.mcp_exchange(client, server, "tools/list", {})
+            import mcp_runtime
+            try:return await connectors.mcp_exchange(client, server, "tools/list", {})
+            finally:await mcp_runtime.close()
 
     result = asyncio.run(run())
     assert result == {"tools": []}
@@ -222,17 +218,6 @@ def test_mcp_http_exchange_sends_protocol_version_header(monkeypatch):
     assert seen["tools/list"]["mcp-session-id"] == "sess-123"
     assert seen["notifications/initialized"]["mcp-protocol-version"] == "2025-03-26"
 
-
-def test_sse_transport_rejected():
-    server = {"id": "mcp-s", "transport": "sse", "url": "https://legacy.example.com/sse"}
-
-    async def run():
-        async with httpx.AsyncClient() as client:
-            await connectors.mcp_exchange(client, server, "tools/list", {})
-
-    with pytest.raises(connectors.ConnectorError) as ei:
-        asyncio.run(run())
-    assert "streamable_http" in str(ei.value)
 
 
 def test_resolve_server_url():

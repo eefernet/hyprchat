@@ -1,4 +1,7 @@
 # Tested OpenHands transport/session contract for the persistent Daedalus worker.
+fastapi==0.142.2
+uvicorn==0.54.0
+python-multipart==0.0.32
 openhands-sdk==1.11.4
 openhands-tools==1.11.4
 litellm==1.82.0

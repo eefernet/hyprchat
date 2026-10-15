@@ -51,8 +51,8 @@ async def delete_artifact_row_and_file(artifact: dict) -> dict:
         return {"deleted": False, "deleted_file": False}
     deleted_file = False
     if filepath:
-        outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
-        in_outputs = os.path.abspath(filepath).startswith(outputs_root)
+        roots = [os.path.abspath(root) + os.sep for root in (config.SANDBOX_OUTPUTS_DIR, config.ARTIFACT_DIR)]
+        in_outputs = any(os.path.abspath(filepath).startswith(root) for root in roots)
         refs = await db.count_artifacts_with_storage_path(
             artifact.get("storage_path") or "",
             exclude_id=artifact_id,
@@ -76,7 +76,7 @@ async def delete_artifact_files_for_user_ids(user_ids: list[str]) -> int:
         rows = [dict(row) for row in await conn.execute_fetchall("SELECT * FROM artifacts")]
     finally:
         await conn.close()
-    outputs_root = os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep
+    output_roots = [os.path.abspath(root) + os.sep for root in (config.SANDBOX_OUTPUTS_DIR, config.ARTIFACT_DIR)]
     keep_paths: set[str] = set()
     target_paths: set[str] = set()
     for artifact in rows:
@@ -84,7 +84,7 @@ async def delete_artifact_files_for_user_ids(user_ids: list[str]) -> int:
         if not filepath:
             continue
         abs_path = os.path.abspath(filepath)
-        if not abs_path.startswith(outputs_root):
+        if not any(abs_path.startswith(root) for root in output_roots):
             continue
         if artifact.get("user_id") in user_set:
             target_paths.add(abs_path)

@@ -280,7 +280,8 @@ def test_submit_pending_guard_blocks_cleanup_during_prompt_registration(monkeypa
 
     asyncio.run(comfyui.forget_job("prompt-new"))
 
-    assert cleanup_calls == ["cleanup"]
+    # An empty process registry cannot prove persisted siblings were transferred.
+    assert cleanup_calls == []
     assert comfyui._ACTIVE_JOBS == set()
 
 

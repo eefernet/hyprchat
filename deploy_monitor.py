@@ -110,6 +110,13 @@ WATCHED = {
     "frontend/src/versionCheck.js": ("Frontend (build)", REMOTE_FRONTEND, False),
     "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
     "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
+    **{path:('Reliability services',REMOTE_BACKEND,True) for path in (
+        'backend/job_registry.py','backend/task_queue.py','backend/notification_delivery.py',
+        'backend/council_runtime.py','backend/indexing_jobs.py',
+        'backend/calendar_proposals.py','backend/calendar_resources.py','backend/library_search.py',
+        'backend/context_inspector.py','backend/research_checkpoints.py','backend/document_revisions.py',
+        'backend/mcp_runtime.py','backend/mcp_stdio_guard.py','backend/connector_http.py','backend/operations.py')},
+    'backend/routes/jobs.py': ('Jobs API',REMOTE_ROUTES,True),
     "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
     "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
     "backend/artifact_files.py":    ("Artifact Files",   REMOTE_BACKEND,            True),
@@ -123,6 +130,10 @@ WATCHED = {
     "backend/research_evidence.py": ("Research Evidence", REMOTE_BACKEND, True),
     "backend/research_writer.py": ("Research Writer", REMOTE_BACKEND, True),
     "backend/model_management.py":  ("Model Management", REMOTE_BACKEND,            True),
+    "backend/access_policy.py": ("Access Policy", REMOTE_BACKEND, True),
+    "backend/route_policy.json": ("Route Policy", REMOTE_BACKEND, True),
+    "backend/durable_storage.py": ("Durable Storage", REMOTE_BACKEND, True),
+    "backend/image_job_store.py": ("Image Job Store", REMOTE_BACKEND, True),
     "backend/backup.py":            ("Backup Service",   REMOTE_BACKEND,            True),
     "backend/db/__init__.py":       ("Database Package", REMOTE_DB,                 True),
     "backend/db/schema.py":         ("Database Schema",  REMOTE_DB,                 True),
@@ -199,6 +210,7 @@ WATCHED = {
     "backend/agents/language_adapters.py":("Language Adapters", REMOTE_AGENTS, True),
     "backend/agents/assistant.py":      ("Assistant Agent",    REMOTE_AGENTS, True),
     "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),
+    "backend/requirements.lock.txt": ("Backend Lock", REMOTE_BACKEND, True),
     "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
     "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
     # Frontend has a Vite build step now. Watch the SOURCE — a change here runs
@@ -261,6 +273,7 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    'frontend/src/panels/JobsPanel.jsx',
     "frontend/src/components/DocumentActivity.jsx", "frontend/src/components/DocumentPreviewPanel.jsx", "frontend/src/daedalusTimeline.js", "frontend/src/documentFiles.js", "frontend/src/components/OfficePreview.jsx", "frontend/src/components/DocumentSettings.jsx",
     "frontend/src/daedalusJobStore.js", "frontend/src/components/daedalusJob.css",
     "frontend/src/components/daedalusSettings.css",
@@ -279,6 +292,12 @@ FRONTEND_SRC_FILES = {
     "frontend/src/ModelPicker.jsx",
     "frontend/src/canvasEditorSetup.js",
     "frontend/src/components/ArtifactCanvas.jsx",
+    "frontend/src/components/PanelBoundary.jsx",
+    "frontend/src/components/OperationsSummary.jsx",
+    "frontend/src/components/ResearchRecovery.jsx",
+    "frontend/src/components/DocumentRevisionReview.jsx",
+    "frontend/src/components/ContextInspector.jsx",
+    "frontend/src/panels/LibrarySearchPanel.jsx",
     "frontend/src/components/BackgroundCanvas.jsx",
     "frontend/src/components/ChatHero.jsx",
     "frontend/src/components/EmptyState.jsx",
@@ -1013,6 +1032,11 @@ def deploy_changes(changed, cfg):
     scan retries everything). This replaces the old per-file scp-in-place,
     where a mid-batch failure restarted the service on a half-updated tree.
     """
+    changed = list(changed)
+    dependency_changes = [path for path, _ in changed if path.endswith(("requirements.txt", "requirements.lock.txt"))]
+    if dependency_changes:
+        print("Dependency changes require scripts/staged_release.py prepare/activate; live pip installation is disabled.")
+        return {}
     hypr = cfg["hyprchat"]
     sx = cfg.get("searxng") if _server_configured(cfg.get("searxng")) else None
     needs_restart = False
@@ -1187,26 +1211,6 @@ def deploy_changes(changed, cfg):
         input(f"\n  {DIM}Press Enter to continue...{RST}")
         return pushed
 
-    if needs_pip:
-        print()
-        print(f"  {Y}\u25b6{RST} Installing new dependencies...")
-        ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-            "cd /opt/hyprchat/backend && pip install -r requirements.txt --break-system-packages -q 2>&1 | tail -3")
-        if ok:
-            print(f"  {G}\u2713{RST} Dependencies updated")
-        else:
-            print(f"  {R}\u2717{RST} pip install failed: {err}")
-
-    # Reload systemd if service file changed (and actually activated)
-    if "backend/hyprchat.service" in pushed:
-        print()
-        print(f"  {Y}\u25b6{RST} Reloading systemd daemon...")
-        ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-            "systemctl daemon-reload && systemctl enable hyprchat >/dev/null 2>&1")
-        if ok:
-            print(f"  {G}\u2713{RST} Daemon reloaded; hyprchat enabled")
-        else:
-            print(f"  {R}\u2717{RST} daemon-reload failed: {err}")
 
     if needs_restart:
         print()

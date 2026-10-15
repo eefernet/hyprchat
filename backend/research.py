@@ -541,7 +541,7 @@ async def _search_searxng(
     retrieval while the interactive ranker retains its seven-day preference. Set to "month" for news
     queries with explicit time-cues so 2019 articles don't outrank current ones.
     """
-    from search_runtime import diagnose_response, classify_failure
+    from search_runtime import diagnose_response, classify_failure, provider_get
     diagnostics = diagnostics if diagnostics is not None else {}
     results = []
     try:
@@ -553,10 +553,10 @@ async def _search_searxng(
         if engines:
             _params["engines"] = engines
         params = urllib.parse.urlencode(_params)
-        r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
+        r = await provider_get(http, f"{searxng_url}/search?{params}", diagnostics=diagnostics)
         if r.status_code == 429 and retry:
             await asyncio.sleep(3.0)
-            r = await http.get(f"{searxng_url}/search?{params}", timeout=12)
+            r = await provider_get(http, f"{searxng_url}/search?{params}", diagnostics=diagnostics)
         diagnostics.update(diagnose_response(r.status_code))
         if r.status_code >= 400:
             return []
@@ -2361,6 +2361,7 @@ async def run_research_report(
     query: str, depth: int = 3, focus: str = "", report_type: str = "analyst",
     model: str = "", planner_model: str = "", auditor_model: str = "",
     kb_ids: list | None = None, inputs: list | None = None,
+    resume_state: dict | None = None,
 ) -> dict:
     """Run the first-class Deep Research report pipeline.
 
@@ -2420,454 +2421,478 @@ async def run_research_report(
             "query": query, "report_type": report_type, "depth": depth,
         })
 
-        # Phase 1: planning
-        await phase("planning", "Planning research strategy", "Building queries, criteria, and outline", 5)
-        plan_prompt = f"""You are the planning stage for an advanced research system.
+        if resume_state:
+            title = resume_state['title']
+            plan = resume_state['plan']
+            outline = resume_state['outline']
+            sources = resume_state['sources']
+            pages = resume_state['pages']
+            user_context = resume_state['user_context']
+            searched = resume_state['searched']
+            all_results = resume_state['all_results']
+            max_adaptive_rounds = resume_state['max_adaptive_rounds']
+            adaptive_learnings = resume_state['adaptive_learnings']
+            adaptive_gaps = resume_state['adaptive_gaps']
+            adaptive_followups = resume_state['adaptive_followups']
+            fetch_diagnostics = resume_state['fetch_diagnostics']
+            search_diagnostics = resume_state['search_diagnostics']
+            await phase("extracting", "Resuming saved evidence", "Keeping the original sources and run settings", 60)
+        else:
+            # Phase 1: planning
+            await phase("planning", "Planning research strategy", "Building queries, criteria, and outline", 5)
+            plan_prompt = f"""You are the planning stage for an advanced research system.
 
-Topic: {query}
-Focus: {focus or "none"}
-Report type: {template["label"]}
-Expected sections: {", ".join(template["sections"])}
-Current date: {current_date}
-Depth: {depth}/5
-Collection budget: up to {budget["queries"]} search queries, {budget["target_sources"]} sources, and {budget["page_reads"]} full-page reads.
+    Topic: {query}
+    Focus: {focus or "none"}
+    Report type: {template["label"]}
+    Expected sections: {", ".join(template["sections"])}
+    Current date: {current_date}
+    Depth: {depth}/5
+    Collection budget: up to {budget["queries"]} search queries, {budget["target_sources"]} sources, and {budget["page_reads"]} full-page reads.
 
-Return strict JSON with:
-{{
-  "title": "short report title",
-  "research_questions": ["..."],
-  "search_queries": ["..."],
-  "inclusion_criteria": ["..."],
-  "outline": [{{"heading":"...", "goal":"..."}}],
-  "known_risks": ["..."]
-}}
+    Return strict JSON with:
+    {{
+      "title": "short report title",
+      "research_questions": ["..."],
+      "search_queries": ["..."],
+      "inclusion_criteria": ["..."],
+      "outline": [{{"heading":"...", "goal":"..."}}],
+      "known_risks": ["..."]
+    }}
 
-Prefer precise search queries, primary sources, recent sources when freshness matters, diverse viewpoints, and enough query diversity to use the collection budget.
-Use short search queries (roughly 4–10 words), preserving exact names and identifiers from the request.
-You have not seen evidence yet. Frame uncertain specifications and compatibility as questions to verify; do not assert them in the outline or bake guessed specifications into searches.
-Use the current date above as authoritative; do not infer "current real-world knowledge" from model training cutoffs."""
-        from research_writer import fit_prompt
-        planning_tokens = min(1800, max(128, _research_num_ctx() // 4))
-        plan_prompt, _ = fit_prompt(plan_prompt, [], planning_tokens)
-        plan_text = await cancel_registry.await_cancellable(
-            _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=planning_tokens),
-            report_id,
-        )
-        plan = _safe_json_obj(plan_text, {})
-        if not isinstance(plan, dict):
-            plan = {}
-        fallback_title = query[:80].strip() or "Research Report"
-        title = _one_line(plan.get("title") or fallback_title, 96)
-        outline = plan.get("outline") if isinstance(plan.get("outline"), list) else [
-            {"heading": s, "goal": f"Cover {s.lower()} for {template['label']}."}
-            for s in template["sections"]
-        ]
-        await db.update_research_report(report_id, title=title, outline={
-            "template": report_type,
-            "sections": outline,
-            "research_questions": plan.get("research_questions", []),
-            "inclusion_criteria": plan.get("inclusion_criteria", []),
-            "known_risks": plan.get("known_risks", []),
-        })
-
-        # Phase 2: gather context from uploaded inputs and KBs.
-        await phase("context", "Loading user context", "Reading uploaded notes and knowledge bases", 12)
-        input_context_parts = []
-        input_sources = []
-        for input_no, item in enumerate(inputs[:12]):
-            name = _one_line(item.get("name") or item.get("filename") or "Uploaded input", 120)
-            content = (item.get("content") or item.get("text") or "").strip()
-            if not content:
-                continue
-            content = content[:100000]
-            input_sources.append({
-                "index": 0, "title": f"Uploaded: {name}", "url": "",
-                "snippet": _one_line(content, 240), "type": item.get("type", "file"),
-                "tier": 0, "tier_label": _source_tier_label(0), "metadata": {"name": name, "evidence_key": f"input:{input_no}"},
-            })
-            evidence_documents[f"input:{input_no}"] = content
-            input_context_parts.append(f"### Uploaded input: {name}\n{content[:16000]}")
-        kb_context = ""
-        if kb_ids and query:
-            try:
-                chunks = await rag.hybrid_query(kb_ids, query, top_k=budget["retrieval_chunks"])
-                if chunks:
-                    kb_context = rag.format_context(chunks, max_chars=8000)
-                    input_context_parts.append(f"### Knowledge base context\n{kb_context}")
-                    for ci, chunk in enumerate(chunks):
-                        key = f"kb:{chunk.get('kb_id', '')}:{chunk.get('filename', '')}:{chunk.get('chunk_index', ci)}"
-                        evidence_documents[key] = chunk.get("text", "")
-                        input_sources.append({"index": 0, "title": "KB: " + str(chunk.get("filename") or "Excerpt"),
-                            "url": "", "snippet": _one_line(chunk.get("text", ""), 240), "type": "kb",
-                            "tier": 0, "metadata": {"evidence_key": key, "kb_id": chunk.get("kb_id"), "chunk_index": chunk.get("chunk_index")}})
-            except Exception as e:
-                await _emit_report_event(events, report_id, "research_audit", {
-                    "level": "warning", "message": f"KB context unavailable: {e}",
-                })
-        user_context = "\n\n".join(input_context_parts)[:32000]
-        seed_urls = _extract_seed_urls(query, focus, user_context)
-        direct_sources = []
-        direct_pages = []
-        safe_seeds = []
-        for url in seed_urls:
-            if not _url_safe_for_direct_fetch(url):
-                await _emit_report_event(events, report_id, "research_audit", {
-                    "level": "warning", "message": f"Skipped unsafe direct URL: {url}",
-                })
-                continue
-            safe_seeds.append(url)
-
-        async def _fetch_seed(url: str) -> tuple[str, dict | None]:
-            if _github_repo_from_url(url):
-                page = await _fetch_github_repo_snapshot(http, url)
-                if page:
-                    return "github_repo", page
-            return "direct_url", await _fetch_report_page(http, url, fetch_diagnostics)
-
-        initial_page_budget = budget["page_reads"] if depth == 1 else max(1, int(budget["page_reads"] * .6))
-        safe_seeds = safe_seeds[:initial_page_budget]
-        await check_cancel()
-        seed_results = await asyncio.gather(
-            *[_fetch_seed(u) for u in safe_seeds], return_exceptions=True,
-        ) if safe_seeds else []
-        for url, seed_result in zip(safe_seeds, seed_results):
-            await check_cancel()
-            if isinstance(seed_result, BaseException):
-                seed_result = ("direct_url", None)
-            source_type, page = seed_result
-            if not page or not page.get("content"):
-                await _emit_report_event(events, report_id, "research_audit", {
-                    "level": "warning", "message": f"Direct URL could not be read: {url}",
-                })
-                continue
-            direct_url = _normalize_url(page.get("url") or url)
-            tier = 0 if source_type == "github_repo" else _source_tier(direct_url)
-            src = {
-                "index": len(input_sources) + len(direct_sources) + 1,
-                "title": page.get("title") or direct_url,
-                "url": direct_url,
-                "snippet": _one_line(page.get("content", ""), 320),
-                "type": source_type,
-                "tier": tier,
-                "tier_label": _source_tier_label(tier),
-                "query": "user-provided URL",
-                "metadata": {"seed_url": url, "files": page.get("files", []), "default_branch": page.get("default_branch")},
-            }
-            src = _apply_source_quality(src)
-            direct_sources.append(src)
-            direct_pages.append({
-                "url": direct_url,
-                "title": src["title"],
-                "content": page.get("content", ""),
-                "source_index": src["index"],
-                "source_type": source_type,
-            })
-            await _emit_report_event(events, report_id, "research_source_found", src)
-            await _emit_report_event(events, report_id, "research_source_read", {
-                "url": direct_url, "title": src["title"], "source_index": src["index"],
-                "chars": len(page.get("content", "")), "direct": True,
+    Prefer precise search queries, primary sources, recent sources when freshness matters, diverse viewpoints, and enough query diversity to use the collection budget.
+    Use short search queries (roughly 4–10 words), preserving exact names and identifiers from the request.
+    You have not seen evidence yet. Frame uncertain specifications and compatibility as questions to verify; do not assert them in the outline or bake guessed specifications into searches.
+    Use the current date above as authoritative; do not infer "current real-world knowledge" from model training cutoffs."""
+            from research_writer import fit_prompt
+            planning_tokens = min(1800, max(128, _research_num_ctx() // 4))
+            plan_prompt, _ = fit_prompt(plan_prompt, [], planning_tokens)
+            plan_text = await cancel_registry.await_cancellable(
+                _ask_ollama(http, ollama_url, plan_prompt, model=plan_model, default_model=default_model, max_tokens=planning_tokens),
+                report_id,
+            )
+            plan = _safe_json_obj(plan_text, {})
+            if not isinstance(plan, dict):
+                plan = {}
+            fallback_title = query[:80].strip() or "Research Report"
+            title = _one_line(plan.get("title") or fallback_title, 96)
+            outline = plan.get("outline") if isinstance(plan.get("outline"), list) else [
+                {"heading": s, "goal": f"Cover {s.lower()} for {template['label']}."}
+                for s in template["sections"]
+            ]
+            await db.update_research_report(report_id, title=title, outline={
+                "template": report_type,
+                "sections": outline,
+                "research_questions": plan.get("research_questions", []),
+                "inclusion_criteria": plan.get("inclusion_criteria", []),
+                "known_risks": plan.get("known_risks", []),
             })
 
-        # Investigative template: fold the shared leak/FOIA/gov/court source layer
-        # into the report's direct sources so they're tiered and cited alongside
-        # web results. Gated on the template's data field (not report_type) so any
-        # future template can opt in. Fails open — a dead adapter contributes nothing.
-        # Shared Google-scrape budget across the whole report run (leak adapters
-        # + every search wave below draw from the same pool).
-        google_fallback_state = {"remaining": 8}
-        if template.get("source_profile") == "investigative":
-            await check_cancel()
-            try:
-                _leak_deadline = _CONSPIRACY_LIMITS[max(3, min(5, int(depth or 4)))]["leak_deadline"]
-                leak_items = await leak_sources.gather_leak_sources(
-                    http, query, depth=depth, searxng_url=searxng_url,
-                    deadline=_leak_deadline, fallback_state=google_fallback_state,
-                )
-            except Exception:
-                leak_items = []
-            existing_direct_urls = {s.get("url") for s in direct_sources if s.get("url")}
-            leak_fetch_budget = min(6 if depth >= 4 else 4, max(0, initial_page_budget - len(direct_pages)))
-            for item in leak_items:
-                await check_cancel()
-                item_url = _normalize_url(item.get("url") or "")
-                if not item_url or item_url in existing_direct_urls:
+            # Phase 2: gather context from uploaded inputs and KBs.
+            await phase("context", "Loading user context", "Reading uploaded notes and knowledge bases", 12)
+            input_context_parts = []
+            input_sources = []
+            for input_no, item in enumerate(inputs[:12]):
+                name = _one_line(item.get("name") or item.get("filename") or "Uploaded input", 120)
+                content = (item.get("content") or item.get("text") or "").strip()
+                if not content:
                     continue
-                existing_direct_urls.add(item_url)
-                tier = _source_tier(item_url)
+                content = content[:100000]
+                input_sources.append({
+                    "index": 0, "title": f"Uploaded: {name}", "url": "",
+                    "snippet": _one_line(content, 240), "type": item.get("type", "file"),
+                    "tier": 0, "tier_label": _source_tier_label(0), "metadata": {"name": name, "evidence_key": f"input:{input_no}"},
+                })
+                evidence_documents[f"input:{input_no}"] = content
+                input_context_parts.append(f"### Uploaded input: {name}\n{content[:16000]}")
+            kb_context = ""
+            if kb_ids and query:
+                try:
+                    chunks = await rag.hybrid_query(kb_ids, query, top_k=budget["retrieval_chunks"])
+                    if chunks:
+                        kb_context = rag.format_context(chunks, max_chars=8000)
+                        input_context_parts.append(f"### Knowledge base context\n{kb_context}")
+                        for ci, chunk in enumerate(chunks):
+                            key = f"kb:{chunk.get('kb_id', '')}:{chunk.get('filename', '')}:{chunk.get('chunk_index', ci)}"
+                            evidence_documents[key] = chunk.get("text", "")
+                            input_sources.append({"index": 0, "title": "KB: " + str(chunk.get("filename") or "Excerpt"),
+                                "url": "", "snippet": _one_line(chunk.get("text", ""), 240), "type": "kb",
+                                "tier": 0, "metadata": {"evidence_key": key, "kb_id": chunk.get("kb_id"), "chunk_index": chunk.get("chunk_index")}})
+                except Exception as e:
+                    await _emit_report_event(events, report_id, "research_audit", {
+                        "level": "warning", "message": f"KB context unavailable: {e}",
+                    })
+            user_context = "\n\n".join(input_context_parts)[:32000]
+            seed_urls = _extract_seed_urls(query, focus, user_context)
+            direct_sources = []
+            direct_pages = []
+            safe_seeds = []
+            for url in seed_urls:
+                if not _url_safe_for_direct_fetch(url):
+                    await _emit_report_event(events, report_id, "research_audit", {
+                        "level": "warning", "message": f"Skipped unsafe direct URL: {url}",
+                    })
+                    continue
+                safe_seeds.append(url)
+
+            async def _fetch_seed(url: str) -> tuple[str, dict | None]:
+                if _github_repo_from_url(url):
+                    page = await _fetch_github_repo_snapshot(http, url)
+                    if page:
+                        return "github_repo", page
+                return "direct_url", await _fetch_report_page(http, url, fetch_diagnostics)
+
+            initial_page_budget = budget["page_reads"] if depth == 1 else max(1, int(budget["page_reads"] * .6))
+            safe_seeds = safe_seeds[:initial_page_budget]
+            await check_cancel()
+            seed_results = await asyncio.gather(
+                *[_fetch_seed(u) for u in safe_seeds], return_exceptions=True,
+            ) if safe_seeds else []
+            for url, seed_result in zip(safe_seeds, seed_results):
+                await check_cancel()
+                if isinstance(seed_result, BaseException):
+                    seed_result = ("direct_url", None)
+                source_type, page = seed_result
+                if not page or not page.get("content"):
+                    await _emit_report_event(events, report_id, "research_audit", {
+                        "level": "warning", "message": f"Direct URL could not be read: {url}",
+                    })
+                    continue
+                direct_url = _normalize_url(page.get("url") or url)
+                tier = 0 if source_type == "github_repo" else _source_tier(direct_url)
                 src = {
                     "index": len(input_sources) + len(direct_sources) + 1,
-                    "title": item.get("title") or item_url,
-                    "url": item_url,
-                    "snippet": _one_line(item.get("content", ""), 320),
-                    "type": "leak_source",
+                    "title": page.get("title") or direct_url,
+                    "url": direct_url,
+                    "snippet": _one_line(page.get("content", ""), 320),
+                    "type": source_type,
                     "tier": tier,
                     "tier_label": _source_tier_label(tier),
-                    "query": f"{item.get('source', 'archive')} direct search",
-                    "metadata": {"source_class": item.get("kind"), "source_name": item.get("source")},
+                    "query": "user-provided URL",
+                    "metadata": {"seed_url": url, "files": page.get("files", []), "default_branch": page.get("default_branch")},
                 }
                 src = _apply_source_quality(src)
                 direct_sources.append(src)
+                direct_pages.append({
+                    "url": direct_url,
+                    "title": src["title"],
+                    "content": page.get("content", ""),
+                    "source_index": src["index"],
+                    "source_type": source_type,
+                })
                 await _emit_report_event(events, report_id, "research_source_found", src)
-            # Read the top-N highest-tier direct-archive hits into evidence
-            # (lower tier = better source; ties keep submission order).
-            leak_srcs = sorted(
-                (s for s in direct_sources if s.get("type") == "leak_source"),
-                key=lambda s: s.get("tier", 2),
-            )
-            leak_read_urls = [s["url"] for s in leak_srcs][:leak_fetch_budget]
-            if leak_read_urls:
-                leak_pages = await asyncio.gather(
-                    *[_fetch_report_page(http, u, fetch_diagnostics) for u in leak_read_urls], return_exceptions=True,
-                )
-                _by_url = {s["url"]: s for s in direct_sources}
-                for u, page in zip(leak_read_urls, leak_pages):
-                    await check_cancel()
-                    if not isinstance(page, dict) or not page.get("content"):
-                        continue
-                    s = _by_url.get(u)
-                    if not s:
-                        continue
-                    direct_pages.append({
-                        "url": u,
-                        "title": s["title"],
-                        "content": page.get("content", ""),
-                        "source_index": s["index"],
-                        "source_type": "leak_source",
-                    })
-                    await _emit_report_event(events, report_id, "research_source_read", {
-                        "url": u, "title": s["title"], "source_index": s["index"],
-                        "chars": len(page.get("content", "")), "direct": True,
-                    })
-
-        # Phase 3: search.
-        await phase("search", "Searching the web", "Initial source discovery and query expansion", 20)
-        planned_queries = plan.get("search_queries", [])
-        if not isinstance(planned_queries, list):
-            planned_queries = []
-        full_qset = _make_report_search_queries(query, focus, planned_queries, report_type, budget)
-        initial_query_count = max(3, int(max(1, budget["queries"]) * (0.58 if depth >= 4 else 0.68)))
-        qset = full_qset[:min(len(full_qset), initial_query_count)]
-
-        all_results = []
-        searched = set()
-        pages = list(direct_pages)
-        fetched_urls = {_normalize_url(p.get("url", "")) for p in pages if p.get("url")}
-        emitted_source_urls = {s.get("url") for s in direct_sources if s.get("url")}
-        adaptive_learnings: list[str] = []
-        adaptive_gaps: list[str] = []
-        adaptive_followups: list[str] = []
-
-        async def run_search_queries(queries: list[str], pct_base: int, pct_span: int, detail_prefix: str):
-            if not queries:
-                return
-
-            def claim(q):
-                if q in searched:
-                    return False
-                searched.add(q)
-                return True
-
-            async def one(q):
-                time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
-                diagnostic = {"query": q}
-                items = await _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state, diagnostics=diagnostic)
-                relevant = [item for item in items if _report_result_relevant(item, q)]
-                diagnostic.update(discarded_results=len(items) - len(relevant), retained_results=len(relevant))
-                search_diagnostics.append(diagnostic)
-                if diagnostic.get('status') not in (None, 'ok') or len(relevant) < len(items):
-                    await _emit_report_event(events, report_id, 'research_audit', {
-                        'level': 'warning', 'message': f"Search retained {len(relevant)}/{len(items)} relevant results; provider status: {diagnostic.get('status', 'unknown')}",
-                        'diagnostics': diagnostic})
-                items = relevant
-                for item in items:
-                    item["query"] = q
-                return items
-
-            async def progress(done):
-                await _emit_report_event(events, report_id, "research_phase", {
-                    "phase": "search", "label": "Searching the web",
-                    "detail": f"{detail_prefix}: {min(done, len(queries))}/{len(queries)} queries complete",
-                    "pct": pct_base + int(pct_span * done / max(len(queries), 1)),
+                await _emit_report_event(events, report_id, "research_source_read", {
+                    "url": direct_url, "title": src["title"], "source_index": src["index"],
+                    "chars": len(page.get("content", "")), "direct": True,
                 })
 
-            await _batched_searches(queries, one, delay=_SEARCH_BATCH_DELAY_DEEP,
-                                    before_batch=check_cancel, prepare=claim,
-                                    on_batch_done=progress, sink=all_results)
-
-        def remap_page_source_indices(current_sources: list[dict]) -> None:
-            by_url = {_normalize_url(s.get("url", "")): s for s in current_sources if s.get("url")}
-            for page in pages:
-                src = by_url.get(_normalize_url(page.get("requested_url") or page.get("url", ""))) or by_url.get(_normalize_url(page.get("url", "")))
-                if src:
-                    page["source_index"] = src.get("index", 0)
-
-        async def archive_evidence():
-            page_by_url = {}
-            for p in pages:
-                page_by_url[_normalize_url(p.get("requested_url") or p.get("url", ""))] = p
-                page_by_url[_normalize_url(p.get("url", ""))] = p
-            docs = []
-            for src in sources:
-                key = src.get("metadata", {}).get("evidence_key")
-                page = page_by_url.get(_normalize_url(src.get("url", "")))
-                content = evidence_documents.get(key) if key else None
-                kind = ("kb" if src.get("type") == "kb" else "uploaded") if key else "snippet"
-                if page:
-                    content, kind = page.get("content", ""), "full_page"
-                docs.append({"source_id": f"S{src['index']}", "title": src.get("title", ""),
-                    "url": src.get("url", ""), "content": content or src.get("snippet", ""),
-                    "metadata": {**src.get("metadata", {}), "kind": kind, "source_type": src.get("type", "web")}})
-            await check_cancel()
-            if not await store_documents(report_id, docs):
-                raise cancel_registry.RunCancelled(report_id)
-            await cancel_registry.await_cancellable(index_pending(report_id), report_id)
-
-        async def emit_new_sources(current_sources: list[dict]) -> None:
-            for src in current_sources:
-                url = src.get("url") or f"local:{src.get('title','')}"
-                if url in emitted_source_urls:
-                    continue
-                emitted_source_urls.add(url)
-                await _emit_report_event(events, report_id, "research_source_found", src)
-
-        async def fetch_ranked_pages(current_sources: list[dict], max_new_pages: int) -> None:
-            max_new_pages = min(max_new_pages, budget["page_reads"] - len(pages), budget["page_reads"] * 2 - len(fetch_diagnostics))
-            if max_new_pages <= 0:
-                return
-            await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
-            registered_urls = {src.get("url") for src in current_sources}
-            web_results = [r for r in all_results if _normalize_url(r.get("url", "")) in registered_urls]
-            top_urls = [u for u in _rank_urls(web_results, fetched_urls, allow_pdf=True) if _normalize_url(u) not in fetched_urls][:max_new_pages]
-            for i in range(0, len(top_urls), 4):
+            # Investigative template: fold the shared leak/FOIA/gov/court source layer
+            # into the report's direct sources so they're tiered and cited alongside
+            # web results. Gated on the template's data field (not report_type) so any
+            # future template can opt in. Fails open — a dead adapter contributes nothing.
+            # Shared Google-scrape budget across the whole report run (leak adapters
+            # + every search wave below draw from the same pool).
+            google_fallback_state = {"remaining": 8}
+            if template.get("source_profile") == "investigative":
                 await check_cancel()
-                batch = top_urls[i:i + 4]
-                fetched = await asyncio.gather(*[_fetch_report_page(http, u, fetch_diagnostics) for u in batch], return_exceptions=True)
-                for u, page in zip(batch, fetched):
-                    # Record the requested URL even on failure so adaptive
-                    # rounds never re-rank/re-fetch it (redirects used to leave
-                    # the original URL eligible forever).
-                    req_norm = _normalize_url(u)
-                    fetched_urls.add(req_norm)
-                    if isinstance(page, dict) and page.get("content"):
-                        norm = _normalize_url(page.get("url", ""))
-                        fetched_urls.add(norm)
-                        src_meta = next((s for s in current_sources if s.get("url") in (norm, req_norm)), {})
-                        page["source_index"] = src_meta.get("index", 0)
-                        pages.append(page)
+                try:
+                    _leak_deadline = _CONSPIRACY_LIMITS[max(3, min(5, int(depth or 4)))]["leak_deadline"]
+                    leak_items = await leak_sources.gather_leak_sources(
+                        http, query, depth=depth, searxng_url=searxng_url,
+                        deadline=_leak_deadline, fallback_state=google_fallback_state,
+                    )
+                except Exception:
+                    leak_items = []
+                existing_direct_urls = {s.get("url") for s in direct_sources if s.get("url")}
+                leak_fetch_budget = min(6 if depth >= 4 else 4, max(0, initial_page_budget - len(direct_pages)))
+                for item in leak_items:
+                    await check_cancel()
+                    item_url = _normalize_url(item.get("url") or "")
+                    if not item_url or item_url in existing_direct_urls:
+                        continue
+                    existing_direct_urls.add(item_url)
+                    tier = _source_tier(item_url)
+                    src = {
+                        "index": len(input_sources) + len(direct_sources) + 1,
+                        "title": item.get("title") or item_url,
+                        "url": item_url,
+                        "snippet": _one_line(item.get("content", ""), 320),
+                        "type": "leak_source",
+                        "tier": tier,
+                        "tier_label": _source_tier_label(tier),
+                        "query": f"{item.get('source', 'archive')} direct search",
+                        "metadata": {"source_class": item.get("kind"), "source_name": item.get("source")},
+                    }
+                    src = _apply_source_quality(src)
+                    direct_sources.append(src)
+                    await _emit_report_event(events, report_id, "research_source_found", src)
+                # Read the top-N highest-tier direct-archive hits into evidence
+                # (lower tier = better source; ties keep submission order).
+                leak_srcs = sorted(
+                    (s for s in direct_sources if s.get("type") == "leak_source"),
+                    key=lambda s: s.get("tier", 2),
+                )
+                leak_read_urls = [s["url"] for s in leak_srcs][:leak_fetch_budget]
+                if leak_read_urls:
+                    leak_pages = await asyncio.gather(
+                        *[_fetch_report_page(http, u, fetch_diagnostics) for u in leak_read_urls], return_exceptions=True,
+                    )
+                    _by_url = {s["url"]: s for s in direct_sources}
+                    for u, page in zip(leak_read_urls, leak_pages):
+                        await check_cancel()
+                        if not isinstance(page, dict) or not page.get("content"):
+                            continue
+                        s = _by_url.get(u)
+                        if not s:
+                            continue
+                        direct_pages.append({
+                            "url": u,
+                            "title": s["title"],
+                            "content": page.get("content", ""),
+                            "source_index": s["index"],
+                            "source_type": "leak_source",
+                        })
                         await _emit_report_event(events, report_id, "research_source_read", {
-                            "url": page.get("url", ""), "title": src_meta.get("title", ""),
-                            "source_index": page.get("source_index"),
-                            "chars": len(page.get("content", "")),
+                            "url": u, "title": s["title"], "source_index": s["index"],
+                            "chars": len(page.get("content", "")), "direct": True,
                         })
 
-        def current_metrics(current_sources: list[dict], extra: dict | None = None) -> dict:
-            m = {
-                "searches": len(searched), "results": len(all_results),
-                "source_count": len(current_sources), "pages_read": len(pages), "elapsed": time.time() - t_start,
-                "target_queries": budget["queries"], "target_sources": budget["target_sources"],
-                "target_pages": budget["page_reads"], "depth": depth,
-                "adaptive_learnings": len(adaptive_learnings),
-                "adaptive_followup_queries": len(adaptive_followups), "fetch_diagnostics": list(fetch_diagnostics),
-                "search_diagnostics": list(search_diagnostics),
-            }
-            if extra:
-                m.update(extra)
-            metrics.update(m)
-            return m
+            # Phase 3: search.
+            await phase("search", "Searching the web", "Initial source discovery and query expansion", 20)
+            planned_queries = plan.get("search_queries", [])
+            if not isinstance(planned_queries, list):
+                planned_queries = []
+            full_qset = _make_report_search_queries(query, focus, planned_queries, report_type, budget)
+            initial_query_count = max(3, int(max(1, budget["queries"]) * (0.58 if depth >= 4 else 0.68)))
+            qset = full_qset[:min(len(full_qset), initial_query_count)]
 
-        await run_search_queries(qset, 20, 18, "initial")
-        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
-        remap_page_source_indices(sources)
-        await emit_new_sources(sources)
-        await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
-        await db.replace_research_sources(report_id, sources)
+            all_results = []
+            searched = set()
+            pages = list(direct_pages)
+            fetched_urls = {_normalize_url(p.get("url", "")) for p in pages if p.get("url")}
+            emitted_source_urls = {s.get("url") for s in direct_sources if s.get("url")}
+            adaptive_learnings: list[str] = []
+            adaptive_gaps: list[str] = []
+            adaptive_followups: list[str] = []
 
-        if not sources and not user_context:
-            raise RuntimeError("No usable sources found. Check SearXNG or provide files/KB context.")
+            async def run_search_queries(queries: list[str], pct_base: int, pct_span: int, detail_prefix: str):
+                if not queries:
+                    return
 
-        # Phase 4: read pages, then adaptively search gaps.
-        await fetch_ranked_pages(sources, max(0, initial_page_budget - len(pages)))
-        await archive_evidence()
-        await db.update_research_report(report_id, metrics=current_metrics(sources))
+                def claim(q):
+                    if q in searched:
+                        return False
+                    searched.add(q)
+                    return True
 
-        max_adaptive_rounds = max(0, min(4, depth - 1))
-        for round_no in range(1, max_adaptive_rounds + 1):
-            await check_cancel()
-            remaining_queries = max(0, budget["queries"] - len(searched))
-            remaining_pages = max(0, budget["page_reads"] - len(pages))
-            if remaining_queries <= 0 and remaining_pages <= 0:
-                break
-            await phase("followup", "Adaptive follow-up", f"Round {round_no}: extracting learnings and gaps", 50 + min(10, round_no * 3))
-            interim_source_lines = [
-                f"[S{s.get('index')}] {s.get('title','')} | credibility {s.get('credibility_score', 0)}/100 | {s.get('snippet','')}"
-                for s in sources[:min(len(sources), budget["source_briefs"])]
-            ]
-            interim_page_lines = [
-                f"[S{p.get('source_index') or '?'}] {p.get('url','')}\n{p.get('content','')[:1400]}"
-                for p in pages[-min(len(pages), 8):]
-            ]
-            evidence_summary = (
-                ("Existing learnings:\n" + "\n".join(f"- {x}" for x in adaptive_learnings[-10:]) + "\n\n" if adaptive_learnings else "") +
-                "Source briefs:\n" + "\n".join(interim_source_lines) +
-                "\n\nRecent full-text evidence:\n" + "\n\n".join(interim_page_lines)
-            )
-            adaptive_state = await cancel_registry.await_cancellable(
-                _extract_adaptive_learnings(
-                    http, ollama_url, default_model, run_model,
-                    query, focus, template["label"], round_no,
-                    evidence_summary, remaining_queries,
-                ),
-                report_id,
-            )
-            new_learnings = adaptive_state.get("learnings", [])
-            new_gaps = adaptive_state.get("gaps", [])
-            adaptive_learnings.extend([x for x in new_learnings if x not in adaptive_learnings])
-            adaptive_gaps.extend([x for x in new_gaps if x not in adaptive_gaps])
-            followups = _normalize_followup_queries(
-                adaptive_state.get("follow_up_queries", []),
-                searched, query, remaining_queries,
-            )
-            if not followups and remaining_queries > 0 and round_no == 1:
-                followups = _normalize_followup_queries(
-                    [
-                        _compose_report_query(query, "primary source data"),
-                        _compose_report_query(query, "contradictions criticism limitations"),
-                        _compose_report_query(query, "official documentation benchmarks"),
-                    ],
-                    searched, query, min(remaining_queries, 3),
-                )
-            if not followups and not new_learnings:
-                break
-            if followups:
-                adaptive_followups.extend(followups)
-                await _emit_report_event(events, report_id, "research_phase", {
-                    "phase": "followup",
-                    "label": "Adaptive follow-up",
-                    "detail": f"Round {round_no}: {len(followups)} follow-up queries",
-                    "pct": 56 + min(12, round_no * 3),
-                })
-                await run_search_queries(followups, 56 + min(12, round_no * 3), 4, f"adaptive round {round_no}")
-                sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
-                remap_page_source_indices(sources)
-                await emit_new_sources(sources)
-                await db.replace_research_sources(report_id, sources)
-            if remaining_pages > 0:
-                rounds_left = max(1, max_adaptive_rounds - round_no + 1)
-                await fetch_ranked_pages(sources, max(1, remaining_pages // rounds_left))
-            await archive_evidence()
+                async def one(q):
+                    time_range = "year" if re.search(r"\b(latest|recent|current|today|202[5-9]|news)\b", q, re.I) else None
+                    diagnostic = {"query": q}
+                    items = await _search_searxng(http, searxng_url, q, count=budget["results_per_query"], time_range=time_range, fallback_state=google_fallback_state, diagnostics=diagnostic)
+                    relevant = [item for item in items if _report_result_relevant(item, q)]
+                    diagnostic.update(discarded_results=len(items) - len(relevant), retained_results=len(relevant))
+                    search_diagnostics.append(diagnostic)
+                    if diagnostic.get('status') not in (None, 'ok') or len(relevant) < len(items):
+                        await _emit_report_event(events, report_id, 'research_audit', {
+                            'level': 'warning', 'message': f"Search retained {len(relevant)}/{len(items)} relevant results; provider status: {diagnostic.get('status', 'unknown')}",
+                            'diagnostics': diagnostic})
+                    items = relevant
+                    for item in items:
+                        item["query"] = q
+                    return items
+
+                async def progress(done):
+                    await _emit_report_event(events, report_id, "research_phase", {
+                        "phase": "search", "label": "Searching the web",
+                        "detail": f"{detail_prefix}: {min(done, len(queries))}/{len(queries)} queries complete",
+                        "pct": pct_base + int(pct_span * done / max(len(queries), 1)),
+                    })
+
+                await _batched_searches(queries, one, delay=_SEARCH_BATCH_DELAY_DEEP,
+                                        before_batch=check_cancel, prepare=claim,
+                                        on_batch_done=progress, sink=all_results)
+
+            def remap_page_source_indices(current_sources: list[dict]) -> None:
+                by_url = {_normalize_url(s.get("url", "")): s for s in current_sources if s.get("url")}
+                for page in pages:
+                    src = by_url.get(_normalize_url(page.get("requested_url") or page.get("url", ""))) or by_url.get(_normalize_url(page.get("url", "")))
+                    if src:
+                        page["source_index"] = src.get("index", 0)
+
+            async def archive_evidence():
+                page_by_url = {}
+                for p in pages:
+                    page_by_url[_normalize_url(p.get("requested_url") or p.get("url", ""))] = p
+                    page_by_url[_normalize_url(p.get("url", ""))] = p
+                docs = []
+                for src in sources:
+                    key = src.get("metadata", {}).get("evidence_key")
+                    page = page_by_url.get(_normalize_url(src.get("url", "")))
+                    content = evidence_documents.get(key) if key else None
+                    kind = ("kb" if src.get("type") == "kb" else "uploaded") if key else "snippet"
+                    if page:
+                        content, kind = page.get("content", ""), "full_page"
+                    docs.append({"source_id": f"S{src['index']}", "title": src.get("title", ""),
+                        "url": src.get("url", ""), "content": content or src.get("snippet", ""),
+                        "metadata": {**src.get("metadata", {}), "kind": kind, "source_type": src.get("type", "web")}})
+                await check_cancel()
+                if not await store_documents(report_id, docs):
+                    raise cancel_registry.RunCancelled(report_id)
+                await cancel_registry.await_cancellable(index_pending(report_id), report_id)
+
+            async def emit_new_sources(current_sources: list[dict]) -> None:
+                for src in current_sources:
+                    url = src.get("url") or f"local:{src.get('title','')}"
+                    if url in emitted_source_urls:
+                        continue
+                    emitted_source_urls.add(url)
+                    await _emit_report_event(events, report_id, "research_source_found", src)
+
+            async def fetch_ranked_pages(current_sources: list[dict], max_new_pages: int) -> None:
+                max_new_pages = min(max_new_pages, budget["page_reads"] - len(pages), budget["page_reads"] * 2 - len(fetch_diagnostics))
+                if max_new_pages <= 0:
+                    return
+                await phase("reading", "Reading high-value sources", "Fetching full text for ranked pages", 42)
+                registered_urls = {src.get("url") for src in current_sources}
+                web_results = [r for r in all_results if _normalize_url(r.get("url", "")) in registered_urls]
+                top_urls = [u for u in _rank_urls(web_results, fetched_urls, allow_pdf=True) if _normalize_url(u) not in fetched_urls][:max_new_pages]
+                for i in range(0, len(top_urls), 4):
+                    await check_cancel()
+                    batch = top_urls[i:i + 4]
+                    fetched = await asyncio.gather(*[_fetch_report_page(http, u, fetch_diagnostics) for u in batch], return_exceptions=True)
+                    for u, page in zip(batch, fetched):
+                        # Record the requested URL even on failure so adaptive
+                        # rounds never re-rank/re-fetch it (redirects used to leave
+                        # the original URL eligible forever).
+                        req_norm = _normalize_url(u)
+                        fetched_urls.add(req_norm)
+                        if isinstance(page, dict) and page.get("content"):
+                            norm = _normalize_url(page.get("url", ""))
+                            fetched_urls.add(norm)
+                            src_meta = next((s for s in current_sources if s.get("url") in (norm, req_norm)), {})
+                            page["source_index"] = src_meta.get("index", 0)
+                            pages.append(page)
+                            await _emit_report_event(events, report_id, "research_source_read", {
+                                "url": page.get("url", ""), "title": src_meta.get("title", ""),
+                                "source_index": page.get("source_index"),
+                                "chars": len(page.get("content", "")),
+                            })
+
+            def current_metrics(current_sources: list[dict], extra: dict | None = None) -> dict:
+                m = {
+                    "searches": len(searched), "results": len(all_results),
+                    "source_count": len(current_sources), "pages_read": len(pages), "elapsed": time.time() - t_start,
+                    "target_queries": budget["queries"], "target_sources": budget["target_sources"],
+                    "target_pages": budget["page_reads"], "depth": depth,
+                    "adaptive_learnings": len(adaptive_learnings),
+                    "adaptive_followup_queries": len(adaptive_followups), "fetch_diagnostics": list(fetch_diagnostics),
+                    "search_diagnostics": list(search_diagnostics),
+                }
+                if extra:
+                    m.update(extra)
+                metrics.update(m)
+                return m
+
+            await run_search_queries(qset, 20, 18, "initial")
+            sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
+            remap_page_source_indices(sources)
+            await emit_new_sources(sources)
             await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
+            await db.replace_research_sources(report_id, sources)
 
-        sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
-        remap_page_source_indices(sources)
-        await db.replace_research_sources(report_id, sources)
+            if not sources and not user_context:
+                raise RuntimeError("No usable sources found. Check SearXNG or provide files/KB context.")
 
-        # Spend unused read allowance on remaining ranked sources, with bounded retries.
-        for _ in range(2):
-            remaining = budget["page_reads"] - len(pages)
-            if remaining <= 0 or len(fetched_urls) >= budget["page_reads"] * 2:
-                break
-            await fetch_ranked_pages(sources, min(remaining, budget["page_reads"] * 2 - len(fetched_urls)))
-        await archive_evidence()
+            # Phase 4: read pages, then adaptively search gaps.
+            await fetch_ranked_pages(sources, max(0, initial_page_budget - len(pages)))
+            await archive_evidence()
+            await db.update_research_report(report_id, metrics=current_metrics(sources))
+
+            max_adaptive_rounds = max(0, min(4, depth - 1))
+            for round_no in range(1, max_adaptive_rounds + 1):
+                await check_cancel()
+                remaining_queries = max(0, budget["queries"] - len(searched))
+                remaining_pages = max(0, budget["page_reads"] - len(pages))
+                if remaining_queries <= 0 and remaining_pages <= 0:
+                    break
+                await phase("followup", "Adaptive follow-up", f"Round {round_no}: extracting learnings and gaps", 50 + min(10, round_no * 3))
+                interim_source_lines = [
+                    f"[S{s.get('index')}] {s.get('title','')} | credibility {s.get('credibility_score', 0)}/100 | {s.get('snippet','')}"
+                    for s in sources[:min(len(sources), budget["source_briefs"])]
+                ]
+                interim_page_lines = [
+                    f"[S{p.get('source_index') or '?'}] {p.get('url','')}\n{p.get('content','')[:1400]}"
+                    for p in pages[-min(len(pages), 8):]
+                ]
+                evidence_summary = (
+                    ("Existing learnings:\n" + "\n".join(f"- {x}" for x in adaptive_learnings[-10:]) + "\n\n" if adaptive_learnings else "") +
+                    "Source briefs:\n" + "\n".join(interim_source_lines) +
+                    "\n\nRecent full-text evidence:\n" + "\n\n".join(interim_page_lines)
+                )
+                adaptive_state = await cancel_registry.await_cancellable(
+                    _extract_adaptive_learnings(
+                        http, ollama_url, default_model, run_model,
+                        query, focus, template["label"], round_no,
+                        evidence_summary, remaining_queries,
+                    ),
+                    report_id,
+                )
+                new_learnings = adaptive_state.get("learnings", [])
+                new_gaps = adaptive_state.get("gaps", [])
+                adaptive_learnings.extend([x for x in new_learnings if x not in adaptive_learnings])
+                adaptive_gaps.extend([x for x in new_gaps if x not in adaptive_gaps])
+                followups = _normalize_followup_queries(
+                    adaptive_state.get("follow_up_queries", []),
+                    searched, query, remaining_queries,
+                )
+                if not followups and remaining_queries > 0 and round_no == 1:
+                    followups = _normalize_followup_queries(
+                        [
+                            _compose_report_query(query, "primary source data"),
+                            _compose_report_query(query, "contradictions criticism limitations"),
+                            _compose_report_query(query, "official documentation benchmarks"),
+                        ],
+                        searched, query, min(remaining_queries, 3),
+                    )
+                if not followups and not new_learnings:
+                    break
+                if followups:
+                    adaptive_followups.extend(followups)
+                    await _emit_report_event(events, report_id, "research_phase", {
+                        "phase": "followup",
+                        "label": "Adaptive follow-up",
+                        "detail": f"Round {round_no}: {len(followups)} follow-up queries",
+                        "pct": 56 + min(12, round_no * 3),
+                    })
+                    await run_search_queries(followups, 56 + min(12, round_no * 3), 4, f"adaptive round {round_no}")
+                    sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
+                    remap_page_source_indices(sources)
+                    await emit_new_sources(sources)
+                    await db.replace_research_sources(report_id, sources)
+                if remaining_pages > 0:
+                    rounds_left = max(1, max_adaptive_rounds - round_no + 1)
+                    await fetch_ranked_pages(sources, max(1, remaining_pages // rounds_left))
+                await archive_evidence()
+                await db.update_research_report(report_id, sources=sources, metrics=current_metrics(sources))
+
+            sources = _normalize_report_sources(input_sources, direct_sources, all_results, budget, source_registry)
+            remap_page_source_indices(sources)
+            await db.replace_research_sources(report_id, sources)
+
+            # Spend unused read allowance on remaining ranked sources, with bounded retries.
+            for _ in range(2):
+                remaining = budget["page_reads"] - len(pages)
+                if remaining <= 0 or len(fetched_urls) >= budget["page_reads"] * 2:
+                    break
+                await fetch_ranked_pages(sources, min(remaining, budget["page_reads"] * 2 - len(fetched_urls)))
+            await archive_evidence()
+
+        from research_checkpoints import save as save_checkpoint
+        pipeline=dict(query=query,depth=depth,focus=focus,report_type=report_type,model=run_model,
+            planner_model=plan_model,auditor_model=audit_model,kb_ids=kb_ids,inputs=inputs)
+        checkpoint_state={'title':title,'plan':plan,'outline':outline,'sources':sources,'pages':pages,'user_context':user_context,'searched':list(searched),'all_results':all_results,'max_adaptive_rounds':max_adaptive_rounds,'adaptive_learnings':adaptive_learnings,'adaptive_gaps':adaptive_gaps,'adaptive_followups':adaptive_followups,'fetch_diagnostics':fetch_diagnostics,'search_diagnostics':search_diagnostics}
+        await save_checkpoint(report_id,'evidence',{'pipeline':pipeline,'state':checkpoint_state},
+            {'num_ctx':_research_num_ctx(),'model':run_model})
 
         # Build bounded evidence context.
         source_briefs = []
@@ -3123,9 +3148,11 @@ Return strict JSON:
     except asyncio.CancelledError:
         # Keep the last durable draft, including on service shutdown.
         saved = await db.get_research_report(report_id)
-        if saved and saved.get("status") in {"queued", "pending", "running"}:
+        if saved and saved.get("status") in {"queued", "pending", "running", "cancelling"}:
+            cancelled = saved.get('status') == 'cancelling'
             await db.update_research_report(
-                report_id, status="failed", error="Research interrupted; saved draft retained", unless_status="cancelled",
+                report_id, status="cancelled" if cancelled else "interrupted",
+                error="Cancelled by user" if cancelled else "Research interrupted; saved draft retained", unless_status="cancelled",
                 metrics={**metrics, "elapsed": time.time() - t_start},
                 completed_at=datetime.utcnow().isoformat(),
             )

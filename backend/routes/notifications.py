@@ -29,6 +29,9 @@ async def list_notifications(since_id: int = 0, limit: int = 50, unseen_only: bo
     rows = await db.list_notifications(since_id=since_id, limit=min(limit, 200),
                                        unseen_only=unseen_only)
     unseen = await db.list_notifications(limit=200, unseen_only=True)
+    import notification_delivery
+    for row in rows:
+        row['deliveries'] = await notification_delivery.list_deliveries(row['id'])
     return {"notifications": rows, "unseen_count": len(unseen)}
 
 

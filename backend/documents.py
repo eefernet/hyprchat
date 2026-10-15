@@ -67,7 +67,10 @@ def require_enabled():
 
 
 async def worker(http, command, *args):
-    cmd = " ".join(shlex.quote(str(x)) for x in [f"{INSTALL}/venv/bin/python", f"{INSTALL}/document_worker.py", command, *args])
+    command_args=" ".join(shlex.quote(str(x)) for x in [command,*args])
+    cmd=(f"document_install={shlex.quote(INSTALL)}; "
+         'if [ -x "$document_install/current/venv/bin/python" ]; then document_install="$document_install/current"; fi; '
+         '"$document_install/venv/bin/python" "$document_install/document_worker.py" '+command_args)
     response = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 25}, timeout=35)
     response.raise_for_status()
     result = response.json()
@@ -432,6 +435,13 @@ async def cancel_run(http, run_id):
     if row["status"] != "cancelling":
         return {"run_id": run_id, "status": row["status"]}
     cancel_registry.signal(run_id)
+    envelope=row.get('result_envelope') or {}
+    if envelope.get('action') == 'batch_export':
+        child_id=envelope.get('child_run_id')
+        child=await cancel_run(http,child_id) if child_id else None
+        if run_id not in _tasks and (not child or child['status'] not in {'queued','running','cancelling'}):
+            await db.update_run(run_id,status='cancelled',ended=True)
+        return {'run_id':run_id,'status':(await db.get_run(run_id))['status'],'error':(child or {}).get('error','')}
     error = await stop_worker(http, run_id)
     # An active owner finishes rollback before reporting cancellation.
     if not error and run_id not in _tasks:

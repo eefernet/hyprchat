@@ -1367,6 +1367,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                             "filename": c["filename"],
                             "kb_id": c["kb_id"],
                             "chunk_index": c.get("chunk_index", 0),
+                            "location": c.get("location") or rag.location_from_text(c.get("text", "")),
                             "score": round(c.get("score", 0), 4),
                             "snippet": (c.get("text") or "")[:300],
                         } for i, c in enumerate(chunks)]
@@ -1898,6 +1899,7 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
+    qs = {}
     # ── Quick Search: gate → rewrite → search → rank → fetch → inject ──
     # Skipped in continue mode: the turn resumes a truncated answer, and the
     # injection target would be the OLD user message (re-searching it).
@@ -2287,6 +2289,14 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                 payload["think"] = True
         if ollama_tools:
             payload["tools"] = ollama_tools
+
+        if _assistant_msg_id is not None:
+            import context_inspector
+            await context_inspector.capture(_assistant_msg_id, model=req.model, provider=_model_provider,
+                options=model_options, memories={'global':global_memory_info,'workspace':workspace_memory_info},
+                retrieved=kb_context, sources=qs.get('results') or qs.get('sources') or [],
+                tools=available_tool_names, messages=messages, original_chars=_ctx_size,
+                thinking=payload.get('think'))
 
         # Keepalive before Ollama call — prevents browser/proxy timeout during prompt eval
         yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
@@ -3357,6 +3367,9 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
                                     "recent_messages": _recent_messages,
                                     "prior_images": _prior_images,
                                 }
+                            if _assistant_msg_id is not None:
+                                import context_inspector
+                                await context_inspector.record_tool(_assistant_msg_id, _n)
                             r = await exec_tool(
                                 http, events, _n, _a, _c, custom_tool_map,
                                 connector_tool_name_map=connector_tool_name_map,

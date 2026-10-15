@@ -527,6 +527,11 @@ def test_each_skeleton_installs_builds_launches_and_only_its_placeholder_row_fai
     from coder_skeletons import files_for
     spec = describe(skeleton_id, 'solution named DemoApp with a console app project `DemoApp` and an xUnit test project `DemoApp.Tests`', 'Demo App')
     repository, store = fixture(tmp_path, files_for(skeleton_id, spec['names']))
+    # This integration fixture installs both ecosystems from a cold cache.
+    # The generic 60-second unit fixture can consume its entire allowance on
+    # npm/pip before readiness is attempted. Keep all runtime gates intact.
+    operation=store.get('check')
+    store.update('check',payload={**operation['payload'],'seconds_remaining':240})
     profile = contract(repository)
     result = run_revision(store, 'check', repository, profile, project_id='skeleton-' + skeleton_id)
     failing = [r for r in result['checks'] if blocking(r)]

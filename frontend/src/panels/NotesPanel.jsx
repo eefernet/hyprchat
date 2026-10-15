@@ -1,4 +1,4 @@
-import React,{useState,useEffect,useCallback} from 'react';
+import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
@@ -11,7 +11,7 @@ import useIsMobile from '../useIsMobile.js';
 
 const EMPTY={kind:"todo",title:"",content:"",due_local:"",remind_local:""};
 
-export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
+export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,initialNoteId}){
   const isMobile=useIsMobile();
   const [notes,setNotes]=useState([]);
   const [loaded,setLoaded]=useState(false);
@@ -20,6 +20,8 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   const [showDone,setShowDone]=useState(false);
   const [err,setErr]=useState("");
   const [loadErr,setLoadErr]=useState("");
+  const openedNote=useRef(null);
+  useEffect(()=>{if(initialNoteId&&openedNote.current!==initialNoteId){const note=notes.find(n=>n.id===initialNoteId);if(note){openedNote.current=initialNoteId;setTab(note.kind);setForm({...EMPTY,...note});}}},[initialNoteId,notes]);
 
   const load=useCallback(async()=>{
     try{setNotes(await apiJson("/api/notes"));setLoadErr("");}catch(e){setLoadErr(String(e.message||e));}

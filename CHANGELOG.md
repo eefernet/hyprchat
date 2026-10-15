@@ -1,39 +1,38 @@
 <details open>
-<summary>Alpha v18.1.1 — Sept 30, 2026</summary>
+<summary>Alpha v18.1.1 — Oct 15, 2026</summary>
 
-> A tidier composer, Office document tools with split previews, Ollama 0.35.0 with Qwen 3.8, and chat and coding fixes.
+> Office document tools, a Jobs panel, searchable saved work, and more reliable chat, research and scheduling.
 
-## Chat
+## Chat & Search
 
-- **Tool toggles moved into the composer** — the row of tool chips above the message box is gone. A wrench icon next to **+** carries a count badge and opens a menu with a switch per tool (built-in, custom and, when configured, a searchable Connectors section). The menu closes on Escape, outside click, conversation switch and send; it is full-width on phones and keeps the large-text layout intact.
-- **Multiple tool calls per turn** — when a model calls two tools in one response (Ollama streams them one per chunk), both now run. Previously only the last one survived.
+- **Composer tools** — manage tools from the wrench menu beside **+**. Multiple tool calls in one reply now run correctly.
+- **Library search** — find chats, notes, research and artifacts with type, workspace and date filters.
+- **Response context** — inspect the model, settings, memories, sources and tools used for a reply.
+- **Councils & retrieval** — councils support selected local and cloud models with cloud spending caps. Search and knowledge-base retrieval handle slow services better and show clearer source locations.
 
-## Documents
+## Documents & Research
 
-- **Word, PowerPoint and Excel tools** — read, create, make targeted edits and export Office files from chat. Edits save as linked revisions while retaining original uploads. Google Docs, Slides and Sheets can be used through Office file export and import.
-- **Preview beside chat** — the eye button opens a resizable document preview alongside the conversation, follows saved revisions and renders missing previews on demand. On phones, the preview opens full-screen and closes back to chat.
-- **Working file delivery** — document jobs show compact status rows with Download and Preview controls instead of the Daedalus project timeline. File controls survive refresh, and failed operations remain visible even when a later read succeeds.
-- **Chat-to-PDF export** — full Markdown reports can become Word documents and downloadable PDFs, preserving headings, tables and later sections without rebuilding them as nested JSON. Invalid arguments get one corrective attempt, then a clear failure instead of a false completion.
+- **Office tools** — read, create, edit and export Word, PowerPoint and Excel files from chat, with previews beside the conversation and PDF export.
+- **Document revisions** — compare versions, restore earlier content as a new revision, and export files in batches while preserving originals.
+- **Research recovery** — deeper reports use saved evidence and clearer citations. Resume interrupted work, compare drafts and ask follow-up questions using saved sources.
 
-## Deep Research
+## Jobs, Calendar & Email
 
-- **More complete reports** — deeper research writes section by section using retained source passages, with evidence inspection and clearer citations. Saved drafts survive refresh, incomplete reports carry warnings through export, and charts and diagrams recover as streaming finishes.
+- **Jobs panel** — track background work, progress, downloads and available cancel, retry or resume actions across refreshes and devices.
+- **Scheduling & notifications** — queued tasks survive restarts, recurring runs avoid overlap, and failed or uncertain deliveries remain visible.
+- **Calendar & email** — improved recurring events, reminders and sync-conflict handling. Appointments extracted from email need confirmation before entering your calendar.
+- **Image Studio & connectors** — retry failed image downloads, cancel individual queued jobs, and use more reliable MCP connections.
 
-## Bug fixes
+## Reliability & Voice
 
-- Fixed document export previews, missing PDF recovery, and Stop status.
-- Fixed research draft recovery, citation checks and deleted-profile evidence cleanup, model selection, and deployment/restart reliability.
+- **Saved files & backups** — durable artifact storage and fuller backups protect documents and downloads; interrupted restores can recover database and files together.
+- **Profiles & mobile** — stronger access controls, fewer stale updates after switching profiles, clearer errors and refreshed app caching. Main gets an operations overview.
+- **Voice** — navigation stops recording and playback; failed transcriptions retain the recording for an explicit retry.
 
-## Daedalus
+## Daedalus & Models
 
-- **Repair prompts list the project files again** — production workspaces live under `/root/.daedalus/…`, which the file-listing filter excluded wholesale, so every repair prompt said "Current files:" with nothing after it and the builder had to rediscover the tree. The listing also skips `.pytest_cache/` now.
-- **Thinking levels on on/off-only models** — a stage configured with a thinking level (low/medium/high) now sends `on` to models that only accept on/off, such as Laguna, instead of failing the operation with an Ollama error.
-- **Model catalog** — HyprFit no longer reports the `qwen3` cards as installed because `qwen3.8` is.
-
-## Infrastructure
-
-- **Ollama 0.35.0** — upgraded from 0.30.7 (Qwen 3.8 support, clean JSON mode on `/api/chat`, thinking controls in `/api/show`). A small `llama-server --poll 0` shim restores full throughput: the newer llama.cpp busy-polls its CPU threads, which halved generation speed on the 8-core container. The upgrade, rollback and shim runbook is in the agent guide.
-- **Models** — the planning model is now `qwen3.8:27b` (≈85 tok/s with speculative decoding; passed every plan/verify/accept stage measured today). The coder model stays `qwen3-coder:30b`: in an isolated A/B, `laguna-xs-2.1` built correct programs but parked every repair round unless builder thinking was on, at roughly twice the calls and time.
+- Fixed repair file listings, thinking controls and model-catalog matching.
+- Updated Ollama to **0.35.0** with restored generation throughput. Planning uses **qwen3.8:27b**; coding remains on **qwen3-coder:30b**.
 
 </details>
 

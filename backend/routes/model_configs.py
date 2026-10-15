@@ -103,6 +103,8 @@ async def get_avatar(filename: str):
     safe_name = os.path.basename(filename)
     if not safe_name or safe_name != filename:
         raise HTTPException(400, "Invalid filename")
+    if not await db.get_model_config(os.path.splitext(safe_name)[0]):
+        raise HTTPException(404, "Avatar not found")
     filepath = os.path.join(avatar_dir, safe_name)
     if not os.path.abspath(filepath).startswith(os.path.abspath(avatar_dir)):
         raise HTTPException(400, "Invalid filename")

@@ -161,7 +161,7 @@ def report_checks(text, sections, sources, target, results, evidence_by_section=
 
 async def compose_report(*, http, ollama_url, events, report_id, query, focus, title,
                          template, depth, model, default_model, auditor_model, plan,
-                         sources, findings, audit, metrics):
+                         sources, findings, audit, metrics, resume_state=None):
     import research
     import research_evidence as evidence
     import database as db
@@ -179,8 +179,9 @@ async def compose_report(*, http, ollama_url, events, report_id, query, focus, t
     summary_names = {'executive summary', 'abstract', 'executive brief', 'briefing'}
     summary_heading = next((h for h in headings if h.lower() in summary_names), None)
     sections = {h: '' for h in headings}
-    results = {}
-    retrieval_log = {}
+    sections.update((resume_state or {}).get('sections',{}))
+    results = {k:SynthesisResult(**v) for k,v in (resume_state or {}).get('results',{}).items()}
+    retrieval_log = dict((resume_state or {}).get('retrieval_log',{}))
     revision = int(metrics.get('snapshot_revision') or 0)
     last_save = 0.0
     method = (f"## Method\n\nCollected {len(sources)} source records using {metrics.get('searches', 0)} searches "
@@ -204,6 +205,12 @@ async def compose_report(*, http, ollama_url, events, report_id, query, focus, t
             return sections.get('_whole', '')
         return '# ' + title + '\n\n' + method + '\n\n'.join(sections[h] for h in headings if sections[h])
 
+    composition=dict(query=query,focus=focus,title=title,template=template,depth=depth,model=model,
+        default_model=default_model,auditor_model=auditor_model,plan=plan,sources=sources,findings=findings,audit=audit,metrics=metrics)
+    from research_checkpoints import save as save_checkpoint
+    from dataclasses import asdict
+    await save_checkpoint(report_id,'writing',{'composition':composition,'writer':resume_state or {}},{'num_ctx':research_num_ctx(),'model':model})
+
     async def checkpoint(text=None, *, force=False):
         nonlocal revision, last_save
         if cancel_registry.is_cancelled(report_id):
@@ -217,6 +224,8 @@ async def compose_report(*, http, ollama_url, events, report_id, query, focus, t
         wrote = await db.update_research_report(report_id, report_markdown=body, metrics=metrics, unless_status='cancelled')
         if not wrote:
             raise cancel_registry.RunCancelled(report_id)
+        if force:
+            await save_checkpoint(report_id,'section',{'composition':composition,'writer':{'sections':sections,'results':{k:asdict(v) for k,v in results.items()},'retrieval_log':retrieval_log}}, {'num_ctx':research_num_ctx(),'model':model},body)
         await research._emit_report_event(events, report_id, 'research_snapshot',
             {'report_markdown': body, 'revision': revision, 'metrics': dict(metrics)})
 
@@ -307,6 +316,9 @@ Original source evidence follows:
     if not sectioned:
         order = ['Full report']
     for heading in order:
+        key=heading if sectioned else '_whole'
+        if results.get(key) and results[key].complete:
+            continue
         await research._emit_report_event(events, report_id, 'research_phase', {'phase': 'synthesis', 'label': f'Writing {heading}', 'detail': 'Retrieving section evidence'})
         await write(heading)
         key = heading if sectioned else '_whole'

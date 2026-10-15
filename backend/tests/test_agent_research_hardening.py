@@ -1191,7 +1191,7 @@ def test_fixer_applied_chains_automatic_review(tmp_path, monkeypatch):
     assert wf is not None
 
 
-def test_reaper_fails_orphaned_research_reports(tmp_path):
+def test_reaper_preserves_orphaned_research_as_interrupted(tmp_path):
     db.DATABASE_PATH = str(tmp_path / "hyprchat.db")
     _run(db.init_db())
     _run(db.create_research_report("rep-stuck", query="q1", title="Stuck"))
@@ -1202,5 +1202,5 @@ def test_reaper_fails_orphaned_research_reports(tmp_path):
     stats = _run(db.reap_stale_runs())
 
     assert stats["reports_reaped"] == 1
-    assert _run(db.get_research_report("rep-stuck"))["status"] == "failed"
+    assert _run(db.get_research_report("rep-stuck"))["status"] == "interrupted"
     assert _run(db.get_research_report("rep-done"))["status"] == "complete"

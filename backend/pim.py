@@ -48,7 +48,7 @@ async def create_note(*, kind: str = "note", title: str, content: str = "",
 async def create_event(*, title: str, start_local: str, end_local: str = "",
                        description: str = "", location: str = "",
                        all_day: bool = False, remind_minutes: int | None = None,
-                       source: str = "", user_id: str | None = None) -> dict | None:
+                       source: str = "", rrule: str = "", user_id: str | None = None) -> dict | None:
     tz = await user_timezone(user_id)
     start_at = local_to_utc(start_local, tz)
     if not start_at:
@@ -58,23 +58,28 @@ async def create_event(*, title: str, start_local: str, end_local: str = "",
     desc = description
     if source:
         desc = (desc + f"\n[source: {source}]").strip()
+    if rrule:
+        from icalendar import vRecur
+        if not vRecur.from_ical(rrule).get("FREQ"): raise ValueError("Recurrence rule requires FREQ")
     return await db.create_calendar_event(
         f"event-{uuid.uuid4().hex[:10]}", title=title, start_at=start_at,
         end_at=end_at, description=desc, location=location, all_day=all_day,
-        remind_minutes=remind_minutes, sync_state="dirty", user_id=user_id)
+        remind_minutes=remind_minutes, rrule=rrule, timezone=tz, sync_state="dirty", user_id=user_id)
 
 
 async def update_event(event_id: str, fields: dict, user_id: str | None = None) -> dict | None:
     """Route/tool-facing update: local times in, marks the row dirty for CalDAV."""
     tz = await user_timezone(user_id)
     mapped: dict = {}
-    for key in ("title", "description", "location", "all_day"):
+    for key in ("title", "description", "location", "all_day", "rrule"):
         if key in fields and fields[key] is not None:
             mapped[key] = fields[key]
     # remind_minutes present-with-None means CLEAR the reminder (the route
     # sends an exclude_unset dump, so the key only appears when explicitly
     # sent — otherwise a set reminder could never be removed).
     if "remind_minutes" in fields:
+        if fields.get('recurrence_id'):
+            raise ValueError('Change reminders on the entire series')
         mapped["remind_minutes"] = fields["remind_minutes"]
     if fields.get("start_local"):
         start = local_to_utc(fields["start_local"], tz)
@@ -92,9 +97,19 @@ async def update_event(event_id: str, fields: dict, user_id: str | None = None) 
         mapped["reminded"] = False
     if mapped:
         existing = await db.get_calendar_event(event_id, user_id=user_id)
-        if existing and existing.get("sync_state") in ("synced", "dirty"):
+        if existing:
+            if existing.get("sync_state") == "conflict":
+                raise ValueError("Resolve the saved synchronization conflict before editing")
+            from calendar_resources import edit_resource
+            mapped["resource_ics"] = edit_resource(existing, mapped, _tz(existing.get("timezone") or tz), fields.get("recurrence_id") or "")
+            if fields.get("recurrence_id"):
+                mapped = {"resource_ics": mapped["resource_ics"]}
             mapped["sync_state"] = "dirty"
-    return await db.update_calendar_event(event_id, mapped, user_id=user_id)
+    updated=await db.update_calendar_event(event_id, mapped, user_id=user_id,
+        expected_updated_at=existing['updated_at'] if mapped and existing else None)
+    if mapped and existing and updated is None:
+        raise ValueError('Calendar event changed during editing; refresh before saving')
+    return updated
 
 
 async def delete_event(event_id: str, user_id: str | None = None) -> bool:
@@ -115,7 +130,8 @@ async def delete_event(event_id: str, user_id: str | None = None) -> bool:
 
 async def reminder_scan() -> int:
     """Fire due note/event reminders. Cross-user select; per-row contextvar."""
-    fired = 0
+    from calendar_resources import deliver_occurrence_reminders
+    fired = await deliver_occurrence_reminders()
     due = await db.due_reminders(datetime.utcnow().isoformat())
     for note in due["notes"]:
         token = db.set_current_user_id(note["user_id"])
@@ -170,7 +186,8 @@ async def _gather_calendar(user_id: str) -> str:
     ]
     lines: list[str] = []
     for label, w_start, w_end, detailed in windows:
-        events = await db.list_calendar_events(
+        from calendar_resources import list_occurrences
+        events = await list_occurrences(
             start=_utc(w_start), end=_utc(w_end), user_id=user_id)
         if not events:
             continue

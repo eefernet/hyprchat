@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 ROOT = Path("/root/hyprchat-documents/jobs")
-INSTALL = Path("/opt/hyprchat-documents")
+INSTALL = Path(__file__).resolve().parent
 
 
 def atomic(path, value):

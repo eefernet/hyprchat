@@ -32,9 +32,10 @@ def _wire(monkeypatch):
         return "UTC"
 
     async def fake_get(event_id, user_id=None):
-        return {"id": event_id, "sync_state": "synced"}
+        return {"id": event_id, "updated_at":"fixture-version", "sync_state": "synced", "title":"Fixture", "start_at":"2026-07-14T08:00:00", "end_at":"2026-07-14T09:00:00"}
 
-    async def fake_update(event_id, fields, user_id=None):
+    async def fake_update(event_id, fields, user_id=None, *, expected_updated_at=None):
+        assert expected_updated_at == 'fixture-version'
         state["updated"] = (event_id, fields)
         return {"id": event_id, **fields}
 

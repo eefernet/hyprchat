@@ -160,10 +160,12 @@ async def update_app_settings(body: dict = Body(...)):
             "chunk_overlap": _rag_int("chunk_overlap", 50, 0, 2000),
             "top_k": _rag_int("top_k", 6, 1, 20),
             "max_context_chars": _rag_int("max_context_chars", 6000, 500, 60000),
+            "retrieval_deadline_seconds": _rag_int("retrieval_deadline_seconds", 3, 1, 30),
             "research_top_k": _rag_int("research_top_k", 4, 1, 20),
             "research_max_chars": _rag_int("research_max_chars", 3000, 500, 60000),
         }
         settings["rag"] = clean
+        config.RAG_RETRIEVAL_DEADLINE_SECONDS = clean["retrieval_deadline_seconds"]
         rag.EMBED_MODEL = clean["embed_model"]
         rag.CHUNK_SIZE = clean["chunk_size"]
         rag.CHUNK_OVERLAP = clean["chunk_overlap"]
@@ -482,22 +484,9 @@ async def delete_all_rag_collections():
 
 @router.post("/api/settings/cleanup-now")
 async def cleanup_now():
-    """Immediately delete ALL sandbox output files (ignores cleanup_days age check)."""
-    deleted, freed = 0, 0
-    try:
-        for entry in os.scandir(config.SANDBOX_OUTPUTS_DIR):
-            if entry.is_file(follow_symlinks=False):
-                try:
-                    freed += entry.stat().st_size
-                    os.remove(entry.path)
-                    deleted += 1
-                except Exception as e:
-                    print(f"[Cleanup] Could not remove {entry.path}: {e}")
-    except Exception:
-        pass
-    if deleted:
-        print(f"[Cleanup] Manual clean: removed {deleted} files, freed {freed // 1024} KB")
-    return {"deleted": deleted, "freed_bytes": freed}
+    """Preserve durable, referenced and unresolved legacy outputs."""
+    from durable_storage import cleanup_outputs
+    return await asyncio.to_thread(cleanup_outputs)
 
 
 @router.post("/api/settings/cleanup-codebox")

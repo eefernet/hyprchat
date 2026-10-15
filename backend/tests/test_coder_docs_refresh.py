@@ -79,6 +79,7 @@ def setup_index(monkeypatch,tmp_path):
     monkeypatch.setattr(rag,'_get_collection',lambda _:collection)
     monkeypatch.setattr(rag,'chunk_document',lambda *_:[{'text':'new first','chunk_index':0},{'text':'new second','chunk_index':1}])
     mirror=AsyncMock();monkeypatch.setattr(rag.db,'kb_fts_replace_file',mirror)
+    monkeypatch.setattr(rag.db,'kb_index_record',AsyncMock())
     return file,collection,mirror
 
 
@@ -90,6 +91,7 @@ def test_failed_embeddings_preserve_both_indexes(monkeypatch,tmp_path,embeddings
     assert result['error'] and result['chunks']==0
     assert collection.rows==before and collection.calls==0
     mirror.assert_not_called()
+    rag.db.kb_index_record.assert_not_called()
 
 
 def test_shortened_index_prunes_only_after_success(monkeypatch,tmp_path):
@@ -99,6 +101,7 @@ def test_shortened_index_prunes_only_after_success(monkeypatch,tmp_path):
     assert result['chunks']==2 and 'obsolete' not in collection.rows
     assert {r[0] for r in collection.rows.values()}=={'new first','new second'}
     mirror.assert_awaited_once()
+    rag.db.kb_index_record.assert_awaited_once_with('kb-test','doc.md',rag.INDEX_VERSION,rag.EMBED_MODEL,2,[])
 
 
 def test_mid_batch_failure_restores_previous_index(monkeypatch,tmp_path):
@@ -108,6 +111,7 @@ def test_mid_batch_failure_restores_previous_index(monkeypatch,tmp_path):
     with pytest.raises(RuntimeError):asyncio.run(rag.index_file('kb-test','doc.md',str(file)))
     assert collection.rows==before
     mirror.assert_not_called()
+    rag.db.kb_index_record.assert_not_called()
 
 
 def test_markdown_chunks_preserve_complete_code_blocks_and_version_context(monkeypatch):

@@ -143,7 +143,7 @@ class TestCouncilMembers:
             "points": 3,
         }]
         resolved = asyncio.run(council_mod._resolve_member_personas(members))
-        assert resolved[0]["model"] == "qwen3.5:14b"
+        assert resolved[0]["model"] == "qwen3.5:4b"  # explicit model selection survives persona refresh
         assert resolved[0]["system_prompt"] == "Latest persona prompt."
         assert resolved[0]["persona_name"] == "Latest Persona Name"
         assert members[0]["model"] == "qwen3.5:4b"

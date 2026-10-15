@@ -47,13 +47,11 @@ _search_probes = {}
 
 async def _sample_search(url, http):
     """One bounded upstream query, shared by background and browser checks."""
-    from search_runtime import diagnose_response, classify_failure
+    from search_runtime import diagnose_response, classify_failure, provider_get
     started = time.monotonic()
     try:
-        response = await http.get(
-            f"{url}/search",
-            params={"q": "united states population 2024", "format": "json"}, timeout=10,
-        )
+        from urllib.parse import urlencode
+        response = await provider_get(http, f"{url}/search?" + urlencode({"q":"united states population 2024","format":"json"}))
         diagnosis = diagnose_response(response.status_code, response.json() if response.status_code < 400 else None)
     except Exception as exc:
         diagnosis = {"status": "invalid_response" if isinstance(exc, ValueError) else classify_failure(type(exc).__name__ + ": " + str(exc)),
@@ -231,3 +229,14 @@ async def health_history(days: int = Query(default=90, ge=1, le=365)):
         return {"services": summary, "period_days": days}
     finally:
         await conn.close()
+
+
+@router.get("/api/health/live")
+async def liveness():
+    return {"status": "ok"}
+
+
+@router.get('/api/operations')
+async def operations_summary():
+    import operations
+    return await operations.summary()

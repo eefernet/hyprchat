@@ -76,6 +76,7 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", data_path("hyprchat.db"))
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", data_path("uploads"))
 TOOLS_DIR = os.getenv("TOOLS_DIR", data_path("tools"))
 KB_DIR = os.getenv("KB_DIR", data_path("knowledge_bases"))
+ARTIFACT_DIR = data_path("artifacts")
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "250"))
 
 # ============================================================
@@ -182,6 +183,7 @@ QUICK_SEARCH_TRIAGE_MODEL = os.getenv("QUICK_SEARCH_TRIAGE_MODEL", "")
 # ============================================================
 # Tick interval for the in-process scheduled-task loop (seconds).
 SCHEDULER_TICK_SECONDS = int(os.getenv("SCHEDULER_TICK_SECONDS", "30"))
+RAG_RETRIEVAL_DEADLINE_SECONDS = float(os.getenv("RAG_RETRIEVAL_DEADLINE_SECONDS", "3"))
 # Hard wall-clock cap per scheduled run — a wedged model must not hold the
 # serial execution slot forever.
 SCHEDULED_RUN_TIMEOUT = int(os.getenv("SCHEDULED_RUN_TIMEOUT", "900"))

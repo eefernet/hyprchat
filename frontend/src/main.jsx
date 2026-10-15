@@ -30,6 +30,7 @@ import { createRoot, hydrateRoot } from 'react-dom/client';
 import {
   API,
   HC_USER_KEY,
+  hcCaptureUserContext,
   dismissHyprLoader,
   hcSessionKey,
   hcSetUserContext,
@@ -64,6 +65,11 @@ import useIsMobile, { isMobileNow, useMobileViewport } from './useIsMobile.js';
 import AnalyticsPanel from './panels/AnalyticsPanel.jsx';
 import PromptLibraryPanel from './panels/PromptLibraryPanel.jsx';
 import TasksPanel from './panels/TasksPanel.jsx';
+import JobsPanel from './panels/JobsPanel.jsx';
+import PanelBoundary from './components/PanelBoundary.jsx';
+import ResearchRecovery from './components/ResearchRecovery.jsx';
+import ContextInspector from './components/ContextInspector.jsx';
+import LibrarySearchPanel from './panels/LibrarySearchPanel.jsx';
 import AssistantPanel from './panels/AssistantPanel.jsx';
 import NotesPanel from './panels/NotesPanel.jsx';
 import CalendarPanel from './panels/CalendarPanel.jsx';
@@ -307,7 +313,7 @@ function HyprChat(){
   const [customLabel,setCustomLabel]=useState(null);
   const [connectionsSaving,setConnectionsSaving]=useState(false);
   const [connectionsSaveState,setConnectionsSaveState]=useState(null); // saving|saved|failed
-  const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000});
+  const [ragSettings,setRagSettings]=useState({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000,retrieval_deadline_seconds:3});
   const [kbPreview,setKbPreview]=useState(null);
   const [ragSaving,setRagSaving]=useState(false);
   const [ragSaveState,setRagSaveState]=useState(null); // saving|saved|failed
@@ -568,7 +574,7 @@ function HyprChat(){
   // ── Server-backed user prefs (prompts, model params, quotes, tags, effort) ──
   // Debounced PUTs to /api/prefs/{key}; namespaced localStorage cache per user.
   const prefsSyncRef=useRef(null);
-  if(!prefsSyncRef.current)prefsSyncRef.current=createPrefsSync({api:API});
+  if(!prefsSyncRef.current)prefsSyncRef.current=createPrefsSync({api:API,getContext:hcCaptureUserContext,onError:e=>notify({type:"error",text:"Preferences not saved",detail:e.message})});
   const prefsReadyRef=useRef(false);   // gate: no PUTs until boot hydration ran
   const prefsSkipRef=useRef({});       // per-key: next persist call is a hydration echo
   // Returns true when the call was a hydration echo (callers can skip UI pulses).
@@ -753,6 +759,9 @@ function HyprChat(){
   const [councilRunning,setCouncilRunning]=useState(false);
   const [councilResponses,setCouncilResponses]=useState({}); // {memberId: {model,content,done}}
   const [councilHostContent,setCouncilHostContent]=useState("");
+  const [councilUsage,setCouncilUsage]=useState(null);
+  const [inspectorMessage,setInspectorMessage]=useState(null);
+  const [selectedLibraryNote,setSelectedLibraryNote]=useState(null);
   const [councilVotes,setCouncilVotes]=useState([]); // live votes during current stream
   const [councilVoting,setCouncilVoting]=useState(false); // voting phase active
   const [councilRound,setCouncilRound]=useState(null); // {round, total_rounds, label}
@@ -782,6 +791,8 @@ function HyprChat(){
   // ── Voice: mic recording (STT) + speech playback (TTS) ──
   const [recording,setRecording]=useState(false);
   const [transcribing,setTranscribing]=useState(false);
+  const [retryRecording,setRetryRecording]=useState(null);
+  const transcriptionRef=useRef(null);
   const [speakingMid,setSpeakingMid]=useState(null);
   const [ttsLoadingMid,setTtsLoadingMid]=useState(null);
   const [ttsPhase,setTtsPhase]=useState("");
@@ -871,6 +882,7 @@ function HyprChat(){
   });
   const playTtsSequence=async({mid,chunks,startIndex=0,firstAudio=null,firstHasSource=false,textKey})=>{
     const ctrl=new AbortController();ttsAbortRef.current=ctrl;
+    const audioStartedAt=performance.now();let measuredFirstAudio=false;
     let currentAudio=null,currentPrepared=null;
     try{
       for(let ci=startIndex;ci<chunks.length;ci++){
@@ -886,7 +898,7 @@ function HyprChat(){
           if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
           const d=await r.json();
           if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
-          const streamUrl=d.url?.startsWith("http")?d.url:`${API}${d.url||`/api/audio/speech/${d.id}`}`;
+          const streamUrl=userScopedUrl(d.url||`/api/audio/speech/${d.id}`);
           audio.src=streamUrl;
           try{audio.load();}catch{}
         }
@@ -894,7 +906,7 @@ function HyprChat(){
         setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`loading ${ci+1}/${chunks.length}`:"loading");
         await waitForAudioStart(audio,ctrl.signal,20000,{
           onReady:()=>{if(ttsAbortRef.current===ctrl){setTtsLoadingMid(mid);setTtsPhase(chunks.length>1?`ready ${ci+1}/${chunks.length}`:"ready");}},
-          onPlaying:()=>{if(ttsAbortRef.current===ctrl){setTtsLoadingMid(null);setSpeakingMid(mid);setTtsPhase(chunks.length>1?`playing ${ci+1}/${chunks.length}`:"playing");}},
+          onPlaying:()=>{if(ttsAbortRef.current===ctrl){if(!measuredFirstAudio){measuredFirstAudio=true;notify({type:"info",text:`Audio started in ${((performance.now()-audioStartedAt)/1000).toFixed(1)}s`,duration:2000});}setTtsLoadingMid(null);setSpeakingMid(mid);setTtsPhase(chunks.length>1?`playing ${ci+1}/${chunks.length}`:"playing");}},
         });
         if(ttsAbortRef.current!==ctrl||ctrl.signal.aborted)throw ttsAbortError();
         currentPrepared=null;
@@ -941,12 +953,40 @@ function HyprChat(){
     audioRef.current=firstAudio;
     await playTtsSequence({mid,chunks,startIndex:0,firstAudio,textKey});
   };
+  const cancelVoice=()=>{
+    transcriptionRef.current?.abort();transcriptionRef.current=null;
+    stopSpeaking();
+    const recorder=mediaRecRef.current;
+    if(recorder){recorder.onstop=null;try{recorder.stop();}catch{}recorder.stream?.getTracks().forEach(track=>track.stop());}
+    recChunksRef.current=[];setRecording(false);setTranscribing(false);setRetryRecording(null);
+  };
+  useEffect(()=>{cancelVoice();},[actId,currentUserId,panel]);
+  const transcribeRecording=async(blob,origin)=>{
+    const current=()=>origin.epoch===hcCaptureUserContext().epoch&&origin.conversationId===actIdRef.current;
+    if(!current())return;
+    const controller=new AbortController();transcriptionRef.current=controller;
+    const started=performance.now();setTranscribing(true);setRetryRecording(null);
+    try{
+      const bt=blob.type||"",ext=bt.includes("mp4")?"m4a":bt.includes("ogg")?"ogg":"webm";
+      const fd=new FormData();fd.append("file",blob,`recording.${ext}`);
+      const r=await fetch(`${API}/api/audio/transcribe`,{method:"POST",body:fd,signal:controller.signal});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      if(!current()||controller.signal.aborted)return;
+      if(d.text)setInp(p=>p?`${p} ${d.text}`:d.text);
+      notify({type:"success",text:"Transcription ready",detail:`${((performance.now()-started)/1000).toFixed(1)} seconds`});
+    }catch(e){
+      if(current()&&!controller.signal.aborted){setRetryRecording({blob,origin});notify({type:"error",text:"Transcription failed",detail:`${e.message}. Recording retained for Retry.`});}
+    }finally{if(transcriptionRef.current===controller){transcriptionRef.current=null;setTranscribing(false);}}
+  };
   const toggleRecording=async()=>{
+    const origin={...hcCaptureUserContext(),conversationId:actIdRef.current};
     if(recording){try{mediaRecRef.current?.stop();}catch{}return;}
     if(!navigator.mediaDevices?.getUserMedia){notify({type:"warning",text:"Microphone unavailable",detail:"getUserMedia needs a secure context — use HTTPS or allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure"});return;}
     let stream;
     try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}
     catch(e){notify({type:"warning",text:"Microphone unavailable",detail:e.name==="NotAllowedError"?"Permission denied":e.name==="NotFoundError"?"No microphone found":String(e.message||e)});return;}
+    if(origin.epoch!==hcCaptureUserContext().epoch||origin.conversationId!==actIdRef.current){stream.getTracks().forEach(track=>track.stop());return;}
     const mime=window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported("audio/webm;codecs=opus")?"audio/webm;codecs=opus":"";
     let rec;
     try{rec=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);}
@@ -959,17 +999,7 @@ function HyprChat(){
       const blob=new Blob(recChunksRef.current,{type:rec.mimeType||"audio/webm"});
       recChunksRef.current=[];
       if(blob.size<800)return; // accidental tap — nothing recorded
-      setTranscribing(true);
-      try{
-        const bt=blob.type||"";
-        const ext=bt.includes("mp4")?"m4a":bt.includes("ogg")?"ogg":"webm";
-        const fd=new FormData();fd.append("file",blob,`recording.${ext}`);
-        const r=await fetch(`${API}/api/audio/transcribe`,{method:"POST",body:fd});
-        const d=await r.json().catch(()=>({}));
-        if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
-        if(d.text){setInp(p=>p?`${p} ${d.text}`:d.text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},0);}
-      }catch(e){notify({type:"error",text:"Transcription failed",detail:String(e.message||e)});}
-      setTranscribing(false);
+      await transcribeRecording(blob,origin);
     };
     mediaRecRef.current=rec;
     rec.start();
@@ -981,7 +1011,7 @@ function HyprChat(){
   const DAEDALUS_AVATAR="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAxMDAgMTAwJz48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9J2cnIHgxPScxMicgeTE9JzgnIHgyPSc4OCcgeTI9JzkyJyBncmFkaWVudFVuaXRzPSd1c2VyU3BhY2VPblVzZSc+PHN0b3Agc3RvcC1jb2xvcj0nIzBiMTIyMCcvPjxzdG9wIG9mZnNldD0nLjU1JyBzdG9wLWNvbG9yPScjMWQyYTQ0Jy8+PHN0b3Agb2Zmc2V0PScxJyBzdG9wLWNvbG9yPScjNGIyZDczJy8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9J2EnIHgxPScyNCcgeTE9JzE4JyB4Mj0nNzgnIHkyPSc4NCcgZ3JhZGllbnRVbml0cz0ndXNlclNwYWNlT25Vc2UnPjxzdG9wIHN0b3AtY29sb3I9JyM4ZmQ4ZmYnLz48c3RvcCBvZmZzZXQ9Jy41NScgc3RvcC1jb2xvcj0nI2E4OGNmZicvPjxzdG9wIG9mZnNldD0nMScgc3RvcC1jb2xvcj0nIzZmZmZkMicvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHdpZHRoPScxMDAnIGhlaWdodD0nMTAwJyByeD0nMTgnIGZpbGw9J3VybCgjZyknLz48cGF0aCBkPSdNMTggNDloMTVNNjcgNDloMTVNNTAgMTh2MTNNNTAgNjl2MTNNMjkgMjlsLTktOU03MSA3MWw5IDknIHN0cm9rZT0nIzZmZmZkMicgc3Ryb2tlLXdpZHRoPSczJyBzdHJva2UtbGluZWNhcD0ncm91bmQnIG9wYWNpdHk9Jy43MicvPjxwYXRoIGQ9J00yOCA3MlYyOGgyMmMxNiAwIDI2IDkgMjYgMjJTNjYgNzIgNTAgNzJIMjh6JyBmaWxsPSdub25lJyBzdHJva2U9J3VybCgjYSknIHN0cm9rZS13aWR0aD0nNycgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCcvPjxwYXRoIGQ9J000MiAzNnYyOGg4YzkgMCAxNS01IDE1LTE0UzU5IDM2IDUwIDM2aC04eicgZmlsbD0nIzExMTgyNycgc3Ryb2tlPScjZDhlNmZmJyBzdHJva2Utd2lkdGg9JzMnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnLz48Y2lyY2xlIGN4PSc1MCcgY3k9JzUwJyByPSc1JyBmaWxsPScjNmZmZmQyJy8+PGNpcmNsZSBjeD0nMjAnIGN5PScyMCcgcj0nNCcgZmlsbD0nI2E4OGNmZicvPjxjaXJjbGUgY3g9JzgwJyBjeT0nODAnIHI9JzQnIGZpbGw9JyM4ZmQ4ZmYnLz48L3N2Zz4=";
   const isDaedalusProfileName=(name)=>String(name||"").toLowerCase().includes("daedalus");
   const isCoderPersonaName = (name)=>{const n=(name||"").toLowerCase();return n.includes("coder")||n.includes("daedalus");};
-  const avatarSrc=(avatar)=>avatar?(String(avatar).startsWith("blob:")||String(avatar).startsWith("data:")||String(avatar).startsWith("http")?avatar:`${API}${avatar}`):"";
+  const avatarSrc=(avatar)=>avatar?(String(avatar).startsWith("blob:")||String(avatar).startsWith("data:")||String(avatar).startsWith("http")?avatar:userScopedUrl(avatar)):"";
   const showCodingOptions=isDaedalusPersona(act,actId?null:pendingPersona);
   useEffect(()=>{setCodingOptions({});},[actId,act?.model_config_id,act?.persona_name,pendingPersona?.model_config_id,pendingPersona?.persona_name]);
   const profileAvatar=(mc)=>mc?.parameters?.avatar||(isDaedalusProfileName(mc?.name)?DAEDALUS_AVATAR:null);
@@ -1325,13 +1355,20 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
+    cancelVoice();
+    prefsSyncRef.current?.cancel();
+    for(const timer of kbSaveTimersRef.current.values())clearTimeout(timer);
+    kbSaveTimersRef.current.clear();
+    stopSpeaking();
+    if(mediaRecRef.current){mediaRecRef.current.onstop=null;try{mediaRecRef.current.stop();}catch{}mediaRecRef.current.stream?.getTracks().forEach(track=>track.stop());}
+    recChunksRef.current=[];setRecording(false);setTranscribing(false);
     cancelSendPreparation();
     setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
     researchSelectedRef.current=null;researchAppliedRef.current=null;researchEvidenceRequestRef.current++;researchRequestRef.current++;researchRevisionRef.current=0;setResearchEvidence(null);
-    setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
-    setCouncils([]);setActiveCouncilId(null);setCouncilReport(null);setQuickResults([]);setSearchLoading(false);setQuickSearchError(null);
+    setSelectedLibraryNote(null);setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
+    setCouncils([]);setCouncilUsage(null);setInspectorMessage(null);setActiveCouncilId(null);setCouncilReport(null);setQuickResults([]);setSearchLoading(false);setQuickSearchError(null);
     setCoderWorkflows([]);setCoderProjInfo(null);setAttachments([]);setFtsResults([]);setArtifactFocusId(null);setPanel("chat");setLoadingConv(false);
     // Server-backed prefs are per-profile: clear them and re-gate persistence
     // until the next boot hydration fetches the new profile's values.
@@ -2804,7 +2841,7 @@ function HyprChat(){
     // Title generation
     if(!(cv.messages||[]).length){const title=userMsg.slice(0,40)+(userMsg.length>40?"...":"");uConv(cid,{title});fetch(`${API}/api/conversations/${cid}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({title})}).catch(()=>{});}
     // Start council streaming
-    setCouncilRunning(true);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilRound(null);setCouncilKbStatus("");
+    setCouncilRunning(true);setCouncilUsage(null);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilRound(null);setCouncilKbStatus("");
     // Initialize stream ref for cross-navigation persistence
     const sRef={cid,running:true,responses:{},hostContent:"",votes:[],voting:false,round:null};
     councilStreamRef.current=sRef;
@@ -2840,6 +2877,10 @@ function HyprChat(){
               }
             }else if(d.type==="council_token"){
               setCouncilResponses(p=>{const n={...p,[d.member_id]:{model:d.model,member_name:d.member_name,content:(p[d.member_id]?.content||"")+d.content,done:false,round:d.round,round_label:d.round_label,responding_to:d.responding_to||[]}};sRef.responses=n;return n;});
+            }else if(d.type==="council_error"){
+              setCouncilResponses(p=>({...p,[d.member_id]:{...(p[d.member_id]||{}),model:d.model,member_name:d.member_name,content:(p[d.member_id]?.content||'')+`\n[Member failed: ${d.error}]`,done:true}}));
+            }else if(d.type==="council_usage"){
+              setCouncilUsage(p=>({prompt_tokens:(p?.prompt_tokens||0)+(d.prompt_tokens||0),gen_tokens:(p?.gen_tokens||0)+(d.gen_tokens||0)}));
             }else if(d.type==="council_done"){
               setCouncilResponses(p=>{const n={...p,[d.member_id]:{...(p[d.member_id]||{model:d.model,content:""}),model:d.model,member_name:d.member_name,done:true,round:d.round,round_label:d.round_label,responding_to:d.responding_to||p[d.member_id]?.responding_to||[]}};sRef.responses=n;return n;});
             }else if(d.type==="council_voting"){
@@ -2859,6 +2900,7 @@ function HyprChat(){
             }else if(d.type==="council_host_token"){
               setCouncilHostContent(p=>{const n=p+d.content;sRef.hostContent=n;return n;});
             }else if(d.type==="council_complete"){
+              setCouncilUsage(d.usage||null);
               sRef.running=false;
               setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);setCouncilKbStatus("");
               // Reload conversation from backend to get all rounds with correct metadata
@@ -3369,6 +3411,8 @@ function HyprChat(){
 
   // File upload handler
   const handleFileUpload=async(files)=>{
+    const origin={...hcCaptureUserContext(),conversationId:actIdRef.current};
+    const current=()=>origin.epoch===hcCaptureUserContext().epoch&&origin.conversationId===actIdRef.current;
     if(sendPrepRef.current?.preparing)return;
     // If Coder Bot is active, intercept archive drops and route them to the
     // project upload endpoint instead of treating them as text attachments.
@@ -3388,6 +3432,7 @@ function HyprChat(){
     }
     const newAttachments=[];
     for(const file of remaining){
+      if(!current())return;
       if(isImage(file)){
         if(file.size>20*1024*1024){console.warn(`Skipped ${file.name} — image too large (max 20MB)`);notify({type:"warning",text:"Image skipped",detail:`${file.name} is larger than 20MB.`});continue;}
         try{
@@ -3400,17 +3445,20 @@ function HyprChat(){
       }
       if(isPdf(file)){
         if(file.size>250*1024*1024){console.warn(`Skipped ${file.name} — too large (max 250MB)`);notify({type:"warning",text:"PDF skipped",detail:`${file.name} is larger than 250MB.`});continue;}
+        const attachmentId=crypto.randomUUID();
         // Add a loading placeholder immediately
-        setAttachments(p=>[...p,{name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
+        setAttachments(p=>[...p,{attachmentId,name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
         try{
           const fd=new FormData();fd.append("file",file);
           const r=await fetch(`${API}/api/extract-pdf`,{method:"POST",body:fd});
           if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
           const d=await r.json();
-          setAttachments(p=>p.map((a,i)=>a.name===file.name&&a.loading?{name:file.name,content:d.text||"No text extracted.",type:"pdf",pages:d.total_pages||0,loading:false}:a));
+          if(!current())return;
+          setAttachments(p=>p.map((a,i)=>a.attachmentId===attachmentId&&a.loading?{name:file.name,content:d.text||"No text extracted.",type:"pdf",pages:d.total_pages||0,loading:false}:a));
         }catch(e){
+          if(!current())return;
           console.error("PDF extraction failed:",e);
-          setAttachments(p=>p.map(a=>a.name===file.name&&a.loading?{name:file.name,content:"",type:"pdf",pages:0,loading:false,error:e.message,file}:a));
+          setAttachments(p=>p.map(a=>a.attachmentId===attachmentId&&a.loading?{name:file.name,content:"",type:"pdf",pages:0,loading:false,error:e.message,file}:a));
           notify({type:"error",text:"PDF extraction failed",detail:file.name});
         }
         continue;
@@ -3436,10 +3484,11 @@ function HyprChat(){
         newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`,type:"binary"});
       }
     }
-    if(newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
+    if(current()&&newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
   };
 
   const stop=()=>{
+    cancelVoice();
     // Tell the backend to abort any in-flight runs (architect, builder,
     // reviewer, fixer) before we drop the SSE connection. Without this the
     // run's ollama call keeps burning until its 600s timeout and the runs
@@ -4782,6 +4831,7 @@ function HyprChat(){
   // ============================================================
   const _uiScale=uiFontSize/14;
   return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+    {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)}/>}
     {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${t.acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
     <BackgroundCanvas effect={bgEffect} t={t}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
@@ -4870,6 +4920,7 @@ function HyprChat(){
         </div>
         {!wsPanel&&<>
         {showMessageSearch&&<div style={{display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s both"}}>
+          <button style={btnS(t.acc)} onClick={()=>{setPanel('library');if(isMobile)setSidebar(false);}}>Search all saved content</button>
           <div style={{position:"relative"}}>
             <input ref={titleSearchRef} value={sq} onChange={e=>setSq(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Filter chat titles..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:11}}/>
             <span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",color:t.mut,display:"flex",pointerEvents:"none",opacity:.75}}><IC.Search/></span>
@@ -5513,7 +5564,7 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],interrupted:[t.warm,"Interrupted"],cancelling:[t.warm,"Cancelling"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,...(isMobile?{flexWrap:"wrap",rowGap:6}:{})}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
       {researchView==="reports"&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
@@ -5524,6 +5575,7 @@ function HyprChat(){
         {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print</button>}
       </div>}
     </div>
+    {researchView==="reports"&&report&&<ResearchRecovery key={report.id} report={report} t={t} btnS={btnS} inputS={inputS} onRefresh={()=>loadResearchReport(report.id)}/>}
     {researchView==="new"?
     <div style={{flex:1,overflowY:"auto",minHeight:0,padding:"28px 24px"}}>
       <div style={{maxWidth:960,margin:"0 auto",display:"flex",flexDirection:"column",gap:14}}>
@@ -5792,6 +5844,8 @@ function HyprChat(){
               <div style={sectionS}>
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:9,color:t.warm}}><IC.Crown/><span style={kickerS}>Host / Moderator</span></div>
                 <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:8}}/>
+                <label style={{display:'flex',gap:8,fontSize:12,margin:'8px 0'}}><input type="checkbox" checked={!!council.cloud_enabled} onChange={async e=>{const value=e.target.checked;try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({cloud_enabled:value})});if(!r.ok)throw new Error(`HTTP ${r.status}`);const saved=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?saved:c));}catch(e){if(e.name!=='AbortError')notify({type:'error',text:'Council settings failed',detail:e.message});}}}/>Enable paid cloud calls</label>
+                <label style={{fontSize:12}}>Per-run spending cap (USD)<input aria-label="Council spending cap" type="number" min="0" step="0.01" value={council.cost_limit_usd||0} style={{...inputS,margin:'6px 0'}} onChange={e=>{const v=Number(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,cost_limit_usd:v}:c));}} onBlur={async()=>{try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({cost_limit_usd:council.cost_limit_usd||0})});if(!r.ok)throw new Error(`HTTP ${r.status}`);}catch(e){if(e.name!=='AbortError')notify({type:'error',text:'Council cap save failed',detail:e.message});}}}/></label>
                 <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
                   onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
                   placeholder="Moderator system prompt (optional)" rows={4}
@@ -6910,13 +6964,17 @@ function HyprChat(){
 
       :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
-      :(panel==="tasks"||panel==="notifications")?<TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/>
+      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
 
-      :panel==="email"?<EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
+      :panel==="library"?<PanelBoundary key={panel}><LibrarySearchPanel t={t} btnS={btnS} inputS={inputS} onNavigate={result=>{if(result.kind==='chat')loadConversation(result.parent_id);else if(result.kind==='artifact')openArtifact(result.source_id);else if(result.kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(result.source_id);}else{setSelectedLibraryNote(result.source_id);setPanel('notes');}}}/></PanelBoundary>
 
-      :panel==="notes"?<NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
+      :(panel==="tasks"||panel==="notifications")?<PanelBoundary key={panel}><TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/></PanelBoundary>
 
-      :panel==="calendar"?<CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/>
+      :panel==="email"?<PanelBoundary key={panel}><EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
+
+      :panel==="notes"?<PanelBoundary key={panel}><NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} initialNoteId={selectedLibraryNote}/></PanelBoundary>
+
+      :panel==="calendar"?<PanelBoundary key={panel}><CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
 
       :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{let live=cid;try{const ar=await fetch(`${API}/api/assistant`);const ad=await ar.json();live=ad?.profile?.conversation_id||cid;}catch{}if(!live)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(live);loadConversation(live);setPanel("chat");}}/>
 
@@ -7489,7 +7547,7 @@ function HyprChat(){
       <div style={{display:settingsTab==="rag"?"block":"none",animation:"fadeIn .18s ease"}}>
         <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",marginBottom:12}}>
           <div style={{display:"flex",gap:8}}>
-            <button onClick={()=>setRagSettings({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000})} style={{...btnS(t.mut),fontSize:12,padding:"5px 12px"}}>Default</button>
+            <button onClick={()=>setRagSettings({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000,retrieval_deadline_seconds:3})} style={{...btnS(t.mut),fontSize:12,padding:"5px 12px"}}>Default</button>
             <button disabled={ragSaving} onClick={async()=>{
               setRagSaving(true);setRagSaveState("saving");
               try{
@@ -7561,6 +7619,7 @@ function HyprChat(){
         </>,null,t.warm)}
 
         {settingSection("🔍 Retrieval",null,<>
+          <label style={{fontSize:12}}>Retrieval deadline (seconds)<input type="number" min={1} max={30} value={ragSettings.retrieval_deadline_seconds||3} onChange={e=>setRagSettings(p=>({...p,retrieval_deadline_seconds:Number(e.target.value)}))} style={inputS}/></label>
           <div style={{display:"flex",gap:16}}>
             <div style={{flex:1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
@@ -7986,6 +8045,7 @@ function HyprChat(){
                       </div>
                       <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
                         <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
+                        {(()=>{const usage=turn.host?.metadata?.usage||(isLive?councilUsage:null);return usage?<div style={{fontSize:10,color:t.dim,marginTop:8}}>{usage.prompt_tokens||0} input · {usage.gen_tokens||0} output tokens{usage.estimated_cost_usd!=null?` · estimated $${usage.estimated_cost_usd.toFixed(4)}`:''}{usage.usage_uncertain?' · incomplete provider usage; further paid calls withheld':''}</div>:null;})()}
                         {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                       </div>
                     </div>}
@@ -8156,6 +8216,7 @@ function HyprChat(){
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
                       {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
                     </button>}
+                    {!isU&&msg.id!=null&&<button onClick={()=>setInspectorMessage(msg.id)} style={msgActionS(t.mut)}>Context</button>}
                     {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} title={(playing||generating)?"Stop playback":"Read aloud"} style={msgActionS(playing?t.acc:generating?t.warm:t.mut)}>
                       {generating?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> {ttsPhase||"generating"}</>:playing?<><IC.Stop/> playing</>:<><IC.Volume/> speak</>}
                     </button>;})()}
@@ -8394,6 +8455,7 @@ function HyprChat(){
                 </div>}
               </div>}
             </div>;})()}
+            {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:6,cursor:"pointer"}}>Retry transcription</button>}
             {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
               {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
             </button>}
@@ -8606,4 +8668,4 @@ function HyprChat(){
   </div></div>;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<><HyprChat/><NewVersionBar/></>);
+ReactDOM.createRoot(document.getElementById("root")).render(<><PanelBoundary><HyprChat/></PanelBoundary><NewVersionBar/></>);

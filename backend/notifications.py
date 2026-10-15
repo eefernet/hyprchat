@@ -29,30 +29,11 @@ async def notify(title: str, body: str = "", *, kind: str = "task",
                  user_id: str | None = None) -> int:
     notification_id = await db.add_notification(
         title, body, kind=kind, source_task_id=source_task_id,
-        conversation_id=conversation_id, user_id=user_id)
-    # Quiet hours suppress only the push fanout — the in-app row above always
-    # lands. `urgent=True` (e.g. urgent email triage) can pierce the window
-    # when the profile's urgent_override is on. Fails open: a profile lookup
-    # error must never eat a push.
+        conversation_id=conversation_id, user_id=user_id,
+        delivery_channels=(['ntfy'] if ntfy else []) + (['email'] if email else []), urgent=urgent)
     if ntfy or email:
-        try:
-            import quiet_hours
-            profile = await db.get_assistant_profile(user_id=user_id)
-            if quiet_hours.suppress_push(profile, urgent=urgent):
-                ntfy = email = False
-        except Exception as e:
-            print(f"[NOTIFY] quiet-hours check failed (pushing anyway): {e}")
-    if ntfy:
-        try:
-            await _send_ntfy(title, body, user_id=user_id)
-        except Exception as e:
-            # In-app already landed; push is best-effort.
-            print(f"[NOTIFY] ntfy send failed: {e}")
-    if email:
-        try:
-            await _send_self_email(title, body, user_id=user_id)
-        except Exception as e:
-            print(f"[NOTIFY] email send failed: {e}")
+        import notification_delivery
+        await notification_delivery.deliver_due(notification_id)
     return notification_id
 
 
@@ -61,27 +42,28 @@ async def _send_self_email(title: str, body: str, user_id: str | None = None) ->
     configured SMTP account (Phase 3 channel)."""
     accounts = await db.list_email_accounts(user_id=user_id)
     if not accounts:
-        return
+        return False
     account = await db.get_email_account(accounts[0]["id"], with_password=True,
                                          user_id=user_id)
     if not account or not account.get("smtp_host"):
-        return
+        return False
     import email_client  # call-time: keep notifications import-light
     to = account.get("from_address") or account.get("username") or ""
     if "@" not in to:
-        return
+        return False
     await email_client.send_mail(account, to=to, subject=f"[HyprChat] {title}",
                                  body=body or title)
+    return True
 
 
 async def _send_ntfy(title: str, body: str, user_id: str | None = None) -> None:
     prefs = await db.get_user_pref("ntfy", user_id=user_id)
     if not isinstance(prefs, dict):
-        return
+        return False
     base_url = str(prefs.get("url") or "").strip().rstrip("/")
     topic = str(prefs.get("topic") or "").strip().strip("/")
     if not base_url or not topic or _http is None:
-        return
+        return False
     import connectors  # call-time: keep notifications import-light
     url = f"{base_url}/{topic}"
     await connectors.assert_url_allowed(url, bool(prefs.get("allow_private")))
@@ -91,3 +73,4 @@ async def _send_ntfy(title: str, body: str, user_id: str | None = None) -> None:
         headers["Authorization"] = f"Bearer {token}"
     resp = await _http.post(url, content=(body or title)[:4000], headers=headers, timeout=10)
     resp.raise_for_status()
+    return True

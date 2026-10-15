@@ -49,3 +49,15 @@ async def download(artifact_id: str):
     artifact, path = await documents.owned_source(artifact_id)
     return FileResponse(path, filename=artifact["filename"], media_type=artifact["mime_type"],
                         content_disposition_type="inline" if artifact["kind"] in {"pdf", "image"} else "attachment")
+
+
+class BatchExport(BaseModel):
+    artifact_ids: list[str]
+    format: str
+    conversation_id: str
+
+
+@router.post('/api/documents/batch-export',status_code=202)
+async def batch_export(body: BatchExport):
+    import document_revisions
+    return await document_revisions.submit_batch(route_context().http,body.artifact_ids,body.format,body.conversation_id)

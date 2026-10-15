@@ -22,6 +22,7 @@ from document_runtime import execute, create_document
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
+    monkeypatch.setattr(documents.config, "ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setattr(db, "DATABASE_PATH", str(tmp_path / "db.sqlite"))
     monkeypatch.setattr(documents.config, "SANDBOX_OUTPUTS_DIR", str(tmp_path / "outputs"))
     settings = tmp_path / "settings.json"
