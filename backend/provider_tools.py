@@ -124,10 +124,14 @@ def openai_input_native(messages: list[dict]) -> list[dict]:
             else:
                 out.append({"role": "user", "content": f"[Tool result]\n{text}"})
             continue
+        native = msg.get('provider_state') or []
+        if role == 'assistant':
+            out.extend(item for item in native if item.get('type') in {'reasoning', 'message'})
+        native_text = any(item.get('type') == 'message' for item in native)
         tool_calls = msg.get("tool_calls") or []
         if role == "assistant" and tool_calls:
             text = mp._coerce_text(msg.get("content"))
-            if text:
+            if text and not native_text:
                 out.append({"role": "assistant", "content": text})
             for tc in tool_calls:
                 fn = (tc or {}).get("function") or {}
@@ -143,7 +147,8 @@ def openai_input_native(messages: list[dict]) -> list[dict]:
                 })
                 emitted.add(cid)
             continue
-        out.extend(mp._openai_input([msg]))
+        if not native_text:
+            out.extend(mp._openai_input([msg]))
     return out
 
 
@@ -191,7 +196,7 @@ def anthropic_messages_native(messages: list[dict]) -> tuple[str, list[dict]]:
             continue
         tool_calls = msg.get("tool_calls") or []
         if role == "assistant" and tool_calls:
-            blocks: list[dict] = []
+            blocks: list[dict] = [b for b in msg.get('provider_state', []) if b.get('type') in {'thinking', 'redacted_thinking'}]
             if text:
                 blocks.append({"type": "text", "text": text})
             for tc in tool_calls:
@@ -211,7 +216,7 @@ def anthropic_messages_native(messages: list[dict]) -> tuple[str, list[dict]]:
             continue
         if role not in {"user", "assistant"}:
             role = "user"
-        blocks = []
+        blocks = [b for b in msg.get('provider_state', []) if role == 'assistant' and b.get('type') in {'thinking', 'redacted_thinking'}]
         images = msg.get("images") or []
         if text:
             blocks.append({"type": "text", "text": text})

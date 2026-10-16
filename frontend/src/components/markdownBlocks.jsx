@@ -192,16 +192,16 @@ export function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=fa
     return()=>window.removeEventListener("keydown",onKey);
   },[fs]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
-  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
+  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:"var(--hc-text-secondary)",fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   const wrapStyle=printMode
     ?{margin:"12pt 0",borderRadius:6,overflow:"hidden",border:`1px solid ${t.brd}`,background:"#ffffff",breakInside:"avoid",pageBreakInside:"avoid"}
     :{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep};
   const headStyle=printMode
     ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
-    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`};
+    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:`1px solid ${t.brd}33`};
   return <div className={printMode?"mermaid-print-block":undefined} style={wrapStyle}>
     <div style={headStyle}>
-      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid{repaired&&<span style={{color:t.warm,letterSpacing:0,textTransform:"none",fontWeight:600}}>repaired</span>}</span>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:700}}>◈ mermaid{repaired&&<span style={{color:t.warm,letterSpacing:0,textTransform:"none",fontWeight:600}}>repaired</span>}</span>
       {!printMode&&<div style={{display:"flex",gap:4}}>
         {!err&&!showSrc&&<button onClick={()=>setFs(true)} style={{...headerBtn,color:t.dim}} title="fullscreen / zoom">⛶ expand</button>}
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show diagram":"show source"}>{showSrc?"◱ diagram":"{ } source"}</button>
@@ -209,13 +209,13 @@ export function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=fa
       </div>}
     </div>
     {err&&<div>
-      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Mermaid render error: {err}</div>
-      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:"var(--hc-text-secondary)",fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Mermaid render error: {err}</div>
+      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:"var(--hc-font-code)",color:t.dim}}>{code}</pre>
     </div>}
-    {showSrc&&<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>}
+    {showSrc&&<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:"var(--hc-font-code)",color:t.dim}}>{code}</pre>}
     <div style={{display:err||showSrc?"none":undefined,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
       <div ref={containerRef} className="mermaid-container" style={{background:printMode?"#ffffff":t.bgDeep,minHeight:streaming&&pending?120:undefined,opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
-      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
+      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:"var(--hc-text-secondary)",fontFamily:font,background:t.bgDeep}}>
         <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
         rendering diagram...
       </div>}
@@ -223,9 +223,9 @@ export function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=fa
     {!printMode&&fs&&createPortal(
       <div style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.82)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setFs(false);}}>
         <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(1600px,95vw)",height:"90vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden"}}>
-          <div style={{padding:"10px 16px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:`${t.surface}88`}}>
-            <span style={{fontSize:11,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ mermaid — fullscreen</span>
-            <span style={{fontSize:10,color:t.mut,flex:1}}>drag to pan · scroll to zoom · ESC to close</span>
+          <div style={{padding:"10px 16px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:10,flexShrink:0,background:`${t.surface}F5`}}>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:700}}>◈ mermaid — fullscreen</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flex:1}}>drag to pan · scroll to zoom · ESC to close</span>
             <button onClick={()=>panZoomRef.current?.reset()} style={{...headerBtn,color:t.dim}} title="reset view">⟲ reset</button>
             <button onClick={()=>setFs(false)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}} title="close">✕</button>
           </div>
@@ -342,29 +342,29 @@ export function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,s
     return()=>{if(chartRef.current){try{chartRef.current.destroy();}catch{}chartRef.current=null;}};
   },[code,epoch,showSrc,t,font,printMode,streaming,tick]);
   const copyCode=()=>{try{navigator.clipboard.writeText(code);setCpd(true);setTimeout(()=>setCpd(false),1500);}catch{}};
-  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:10,fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
+  const headerBtn={background:"none",border:"none",cursor:"pointer",padding:"3px 6px",fontSize:"var(--hc-text-secondary)",fontFamily:font,borderRadius:5,display:"flex",alignItems:"center",gap:3};
   const wrapStyle=printMode
     ?{margin:"12pt 0",borderRadius:6,overflow:"hidden",border:`1px solid ${t.brd}`,background:"#ffffff",breakInside:"avoid",pageBreakInside:"avoid"}
     :{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep};
   const headStyle=printMode
     ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
-    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`};
+    :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:`1px solid ${t.brd}33`};
   return <div className={printMode?"chart-print-block":undefined} style={wrapStyle}>
     <div style={headStyle}>
-      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.acc,textTransform:"uppercase",letterSpacing:1,fontWeight:700}}>◈ {kind}</span>
+      <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:700}}>◈ {kind}</span>
       {!printMode&&<div style={{display:"flex",gap:4}}>
         <button onClick={()=>setShowSrc(s=>!s)} style={{...headerBtn,color:showSrc?t.acc:t.dim}} title={showSrc?"show chart":"show source"}>{showSrc?"◱ chart":"{ } source"}</button>
         <button onClick={copyCode} style={{...headerBtn,color:cpd?t.ok:t.dim}} title="copy source">{cpd?"✓ copied":"⧉ copy"}</button>
       </div>}
     </div>
     {err&&<div>
-      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:11,fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
-      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>
+      <div style={{padding:"8px 12px",background:`${t.err}12`,color:t.err,fontSize:"var(--hc-text-secondary)",fontFamily:font,borderBottom:`1px solid ${t.err}33`}}>⚠ Chart render error: {err}</div>
+      <pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:"var(--hc-font-code)",color:t.dim}}>{code}</pre>
     </div>}
-    {showSrc&&<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code}</pre>}
+    {showSrc&&<pre style={{margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:"var(--hc-font-code)",color:t.dim}}>{code}</pre>}
     <div style={{display:err||showSrc?"none":undefined,padding:printMode?"10pt":"14px",height:printMode?280:320,position:"relative",background:printMode?"#ffffff":t.bgDeep}}>
       <canvas ref={canvasRef} style={{opacity:streaming&&pending?0:1,transition:"opacity .18s ease"}}/>
-      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:11,fontFamily:font,background:t.bgDeep}}>
+      {streaming&&pending&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",gap:8,color:t.mut,fontSize:"var(--hc-text-secondary)",fontFamily:font,background:t.bgDeep}}>
         <span style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite"}}/>
         rendering chart...
       </div>}
@@ -377,7 +377,7 @@ export function CodeBlock({code,lang,t,font}){
   const language=normalizeCodeLanguage(lang);
   const html=useMemo(()=>highlightCode(code,language,window.Prism),[code,language]);
   const props={className:`language-${html===null?'none':language}`,style:{fontFamily:font,background:"transparent",color:t.text,padding:0,textShadow:"none"}};
-  return <pre className="hc-code" style={{...codeTokenStyle(t.bgDeep),margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,background:"transparent"}}>
+  return <pre className="hc-code" style={{...codeTokenStyle(t.bgDeep),margin:0,padding:12,fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:"var(--hc-font-code)",background:"transparent"}}>
     {html===null?<code {...props}>{code}</code>:<code {...props} dangerouslySetInnerHTML={{__html:html}}/>}
   </pre>;
 }

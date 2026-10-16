@@ -307,5 +307,9 @@
   "PUT /api/model-configs/{mc_id}": "profile",
   "PUT /api/notifications/channels/ntfy": "profile",
   "PUT /api/prefs/{key}": "profile",
-  "PUT /api/tools/{tool_id}": "profile"
+  "PUT /api/tools/{tool_id}": "profile",
+  "GET /api/model-capabilities": "profile",
+  "GET /api/messages/{message_id}/reviews": "profile",
+  "POST /api/messages/{message_id}/reviews/{revision}/restore": "profile",
+  "GET /api/settings/cleanup-preview": "admin"
 }

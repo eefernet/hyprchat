@@ -1,4 +1,33 @@
 <details open>
+<summary>Alpha v18.2 — Oct 15, 2026</summary>
+
+> Effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.
+
+## Chat & Reasoning
+
+- **Activity pills** — one expandable pill tracks thinking, tools and reviews, with phase emojis, a smooth live thinking preview and cleaner details on desktop and mobile.
+- **Model-aware effort** — Blurt, Ponder, Forge and Galaxy Brain select native reasoning levels when the model supports them. The menu shows the actual levels and model default. Models with boolean-only thinking, no thinking levels or unknown capabilities keep the existing zero-to-three self-review passes.
+- **Safer self-review** — the completed answer stays visible until a replacement finishes. Failed, interrupted, empty or truncated reviews retain the previous answer; review passes can use only read-only verification tools.
+- **Review history** — inspect earlier answers and restore a completed version from Response Context. It also shows effective effort and token usage for each model call.
+- **Reliable delivery** — the server saves completed responses before reporting completion. Review history survives metadata updates, and cloud tool calls preserve provider reasoning state between rounds.
+
+## Interface
+
+- **Clearer reading** — stronger content surfaces, consistent controls and larger labels across panels and themes. Your selected monospace font applies throughout the interface, chat and code.
+- **Familiar chat controls** — restored the original toolbar with separate memory and Ghost mode icons, theme, export and import controls. The composer keeps its subtle outer focus styling without an inner highlighted box.
+- **Room to work** — conversation lists collapse outside Chat and restore on return. Research adapts to available width with report-list and evidence drawers; exports and secondary actions use labeled menus.
+- **Mobile & keyboard** — responsive toolbars, larger touch targets, visible focus, and improved dialog dismissal and focus restoration. Calendar proposals sit below the header.
+
+## Settings & Reliability
+
+- **Profile saves** — failed agent/persona creation, edits and deletion show errors instead of appearing successful. Effort and thinking preferences sync with the signed-in profile.
+- **Cleanup preview** — see reclaimable temporary files and retained storage before cleanup. Saved references, active or interrupted staging files, changed files and unresolved legacy outputs remain protected.
+- **Logging** — removed raw chat/reasoning and tool-argument debug output. Image deletion no longer wipes system journals; the old journal-scrub helper can be retired.
+- **Development environment** — local backend tests now use Python 3.12 and the pinned test dependency lock to match production.
+
+</details>
+
+<details>
 <summary>Alpha v18.1.1 — Oct 15, 2026</summary>
 
 > Office document tools, a Jobs panel, searchable saved work, and more reliable chat, research and scheduling.

@@ -9,6 +9,12 @@ from .context import route_context
 router = APIRouter()
 
 
+@router.get('/api/model-capabilities')
+async def model_capabilities(model: str):
+    import reasoning
+    return await reasoning.capabilities(route_context().http, model)
+
+
 @router.get("/api/model-providers")
 async def get_model_provider_settings():
     return {"providers": await model_providers.provider_statuses()}

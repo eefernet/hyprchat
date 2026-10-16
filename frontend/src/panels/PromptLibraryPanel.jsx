@@ -48,9 +48,9 @@ export default function PromptLibraryPanel({
           {isEditing?<div style={{animation:"fadeIn .2s"}}>
             <div style={{display:"flex",gap:8,marginBottom:8}}>
               <input value={editPrompt.title} onChange={e=>setEditPrompt(ep=>({...ep,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:2,fontWeight:600}}/>
-              <input value={editPrompt.category} onChange={e=>setEditPrompt(ep=>({...ep,category:e.target.value}))} placeholder="Category" style={{...inputS,flex:1,fontSize:10}}/>
+              <input value={editPrompt.category} onChange={e=>setEditPrompt(ep=>({...ep,category:e.target.value}))} placeholder="Category" style={{...inputS,flex:1,fontSize:"var(--hc-text-control)"}}/>
             </div>
-            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:10,color:t.dim,cursor:"pointer",marginBottom:6}}>
+            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:t.dim,cursor:"pointer",marginBottom:6}}>
               <input type="checkbox" checked={!!editPrompt.is_system} onChange={e=>setEditPrompt(ep=>({...ep,is_system:e.target.checked}))} style={{accentColor:t.warm,cursor:"pointer"}}/>
               Available as System Prompt
             </label>
@@ -63,15 +63,15 @@ export default function PromptLibraryPanel({
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:13,fontWeight:600,color:t.text}}>{p.title}</div>
-                <div style={{fontSize:10,color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
               </div>
               <div style={{display:"flex",gap:4,flexShrink:0}}>
-                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:9}}><IC.Zap/> Use</button>
-                <button onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
-                <button onClick={()=>setPrompts(ps=>(Array.isArray(ps)?ps:[]).filter(x=>x&&typeof x==="object"&&x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
+                <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)"}}><IC.Zap/> Use</button>
+                <button aria-label="Edit" onClick={()=>setEditPrompt({id:p.id,title:p.title,content:p.content,category:p.category||"General",is_system:!!p.is_system})} style={btnS(t.mut)}><IC.Pencil/></button>
+                <button aria-label="Delete" onClick={()=>setPrompts(ps=>(Array.isArray(ps)?ps:[]).filter(x=>x&&typeof x==="object"&&x.id!==p.id))} style={btnS(t.err)}><IC.Trash/></button>
               </div>
             </div>
-            <div style={{fontSize:11,color:t.dim,lineHeight:1.5,maxHeight:80,overflow:"hidden"}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.5,maxHeight:80,overflow:"hidden"}}>
               {p.content.slice(0,200)}{p.content.length>200?"...":""}
             </div>
           </div>}

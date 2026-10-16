@@ -1,3 +1,5 @@
+import PanelHeader from '../components/PanelHeader.jsx';
+import {IC} from '../components/icons.jsx';
 import React,{useState,useEffect,useRef} from 'react';
 import OperationsSummary from '../components/OperationsSummary.jsx';
 import { API, userScopedUrl } from '../session.js';
@@ -40,12 +42,12 @@ export default function JobsPanel({t,btnS,inputS,onNavigate}){
     finally{if(version===epoch.current)setBusy('');}
   };
   return <section style={{padding:20,overflowY:'auto',height:'100%',color:t.text}}>
-    <h2 style={{marginTop:0}}>Jobs</h2>
+    <PanelHeader t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/>
     <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
-      <select aria-label="Job type" value={kind} onChange={e=>{setKind(e.target.value);setOffset(0);}} style={inputS}>
+      <select aria-label="Job type" value={kind} onChange={e=>{setKind(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}>
         <option value="">All types</option>{kinds.map(k=><option key={k}>{k}</option>)}
       </select>
-      <select aria-label="Job status" value={status} onChange={e=>{setStatus(e.target.value);setOffset(0);}} style={inputS}>
+      <select aria-label="Job status" value={status} onChange={e=>{setStatus(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}>
         <option value="">All states</option>{['active','queued','running','cancelling','succeeded','partial','failed','cancelled','interrupted'].map(s=><option key={s}>{s}</option>)}
       </select>
       <button style={btnS(t.acc)} onClick={()=>setRefresh(n=>n+1)}>Refresh</button>

@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Que
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 import backup as backup_svc
 import image_job_store
@@ -645,6 +645,9 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
+    effort_mode: Optional[str] = Field(default=None, pattern='^auto$')
+    reasoning_level: StrictBool | StrictStr | None = None
+    reasoning_model: str = ''
     effort_rounds: Optional[int] = None  # 0=off, 1-3=extra self-review passes after the initial answer
     # Clean user-visible content for the latest user message (without the appended
     # `[Attached N image: ...]` hint that messages[].content carries for the model).
@@ -2116,7 +2119,14 @@ async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
     meta = body.get("metadata")
     if content is None and meta is None:
         raise HTTPException(400, "content or metadata required")
-    await db.update_message(msg_id, content=content, metadata=meta)
+    if content is not None and not isinstance(content, str):
+        raise HTTPException(400, "content must be text")
+    if meta is not None and not isinstance(meta, dict):
+        raise HTTPException(400, "metadata must be an object")
+    try:
+        await db.patch_message_presentation(conv_id, msg_id, content=content, metadata=meta)
+    except LookupError as error:
+        raise HTTPException(404, 'Message not found') from error
     # Manual assistant edits arrive content-only (the stream-finalize PATCH
     # always carries metadata). Re-index the edited text for history recall
     # when this conversation is memory-enabled; delete-first keeps it clean.
@@ -2844,12 +2854,13 @@ async def get_image_job(job_id: str):
                 from PIL import Image
                 with Image.open(io.BytesIO(data)) as decoded:
                     decoded.verify()
-                temporary = filepath + ".part"
-                with open(temporary, "wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(temporary, filepath)
+                from durable_storage import temporary_output
+                with temporary_output(db.current_user_id(), job_id) as temporary:
+                    with open(temporary, "wb") as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(temporary, filepath)
         except Exception as e:
             job.update(error="Image transfer failed; poll again to retry", retryable=True)
             await image_job_store.save(job)
@@ -3165,37 +3176,14 @@ async def purge_image_studio():
         # lose the result before HyprChat's done-poll picks it up.
         history_cleared = bool(await comfyui.clear_history())
         comfyui_files = await comfyui.cleanup_outputs()
-    # Scrub journald — historical backend log lines include generation
-    # prompts. The service is unprivileged (User=hyprchat, NoNewPrivileges),
-    # so the actual rotate+vacuum is done by a root path-unit helper
-    # (scripts/install-journal-scrub.sh) watching for this trigger file.
+    # Image deletion never rotates or vacuums the host's shared journal.
     journal_cleared = False
-    try:
-        _trigger = os.path.join(os.path.dirname(config.SETTINGS_PATH), ".journal-scrub-request")
-        with open(_trigger, "w") as f:
-            f.write(datetime.utcnow().isoformat())
-        for _ in range(20):  # helper consumes the trigger when done (~3s)
-            await asyncio.sleep(0.5)
-            if not os.path.exists(_trigger):
-                journal_cleared = True
-                break
-        if not journal_cleared:
-            # Helper not installed — don't leave a stale trigger behind
-            try:
-                os.remove(_trigger)
-            except OSError:
-                pass
-    except Exception as e:
-        print(f"[IMAGE PURGE] journal scrub request failed: {e}")
     notes = []
     if cleanup_skipped:
         notes.append(f"ComfyUI cleanup skipped ({cleanup_skipped}) — run Delete all again to clear its history/copies.")
     elif comfyui_files is None:
         notes.append("ComfyUI cleanup node not installed — its file copies remain "
                      "until the daily cron (install scripts/comfyui_hyprchat_cleanup.py).")
-    if not journal_cleared:
-        notes.append("Journal scrub helper not installed — old server log lines remain "
-                     "(run scripts/install-journal-scrub.sh on the server once).")
     notes.append("Retained legacy storage copies may remain pending ownership review.")
     note = " ".join(notes)
     return {

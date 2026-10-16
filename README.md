@@ -512,11 +512,13 @@ User → HyprChat (:8000)
 
 ### Tests and Builds
 
-Run from the repository root with the backend virtual environment active. Install the test runner alongside the backend requirements:
+Use Python 3.12 to match production (`.python-version`). From the repository root, create an isolated environment and install the hashed test lock:
 
 ```bash
-python3 -m pip install -r backend/requirements.txt pytest
-python3 -m compileall -q backend
+uv venv --python 3.12 .venv
+uv pip sync --python .venv/bin/python --require-hashes backend/test-requirements.lock.txt
+source .venv/bin/activate
+python -m compileall -q backend
 ```
 
 **Offline regression checks** for coding references and interactive search:
@@ -534,7 +536,7 @@ python3 -m pytest \
 **Full backend suite**, including live integration cases when a server is available:
 
 ```bash
-HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest backend/tests/ -v
+HYPRCHAT_URL=http://127.0.0.1:8000 bash backend/tests/run_tests.sh
 ```
 
 Use a dedicated test instance with disposable data: integration tests create and modify resources. Endpoint tests skip when no server is reachable; missing optional dependencies can also cause skips, so a skipped test is not a verified pass. Browser and live model-evaluation cases have additional setup documented in the [Daedalus guide](docs/daedalus-workflows.md).

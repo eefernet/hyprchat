@@ -29,21 +29,21 @@ function TimeGrid({t,days,byDay,todayKey,nowMin,evColor,onEventClick,onSlotClick
     <div style={{display:"flex",borderBottom:`1px solid ${t.brd}22`}}>
       <div style={{width:gutterW,flexShrink:0}}/>
       {days.map(d=>{const k=dkey(d);const isToday=k===todayKey;
-        return <div key={k} onClick={()=>onDayClick&&onDayClick(d)} style={{flex:1,minWidth:0,textAlign:"center",padding:"6px 0",cursor:onDayClick?"pointer":"default",color:isToday?t.acc:t.mut,fontWeight:800,fontSize:10,textTransform:"uppercase"}} title={onDayClick?"Open day view":undefined}>
+        return <div key={k} onClick={()=>onDayClick&&onDayClick(d)} style={{flex:1,minWidth:0,textAlign:"center",padding:"6px 0",cursor:onDayClick?"pointer":"default",color:isToday?t.acc:t.mut,fontWeight:800,fontSize:"var(--hc-text-secondary)",textTransform:"none"}} title={onDayClick?"Open day view":undefined}>
           {d.toLocaleDateString(undefined,{weekday:"short"})} <span style={{fontSize:12,color:isToday?t.acc:t.text}}>{d.getDate()}</span>
         </div>;})}
     </div>
     {allDayRows.some(r=>r.evs.length>0)&&<div style={{display:"flex",borderBottom:`1px solid ${t.brd}22`}}>
-      <div style={{width:gutterW,flexShrink:0,fontSize:8,color:t.mut,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:6}}>all-day</div>
+      <div style={{width:gutterW,flexShrink:0,fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:6}}>all-day</div>
       {allDayRows.map(({d,evs})=><div key={dkey(d)} style={{flex:1,minWidth:0,padding:2,display:"flex",flexDirection:"column",gap:2}}>
-        {evs.slice(0,2).map(e=>{const c=evColor(e);return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={e.title} style={{fontSize:9,color:t.text,background:`${c}22`,borderLeft:`3px solid ${c}`,borderRadius:4,padding:"2px 4px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{e.title}</div>;})}
-        {evs.length>2&&<div style={{fontSize:8,color:t.mut}}>+{evs.length-2}</div>}
+        {evs.slice(0,2).map(e=>{const c=evColor(e);return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={e.title} style={{fontSize:"var(--hc-text-secondary)",color:t.text,background:`${c}22`,borderLeft:`3px solid ${c}`,borderRadius:4,padding:"2px 4px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{e.title}</div>;})}
+        {evs.length>2&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>+{evs.length-2}</div>}
       </div>)}
     </div>}
     <div ref={scrollRef} style={{overflowY:"auto",flex:1,minHeight:0}}>
       <div style={{display:"flex",position:"relative"}}>
         <div style={{width:gutterW,flexShrink:0}}>
-          {Array.from({length:24},(_,h)=><div key={h} style={{height:HOUR_H,fontSize:9,color:t.mut,textAlign:"right",paddingRight:6,boxSizing:"border-box",borderTop:`1px solid ${t.brd}14`}}>{pad(h)}:00</div>)}
+          {Array.from({length:24},(_,h)=><div key={h} style={{height:HOUR_H,fontSize:"var(--hc-text-secondary)",color:t.mut,textAlign:"right",paddingRight:6,boxSizing:"border-box",borderTop:`1px solid ${t.brd}14`}}>{pad(h)}:00</div>)}
         </div>
         {days.map(d=>{
           const k=dkey(d);const isToday=k===todayKey;
@@ -65,11 +65,11 @@ function TimeGrid({t,days,byDay,todayKey,nowMin,evColor,onEventClick,onSlotClick
           return <div key={k} onClick={ev=>{const rect=ev.currentTarget.getBoundingClientRect();const hour=Math.max(0,Math.min(23,Math.floor((ev.clientY-rect.top)/HOUR_H)));onSlotClick(k,hour);}} style={{flex:1,minWidth:0,position:"relative",borderLeft:`1px solid ${t.brd}14`,background:isToday?`${t.acc}06`:"transparent",height:24*HOUR_H,cursor:"pointer"}} title="Click a slot to create an event">
             {Array.from({length:24},(_,h)=><div key={h} style={{position:"absolute",top:h*HOUR_H,left:0,right:0,borderTop:`1px solid ${t.brd}14`,pointerEvents:"none"}}/>)}
             {placed.map(({e,lane,s,en})=>{const c=evColor(e);const w=100/laneN;
-              return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={`${(e.start_local||"").slice(11,16)} ${e.title}`} style={{position:"absolute",top:s/60*HOUR_H,height:Math.max((en-s)/60*HOUR_H,24)-2,left:`calc(${lane*w}% + 2px)`,width:`calc(${w}% - 4px)`,background:`${c}26`,borderLeft:`3px solid ${c}`,borderRadius:6,padding:"2px 5px",fontSize:10,color:t.text,overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:1}}>
+              return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();onEventClick(e);}} title={`${(e.start_local||"").slice(11,16)} ${e.title}`} style={{position:"absolute",top:s/60*HOUR_H,height:Math.max((en-s)/60*HOUR_H,24)-2,left:`calc(${lane*w}% + 2px)`,width:`calc(${w}% - 4px)`,background:`${c}26`,borderLeft:`3px solid ${c}`,borderRadius:6,padding:"2px 5px",fontSize:"var(--hc-text-secondary)",color:t.text,overflow:"hidden",cursor:"pointer",boxSizing:"border-box",zIndex:1}}>
                 <div style={{fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.title}</div>
-                <div style={{fontSize:8,color:t.mut}}>{(e.start_local||"").slice(11,16)}{e.end_local?`–${(e.end_local||"").slice(11,16)}`:""}</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{(e.start_local||"").slice(11,16)}{e.end_local?`–${(e.end_local||"").slice(11,16)}`:""}</div>
               </div>;})}
-            {hidden>0&&<div style={{position:"absolute",top:2,right:2,fontSize:8,color:t.mut,background:`${t.surface}CC`,border:`1px solid ${t.brd}33`,borderRadius:4,padding:"1px 4px",zIndex:2}} title={`${hidden} more overlapping event${hidden>1?"s":""}`}>+{hidden}</div>}
+            {hidden>0&&<div style={{position:"absolute",top:2,right:2,fontSize:"var(--hc-text-secondary)",color:t.mut,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,borderRadius:4,padding:"1px 4px",zIndex:2}} title={`${hidden} more overlapping event${hidden>1?"s":""}`}>+{hidden}</div>}
             {isToday&&nowMin!=null&&<div style={{position:"absolute",top:nowMin/60*HOUR_H,left:0,right:0,borderTop:`1px solid ${t.err}`,zIndex:2,pointerEvents:"none"}}>
               <div style={{position:"absolute",left:-3,top:-3.5,width:6,height:6,borderRadius:"50%",background:t.err}}/>
             </div>}
@@ -208,23 +208,12 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const slotCreate=(k,hour)=>setForm({...EMPTY_EVENT,start_local:`${k}T${pad(hour)}:00`});
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    {conflicts.length>0&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}`}}><strong>Calendar conflicts</strong>{conflicts.map(c=><div key={c.id} style={{marginTop:8}}>
-      <div>Both versions are saved. Choose which to use:</div>{['local','remote'].map(choice=><button key={choice} style={{...btnS(t.acc),margin:4}} onClick={async()=>{try{await apiJson(`/api/calendar/conflicts/${c.id}/${choice}`,{method:'POST'});await load();}catch(e){setErr(e.message);}}}>{choice==='local'?'HyprChat':'Calendar server'}: {c[choice]?.title} · {c[choice]?.start_at}</button>)}
-    </div>)}</div>}
-    {proposals.length>0&&<div style={{padding:12,maxHeight:220,overflowY:'auto',borderBottom:`1px solid ${t.brd}`}}>
-      <strong>Appointments proposed from email</strong>
-      <p style={{fontSize:11,color:t.dim}}>Confirm an appointment to add it to your calendar and allow synchronization.</p>
-      {proposals.map(proposal=><div key={proposal.id} style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginTop:8}}>
-        <span style={{flex:1,fontSize:12}}>{proposal.title} · {new Date(proposal.start_at+'Z').toLocaleString(undefined,{timeZone:tz||'UTC'})}</span>
-        {['confirmed','rejected'].map(decision=><button key={decision} style={btnS(decision==='confirmed'?t.ok:t.mut)} onClick={async()=>{try{await apiJson(`/api/calendar/proposals/${proposal.id}/${decision}`,{method:'POST'});await load();}catch(e){if(e.name!=='AbortError')setErr(e.message);}}}>{decision==='confirmed'?'Confirm':'Reject'}</button>)}
-      </div>)}
-    </div>}
     <PanelHeader t={t} color={t.f1||t.acc} icon={<IC.Clock/>} title="Calendar"
       subtitle="Times shown in your assistant timezone. CalDAV keeps your phone in sync."
       nav={<>
-        <button onClick={()=>step(-1)} style={{...btnS(t.mut),padding:"5px 10px"}}><IC.ChevLeft/></button>
+        <button aria-label="Previous" onClick={()=>step(-1)} style={{...btnS(t.mut),padding:"5px 10px"}}><IC.ChevLeft/></button>
         <div style={{fontSize:12,fontWeight:800,color:t.text,minWidth:150,textAlign:"center"}}>{label}</div>
-        <button onClick={()=>step(1)} style={{...btnS(t.mut),padding:"5px 10px"}}><IC.ChevRight/></button>
+        <button aria-label="Next" onClick={()=>step(1)} style={{...btnS(t.mut),padding:"5px 10px"}}><IC.ChevRight/></button>
         <button onClick={goToday} style={{...btnS(t.mut),padding:"5px 10px"}}>Today</button>
         <div style={{display:"flex",gap:2,marginLeft:6}}>
           {(isMobile?["month","day"]:["month","week","day"]).map(v=><button key={v} onClick={()=>setView(v)} style={{...btnS(view===v?(t.f1||t.acc):t.mut),padding:"5px 10px",textTransform:"capitalize"}}>{v}</button>)}
@@ -234,6 +223,18 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
       <button onClick={()=>setShowAccounts(s=>!s)} style={btnS(showAccounts?t.acc:t.mut)}>CalDAV</button>
       <button onClick={()=>setForm({...EMPTY_EVENT,start_local:`${tzToday()}T09:00`})} style={btnS(t.warm)}><IC.Plus/> Event</button>
     </PanelHeader>
+    {conflicts.length>0&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}`}}><strong>Calendar conflicts</strong>{conflicts.map(c=><div key={c.id} style={{marginTop:8}}>
+      <div>Both versions are saved. Choose which to use:</div>{['local','remote'].map(choice=><button key={choice} style={{...btnS(t.acc),margin:4}} onClick={async()=>{try{await apiJson(`/api/calendar/conflicts/${c.id}/${choice}`,{method:'POST'});await load();}catch(e){setErr(e.message);}}}>{choice==='local'?'HyprChat':'Calendar server'}: {c[choice]?.title} · {c[choice]?.start_at}</button>)}
+    </div>)}</div>}
+    {proposals.length>0&&<div style={{padding:12,maxHeight:220,overflowY:'auto',borderBottom:`1px solid ${t.brd}`}}>
+      <strong>Appointments proposed from email</strong>
+      <p style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>Confirm an appointment to add it to your calendar and allow synchronization.</p>
+      {proposals.map(proposal=><div key={proposal.id} style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginTop:8}}>
+        <span style={{flex:1,fontSize:12}}>{proposal.title} · {new Date(proposal.start_at+'Z').toLocaleString(undefined,{timeZone:tz||'UTC'})}</span>
+        {['confirmed','rejected'].map(decision=><button key={decision} style={btnS(decision==='confirmed'?t.ok:t.mut)} onClick={async()=>{try{await apiJson(`/api/calendar/proposals/${proposal.id}/${decision}`,{method:'POST'});await load();}catch(e){if(e.name!=='AbortError')setErr(e.message);}}}>{decision==='confirmed'?'Confirm':'Reject'}</button>)}
+      </div>)}
+    </div>}
+
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:980}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
@@ -242,17 +243,17 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
             <div style={{fontSize:12,fontWeight:800,color:t.acc}}>CalDAV accounts</div>
             <div style={{flex:1}}/>
-            <button onClick={()=>setAcctForm({...EMPTY_ACCOUNT})} style={{...btnS(t.warm),padding:"4px 9px",fontSize:10}}><IC.Plus/> Add</button>
+            <button onClick={()=>setAcctForm({...EMPTY_ACCOUNT})} style={{...btnS(t.warm),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Plus/> Add</button>
           </div>
-          {accounts.map(a=><div key={a.id} style={{display:"flex",gap:8,alignItems:"center",fontSize:11,color:t.dim,padding:"5px 0",flexWrap:"wrap"}}>
+          {accounts.map(a=><div key={a.id} style={{display:"flex",gap:8,alignItems:"center",fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"5px 0",flexWrap:"wrap"}}>
             <span style={{fontWeight:700,color:t.text}}>{a.label||a.url}</span>
-            <span style={{color:t.mut,fontSize:9}}>{a.username}</span>
-            {a.last_error?<span style={{color:t.err,fontSize:9}} title={a.last_error}>sync error</span>
-              :a.last_sync_at?<span style={{color:t.ok,fontSize:9}}>synced {fmtUtcToLocal(a.last_sync_at)}</span>:null}
+            <span style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>{a.username}</span>
+            {a.last_error?<span style={{color:t.err,fontSize:"var(--hc-text-secondary)"}} title={a.last_error}>sync error</span>
+              :a.last_sync_at?<span style={{color:t.ok,fontSize:"var(--hc-text-secondary)"}}>synced {fmtUtcToLocal(a.last_sync_at)}</span>:null}
             <div style={{flex:1}}/>
-            <button onClick={()=>testAccount(a.id)} style={{...btnS(t.acc),padding:"3px 8px",fontSize:9}}>Test</button>
-            <button onClick={()=>setAcctForm({id:a.id,label:a.label,url:a.url,username:a.username,password:"",calendar_url:a.calendar_url||""})} style={{...btnS(t.mut),padding:"3px 8px",fontSize:9}}><IC.Pencil/></button>
-            <button onClick={async()=>{if(!await confirmAction({title:"Remove CalDAV account",body:"Remove this CalDAV account? Synced events stay and become local-only.",confirmLabel:"Remove",tone:"danger"}))return;try{await apiJson(`/api/calendar/caldav/${a.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Remove failed",detail:String(e.message||e)});}finally{loadAccounts();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:9}}><IC.Trash/></button>
+            <button onClick={()=>testAccount(a.id)} style={{...btnS(t.acc),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}>Test</button>
+            <button aria-label="Edit" onClick={()=>setAcctForm({id:a.id,label:a.label,url:a.url,username:a.username,password:"",calendar_url:a.calendar_url||""})} style={{...btnS(t.mut),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
+            <button aria-label="Delete" onClick={async()=>{if(!await confirmAction({title:"Remove CalDAV account",body:"Remove this CalDAV account? Synced events stay and become local-only.",confirmLabel:"Remove",tone:"danger"}))return;try{await apiJson(`/api/calendar/caldav/${a.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Remove failed",detail:String(e.message||e)});}finally{loadAccounts();}}} style={{...btnS(t.err),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
           </div>)}
           {acctForm&&<div style={{marginTop:10,borderTop:`1px solid ${t.brd}33`,paddingTop:10}}>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
@@ -277,12 +278,12 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
           {form.edit_scope!=='occurrence'&&<input aria-label="Recurrence rule" value={form.rrule||''} onChange={e=>setForm(f=>({...f,rrule:e.target.value}))} placeholder="Recurrence (optional): FREQ=WEEKLY;BYDAY=MO" style={{...inputS,marginBottom:8}}/>}
           <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,marginBottom:8}} autoFocus/>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8,alignItems:"flex-end"}}>
-            <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Start (local)</div>
+            <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Start (local)</div>
               <input type="datetime-local" value={form.start_local} onChange={e=>setForm(f=>({...f,start_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
-            <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>End</div>
+            <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>End</div>
               <input type="datetime-local" value={form.end_local||""} onChange={e=>setForm(f=>({...f,end_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
             <input value={form.location} onChange={e=>setForm(f=>({...f,location:e.target.value}))} placeholder="Location" style={{...inputS,flex:1,minWidth:140}}/>
-            <div><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Remind (min before)</div>
+            <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Remind (min before)</div>
               <input type="number" min={0} disabled={form.edit_scope==='occurrence'} value={form.remind_minutes} onChange={e=>setForm(f=>({...f,remind_minutes:e.target.value}))} style={{...inputS,width:90}}/>{form.edit_scope==='occurrence'&&<small>Reminder applies to the series.</small>}</div>
           </div>
           <textarea value={form.description} onChange={e=>setForm(f=>({...f,description:e.target.value}))} placeholder="Details (optional)" rows={2} style={{...inputS,marginBottom:10,resize:"vertical"}}/>
@@ -292,7 +293,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
           </div>
         </div>}
 
-        {accounts.length>0&&<div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:10,fontSize:10,color:t.dim}}>
+        {accounts.length>0&&<div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:10,fontSize:"var(--hc-text-secondary)",color:t.dim}}>
           <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:9,height:9,borderRadius:3,background:t.acc}}/>Local</span>
           {accounts.map(a=>{const c=colorFor(a.id,t);return <span key={a.id} style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:9,height:9,borderRadius:3,background:c}}/>{a.label||a.url}</span>;})}
         </div>}
@@ -300,16 +301,16 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
         {!loaded?<div style={{marginBottom:16}}><SkeletonCard t={t} h={300} lines={4}/></div>
         :view==="month"?<div style={{...cardS,padding:14,marginBottom:16}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>
-            {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d=><div key={d} style={{fontSize:9,fontWeight:800,color:t.mut,textAlign:"center",padding:"2px 0",textTransform:"uppercase"}}>{d}</div>)}
+            {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(d=><div key={d} style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.mut,textAlign:"center",padding:"2px 0",textTransform:"none"}}>{d}</div>)}
             {cells.map((d,i)=>{
               if(!d)return <div key={`x${i}`}/>;
               const k=dkey(d);const dayEvents=byDay[k]||[];const isToday=k===todayKey;
               return <div key={k} onClick={()=>{setForm({...EMPTY_EVENT,start_local:`${k}T09:00`});}} style={{minHeight:64,border:`1px solid ${isToday?t.acc:t.brd}${isToday?"":"22"}`,borderRadius:6,padding:4,cursor:"pointer",background:isToday?`${t.acc}0d`:"transparent",overflow:"hidden"}}>
-                <div onClick={ev=>{ev.stopPropagation();openDay(d);}} title="Open day view" style={{fontSize:9,fontWeight:800,color:isToday?t.acc:t.mut,display:"inline-block"}}>{d.getDate()}</div>
-                {dayEvents.slice(0,3).map(e=>{const c=evColor(e);return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();openEdit(e);}} title={e.title} style={{fontSize:9,color:t.text,background:`${c}22`,border:`1px solid ${c}44`,borderRadius:3,padding:"2px 4px",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                <div onClick={ev=>{ev.stopPropagation();openDay(d);}} title="Open day view" style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:isToday?t.acc:t.mut,display:"inline-block"}}>{d.getDate()}</div>
+                {dayEvents.slice(0,3).map(e=>{const c=evColor(e);return <div key={e.occurrence_id||e.id} onClick={ev=>{ev.stopPropagation();openEdit(e);}} title={e.title} style={{fontSize:"var(--hc-text-secondary)",color:t.text,background:`${c}22`,border:`1px solid ${c}44`,borderRadius:3,padding:"2px 4px",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
                   {(e.start_local||"").slice(11,16)} {e.title}
                 </div>;})}
-                {dayEvents.length>3&&<div onClick={ev=>{ev.stopPropagation();openDay(d);}} style={{fontSize:8,color:t.mut,marginTop:2}}>+{dayEvents.length-3} more</div>}
+                {dayEvents.length>3&&<div onClick={ev=>{ev.stopPropagation();openDay(d);}} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>+{dayEvents.length-3} more</div>}
               </div>;
             })}
           </div>
@@ -321,13 +322,13 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
 
         <div style={{...cardS}}>
           <div style={{fontSize:12,fontWeight:800,color:t.mut,marginBottom:8}}>Upcoming</div>
-          {upcoming.length===0?<div style={{fontSize:11,color:t.mut}}>Nothing scheduled. Try: "dentist appointment Tuesday at 3pm" in chat.</div>
+          {upcoming.length===0?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Nothing scheduled. Try: "dentist appointment Tuesday at 3pm" in chat.</div>
           :upcoming.map(e=><div key={e.occurrence_id||e.id} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 0",fontSize:12,color:t.dim,borderBottom:`1px solid ${t.brd}18`}}>
             <span style={{width:9,height:9,borderRadius:3,background:evColor(e),flexShrink:0}}/>
-            <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:11}}>{fmtLocalMinute(e.start_local)}</span>
+            <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:"var(--hc-text-secondary)"}}>{fmtLocalMinute(e.start_local)}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.title}{e.location?<span style={{color:t.mut}}> @ {e.location}</span>:null}</span>
-            {e.sync_state==="synced"&&<span title="Synced via CalDAV" style={{fontSize:9,color:t.ok,display:"inline-flex"}}><IC.Refresh/></span>}
-            <button onClick={()=>remove(e.id)} style={{...btnS(t.err),padding:"2px 7px",fontSize:9}}><IC.Trash/></button>
+            {e.sync_state==="synced"&&<span title="Synced via CalDAV" style={{fontSize:"var(--hc-text-secondary)",color:t.ok,display:"inline-flex"}}><IC.Refresh/></span>}
+            <button aria-label="Delete" onClick={()=>remove(e.id)} style={{...btnS(t.err),padding:"2px 7px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
           </div>)}
         </div>
       </div>

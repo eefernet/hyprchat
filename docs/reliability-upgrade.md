@@ -1,14 +1,49 @@
-# Reliability upgrade operations
+# Reliability upgrade operations — October 6, 2026
 
-This guide covers durable storage, backup recovery, access controls, background
-jobs, integrations, and deployment. Preserve the configured model/runtime
-selections and Daedalus acceptance policies when maintaining these features.
+The approved program covers data protection, durable jobs, integration
+correctness, and user interfaces. All four areas were implemented and qualified
+together, then deployed as one cumulative application release after the worker
+and document-worker environments. This was not four separate production rollouts.
+The accepted model/runtime selections and Daedalus acceptance policies remain
+unchanged. Changes are uncommitted.
 
-Deployment helpers retain the previous installation and record activation state
-and rollback snapshot paths in `release.json`. Recovery preserves file ownership
-and checks readiness before clearing its journal. Review available disk space
-before staging dependencies, and retain snapshots until recovery is no longer
-needed.
+## Deployment and validation record
+
+For the October 6 deployment, the backend was `/opt/hyprchat/.releases/20261006-102219-a5c74667`.
+The coding worker is `/opt/openhands-worker/.releases/20261006-030610-0a89b104`;
+document-worker `current` points to
+`/opt/hyprchat-documents/.releases/20261006-025458-0a850a32`.
+Previous installations remain available. Backend `release.json` records the
+committed activation and unique rollback database/vector-store snapshot paths.
+
+- Frozen Linux qualification: 1,492 passed, 117 skipped. Final targeted delta:
+  34 passed; subsequent root-owned rollback failure-injection checks: 4 passed.
+  These are separate runs, not a combined full-suite result.
+- Frontend: 62 tests passed and production build passed. Desktop (1440 × 1000)
+  and mobile (390 × 844) fixture checks covered rendering, new interfaces,
+  profile switching, context inspection, revisions, and explicit voice retry.
+  Live HTTPS Jobs reload and Calendar checks passed at both sizes without
+  browser or HTTP errors.
+- Production-data clone migration and backup/restore verified 60 artifact hashes
+  and a 4,428-file archive. Sixteen pre-existing unresolved references remain
+  preserved for review. Live activation reverified all 60 migrated hashes.
+- Staged SDK/API checks and real sandbox DOCX/PPTX/XLSX creation/PDF conversion
+  passed. Paid-provider calls and external email/calendar writes used fixtures.
+  Live bounded reachability/search checks passed for the existing local services.
+- Frontend and document-worker audits reported no vulnerabilities. Backend and
+  coding-worker advisories remain documented below; their audits are not clean.
+
+The first backend acceptance attempt rejected a harness asset-URL assumption.
+Rollback then exposed ownership loss in restored SQLite/Chroma copies. The old
+service was recovered, ownership-preserving snapshot/restore was implemented
+and tested as root, and the corrected activation passed. Recovery now verifies
+readiness before clearing its journal; each attempt retains separate snapshots.
+
+These checks do not establish long-duration production stability, arbitrary
+document compatibility, or a new model qualification. Voice used a synthetic
+recording fixture; physical iPhone/PWA and microphone behavior remain unverified.
+About 1.35 GB remained free on the backend disk after activation: review retained
+snapshots and originals deliberately before future dependency staging.
 
 ## Durable files and cleanup
 
@@ -104,16 +139,16 @@ write requests return a retryable maintenance error. Failure restores the
 previous service configuration, database and vector store, preserving ownership.
 Original content files are retained.
 After an interrupted deployment, run `staged_release.py recover` before preparing
-another release. Qualify worker and document-worker environments before backend
-activation when the change depends on their updated dependencies.
+another release. The worker and document-worker locks were installed and their
+staged activation checks passed before this backend activation.
 
 `staged_worker_release.py` prepares separate Python 3.13 environments and retains
 the accepted environment. Document activation switches an atomic `current`
 symlink; backend commands fall back to the legacy installation when absent.
 Coding-worker activation uses a journaled systemd override and requires an
 acceptance preflight confirming no active operations. Both roll back failed
-acceptance. Include representative DOCX/PPTX/XLSX operations and PDF previews
-in document-worker acceptance checks.
+acceptance. Synthetic DOCX/PPTX/XLSX creation and PDF previews have passed in
+the staged document sandbox; this does not qualify arbitrary uploaded files.
 
 ## Durable jobs and external effects
 
@@ -189,3 +224,53 @@ LiteLLM proxy/management/authentication/enterprise-hook surfaces; the worker run
 the SDK and does not serve the LiteLLM proxy. Compatible security remediation
 still requires qualification; reproducible locks are not a clean audit. The
 document-worker XML parser is updated to lxml 6.1.0.
+
+
+## Model-aware effort and answer delivery
+
+The composer retains Blurt, Ponder, Forge and Galaxy Brain. For Ollama models
+advertising multiple reasoning levels, these select the actual `/api/show`
+`thinking.values` in order. Three levels omit Forge; two retain Blurt and Galaxy
+Brain; additional levels use their native names. The model's default is labeled
+separately from the lowest level. Explicit native effort takes precedence over
+persona/global boolean thinking controls and runs no self-review passes.
+
+Models with boolean-only thinking, no thinking, unknown provider capabilities,
+or unavailable metadata keep the existing 0/1/2/3 self-review ladder and existing
+thinking on/off controls. Cloud capability entries are exact, documented model
+families and dated snapshots in `backend/reasoning.py`; unlisted/custom models
+remain on self-review. Auto routing resolves capabilities after choosing the
+model and uses a native model's default. Legacy API callers without
+`effort_mode: "auto"` retain their existing behavior.
+
+Self-review keeps the last completed answer visible while buffering its
+replacement. A completed shorter correction is allowed; empty, truncated,
+failed, or interrupted reviews retain the preceding answer. Only explicitly
+allowlisted read-only tools can execute during review. Context Inspector shows
+review history, effective effort, and reported usage for each model call; a
+previous answer can be restored after generation finishes.
+
+The server commits delivery state before sending `done`; browser completion
+PATCHes merge presentation metadata without replacing the canonical answer.
+Disconnect saves partial initial output or the last completed review. Cloud
+reasoning/tool continuity is retained in memory using provider-native state,
+including OpenAI encrypted reasoning and Anthropic signed thinking blocks.
+
+Sandbox cleanup now previews retained and reclaimable bytes. It reclaims only
+explicitly released staging leases whose contents still match and which have no
+saved references. Active/interrupted leases, legacy outputs, symlinks and durable
+files remain. The initial lease producer is Image Studio's transfer staging;
+other output producers remain conservatively retained. The old image-purge
+journal helper is retired; see [image setup](image-generation-setup.md).
+
+Local development uses `.python-version` (3.12) and `.venv`; the test runner
+refuses a different interpreter and never installs into system Python. Linux
+Daedalus execution tests still require the Linux isolation environment; matching
+Python alone does not supply bubblewrap or network namespaces on macOS.
+
+
+Cloud registry references: [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning),
+[OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model), and
+[Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort).
+Registry entries are conservative; new model IDs require verification rather than
+prefix-based guesses. No paid-provider inference was used to validate this change.

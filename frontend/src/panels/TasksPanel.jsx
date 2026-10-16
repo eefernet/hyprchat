@@ -131,7 +131,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
           Notifications{unseen>0?` (${unseen})`:""}
         </button>
       </>}>
-      <button onClick={()=>{loadTasks();loadNotifs();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
+      <button aria-label="Refresh" onClick={()=>{loadTasks();loadNotifs();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       {tab==="tasks"&&<button onClick={()=>setForm({...EMPTY_FORM})} style={btnS(t.warm)}><IC.Plus/> New Task</button>}
     </PanelHeader>
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
@@ -155,7 +155,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                   <option value="llm">Agent task</option>
                   <option value="research">Deep research</option>
                 </select>
-                :<span style={{fontSize:10,color:t.warm,border:`1px solid ${t.warm}44`,borderRadius:8,padding:"5px 10px"}}>
+                :<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,border:`1px solid ${t.warm}44`,borderRadius:8,padding:"5px 10px"}}>
                   {form.task_type==="check_in"?"check-in — managed in the Assistant panel":form.task_type}
                 </span>}
               <select value={form.schedule_kind} onChange={e=>setForm(f=>({...f,schedule_kind:e.target.value}))} style={{...inputS,width:"auto"}}>
@@ -173,11 +173,11 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                   <option value="">when…</option>
                   {eventNames.map(ev=><option key={ev} value={ev}>{ev.replace(/_/g," ")}</option>)}
                 </select>
-                <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
+                <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
                   every <input type="number" min={1} value={form.every} onChange={e=>setForm(f=>({...f,every:e.target.value}))} style={{...inputS,width:56}}/> occurrence(s)
                 </label>
               </>}
-              <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
+              <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
                 <input type="checkbox" checked={!!form.notify} onChange={e=>setForm(f=>({...f,notify:e.target.checked}))}/> notify when done
               </label>
             </div>
@@ -193,7 +193,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
             <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
               <div style={{flex:1,minWidth:200}}>
                 <div style={{fontSize:13,fontWeight:800,color:t.text}}>{task.title}</div>
-                <div style={{fontSize:10,color:t.mut,marginTop:3}}>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>
                   {kindLabel(task.schedule_kind)}
                   {task.next_run?` · next ${fmtTs(task.next_run)}`:""}
                   {task.last_status?<span> · last <span style={{color:statusColor(task.last_status)}}>{task.last_status}</span></span>:null}
@@ -201,24 +201,24 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                 </div>
               </div>
               <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-                <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:10}}><IC.Play/> Run</button>
-                <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:10}}>{task.enabled?"Pause":"Resume"}</button>
-                <button onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:10}}><IC.Pencil/></button>
-                <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:10}}>History</button>
-                <button onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:10}}><IC.Trash/></button>
+                <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Play/> Run</button>
+                <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}>{task.enabled?"Pause":"Resume"}</button>
+                <button aria-label="Edit" onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
+                <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}>History</button>
+                <button aria-label="Delete" onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
               </div>
             </div>
-            {task.schedule_kind==="webhook"&&task.webhook_token&&<div style={{fontSize:10,color:t.mut,marginTop:6,wordBreak:"break-all"}}>
+            {task.schedule_kind==="webhook"&&task.webhook_token&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6,wordBreak:"break-all"}}>
               Webhook: POST {API||window.location.origin}/api/hooks/{task.webhook_token}
             </div>}
-            {task.prompt&&<div style={{fontSize:11,color:t.dim,marginTop:6,whiteSpace:"pre-wrap"}}>{task.prompt.slice(0,300)}{task.prompt.length>300?"…":""}</div>}
+            {task.prompt&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:6,whiteSpace:"pre-wrap"}}>{task.prompt.slice(0,300)}{task.prompt.length>300?"…":""}</div>}
             {runsFor===task.id&&<div style={{marginTop:10,borderTop:`1px solid ${t.brd}33`,paddingTop:8}}>
-              {runs.length===0?<div style={{fontSize:11,color:t.mut}}>No runs yet.</div>
-              :runs.map(r=><div key={r.id} style={{fontSize:11,color:t.dim,padding:"3px 0",display:"flex",gap:8,alignItems:"baseline"}}>
+              {runs.length===0?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No runs yet.</div>
+              :runs.map(r=><div key={r.id} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"3px 0",display:"flex",gap:8,alignItems:"baseline"}}>
                 <span style={{color:statusColor(r.status),fontWeight:700,minWidth:70}}>{r.status}</span>
                 <span style={{color:t.mut}}>{fmtTs(r.started_at)}</span>
                 <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.error||r.result_text||""}</span>
-                {r.status==="running"&&<button onClick={async()=>{try{await apiJson(`/api/tasks/runs/${r.id}/cancel`,{method:"POST"});}catch(e){setErr(String(e.message||e));}finally{refreshRuns(task.id);loadTasks();}}} style={{...btnS(t.err),padding:"2px 6px",fontSize:9}}>Stop</button>}
+                {r.status==="running"&&<button onClick={async()=>{try{await apiJson(`/api/tasks/runs/${r.id}/cancel`,{method:"POST"});}catch(e){setErr(String(e.message||e));}finally{refreshRuns(task.id);loadTasks();}}} style={{...btnS(t.err),padding:"2px 6px",fontSize:"var(--hc-text-control)"}}>Stop</button>}
               </div>)}
             </div>}
           </div>)}
@@ -234,22 +234,22 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
           :notifs.map(n=><div key={n.id} style={{...cardS,marginBottom:8,borderLeft:`3px solid ${n.seen?t.brd:t.warm}`,display:"flex",gap:10,alignItems:"flex-start"}}>
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontSize:12,fontWeight:n.seen?600:800,color:t.text}}>{n.title}</div>
-              {n.body&&<div style={{fontSize:11,color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.body}</div>}
-              {(n.deliveries||[]).map(d=><div key={d.channel} style={{fontSize:10,color:d.status==='uncertain'||d.status==='failed'?t.err:t.dim,marginTop:4}}>{d.channel}: {d.status.replaceAll('_',' ')} · {d.attempts} attempt{d.attempts===1?'':'s'}{d.error?` · ${d.error}`:''}{d.status==='uncertain'?' — Check the destination before sending again.':''}</div>)}
-              <div style={{fontSize:9,color:t.mut,marginTop:4}}>{n.kind} · {fmtTs(n.created_at)}</div>
+              {n.body&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.body}</div>}
+              {(n.deliveries||[]).map(d=><div key={d.channel} style={{fontSize:"var(--hc-text-secondary)",color:d.status==='uncertain'||d.status==='failed'?t.err:t.dim,marginTop:4}}>{d.channel}: {d.status.replaceAll('_',' ')} · {d.attempts} attempt{d.attempts===1?'':'s'}{d.error?` · ${d.error}`:''}{d.status==='uncertain'?' — Check the destination before sending again.':''}</div>)}
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>{n.kind} · {fmtTs(n.created_at)}</div>
             </div>
-            <button onClick={async()=>{try{await apiJson(`/api/notifications/${n.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));}finally{loadNotifs();}}} style={{...btnS(t.mut),padding:"3px 7px",fontSize:10}}><IC.Trash/></button>
+            <button aria-label="Delete" onClick={async()=>{try{await apiJson(`/api/notifications/${n.id}`,{method:"DELETE"});}catch(e){setErr(String(e.message||e));}finally{loadNotifs();}}} style={{...btnS(t.mut),padding:"3px 7px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
           </div>)}
 
           <div style={{...cardS,marginTop:20}}>
             <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:8}}>ntfy push channel</div>
-            <div style={{fontSize:10,color:t.mut,marginBottom:10}}>Optional push notifications via an ntfy server. Tasks with the ntfy delivery option send here; in-app notifications always work.</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:10}}>Optional push notifications via an ntfy server. Tasks with the ntfy delivery option send here; in-app notifications always work.</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
               <input value={ntfy.url} onChange={e=>setNtfy(n=>({...n,url:e.target.value}))} placeholder="https://ntfy.sh" style={{...inputS,flex:2,minWidth:180}}/>
               <input value={ntfy.topic} onChange={e=>setNtfy(n=>({...n,topic:e.target.value}))} placeholder="topic" style={{...inputS,flex:1,minWidth:120}}/>
               <input value={ntfy.token} onChange={e=>setNtfy(n=>({...n,token:e.target.value}))} placeholder={ntfy.token_set?"token saved — leave blank to keep":"access token (optional)"} type="password" style={{...inputS,flex:1,minWidth:140}}/>
             </div>
-            <label style={{fontSize:11,color:t.dim,display:"flex",gap:6,alignItems:"center",marginBottom:10}}>
+            <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,display:"flex",gap:6,alignItems:"center",marginBottom:10}}>
               <input type="checkbox" checked={!!ntfy.allow_private} onChange={e=>setNtfy(n=>({...n,allow_private:e.target.checked}))}/>
               Allow private/LAN ntfy server
             </label>

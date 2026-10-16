@@ -44,7 +44,7 @@ export default function DocumentActivity({runIds,events=[],live=false,t,onPrevie
     })}
     {validations.map(v=><div role="alert" key={v} style={{color:t.err}}>{v}</div>)}
     {error&&<div role="status" style={{color:t.mut}}>{error}</div>}
-    {files.map(a=><div key={a.artifact_id} style={{display:'flex',alignItems:'center',gap:8,padding:'9px 11px',border:`1px solid ${t.brd}55`,borderRadius:8,background:`${t.surface}88`}}>
+    {files.map(a=><div key={a.artifact_id} style={{display:'flex',alignItems:'center',gap:8,padding:'9px 11px',border:`1px solid ${t.brd}55`,borderRadius:8,background:`${t.surface}F5`}}>
       <span style={{flex:1,minWidth:0,overflowWrap:'anywhere',color:t.text}}>{a.filename}</span>
       <a href={userScopedUrl(a.url)} download={a.filename} style={{color:t.ok}}>Download</a>
       <button title="Preview" aria-label={`Preview ${a.filename}`} onClick={()=>onPreview(a.filename,a.url)} style={{background:'none',border:`1px solid ${t.acc}55`,borderRadius:5,padding:'4px 8px',color:t.acc,cursor:'pointer'}}>👁</button>

@@ -1,0 +1,77 @@
+/* Shared presentation, inherited by the app and body portals. */
+:root {
+  --hc-font-ui: "JetBrains Mono", monospace;
+  --hc-font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --hc-space-1: 4px; --hc-space-2: 8px; --hc-space-3: 12px;
+  --hc-space-4: 16px; --hc-space-5: 20px; --hc-space-6: 24px;
+  --hc-text-control: 14px; --hc-text-secondary: 12px; --hc-text-reading: 16px;
+  --hc-radius: 8px; --hc-radius-card: 12px; --hc-control-height: 36px;
+}
+body { font-family: var(--hc-font-ui); color: var(--hc-text); }
+.hc-app { font-size: var(--hc-text-control); line-height: 1.5; }
+button, input, textarea, select { font-family: inherit; font-size: var(--hc-text-control); }
+button, select, summary { touch-action: manipulation; }
+button:not(:disabled), summary { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button, input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]), select { min-height: var(--hc-control-height); }
+input, textarea, select { min-width: 0; max-width: 100%; }
+:where(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--hc-accent); outline-offset: 3px;
+}
+/* The composer already shows focus on its outer surface. */
+.hc-composer-input:focus-visible { outline: none; }
+/* Preserve the original compact toolbar on desktop, with wrapping at any scale. */
+.hc-app-header { --hc-control-height: 0px; }
+.hc-app-header > div { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+pre, code, kbd, samp, .cm-editor, .cm-scroller { font-family: var(--hc-font-code); }
+.hc-panel-header { padding: 16px 24px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; flex-shrink:0; border-bottom:1px solid var(--hc-border); background:var(--hc-surface); }
+.hc-panel-heading { display:flex; align-items:center; gap:12px; min-width:0; max-width:100%; }
+.hc-panel-title { font-size:22px; line-height:1.25; font-weight:650; color:var(--hc-text); overflow-wrap:anywhere; }
+.hc-panel-subtitle { font-size:12px; color:var(--hc-secondary); margin-top:4px; max-width:64ch; }
+.hc-panel-nav, .hc-panel-actions, .hc-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
+.hc-panel-actions { margin-left:auto; }
+.hc-empty { display:flex; flex-direction:column; align-items:center; gap:12px; text-align:center; padding:40px 24px; background:var(--hc-surface); border:1px dashed var(--hc-border); border-radius:12px; color:var(--hc-secondary); }
+.hc-empty.is-compact { padding:24px 16px; }
+.hc-empty-title { color:var(--hc-text); font-size:16px; font-weight:650; }
+.hc-empty-hint { font-size:14px; line-height:1.6; max-width:48ch; }
+.hc-button { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:8px 12px; border-radius:8px; border:1px solid var(--hc-border); background:var(--hc-surface); color:var(--hc-text); font:inherit; font-size:14px; }
+.hc-button:hover { background:var(--hc-hover); }
+.hc-button.is-primary { background:var(--hc-accent); color:var(--hc-surface-raised); border-color:var(--hc-accent); }
+.hc-button.is-danger { color:var(--hc-danger); }
+.hc-popover { position:fixed; z-index:1000; padding:8px; background:var(--hc-surface-raised); color:var(--hc-text); border:1px solid var(--hc-border); border-radius:12px; box-shadow:0 12px 40px #0006; overflow:auto; font-family:var(--hc-font-ui); font-size:14px; }
+.hc-popover button { display:flex; text-align:left; align-items:center; gap:8px; width:100%; padding:8px 12px; background:transparent; color:inherit; border:0; border-radius:8px; font:inherit; }
+.hc-popover button:hover, .hc-popover button:focus-visible { background:var(--hc-hover); }
+.hc-popover button:disabled { opacity:.5; }
+.hc-drawer-backdrop { position:fixed; inset:0; z-index:800; background:#0008; display:flex; justify-content:flex-end; }
+.hc-drawer { width:min(440px,calc(100vw / var(--hc-ui-scale,1))); height:calc(var(--hc-viewport-height) / var(--hc-ui-scale,1)); display:flex; flex-direction:column; background:var(--hc-surface-raised); color:var(--hc-text); font-family:var(--hc-font-ui); padding:16px; padding-bottom:max(16px,env(safe-area-inset-bottom)); overflow:auto; }
+.hc-drawer-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-bottom:16px; }
+.hc-drawer-heading h2 { font-size:20px; }
+.hc-research { min-height:0; min-width:0; }
+.hc-research-grid { display:grid; flex:1; min-height:0; grid-template-columns:minmax(0,1fr); overflow:hidden; }
+.hc-research-grid.has-list { grid-template-columns:260px minmax(0,1fr); }
+.hc-research-grid.has-evidence { grid-template-columns:260px minmax(0,1fr) 280px; }
+.hc-reading-surface { background:var(--hc-surface); border:1px solid var(--hc-border); border-radius:12px; padding:24px; }
+.hc-research-report { overflow-y:auto; padding:20px; min-width:0; }
+.hc-research-side { overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:16px; background:var(--hc-surface); min-width:0; }
+.hc-content { container-type:inline-size; }
+@container (max-width:650px) {
+  .hc-panel-header { padding:16px; }
+  .hc-panel-nav { flex-basis:100%; }
+  .hc-panel-actions { margin-left:0; }
+}
+@media (max-width:768px), (pointer:coarse) {
+  :root { --hc-control-height:44px; }
+  button, summary { min-height:44px; }
+  button:has(>svg:only-child) { min-width:44px; }
+  .hc-panel-header { padding:12px; gap:12px; }
+  .hc-panel-title { font-size:20px; }
+  .hc-reading-surface { padding:16px; }
+  .hc-research-report { padding:12px; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .hc-empty-icon { animation:none; }
+}
+.hc-advanced { border:1px solid var(--hc-border); border-radius:8px; padding:12px 16px; margin:16px 0; }
+.hc-advanced > summary { color:var(--hc-secondary); font-size:14px; font-weight:600; }
+.hc-advanced[open] > summary { margin-bottom:16px; }
+.hc-content > section { min-width:0; }

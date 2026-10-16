@@ -144,15 +144,15 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
   return <div ref={triggerRef} style={{position:"relative",...style}}>
     <div onClick={openDropdown} onKeyDown={onTriggerKeyDown} tabIndex={0} role="combobox"
       aria-expanded={open} aria-haspopup="listbox" aria-label="Model"
-      style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none",outline:"none"}}>
+      style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none",outline:undefined}}>
       <span style={{fontSize:compact?12:14,flexShrink:0}}>{isMissing?"⚠️":famIcon(name)}</span>
       <div style={{flex:1,minWidth:0}}>
         <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||"Select model"))}</div>
         {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
-          <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
-          {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
-          {ctxLen>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
-          {caps.map(c=><span key={c.label} style={{fontSize:7,padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
+          <span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:700}}>{tag}</span>
+          {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{paramSz}</span>}
+          {ctxLen>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
+          {caps.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
         </div>}
       </div>
       {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:12,color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><IC.Refresh/></span>}
@@ -162,7 +162,7 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
       const {grouped,sortedMakers,flatIdx}=grouping;
       return createPortal(<div ref={dropRef} role="listbox" style={{position:"fixed",...(dropPos.up?{bottom:dropPos.bottom}:{top:dropPos.top}),left:dropPos.left,minWidth:dropPos.width,maxWidth:"min(380px, calc(100vw - 16px))",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:dropPos.maxH,overflowY:"auto",padding:"4px",fontFamily:font}}>
         {sortedMakers.map(maker=><div key={maker}>
-          <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
+          <div style={{padding:"5px 10px 3px",fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,textTransform:"none",letterSpacing:0,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
           {grouped[maker].map(m=>{
             const isHF=m.startsWith("hf.co/");
             const provider=cloudModelProvider(m);
@@ -180,18 +180,18 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
               <span style={{fontSize:15,flexShrink:0}}>{isHF?"🤗":famIcon(provider||mn)}</span>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",alignItems:"center",gap:4}}>
-                  <div style={{fontSize:11,fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
-                  {isHF&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
-                  {provider&&(()=>{const pc=provider==="openai"?t.ok:provider==="anthropic"?t.pink:"#4aa3ff";const pl=provider==="openai"?"OpenAI":provider==="anthropic"?"Claude":(mdi.details?.provider_label||"Custom");return <span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:`${pc}22`,color:pc,fontWeight:700,flexShrink:0,border:`1px solid ${pc}33`,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>;})()}
+                  <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
+                  {isHF&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
+                  {provider&&(()=>{const pc=provider==="openai"?t.ok:provider==="anthropic"?t.pink:"#4aa3ff";const pl=provider==="openai"?"OpenAI":provider==="anthropic"?"Claude":(mdi.details?.provider_label||"Custom");return <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:3,background:`${pc}22`,color:pc,fontWeight:700,flexShrink:0,border:`1px solid ${pc}33`,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>;})()}
                 </div>
                 <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
-                  <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>
-                  {ps&&<span style={{fontSize:8,color:t.mut}}>{ps}</span>}
-                  {ctx2>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
-                  {mc.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}20`,color:c.color,fontWeight:600,border:`1px solid ${c.color}33`}}>{c.emoji} {c.label}</span>)}
+                  <span style={{fontSize:"var(--hc-text-secondary)",color:sc2,fontWeight:700}}>{mt}</span>
+                  {ps&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{ps}</span>}
+                  {ctx2>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
+                  {mc.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:4,background:`${c.color}20`,color:c.color,fontWeight:600,border:`1px solid ${c.color}33`}}>{c.emoji} {c.label}</span>)}
                 </div>
               </div>
-              {sel&&<span style={{fontSize:10,color:t.acc,flexShrink:0}}>✓</span>}
+              {sel&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,flexShrink:0}}>✓</span>}
             </div>;
           })}
         </div>)}

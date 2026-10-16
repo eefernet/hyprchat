@@ -13,11 +13,11 @@ def redact(value):
 
 
 async def capture(message_id, *, model, provider, options, memories, retrieved, sources,
-                  tools, messages, original_chars, thinking=None):
+                  tools, messages, original_chars, thinking=None, effort=None):
     if message_id is None: return
     payload={'version':1,'model':model,'provider':provider,
         'settings':{k:v for k,v in options.items() if k in {'num_ctx','num_predict','temperature','top_p','top_k','repeat_penalty','seed'}},
-        'thinking_enabled':thinking,
+        'thinking_enabled':thinking, 'effort':effort,
         'memories':{name:{'ids':list(info.get('memory_ids') or []),'block_ids':list(info.get('block_ids') or []),
             'selected_context':redact(info.get('context'))[:20000]} for name,info in memories.items()},
         'retrieved_context':redact(retrieved)[:60000],
@@ -58,3 +58,16 @@ async def record_tool(message_id, name):
             (name[:200],message_id,message_id,message_id,db.current_user_id()))
         await conn.commit()
     finally: await conn.close()
+
+
+async def record_usage(message_id, prompt_tokens, gen_tokens, elapsed):
+    conn = await db.get_db()
+    try:
+        await conn.execute('''UPDATE message_context SET payload=json_set(payload,
+            '$.usage',json(?)) WHERE message_id=? AND sequence=(SELECT MAX(sequence) FROM message_context WHERE message_id=?)
+            AND EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=? AND c.user_id=?)''',
+            (json.dumps({'prompt_tokens':prompt_tokens,'gen_tokens':gen_tokens,'elapsed_seconds':round(elapsed,3)}),
+             message_id,message_id,message_id,db.current_user_id()))
+        await conn.commit()
+    finally:
+        await conn.close()

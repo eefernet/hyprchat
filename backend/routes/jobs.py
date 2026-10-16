@@ -1,8 +1,55 @@
 """Owner-scoped adapters for existing domain job controllers."""
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 import job_registry
 
 router = APIRouter()
+
+
+@router.get('/api/messages/{message_id}/reviews')
+async def message_reviews(message_id: int):
+    import database as db
+    import json
+    conn = await db.get_db()
+    try:
+        rows = await conn.execute_fetchall('''SELECT m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            WHERE m.id=? AND c.user_id=?''', (message_id, db.current_user_id()))
+        if not rows:
+            raise HTTPException(404, 'Message not found')
+        meta = json.loads(rows[0]['metadata'] or '{}')
+        return {'revisions': meta.get('review_history', []), 'in_progress': meta.get('in_progress', False)}
+    finally:
+        await conn.close()
+
+
+@router.post('/api/messages/{message_id}/reviews/{revision}/restore')
+async def restore_message_review(message_id: int, revision: int, background_tasks: BackgroundTasks):
+    import database as db
+    import json
+    conn = await db.get_db()
+    try:
+        await conn.execute('BEGIN IMMEDIATE')
+        rows = await conn.execute_fetchall('''SELECT m.content,m.metadata,m.conversation_id FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            WHERE m.id=? AND c.user_id=?''', (message_id, db.current_user_id()))
+        if not rows:
+            raise HTTPException(404, 'Message not found')
+        meta = json.loads(rows[0]['metadata'] or '{}')
+        history = meta.get('review_history', [])
+        if meta.get('in_progress'):
+            raise HTTPException(409, 'Wait for the response to finish before restoring a review')
+        if revision < 0 or revision >= len(history):
+            raise HTTPException(404, 'Review not found')
+        content = history[revision]['content']
+        meta['restored_review'] = revision
+        await conn.execute('UPDATE messages SET content=?,metadata=? WHERE id=?', (content, json.dumps(meta), message_id))
+        conv_id = rows[0]['conversation_id']
+        await conn.execute("UPDATE conversations SET summary='',summary_until_msg_id=0 WHERE id=? AND summary_until_msg_id>=?", (conv_id, message_id))
+        await conn.commit()
+        import rag
+        # Invalidate stale recall text even if the restored answer is too short to index.
+        background_tasks.add_task(rag.remove_history_message, message_id)
+        return {'content': content, 'metadata': meta}
+    finally:
+        await conn.close()
 
 
 @router.get('/api/library/search')

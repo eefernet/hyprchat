@@ -1,3 +1,5 @@
+import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
+import {apiJson} from "../api.js";
 import {isDocumentEvent} from "../documentFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -17,98 +19,10 @@ import EmptyState from './EmptyState.jsx';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
 
-const Pill = ({ev,t,expanded,onToggle})=>{
-  const scrollRef = useRef(null);
-  const stickRef = useRef(true);  // sticky-bottom: auto-scroll to new steps unless user scrolled up
+// Detail content shares the activity panel's single scroll container.
+const ActivityDetail = ({ev,t,active=false})=>{
+  const detail=activityDetail(ev),status=activityText(ev);
   const [copiedDetail,setCopiedDetail]=useState("");
-  const isS = ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="thinking";
-  const isE = ev.type==="tool_error"||ev.type==="error";
-  const isD = ev.type==="tool_end"||ev.type==="tool_done"||ev.type==="complete"||ev.type==="thought_done";
-  const isThink = ev.type==="thinking"||ev.type==="thought_done";
-  const bg=isE?`${t.err}18`:isD?`${t.surface}44`:isThink?`${t.f4}10`:`${t.acc}10`;
-  const bc=isE?`${t.err}40`:isD?`${t.brd}24`:isThink?`${t.f4}28`:`${t.acc}28`;
-  const tc=isE?t.err:isD?t.ok:isThink?t.f4:t.acc;
-  let detail = null;
-  if(expanded && ev.data?.detail){try{detail=JSON.parse(ev.data.detail);}catch{detail=ev.data.detail;}}
-  const isClickable = !!(ev.data?.detail) || isThink;
-  const stepsLen = (detail && typeof detail==="object" && Array.isArray(detail.steps)) ? detail.steps.length : 0;
-  // Reset sticky + jump to bottom when the panel is (re)opened.
-  useEffect(()=>{
-    if(!expanded)return;
-    stickRef.current = true;
-    const el=scrollRef.current;
-    if(el)el.scrollTop = el.scrollHeight;
-  },[expanded]);
-  // When new steps arrive, auto-scroll only if user hasn't scrolled up.
-  useEffect(()=>{
-    if(!expanded||!stickRef.current)return;
-    const el=scrollRef.current;
-    if(el)el.scrollTop = el.scrollHeight;
-  },[stepsLen,expanded]);
-  const handlePanelScroll = (e)=>{
-    const el=e.currentTarget;
-    // 24px tolerance — treat "almost at bottom" as still sticky
-    stickRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) < 24;
-  };
-  
-  const toolName = ev.data?.tool||ev.type;
-  const status = ev.data?.status||"";
-  
-  // Geeky expressive labels + icons
-  const labelMap = {
-    "thinking": ["🧠", "Reasoning"],
-    "thought_done": ["🧠", "Reasoned"],
-    "processing": isD ? ["⚡", "Initialized"] : ["🔮", "Connecting"],
-    "execute_code": isD ? ["🎯", "Executed"] : ["⚡", "Sandbox"],
-    "research": isD ? ["📡", "Signal Acquired"] : ["🔎", "Scanning"],
-    "deep_research": isD ? ["📊", "Research Ready"] : ["🔬", "Agent Research"],
-    "conspiracy_research": isD ? ["🕵️", "Dossier Ready"] : ["🔮", "Digging"],
-    "generate_image": isD ? ["🖼️", "Image ready"] : ["🖼️", "Generating image"],
-    "write_file": isD ? ["💾", "Committed"] : ["📝", "Writing"],
-    "read_file": isD ? ["📖", "Loaded"] : ["📂", "Reading"],
-    "list_files": isD ? ["📋", "Indexed"] : ["🗂️", "Scanning"],
-    "run_shell": isD ? ["⚡", "Exited"] : ["🖥️", "Shell"],
-    "fetch_url": isD ? ["🌐", "Fetched"] : ["🕸️", "Spidering"],
-    "install_package": isD ? ["📦", "Installed"] : ["📥", "Installing"],
-    "complete": ["✅", "Done"],
-    "download_file": isD ? ["📎", "Ready"] : ["📤", "Packaging"],
-    "delete_file": isD ? ["🗑️", "Deleted"] : ["🗑️", "Deleting"],
-    "download_project": isD ? ["📦", "Packaged"] : ["📦", "Archiving"],
-    "kb": isD ? ["📚", "Retrieved"] : ["📖", "Knowledge Base"],
-    "memory": isD ? ["🧠", "Recalled"] : ["🧠", "Remembering"],
-    "generate_code": isD ? ["🧬", "Code Ready"] : ["🧬", "Agent Coding"],
-    "generating": ["✍️", "Generating"],
-    "refinement": isD ? ["✨", "Refined"] : ["✨", "Refining"],
-    "error": ["❌", "Error"],
-    "tool_error": ["❌", "Error"],
-  };
-  const [icon, label] = labelMap[toolName] || (isE ? ["❌", toolName] : isD ? ["✓", toolName] : ["⏳", toolName]);
-  const isActive = isS && !isD;
-  // De-duplicate status: backend often emits "🔮 Connecting to neural oracle..." while the
-  // labelMap also renders "🔮 Connecting" — strip a leading emoji and the label word from
-  // the status so the pill doesn't read "Connecting Connecting...".
-  const displayStatus = (()=>{
-    if(!status)return "";
-    // Strip leading emoji (incl. ZWJ U+200D and VS16 U+FE0F) and whitespace.
-    let s = status.replace(/^[\p{Extended_Pictographic}‍️\s]+/u,"");
-    if(label){
-      const re = new RegExp("^" + label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + "\\s*[:—\\-]?\\s*","i");
-      s = s.replace(re,"");
-    }
-    return s.trim();
-  })();
-  const showMarquee = isThink && isActive && !expanded && displayStatus.length > 15;
-  const getIconAnim = (name) => {
-    if(name==="execute_code"||name==="run_shell") return "spin 1.2s linear infinite";
-    if(name==="research"||name==="deep_research"||name==="fetch_url"||name==="conspiracy_research"||name==="kb") return "swing 1.5s ease-in-out infinite";
-    if(name==="generate_code") return "pulse 1.5s ease-in-out infinite";
-    if(name==="write_file"||name==="download_file"||name==="download_project") return "bounce 1s ease-in-out infinite";
-    if(name==="memory") return "memoryPulse 1.8s ease-in-out infinite";
-    if(name==="generating") return "writing 0.8s ease-in-out infinite";
-    if(name==="thinking") return "bop 2s ease-in-out infinite";
-    return "bop 1.5s ease-in-out infinite";
-  };
-  const marqueeKey = Math.floor(displayStatus.length / 30);
   const copyDetailText=(key,text)=>{
     try{
       navigator.clipboard?.writeText(String(text||""));
@@ -118,11 +32,11 @@ const Pill = ({ev,t,expanded,onToggle})=>{
   };
   const isImageDetail=detail&&typeof detail==="object"&&detail.tool==="generate_image";
   const ImagePromptDetail=()=>{
-    const preS={margin:0,padding:8,background:`${t.surface}88`,borderRadius:5,whiteSpace:"pre-wrap",wordBreak:"break-word",color:t.dim,fontSize:11,maxHeight:150,overflow:"auto",border:`1px solid ${t.brd}18`};
+    const preS={margin:0,padding:8,background:`${t.surface}F5`,borderRadius:5,whiteSpace:"pre-wrap",wordBreak:"break-word",color:t.dim,fontSize:"var(--hc-text-secondary)",border:`1px solid ${t.brd}18`};
     const block=(key,label,value)=>value?<div style={{marginBottom:8}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-        <span style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
-        <button onClick={()=>copyDetailText(key,value)} style={{marginLeft:"auto",fontSize:9,padding:"2px 7px",borderRadius:6,border:`1px solid ${t.acc}33`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:"inherit"}}>{copiedDetail===key?"Copied":"Copy"}</button>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>{label}</span>
+        <button onClick={()=>copyDetailText(key,value)} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",padding:"2px 7px",borderRadius:6,border:`1px solid ${t.acc}33`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:"inherit"}}>{copiedDetail===key?"Copied":"Copy"}</button>
       </div>
       <pre style={preS}>{value}</pre>
     </div>:null;
@@ -139,74 +53,145 @@ const Pill = ({ev,t,expanded,onToggle})=>{
       ["Fallback",detail.prompt_fallback?"yes":"no"],
     ].filter(([,v])=>v!==undefined&&v!==null&&v!=="");
     return <div>
-      {detail.auto_enhanced&&<div style={{display:"inline-flex",alignItems:"center",gap:4,marginBottom:8,fontSize:9,fontWeight:800,color:t.acc2,background:`${t.acc2}12`,border:`1px solid ${t.acc2}30`,borderRadius:6,padding:"2px 8px"}}>✨ prompt auto-enhanced</div>}
+      {detail.auto_enhanced&&<div style={{display:"inline-flex",alignItems:"center",gap:4,marginBottom:8,fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc2,background:`${t.acc2}12`,border:`1px solid ${t.acc2}30`,borderRadius:6,padding:"2px 8px"}}>✨ prompt auto-enhanced</div>}
       {block("prompt","Prompt sent to ComfyUI",detail.prompt)}
       {block("negative","Negative prompt",detail.negative_prompt)}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:6,marginTop:2}}>
-        {flags.map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}22`,background:`${t.surface}55`,borderRadius:6,padding:"6px 8px",minWidth:0}}>
-          <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:2}}>{k}</div>
-          <div style={{fontSize:10,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(v)}</div>
+        {flags.map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}22`,background:`${t.surface}F5`,borderRadius:6,padding:"6px 8px",minWidth:0}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:2}}>{k}</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(v)}</div>
         </div>)}
       </div>
     </div>;
   };
 
-  return <div style={{animation:"fadeIn .3s",marginBottom:2}}>
-    <div onClick={isClickable?onToggle:undefined} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 12px",background:bg,border:`1px solid ${bc}`,borderRadius:expanded?"9px 9px 0 0":9,fontSize:12,color:tc,cursor:isClickable?"pointer":"default",maxWidth:"100%",transition:"all .2s",animation:isActive?`fadeIn .3s, pillGlow 2s ease-in-out infinite`:"fadeIn .3s",boxShadow:isActive?`0 0 8px ${bc}`:"none"}}>
-      {isS&&!isD&&<span style={{display:"inline-block",animation:getIconAnim(toolName),flexShrink:0,lineHeight:1,transformOrigin:"center"}}>{icon}</span>}
-      {isD&&<><span style={{color:t.ok,flexShrink:0,lineHeight:1}}>✓</span><span style={{flexShrink:0,lineHeight:1}}>{icon}</span></>}
-      <span style={{fontWeight:600,flexShrink:0}}>{label}</span>
-      {showMarquee
-        ? <span className="pill-marquee-wrap">
-            <span key={marqueeKey} className="pill-marquee-inner" style={{color:tc,opacity:.75,fontStyle:"italic"}}>
-              {displayStatus}&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{displayStatus}
-            </span>
-          </span>
-        : displayStatus&&<span style={{opacity:.6,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:350,fontStyle:isThink?"italic":"normal"}}>{displayStatus}</span>
-      }
-      {isClickable&&<span style={{opacity:.3,flexShrink:0,fontSize:8,marginLeft:2}}>{expanded?"▴":"▾"}</span>}
-    </div>
-    {expanded&&(detail||isThink)&&<div ref={scrollRef} onScroll={handlePanelScroll} style={{background:`${t.bgDeep}`,border:`1px solid ${bc}`,borderTop:"none",borderRadius:"0 0 8px 8px",padding:10,fontSize:11,maxHeight:300,overflowY:"auto",maxWidth:600}}>
-      {!detail?<div style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
+  return <div className="hc-activity-detail">
+      {!detail?<div style={{color:t.dim,lineHeight:1.6,whiteSpace:"pre-wrap",opacity:.7}}>{status||"Thinking..."}</div>
       :typeof detail==="string"?<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontFamily:"inherit"}}>{detail}</pre>
       :isImageDetail?<ImagePromptDetail/>
-      :detail.thinking?<div ref={el=>{if(el&&isActive)el.scrollTop=el.scrollHeight;}} style={{color:t.dim,fontStyle:"italic",lineHeight:1.6,whiteSpace:"pre-wrap",maxHeight:250,overflowY:"auto"}}>{detail.thinking}</div>
+      :detail.thinking?<div style={{color:t.dim,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{detail.thinking}</div>
       :detail.code?<div>
-        {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:10}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
-        <pre style={{margin:0,padding:8,background:`${t.surface}88`,borderRadius:4,whiteSpace:"pre-wrap",color:t.warm,fontSize:11,maxHeight:100,overflow:"auto",border:`1px solid ${t.brd}18`}}>{detail.code}</pre>
-        {detail.stdout&&<><div style={{color:t.ok,marginTop:6,fontWeight:600,fontSize:10}}>📤 stdout:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:11,background:`${t.ok}08`,borderRadius:4,marginTop:2}}>{detail.stdout}</pre></>}
-        {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:10}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:11,background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
+        {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:"var(--hc-text-secondary)"}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
+        <pre style={{margin:0,padding:8,background:`${t.surface}F5`,borderRadius:4,whiteSpace:"pre-wrap",color:t.warm,fontSize:"var(--hc-text-secondary)",border:`1px solid ${t.brd}18`}}>{detail.code}</pre>
+        {detail.stdout&&<><div style={{color:t.ok,marginTop:6,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 stdout:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",background:`${t.ok}08`,borderRadius:4,marginTop:2}}>{detail.stdout}</pre></>}
+        {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
       </div>
-      :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:11}}>🔗 {r.title}</a></div>)}</div>
+      :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:"var(--hc-text-secondary)"}}>🔗 {r.title}</a></div>)}</div>
       :detail.steps?<div>
         <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-          <span style={{fontSize:10,fontWeight:700,color:t.acc}}>Agent Timeline</span>
-          <span style={{fontSize:9,color:t.mut,background:`${t.surface}88`,padding:"1px 6px",borderRadius:8}}>{detail.steps.length} step{detail.steps.length!==1?"s":""}</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc}}>Agent Timeline</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,background:`${t.surface}F5`,padding:"1px 6px",borderRadius:8}}>{detail.steps.length} step{detail.steps.length!==1?"s":""}</span>
         </div>
         {detail.steps.length>0&&(()=>{const last=detail.steps[detail.steps.length-1];return <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,padding:"4px 8px",background:`${t.acc}11`,borderRadius:6,border:`1px solid ${t.acc}22`}}>
-          <div style={{width:8,height:8,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite",flexShrink:0}}/>
-          <span style={{fontSize:10,color:t.mut,fontWeight:600}}>Current:</span>
-          <span style={{fontSize:11,fontWeight:700,color:t.acc}}>{last.icon} {last.label}</span>
-          <span style={{fontSize:10,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{last.detail}</span>
+          <div style={{width:8,height:8,borderRadius:"50%",background:t.acc,animation:active?"pulse 1.4s infinite":"none",flexShrink:0}}/>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600}}>{active?"Current:":"Latest:"}</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc}}>{last.icon} {last.label}</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{last.detail}</span>
         </div>;})()}
         <div style={{display:"flex",flexDirection:"column",gap:0,paddingLeft:8,borderLeft:`2px solid ${t.acc}22`}}>
           {detail.steps.map((s,i)=>{const isLast=i===detail.steps.length-1;return <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",padding:"3px 0",position:"relative",opacity:isLast?1:.65}}>
-            <span style={{position:"absolute",left:-13,top:6,width:isLast?8:6,height:isLast?8:6,borderRadius:"50%",background:isLast?t.acc:`${t.acc}55`,animation:isLast?"pulse 1.4s infinite":"none",transition:"all .2s"}}/>
-            <span style={{flexShrink:0,fontSize:11,width:18,textAlign:"center"}}>{s.icon}</span>
-            <span style={{color:isLast?t.acc:`${t.acc}99`,fontSize:10,fontWeight:isLast?700:600,flexShrink:0,minWidth:55}}>{s.label}</span>
-            <span style={{color:isLast?t.text:t.dim,fontSize:10,fontWeight:isLast?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{s.detail}</span>
+            <span style={{position:"absolute",left:-13,top:6,width:isLast?8:6,height:isLast?8:6,borderRadius:"50%",background:isLast?t.acc:`${t.acc}55`,animation:isLast&&active?"pulse 1.4s infinite":"none",transition:"all .2s"}}/>
+            <span style={{flexShrink:0,fontSize:"var(--hc-text-secondary)",width:18,textAlign:"center"}}>{s.icon}</span>
+            <span style={{color:isLast?t.acc:`${t.acc}99`,fontSize:"var(--hc-text-secondary)",fontWeight:isLast?700:600,flexShrink:0,minWidth:55}}>{s.label}</span>
+            <span style={{color:isLast?t.text:t.dim,fontSize:"var(--hc-text-secondary)",fontWeight:isLast?600:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{s.detail}</span>
           </div>;})}
         </div>
       </div>
       :detail.method?<div>
-        <div style={{color:t.mut,fontSize:10,marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
-        {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}66`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:60,overflow:"auto"}}>{JSON.stringify(detail.args,null,2)}</pre>}
-        {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:10}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:10,maxHeight:80,overflow:"auto"}}>{detail.result}</pre></>}
+        <div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
+        {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}F5`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail.args,null,2)}</pre>}
+        {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{detail.result}</pre></>}
       </div>
-      :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:10}}>{JSON.stringify(detail,null,2)}</pre>}
-    </div>}
+      :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail,null,2)}</pre>}
   </div>;
 };
+
+// Pace the collapsed excerpt independently of token arrivals. Keep the newest
+// text at the right edge, with a brief crossfade instead of a restarting marquee.
+function ThinkingPreview({text}){
+  const excerpt=String(text||"").replace(/\s+/g," ").trim().slice(-240);
+  const latest=useRef(excerpt);
+  const viewport=useRef(null);
+  const [overflow,setOverflow]=useState(false);
+  const [frame,setFrame]=useState({text:excerpt,previous:"",version:0});
+  useEffect(()=>{latest.current=excerpt;},[excerpt]);
+  useEffect(()=>{
+    const timer=setInterval(()=>setFrame(old=>old.text===latest.current?old:{text:latest.current,previous:old.text,version:old.version+1}),800);
+    return ()=>clearInterval(timer);
+  },[]);
+  React.useLayoutEffect(()=>{
+    const el=viewport.current;
+    const measure=()=>setOverflow(el.querySelector('.hc-activity-preview-current').scrollWidth>el.clientWidth+1);
+    measure();
+    const observer=new ResizeObserver(measure);observer.observe(el);
+    return ()=>observer.disconnect();
+  },[frame.version]);
+  return <span ref={viewport} className={`hc-activity-preview${overflow?" is-overflowing":""}`} aria-hidden="true">
+    <span key={frame.version} className="hc-activity-preview-frame">
+      {frame.previous&&<span className="hc-activity-preview-old">{frame.previous}</span>}
+      <span className="hc-activity-preview-current">{frame.text}</span>
+    </span>
+  </span>;
+}
+
+const ACTIVITY_ICONS={starting:"🔮",thinking:"🧠",writing:"✍️",reviewing:"✨",searching:"🔎",tool:"🛠️",complete:"✅",stopped:"⏹️",failed:"❌"};
+const ACTIVITY_TOOL_ICONS={fetch_url:"🌐",execute_code:"💻",run_shell:"💻",read_file:"📖",write_file:"📝",list_files:"📂",generate_image:"🎨",kb:"📚",memory:"🧠",download_file:"📦",download_project:"📦",install_package:"📦",deep_research:"🔬"};
+
+export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t}){
+  const state=chatActivity({events,savedEvents,live,content,status});
+  const [expanded,setExpanded]=useState(false);
+  const [following,setFollowing]=useState(true);
+  const manual=useRef(false),autoOpened=useRef(false),scrollRef=useRef(null),followRef=useRef(true);
+  const panelId=React.useId();
+  const hasReasoning=state.entries.some(e=>e.kind==="reasoning");
+  useEffect(()=>{
+    if(autoExpand&&live&&hasReasoning&&!autoOpened.current){
+      autoOpened.current=true;
+      if(!manual.current)setExpanded(true);
+    }
+  },[autoExpand,live,hasReasoning]);
+  const detailVersion=state.entries.map(row=>`${row.id}:${row.state}:${JSON.stringify(row.event.data)}`).join("|");
+  // Updating streaming text must not pull a reader away from older details.
+  React.useLayoutEffect(()=>{
+    if(expanded&&followRef.current&&scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;
+  },[expanded,detailVersion]);
+  const toggle=()=>{manual.current=true;setExpanded(v=>!v);};
+  const jump=()=>{followRef.current=true;setFollowing(true);if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;};
+  if(!state.visible)return null;
+  const color=state.phase==="failed"?t.err:state.phase==="thinking"?t.f4:state.phase==="reviewing"?t.warm:state.phase==="stopped"?t.mut:state.active?t.acc:t.dim;
+  const expandable=state.entries.length>0;
+  const thought=state.entries.filter(row=>row.kind==="reasoning").at(-1);
+  const preview=!expanded&&(state.phase==="thinking"||(state.phase==="reviewing"&&thought?.state==="running"))?(activityDetail(thought?.event)?.thinking||activityText(thought?.event)):"";
+  const tool=state.entries.filter(row=>row.kind==="tool"&&row.state==="running").at(-1)?.tool;
+  const icon=(state.phase==="tool"&&ACTIVITY_TOOL_ICONS[tool])||ACTIVITY_ICONS[state.phase];
+  const summary=[hasReasoning?"Reasoning":"",state.tools?`${state.tools} tool${state.tools===1?"":"s"}`:"",state.entries.some(e=>e.kind==="review")?"Review":""].filter(Boolean).join(" · ");
+  const header=<>
+    <span aria-hidden="true" className={`hc-activity-icon${state.active?" is-active":""}`}>{icon}</span>
+    <span className="hc-activity-label">{state.label}</span>
+    {preview&&<ThinkingPreview key={thought.id} text={preview}/>}
+    {!state.active&&summary&&<span className="hc-activity-summary">{summary}</span>}
+    {expandable&&<span className="hc-activity-chevron" aria-hidden="true">{expanded?"▴":"▾"}</span>}
+  </>;
+  return <section className="hc-chat-activity" data-phase={state.phase} style={{"--activity-color":color,"--activity-border":`${color}30`,"--activity-tint":`${color}08`,"--activity-glow":`${color}12`,"--activity-surface":t.bgDeep,"--activity-muted":t.mut,"--activity-text":t.dim}}>
+    <span className="hc-sr-only" role="status" aria-live="polite" aria-atomic="true">{state.label}</span>
+    {expandable?<button type="button" className="hc-activity-header" onClick={toggle} aria-expanded={expanded} aria-controls={panelId} aria-label={`${state.label} details`}>{header}</button>:<div className="hc-activity-header">{header}</div>}
+    {expanded&&expandable&&<>
+      <div id={panelId} ref={scrollRef} className="hc-activity-scroll" tabIndex={0} aria-label="Activity details" onScroll={e=>{
+        const el=e.currentTarget,near=el.scrollHeight-el.scrollTop-el.clientHeight<24;
+        followRef.current=near;setFollowing(near);
+      }}>
+        {state.entries.map(row=><div key={row.id} className="hc-activity-entry" data-state={row.state}>
+          <div className="hc-activity-entry-heading"><span>{row.label}</span><span style={{color:row.state==="failed"?t.err:row.state==="complete"?t.ok:t.mut}}>{{running:"In progress",complete:"Complete",failed:"Failed",interrupted:"Interrupted",retained:"Answer retained",unknown:"Result unavailable"}[row.state]}</span></div>
+          {row.kind==="reasoning"||row.kind==="error"?<ActivityDetail ev={row.event} t={t} active={row.state==="running"}/>:<>
+            {activityText(row.event)&&<div className="hc-activity-description">{activityText(row.event)}</div>}
+            {activityDetail(row.event)&&<details className="hc-activity-tool-detail"><summary>Details</summary><ActivityDetail ev={row.event} t={t} active={row.state==="running"}/></details>}
+          </>}
+        </div>)}
+      </div>
+      {!following&&state.active&&<button type="button" className="hc-activity-jump" onClick={jump}>Jump to latest ↓</button>}
+    </>}
+  </section>;
+}
 
 const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   const [expanded,setExpanded]=useState(streaming);
@@ -224,10 +209,10 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 12px ${t.acc}22`:"none",transition:"all .3s"}}>
     <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:streaming?"pillGlow 2s ease-in-out infinite":"none"}}>
       <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>📐</span>
-      <span style={{fontWeight:700,fontSize:11,color:tc,letterSpacing:.3}}>Architecture Plan</span>
-      {streaming&&<span style={{fontSize:10,color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
-      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:9,fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
-      <span style={{fontSize:9,color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
+      <span style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:tc,letterSpacing:.3}}>Architecture Plan</span>
+      {streaming&&<span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
+      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:"var(--hc-text-control)",fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
     </div>
     {expanded&&<div style={{padding:"10px 14px",fontSize:12,lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
       {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
@@ -532,14 +517,14 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
       setExpanded(true);
     }
   },[run,needsAttention,autoExpanded]);
-  const DetailBody = ({compact=false}={}) => <div style={{padding:compact?"8px 0 0":"8px 12px",fontSize:11,lineHeight:1.55,color:t.dim,maxHeight:compact?360:320,overflowY:"auto",fontFamily:font}}>
+  const DetailBody = ({compact=false}={}) => <div style={{padding:compact?"8px 0 0":"8px 12px",fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.dim,maxHeight:compact?360:320,overflowY:"auto",fontFamily:font}}>
     {chips.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
-      {chips.map(([label,value],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:9,color:t.mut,border:`1px solid ${t.brd}2e`,background:`${t.surface}55`,borderRadius:999,padding:"2px 7px",maxWidth:compact?260:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+      {chips.map(([label,value],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,border:`1px solid ${t.brd}2e`,background:`${t.surface}F5`,borderRadius:999,padding:"2px 7px",maxWidth:compact?260:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
         <span style={{color:t.dim,fontWeight:800}}>{label}</span> {value}
       </span>)}
     </div>}
     {architectPlan&&<div style={{marginBottom:9,padding:"8px 10px",borderRadius:7,border:`1px solid ${t.acc}28`,background:`${t.acc}09`,color:t.dim}}>
-      <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.6,fontWeight:900,marginBottom:5}}>Architecture Plan</div>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:900,marginBottom:5}}>Architecture Plan</div>
       {md?<MDWrap>{md(architectPlan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{architectPlan}</pre>}
     </div>}
     {allSteps.length===0 && <div style={{color:t.mut,fontStyle:"italic"}}>No steps recorded yet…</div>}
@@ -548,18 +533,18 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
       const stepNo = s.step ?? i+1;
       const meta = _stepTimeMeta(s, allSteps[i-1], run);
       return <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none",display:"grid",gridTemplateColumns:"28px 18px minmax(76px,auto) minmax(0,1fr)",alignItems:"baseline",gap:6}}>
-        <span style={{color:t.mut,fontSize:10,textAlign:"right"}}>#{stepNo}</span>
-        <span style={{fontSize:11,opacity:.85,textAlign:"center"}}>{stepIcon}</span>
+        <span style={{color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"right"}}>#{stepNo}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",opacity:.85,textAlign:"center"}}>{stepIcon}</span>
         <span style={{color:colour,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.action||"?"}</span>
         <span style={{color:t.dim,minWidth:0,wordBreak:"break-word"}}>
           {(s.detail||"").slice(0,220)}
-          {meta&&<span style={{display:"block",marginTop:1,fontSize:9,color:t.mut,wordBreak:"normal"}}>{meta}</span>}
+          {meta&&<span style={{display:"block",marginTop:1,fontSize:"var(--hc-text-secondary)",color:t.mut,wordBreak:"normal"}}>{meta}</span>}
         </span>
       </div>;
     })}
     {summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{summary}</div>}
     {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
-    {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:10,color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
+    {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:"var(--hc-text-secondary)",color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
     {baseRole==="reviewer"&&(env.issues||[]).length>0&&<div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>
       {(env.issues||[]).slice(0,6).map((issue,i)=><div key={i} style={{padding:"6px 8px",borderRadius:6,border:`1px solid ${t.err}25`,background:`${t.err}08`,color:t.dim}}>
         <span style={{color:t.err,fontWeight:800}}>{issue.file||issue.path||`issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
@@ -567,8 +552,8 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
     </div>}
     {baseRole==="qa" && env.answer && <div style={{marginTop:10,padding:"10px 12px",borderRadius:8,background:`${colour}08`,border:`1px solid ${colour}22`,color:t.dim,fontSize:12,lineHeight:1.6}}>
       {md?<MDWrap>{md(env.answer)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{env.answer}</pre>}
-      {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:5,background:`${t.acc}18`,color:t.acc,fontSize:10,fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
-      {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:10,color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
+      {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:5,background:`${t.acc}18`,color:t.acc,fontSize:"var(--hc-text-secondary)",fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
+      {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:"var(--hc-text-secondary)",color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
     </div>}
   </div>;
   if(variant==="timeline"){
@@ -582,18 +567,18 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
         <div onClick={()=>setExpanded(p=>!p)} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"start",cursor:"pointer",userSelect:"none"}}>
           <div style={{minWidth:0}}>
             <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
-              <span style={{fontWeight:900,color:colour,fontSize:11}}>{visual.label}</span>
-              <span style={{fontSize:10,color:t.mut}}>{statusLabel}</span>
-              <span style={{fontSize:10,color:t.mut,opacity:.72}}>{role}</span>
-              {dur&&<span style={{fontSize:10,color:t.mut,opacity:.72}}>{dur}</span>}
-              {artifacts.length>0&&<span style={{fontSize:10,color:t.ok,opacity:.8}}>{artifacts.length} artifact{artifacts.length===1?"":"s"}</span>}
-              {err&&<span style={{fontSize:10,color:t.err}}>· {err}</span>}
+              <span style={{fontWeight:900,color:colour,fontSize:"var(--hc-text-secondary)"}}>{visual.label}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{statusLabel}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.72}}>{role}</span>
+              {dur&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.72}}>{dur}</span>}
+              {artifacts.length>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.ok,opacity:.8}}>{artifacts.length} artifact{artifacts.length===1?"":"s"}</span>}
+              {err&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>· {err}</span>}
             </div>
-            <div style={{fontSize:10,color:t.mut,lineHeight:1.45,marginTop:3,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:expanded?3:2,WebkitBoxOrient:"vertical",wordBreak:"break-word"}}>{summary}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45,marginTop:3,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:expanded?3:2,WebkitBoxOrient:"vertical",wordBreak:"break-word"}}>{summary}</div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:5}}>
-            {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:10,color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
-            <span style={{fontSize:9,color:colour,opacity:.55,paddingTop:1}}>{expanded?"▴":"▾"}</span>
+            {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:"var(--hc-text-control)",color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
+            <span style={{fontSize:"var(--hc-text-secondary)",color:colour,opacity:.55,paddingTop:1}}>{expanded?"▴":"▾"}</span>
           </div>
         </div>
         {expanded&&<DetailBody compact/>}
@@ -605,20 +590,20 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   return <div style={{marginTop:6,marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 12px ${colour}22`:"none",transition:"all .3s"}}>
     <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:isStreaming?"pillGlow 2s ease-in-out infinite":"none"}}>
       <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>{visual.icon}</span>
-      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>{visual.label}</span>
-      <span style={{fontSize:10,color:t.mut,opacity:.6}}>· {role}</span>
-      <span style={{fontSize:10,color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>· {statusLabel}</span>
-      {filesN>0 && <span style={{fontSize:10,color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
-      {artifacts.length>0 && <span style={{fontSize:10,color:t.ok}}>· {artifacts.length} artifact{artifacts.length===1?"":"s"}</span>}
-      {dur && <span style={{fontSize:10,color:t.mut}}>· {dur}</span>}
-      {err && <span style={{fontSize:10,color:t.err}}>· {err}</span>}
-      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{marginLeft:"auto",fontSize:10,color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
-      <span style={{fontSize:9,color:colour,opacity:.45,marginLeft:artifacts.length>0&&onOpenArtifact?0:"auto"}}>{expanded?"▴":"▾"}</span>
+      <span style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:colour,letterSpacing:.3}}>{visual.label}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6}}>· {role}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>· {statusLabel}</span>
+      {filesN>0 && <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
+      {artifacts.length>0 && <span style={{fontSize:"var(--hc-text-secondary)",color:t.ok}}>· {artifacts.length} artifact{artifacts.length===1?"":"s"}</span>}
+      {dur && <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>· {dur}</span>}
+      {err && <span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>· {err}</span>}
+      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
+      <span style={{fontSize:"var(--hc-text-secondary)",color:colour,opacity:.45,marginLeft:artifacts.length>0&&onOpenArtifact?0:"auto"}}>{expanded?"▴":"▾"}</span>
     </div>
-    {!expanded && needsAttention && <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",borderTop:`1px solid ${bc}`,fontSize:10,color:t.err,background:`${t.err}08`}}>
+    {!expanded && needsAttention && <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",borderTop:`1px solid ${bc}`,fontSize:"var(--hc-text-secondary)",color:t.err,background:`${t.err}08`}}>
       <span style={{fontWeight:800}}>Failed run</span>
       <span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{env.error||env.summary||"Open details for the recorded issue."}</span>
-      <button onClick={()=>setExpanded(true)} style={{background:"none",border:`1px solid ${t.err}35`,color:t.err,cursor:"pointer",padding:"2px 8px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Details</button>
+      <button onClick={()=>setExpanded(true)} style={{background:"none",border:`1px solid ${t.err}35`,color:t.err,cursor:"pointer",padding:"2px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Details</button>
     </div>}
     {expanded && <DetailBody/>}
   </div>;
@@ -675,14 +660,14 @@ const LegacyWorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
     <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
       <span style={{fontSize:13}}>🧭</span>
-      <span style={{fontWeight:700,fontSize:11,color:colour,letterSpacing:.3}}>Workflow</span>
-      <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
-      <span style={{fontSize:10,color:colour}}>· {state}</span>
-      <span style={{fontSize:10,color:t.mut}}>· artifact: {artifact}</span>
-      {artifacts.length>0&&<a href={artifacts[0].id?`${API}/api/artifacts/${artifacts[0].id}/download`:`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:10,color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:700}}>download</a>}
-      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:10,color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>details</button>}
+      <span style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:colour,letterSpacing:.3}}>Workflow</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:colour}}>· {state}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>· artifact: {artifact}</span>
+      {artifacts.length>0&&<a href={artifacts[0].id?`${API}/api/artifacts/${artifacts[0].id}/download`:`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:700}}>download</a>}
+      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:"var(--hc-text-control)",color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>details</button>}
     </div>
-    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:10,color:t.mut}}>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:"var(--hc-text-secondary)",color:t.mut}}>
       {wf.project_id&&<span>project: {wf.project_id}</span>}
       {contract.build_system&&<span>build: {contract.build_system}</span>}
       {contract.test_cmd&&<span>test: {contract.test_cmd.slice(0,60)}</span>}
@@ -786,12 +771,12 @@ function QuickSourceInlineChip({href,label,source,t,font,onPreview}){
   const short=text.length>34?`${text.slice(0,31)}...`:text;
   const title=[source?.title||text,host,source?.snippet].filter(Boolean).join("\n");
   return <span style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 1px",verticalAlign:"middle",maxWidth:"100%"}}>
-    <a href={href} target="_blank" rel="noopener" title={title} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",background:`${t.f1}12`,border:`1px solid ${t.f1}38`,borderRadius:onPreview?"7px 0 0 7px":7,color:t.f1,textDecoration:"none",fontSize:11,fontWeight:750,maxWidth:260,overflow:"hidden",whiteSpace:"nowrap",boxSizing:"border-box"}}>
+    <a href={href} target="_blank" rel="noopener" title={title} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",background:`${t.f1}12`,border:`1px solid ${t.f1}38`,borderRadius:onPreview?"7px 0 0 7px":7,color:t.f1,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:750,maxWidth:260,overflow:"hidden",whiteSpace:"nowrap",boxSizing:"border-box"}}>
       <SourceFavicon url={href} domain={host} size={14} theme={t}/>
       <span style={{overflow:"hidden",textOverflow:"ellipsis"}}>{short}</span>
-      <span style={{fontSize:8,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.4}}>{host}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:800,textTransform:"none",letterSpacing:0}}>{host}</span>
     </a>
-    {onPreview&&<button type="button" onClick={()=>onPreview(source?.title||text,href)} title="Preview source" style={{display:"inline-flex",alignItems:"center",justifyContent:"center",height:24,padding:"0 7px",background:`${t.acc}10`,border:`1px solid ${t.f1}38`,borderLeft:"none",borderRadius:"0 7px 7px 0",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:10}}>
+    {onPreview&&<button type="button" onClick={()=>onPreview(source?.title||text,href)} title="Preview source" style={{display:"inline-flex",alignItems:"center",justifyContent:"center",height:24,padding:"0 7px",background:`${t.acc}10`,border:`1px solid ${t.f1}38`,borderLeft:"none",borderRadius:"0 7px 7px 0",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>
       <IC.Search/>
     </button>}
   </span>;
@@ -806,16 +791,16 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
   const freshness=payload?.freshness_mode||payload?.resolved_date||"";
   const shown=results.slice(0,18);
   const meta=[freshness,domains.slice(0,3).join(", ")].filter(Boolean).join(" - ");
-  return <div style={{margin:"12px 0 4px",border:`1px solid ${t.brd}44`,borderRadius:8,background:`${t.surface}42`,overflow:"hidden",boxShadow:"none"}}>
-    <button type="button" aria-expanded={open} onClick={()=>setOpen(o=>!o)} style={{width:"100%",border:"none",background:`${t.surface}58`,color:t.dim,cursor:"pointer",fontFamily:font,padding:"7px 10px",display:"grid",gridTemplateColumns:"auto 1fr auto",alignItems:"center",gap:9,textAlign:"left"}}>
-      <span style={{display:"inline-flex",alignItems:"center",gap:6,color:t.f1,fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.6,whiteSpace:"nowrap"}}>
-        <span style={{transition:"transform .16s",transform:open?"rotate(90deg)":"rotate(0)",display:"inline-block",fontSize:9}}>▶</span>
+  return <div style={{margin:"12px 0 4px",border:`1px solid ${t.brd}44`,borderRadius:8,background:`${t.surface}F5`,overflow:"hidden",boxShadow:"none"}}>
+    <button type="button" aria-expanded={open} onClick={()=>setOpen(o=>!o)} style={{width:"100%",border:"none",background:`${t.surface}F5`,color:t.dim,cursor:"pointer",fontFamily:font,padding:"7px 10px",display:"grid",gridTemplateColumns:"auto 1fr auto",alignItems:"center",gap:9,textAlign:"left"}}>
+      <span style={{display:"inline-flex",alignItems:"center",gap:6,color:t.f1,fontSize:"var(--hc-text-secondary)",fontWeight:900,textTransform:"none",letterSpacing:0,whiteSpace:"nowrap"}}>
+        <span style={{transition:"transform .16s",transform:open?"rotate(90deg)":"rotate(0)",display:"inline-block",fontSize:"var(--hc-text-secondary)"}}>▶</span>
         <IC.Search/> Sources
         <span style={{color:t.mut,fontWeight:800,letterSpacing:0}}>({results.length})</span>
       </span>
       <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:1}}>
-        <span style={{fontSize:11,color:t.text,fontWeight:750,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{query}</span>
-        {meta&&<span style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta}</span>}
+        <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:750,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{query}</span>
+        {meta&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta}</span>}
       </span>
       <span style={{display:"flex",alignItems:"center",justifyContent:"flex-end",minWidth:0,paddingLeft:4}}>
         {results.slice(0,6).map((r,i)=><span key={`${r.url}-${i}`} style={{marginLeft:i?-5:0,position:"relative",zIndex:10-i}}>
@@ -828,15 +813,15 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
         const isMedia=r.type==="youtube"||r.type==="image";
         const thumb=r.thumbnail&&isMedia;
         const badges=[r.published_date,r.freshness,r.source_tier].filter(Boolean).join(" - ");
-        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"30px minmax(0,1fr) 54px":"30px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:7,border:`1px solid ${t.brd}32`,background:`${t.bgDeep}55`,color:t.dim,boxSizing:"border-box"}}>
+        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"30px minmax(0,1fr) 54px":"30px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:7,border:`1px solid ${t.brd}32`,background:`${t.bgDeep}F5`,color:t.dim,boxSizing:"border-box"}}>
           <span style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,width:30,minWidth:30}}>
             <SourceFavicon url={r.url} domain={r.domain} size={22} theme={t} title={r.domain}/>
-            <span title={`Source ${i+1}`} style={{fontSize:9,lineHeight:1,fontWeight:900,color:t.acc,padding:"2px 3px",borderRadius:4,background:`${t.acc}10`,border:`1px solid ${t.acc}24`}}>[{i+1}]</span>
+            <span title={`Source ${i+1}`} style={{fontSize:"var(--hc-text-secondary)",lineHeight:1,fontWeight:900,color:t.acc,padding:"2px 3px",borderRadius:4,background:`${t.acc}10`,border:`1px solid ${t.acc}24`}}>[{i+1}]</span>
           </span>
           <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:3}}>
-            <span style={{fontSize:11,fontWeight:800,color:t.text,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.title||r.domain||"Source"}</span>
-            {r.snippet&&<span style={{fontSize:10,color:t.mut,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.snippet}</span>}
-            <span style={{display:"flex",alignItems:"center",gap:5,minWidth:0,fontSize:9,color:t.dim}}>
+            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.text,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.title||r.domain||"Source"}</span>
+            {r.snippet&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.snippet}</span>}
+            <span style={{display:"flex",alignItems:"center",gap:5,minWidth:0,fontSize:"var(--hc-text-secondary)",color:t.dim}}>
               <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:750,color:r.type==="youtube"?t.err:r.type==="image"?t.acc:t.f1}}>{r.domain||"web"}</span>
               {badges&&<span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:t.mut}}>{badges}</span>}
               {typeof r.score==="number"&&<span style={{marginLeft:"auto",color:t.mut,flexShrink:0}}>{Math.round(r.score)}</span>}
@@ -880,18 +865,6 @@ const _fmtElapsed = (start, now=Date.now())=>{
 };
 const _parseUtcishMs = parseUtcishMs; // canonical impl lives in datetime.js
 const _stripStatusEmoji = (txt="")=>String(txt||"").replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,"").trim();
-const _phaseFromEvent = (ev)=>{
-  if(!ev)return null;
-  const d=ev.data||{};
-  const tool=d.tool||ev.type;
-  const status=_stripStatusEmoji(d.label||d.status||"");
-  if(ev.type==="thinking"||ev.type==="thought_done")return{phase:"thinking",label:ev.type==="thought_done"?"Reasoning complete":"Thinking",detail:status,pct:d.pct};
-  if(ev.type==="search_results"&&d.source==="quick_search")return{phase:"searching",label:"Search complete",detail:`${(d.results||[]).length} sources`,pct:100};
-  if(ev.type==="tool_error"||ev.type==="error")return{phase:"failed",label:"Failed",detail:status||tool,pct:d.pct};
-  if(ev.type==="tool_end"||ev.type==="tool_done")return{phase:"complete",label:"Tool complete",detail:status||tool,pct:d.pct||100};
-  if(ev.type==="tool_start"||ev.type==="tool_progress"||ev.type==="tool_status")return{phase:"tool",label:(tool||"tool").replaceAll("_"," "),detail:status,pct:d.pct};
-  return null;
-};
 
 function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunning=false,elapsedLabel="--",eventLabel}){
   const visible=(events||[]).filter(e=>e.type!=="research_token");
@@ -919,109 +892,40 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
     ["Elapsed",elapsedLabel,null],
   ];
   const recent=visible.filter(e=>["research_phase","research_source_found","research_source_read","research_finding","research_audit","research_done","research_error"].includes(e.type)).slice(-6);
-  return <div style={{border:`1px solid ${t.brd}33`,borderRadius:8,padding:22,background:`${t.surface}66`,color:t.mut,fontSize:12,lineHeight:1.55,animation:"fadeIn .2s"}}>
+  return <div style={{border:`1px solid ${t.brd}33`,borderRadius:8,padding:22,background:`${t.surface}F5`,color:t.mut,fontSize:12,lineHeight:1.55,animation:"fadeIn .2s"}}>
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
       <div style={{width:34,height:34,borderRadius:8,border:`1px solid ${t.acc}33`,background:`${t.acc}12`,display:"flex",alignItems:"center",justifyContent:"center",color:t.acc,flexShrink:0}}><IC.Search/></div>
       <div style={{minWidth:0}}>
-        <div style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8,color:t.acc}}>{phaseTitle}</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:900,textTransform:"none",letterSpacing:0,color:t.acc}}>{phaseTitle}</div>
         <div style={{fontSize:12,color:t.text,lineHeight:1.35}}>{latestPhase?.data?.detail||phaseDetail}</div>
       </div>
-      {researchRunning&&<span style={{marginLeft:"auto",fontSize:9,padding:"3px 7px",borderRadius:7,border:`1px solid ${t.f1}33`,color:t.f1,background:`${t.f1}10`,textTransform:"uppercase",letterSpacing:.6}}>live</span>}
+      {researchRunning&&<span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",padding:"3px 7px",borderRadius:7,border:`1px solid ${t.f1}33`,color:t.f1,background:`${t.f1}10`,textTransform:"none",letterSpacing:0}}>live</span>}
     </div>
-    <div style={{height:6,borderRadius:99,background:`${t.bgDeep}cc`,border:`1px solid ${t.brd}24`,overflow:"hidden",marginBottom:12}}>
+    <div style={{height:6,borderRadius:99,background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}24`,overflow:"hidden",marginBottom:12}}>
       <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg, ${t.acc}, ${t.f1})`,boxShadow:`0 0 18px ${t.acc}66`,transition:"width .45s ease"}}/>
     </div>
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:7,marginBottom:14}}>
-      {metricLine.map(([label,value,target])=><div key={label} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"7px 8px",background:`${t.bgDeep}66`,minWidth:0}}>
+      {metricLine.map(([label,value,target])=><div key={label} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"7px 8px",background:`${t.bgDeep}F5`,minWidth:0}}>
         <div style={{fontSize:13,fontWeight:900,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{target?`${value}/${target}`:value}</div>
-        <div style={{fontSize:8,color:t.dim,textTransform:"uppercase",letterSpacing:.6,marginTop:2}}>{label}</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,marginTop:2}}>{label}</div>
       </div>)}
     </div>
     <div style={{display:"flex",flexDirection:"column",gap:6}}>
-      {recent.length?recent.map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_read"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={`${ev.type}-${i}`} style={{display:"flex",alignItems:"flex-start",gap:8,color:t.dim,fontSize:10,lineHeight:1.35}}>
+      {recent.length?recent.map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_read"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={`${ev.type}-${i}`} style={{display:"flex",alignItems:"flex-start",gap:8,color:t.dim,fontSize:"var(--hc-text-secondary)",lineHeight:1.35}}>
         <span style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 8px ${c}66`,marginTop:4,flexShrink:0}}/>
         <span style={{overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{eventLabel?eventLabel(ev,i):(ev.type||"activity")}</span>
-      </div>}):<div style={{fontSize:10,color:t.dim}}>Awaiting first research event.</div>}
+      </div>}):<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>Awaiting first research event.</div>}
     </div>
   </div>;
 }
 
-// Inline tool status: shows latest pill, expands to show all
-const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifact,historical,md,savedEvts,msgContent})=>{
-  const [showAll,setShowAll]=useState(false);
-  // Hoisted from SourceLinkCards: that component type is recreated every
-  // render (inline definition), so React remounts it constantly — local
-  // state there resets on every parent re-render, and its conditional
-  // useState after an early return only avoided crashing because of the
-  // remount. Keep its state here.
+// Delivered files and sources stay below the answer. Specialized raw timelines
+// can opt into the same activity panel; normal chat mounts it once above text.
+const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],msgContent,showActivity=true})=>{
   const [slExpanded,setSlExpanded]=useState(false);
   evts=evts.filter(e=>!isDocumentEvent(e));
-  savedEvts=(savedEvts||[]).filter(e=>!isDocumentEvent(e));
-  if(!evts.length) return null;
-
-  // Stable string key for expandedPill — avoids collapse when new events arrive
-  // Guard: if evts only has source_links/search_results (no tool/thinking), merged will be empty
-  const getPillKey = (ev, idx) => {
-    if(ev.type==="thinking"||ev.type==="thought_done") return "thinking";
-    if(ev.type==="complete") return "streaming";
-    if(idx!==undefined) return `${ev.data?.tool||ev.type}_${idx}`;
-    return ev.data?.tool || ev.type;
-  };
-
-  // Collapse events: keep only meaningful pills
-  const merged = [];
-
-  // First pass: group by category
-  const thinkingEvts = evts.filter(e=>e.type==="thinking"||e.type==="thought_done");
-  const toolEvts = evts.filter(e=>e.type==="tool_start"||e.type==="tool_progress"||e.type==="tool_end"||e.type==="tool_done"||e.type==="tool_error");
-  const streamEvts = evts.filter(e=>e.type==="complete");
-  const otherEvts = evts.filter(e=>!["thinking","thought_done","tool_start","tool_progress","tool_end","tool_done","tool_error","complete","code_output","file_ready","search_results","source_links","kb_sources","codeagent_note"].includes(e.type));
-
-  // Thinking: collapse to just the final state
-  if(thinkingEvts.length){
-    const done = thinkingEvts.find(e=>e.type==="thought_done");
-    merged.push(done || thinkingEvts[thinkingEvts.length-1]);
-  }
-
-  // Tools: pair each start→end sequentially (not by name, so repeated tools each get a step)
-  const _pendingStarts = []; // stack of unmatched tool_start events
-  for(const e of toolEvts){
-    const key = e.data?.tool||"unknown";
-    if(e.type==="tool_start"){
-      _pendingStarts.push({key, evt: e});
-    } else if(e.type==="tool_progress"){
-      // Update the latest pending start for this tool
-      const idx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
-      if(idx>=0) _pendingStarts[_pendingStarts.length-1-idx].evt = e;
-    } else { // tool_end, tool_done, tool_error
-      // Match with the newest pending start for this tool. Some tools emit an
-      // outer chat-level start and then an inner run-level start with run_id.
-      const revIdx = [..._pendingStarts].reverse().findIndex(p=>p.key===key);
-      if(revIdx>=0) _pendingStarts.splice(_pendingStarts.length-1-revIdx, 1);
-      merged.push(e);
-    }
-  }
-  // Remaining unmatched starts
-  for(const {evt} of _pendingStarts){
-    if(historical){
-      merged.push({...evt, type:"tool_done", data:{...evt.data, status:"done"}});
-    }else{
-      merged.push(evt);
-    }
-  }
-
-  // Streaming: collapse to final state
-  if(streamEvts.length){
-    const done = streamEvts.find(e=>e.type==="complete");
-    merged.push(done || streamEvts[streamEvts.length-1]);
-  }
-
-  // Other events pass through
-  merged.push(...otherEvts);
-
-  const latest = merged.length ? merged[merged.length-1] : null;
-  const completedCount = merged.filter(e=>e.type==="tool_end"||e.type==="tool_done"||e.type==="complete"||e.type==="thought_done").length;
-  const totalSteps = merged.length;
+  savedEvts=savedEvts.filter(e=>!isDocumentEvent(e));
+  if(!evts.length)return null;
 
   const codeOutputEvts = evts.filter(e=>e.type==="code_output");
   const fileReadyEvts = evts.filter(e=>e.type==="file_ready");
@@ -1053,19 +957,19 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   // collapsible code output, so ToolStatus shouldn't render another copy here.
   const CodeOutputCards = ()=>historical?null:<>{codeOutputEvts.map((e,i)=>{
     const d=e.data||{};
-    return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:11}}>
+    return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:"var(--hc-text-secondary)"}}>
       <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
         <span>{d.success?"🎯":"❌"}</span>
         <span style={{fontWeight:600,color:d.success?t.ok:t.err}}>{d.language} output</span>
         <span style={{color:t.mut,marginLeft:"auto"}}>{d.exec_time?.toFixed?.(1)}s</span>
       </div>
       {d.stdout&&<>
-        <div style={{padding:"4px 10px 2px",fontSize:10,color:t.ok,fontWeight:600}}>stdout</div>
-        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.dim,maxHeight:200,overflowY:"auto",fontSize:11}}>{d.stdout}</pre>
+        <div style={{padding:"4px 10px 2px",fontSize:"var(--hc-text-secondary)",color:t.ok,fontWeight:600}}>stdout</div>
+        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.dim,maxHeight:200,overflowY:"auto",fontSize:"var(--hc-text-secondary)"}}>{d.stdout}</pre>
       </>}
       {d.stderr&&<>
-        <div style={{padding:"4px 10px 2px",fontSize:10,color:t.err,fontWeight:600}}>stderr</div>
-        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.err,maxHeight:120,overflowY:"auto",fontSize:11}}>{d.stderr}</pre>
+        <div style={{padding:"4px 10px 2px",fontSize:"var(--hc-text-secondary)",color:t.err,fontWeight:600}}>stderr</div>
+        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.err,maxHeight:120,overflowY:"auto",fontSize:"var(--hc-text-secondary)"}}>{d.stderr}</pre>
       </>}
     </div>;
   })}</>;
@@ -1092,10 +996,10 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
       <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
       <a href={d.artifact_id?`${API}/api/artifacts/${d.artifact_id}/download`:`${API}${d.url}`} download={d.filename}
         style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-        <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:9,background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:10,opacity:.6}}>⬇</span>
+        <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:"var(--hc-text-secondary)",background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:"var(--hc-text-secondary)",opacity:.6}}>⬇</span>
       </a>
-      {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:13,display:"flex",alignItems:"center"}}>👁</button>}
-      {d.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{padding:"7px 10px",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,borderRadius:8,color:t.pink,cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:800,display:"flex",alignItems:"center"}}>Artifact</button>}
+      {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",display:"flex",alignItems:"center"}}>👁</button>}
+      {d.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{padding:"7px 10px",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,borderRadius:8,color:t.pink,cursor:"pointer",fontSize:"var(--hc-text-control)",fontFamily:"inherit",fontWeight:800,display:"flex",alignItems:"center"}}>Artifact</button>}
       </div>
     </div>;
   })}</>;};
@@ -1106,8 +1010,8 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
     return <div key={i} style={{marginTop:6,border:`1px solid ${t.acc}30`,background:`${t.acc}0F`,borderRadius:8,padding:"7px 10px",display:"flex",alignItems:"flex-start",gap:8,maxWidth:640}}>
       <span style={{fontSize:13,lineHeight:1.35,flexShrink:0}}>🧬</span>
       <div style={{minWidth:0}}>
-        <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.7,fontWeight:800,marginBottom:2}}>Direct build</div>
-        <div style={{fontSize:11,color:t.dim,lineHeight:1.45}}>{text}</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:800,marginBottom:2}}>Direct build</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>{text}</div>
       </div>
     </div>;
   })}</>;
@@ -1117,16 +1021,16 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
     const sources = latestKb?.data?.sources||[];
     if(!sources.length)return null;
     const names=[...new Set(sources.map(s=>s.filename).filter(Boolean))];
-    return <div style={{marginTop:6,border:`1px solid ${t.acc}28`,background:`${t.surface}42`,borderRadius:8,padding:"7px 10px",maxWidth:680}}>
-      <div style={{fontSize:9,color:t.acc,textTransform:"uppercase",letterSpacing:.7,fontWeight:800,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+    return <div style={{marginTop:6,border:`1px solid ${t.acc}28`,background:`${t.surface}F5`,borderRadius:8,padding:"7px 10px",maxWidth:680}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:800,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
         <span>📚</span><span>Knowledge sources</span><span style={{color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0}}>· {sources.length} chunk{sources.length!==1?"s":""}</span>
       </div>
-      <div style={{fontSize:11,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:5}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:5}}>
         {names.length?names.slice(0,4).join(", "):"Knowledge base context"}
         {names.length>4?` +${names.length-4} more`:""}
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:4}}>
-        {sources.slice(0,3).map((s,si)=><div key={`${s.filename||"source"}-${s.chunk_index||si}-${si}`} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:10,color:t.dim,lineHeight:1.35}}>
+        {sources.slice(0,3).map((s,si)=><div key={`${s.filename||"source"}-${s.chunk_index||si}-${si}`} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.35}}>
           <span style={{fontWeight:800,color:t.acc,flexShrink:0}}>[{s.n||si+1}]</span>
           <span style={{minWidth:0,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>
             <span style={{color:t.text,fontWeight:700}}>{s.filename||"source"}</span>
@@ -1143,7 +1047,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
     const results=d.results||[];
     if(!results.length)return null;
     return <div key={ei} style={{marginTop:10}}>
-      <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
         <IC.Search/><span>{d.query||"Search"}</span><span style={{opacity:.5}}>· {results.length} sources</span>
       </div>
       <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:8}}>
@@ -1152,26 +1056,26 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
           const isYT=r.type==="youtube";
           const isImg=r.type==="image";
           const hasThumbnail=!!r.thumbnail;
-          return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}CC`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
+          return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F5`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
             onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
             <div style={{width:"100%",height:88,background:hasThumbnail?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep}DD,${t.surface}AA,${t.acc}18)`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
               {hasThumbnail
                 ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                 :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
                   <img src={_qsFaviconUrl(hn,64)} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
-                  <span style={{fontSize:9,color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
+                  <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
                 </div>}
               {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
+                <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
               </div>}
               {hasThumbnail&&hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
                 <img src={_qsFaviconUrl(hn,32)} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
               </div>}
             </div>
             <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
-              <div style={{fontSize:10,fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.35}}>{r.title}</div>
-              {r.snippet&&<div style={{fontSize:9,color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
-              <div style={{fontSize:8,color:isYT?t.err:isImg?t.acc:t.dim,marginTop:"auto",paddingTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.35}}>{r.title}</div>
+              {r.snippet&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",lineHeight:1.4}}>{r.snippet}</div>}
+              <div style={{fontSize:"var(--hc-text-secondary)",color:isYT?t.err:isImg?t.acc:t.dim,marginTop:"auto",paddingTop:2}}>{isYT?"▶ YouTube":isImg?"🖼 Image":hn||"Web"}</div>
             </div>
           </a>;
         })}
@@ -1184,7 +1088,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
     if(!allLinks.length)return null;
     const shown=slExpanded?allLinks:allLinks.slice(0,8);
     return <div style={{marginTop:10}}>
-      <div style={{fontSize:9,color:t.warm,textTransform:"uppercase",letterSpacing:.5,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,textTransform:"none",letterSpacing:0,marginBottom:6,display:"flex",alignItems:"center",gap:4}}>
         <span>🔗</span><span>Sources ({allLinks.length})</span>
       </div>
       <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
@@ -1193,54 +1097,27 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
           const isPdf=lnk.url.toLowerCase().endsWith(".pdf");
           const title=(lnk.title||hn||lnk.url).slice(0,60);
           return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:0}}>
-            <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:10,fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
+            <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
               onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}20`} onMouseLeave={e=>e.currentTarget.style.background=`${t.warm}10`}>
               {isPdf?<span>📄</span>:<img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
               <span>{title}</span>
             </a>
             {onPreview&&<button onClick={()=>onPreview(title,lnk.url)} title="Preview in panel"
-              style={{padding:"5px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center",transition:"all .15s"}}
+              style={{padding:"5px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",display:"flex",alignItems:"center",transition:"all .15s"}}
               onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}25`} onMouseLeave={e=>e.currentTarget.style.background=`${t.acc}12`}>👁</button>}
           </div>;
         })}
       </div>
-      {allLinks.length>8&&<button onClick={()=>setSlExpanded(p=>!p)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:9,cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{slExpanded?`Show less ▴`:`+${allLinks.length-8} more ▾`}</button>}
+      {allLinks.length>8&&<button onClick={()=>setSlExpanded(p=>!p)} style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{slExpanded?`Show less ▴`:`+${allLinks.length-8} more ▾`}</button>}
     </div>;
   };
 
 
-  if(!showAll){
-    const activeThinking = merged.find(e=>e.type==="thinking");
-    const activeTool = [...merged].reverse().find(e=>e.type==="tool_start"||e.type==="tool_progress");
-    const primaryPill = activeThinking || activeTool || latest;
-    return <div style={{padding:"4px 0"}}>
-      {Panels}
-      <CodeAgentNoteCards/>
-      <KbSourceCards/>
-      {primaryPill&&<div style={{display:"flex",flexDirection:"column",gap:3}}>
-        <Pill ev={primaryPill} t={t} expanded={expandedPill===getPillKey(primaryPill)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(primaryPill)?null:getPillKey(primaryPill))}/>
-        {primaryPill!==latest&&latest&&<Pill ev={latest} t={t} expanded={expandedPill===getPillKey(latest)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(latest)?null:getPillKey(latest))}/>}
-        {totalSteps>1&&<button onClick={()=>setShowAll(true)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",alignSelf:"flex-start",marginTop:1}}>
-          {completedCount} step{completedCount!==1?"s":""} ▾
-        </button>}
-      </div>}
-      <CodeOutputCards/>
-      <FileReadyButtons/>
-      <SearchResultCards/>
-      <SourceLinkCards/>
-    </div>;
-  }
-
   return <div style={{padding:"4px 0"}}>
     {Panels}
+    {showActivity&&<ChatActivity events={evts} savedEvents={savedEvts} live={!historical} content={msgContent} t={t}/>}
     <CodeAgentNoteCards/>
     <KbSourceCards/>
-    <button onClick={()=>setShowAll(false)} style={{background:`${t.surface}60`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:10,cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
-      Hide steps ▴
-    </button>
-    <div style={{display:"flex",flexDirection:"column",gap:2}}>
-      {merged.map((ev,i)=><Pill key={getPillKey(ev,i)} ev={ev} t={t} expanded={expandedPill===getPillKey(ev,i)} onToggle={()=>setExpandedPill(expandedPill===getPillKey(ev,i)?null:getPillKey(ev,i))}/>)}
-    </div>
     <CodeOutputCards/>
     <FileReadyButtons/>
     <SearchResultCards/>
@@ -1248,7 +1125,7 @@ const ToolStatus = ({evts,t,expandedPill,setExpandedPill,onPreview,onOpenArtifac
   </div>;
 };
 
-const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
+const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:"var(--hc-text-secondary)",fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
 
 // Shared designed empty state — now lives in its own module (components/EmptyState.jsx)
 // so artifactComponents.jsx can import it without a cycle; re-exported below.
@@ -1266,15 +1143,15 @@ const TIPS={
   research_top_k:"Number of chunks retrieved from research memory per query. Default: 4",
   research_max_chars:"Maximum characters from research memory injected into context. Default: 3000",
 };
-const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k];if(!txt)return null;return <span style={{position:"relative",display:"inline-flex",alignItems:"center",cursor:"help",marginLeft:3}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)}><span style={{fontSize:10,color:t.mut,opacity:.6}}>&#9432;</span>{show&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:"8px 12px",fontSize:10,lineHeight:1.5,color:t.dim,boxShadow:"0 4px 16px #0006",zIndex:999,minWidth:200,maxWidth:280,whiteSpace:"normal",pointerEvents:"none"}}>{txt}</div>}</span>;};
+const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k];if(!txt)return null;return <span style={{position:"relative",display:"inline-flex",alignItems:"center",cursor:"help",marginLeft:3}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)}><span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6}}>&#9432;</span>{show&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:"8px 12px",fontSize:"var(--hc-text-secondary)",lineHeight:1.5,color:t.dim,boxShadow:"0 4px 16px #0006",zIndex:999,minWidth:200,maxWidth:280,whiteSpace:"normal",pointerEvents:"none"}}>{txt}</div>}</span>;};
 
 // ============================================================
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
 function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   const isMobile=useIsMobile();
-  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
+  const inputS={width:"100%",background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:undefined,boxSizing:"border-box"};
+  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
   const emptyDraft={display_name:"",legal_name:"",birthday:"",age:"",bio:"",interestsText:"",linksText:"",notes:""};
   const [profile,setProfile]=React.useState(null);
   const [draft,setDraft]=React.useState(emptyDraft);
@@ -1402,15 +1279,15 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   const suggested=byStatus("suggested");
   const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);
   const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Events & People",t.warm],procedural:["Procedures",t.pink]};
-  const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:8,background:`${t.surface}66`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
+  const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:8,background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
     <div style={{display:"flex",alignItems:"center",gap:6}}>
-      <span style={{fontSize:9,fontWeight:800,color:meta[1],textTransform:"uppercase",letterSpacing:.6}}>{meta[0]}</span>
-      <span style={{fontSize:9,color:t.mut}}>importance {m.importance||3}</span>
-      {m.pinned?<span style={{fontSize:9,color:t.warm}}>pinned</span>:null}
-      {m.confidence?<span style={{fontSize:9,color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
+      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:meta[1],textTransform:"none",letterSpacing:0}}>{meta[0]}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>importance {m.importance||3}</span>
+      {m.pinned?<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm}}>pinned</span>:null}
+      {m.confidence?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
     </div>
     {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
-    {m.metadata?.reason&&<div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
+    {m.metadata?.reason&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
     <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
       {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
       :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
@@ -1420,67 +1297,67 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   </div>;};
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:14,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Memory & Profile</span></div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:22,fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Memory & Profile</span></div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
-        <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-          <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7,marginBottom:12}}>User Profile</div>
+        <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0,marginBottom:12}}>User Profile</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Preferred name</label><input value={draft.display_name} onChange={e=>setDraft(p=>({...p,display_name:e.target.value}))} style={inputS}/></div>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Full name</label><input value={draft.legal_name} onChange={e=>setDraft(p=>({...p,legal_name:e.target.value}))} style={inputS}/></div>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Birthday</label><input value={draft.birthday} onChange={e=>setDraft(p=>({...p,birthday:e.target.value}))} style={inputS}/></div>
-            <div><label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Age</label><input value={draft.age} onChange={e=>setDraft(p=>({...p,age:e.target.value}))} style={inputS}/></div>
+            <div><label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Preferred name</label><input value={draft.display_name} onChange={e=>setDraft(p=>({...p,display_name:e.target.value}))} style={inputS}/></div>
+            <div><label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Full name</label><input value={draft.legal_name} onChange={e=>setDraft(p=>({...p,legal_name:e.target.value}))} style={inputS}/></div>
+            <div><label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Birthday</label><input value={draft.birthday} onChange={e=>setDraft(p=>({...p,birthday:e.target.value}))} style={inputS}/></div>
+            <div><label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Age</label><input value={draft.age} onChange={e=>setDraft(p=>({...p,age:e.target.value}))} style={inputS}/></div>
           </div>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Bio</label>
+          <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Bio</label>
           <textarea value={draft.bio} onChange={e=>setDraft(p=>({...p,bio:e.target.value}))} style={{...inputS,minHeight:86,lineHeight:1.5,resize:"vertical",marginBottom:10}}/>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Interests</label>
+          <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Interests</label>
           <textarea value={draft.interestsText} onChange={e=>setDraft(p=>({...p,interestsText:e.target.value}))} style={{...inputS,minHeight:74,lineHeight:1.45,resize:"vertical",marginBottom:10}}/>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Links</label>
+          <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Links</label>
           <textarea value={draft.linksText} onChange={e=>setDraft(p=>({...p,linksText:e.target.value}))} placeholder="Portfolio | https://example.com" style={{...inputS,minHeight:74,lineHeight:1.45,resize:"vertical",marginBottom:10}}/>
-          <label style={{fontSize:10,color:t.mut,display:"block",marginBottom:4}}>Notes</label>
+          <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Notes</label>
           <textarea value={draft.notes} onChange={e=>setDraft(p=>({...p,notes:e.target.value}))} style={{...inputS,minHeight:82,lineHeight:1.45,resize:"vertical",marginBottom:12}}/>
           <button onClick={saveProfile} disabled={saving} style={{...btnS(t.ok),justifyContent:"center"}}>{saving?"Saving":"Save Profile"}</button>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>Add Memory</div>
+          <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.pink,textTransform:"none",letterSpacing:0,marginBottom:10}}>Add Memory</div>
             <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"160px 1fr",gap:8,alignItems:"start"}}>
               <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
               <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             </div>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,marginTop:8}}>Add Accepted Memory</button>
           </div>
-          <div style={{background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.f1,textTransform:"uppercase",letterSpacing:.7,marginBottom:10}}>Search Past Conversations</div>
+          <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.f1,textTransform:"none",letterSpacing:0,marginBottom:10}}>Search Past Conversations</div>
             <div style={{display:"flex",gap:8}}>
               <input value={histQ} onChange={e=>setHistQ(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")searchHistory();}} placeholder="What did we discuss about..." style={inputS}/>
               <button onClick={searchHistory} disabled={histLoading||!histQ.trim()} style={{...btnS(t.f1),whiteSpace:"nowrap",opacity:histQ.trim()?1:.5}}>{histLoading?"Searching":"Search"}</button>
             </div>
-            <div style={{fontSize:9,color:t.mut,marginTop:6}}>Semantic recall over memory-enabled chats plus keyword search over all chats.</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6}}>Semantic recall over memory-enabled chats plus keyword search over all chats.</div>
             {histResults!==null&&<div style={{display:"flex",flexDirection:"column",gap:6,marginTop:10,maxHeight:300,overflowY:"auto"}}>
-              {histResults.map((h,i)=><div key={i} onClick={()=>h.conversation_id&&onOpenConv&&onOpenConv(h.conversation_id)} style={{padding:"8px 10px",borderRadius:8,background:`${t.bgDeep}AA`,border:`1px solid ${t.brd}33`,cursor:h.conversation_id?"pointer":"default"}}>
+              {histResults.map((h,i)=><div key={i} onClick={()=>h.conversation_id&&onOpenConv&&onOpenConv(h.conversation_id)} style={{padding:"8px 10px",borderRadius:8,background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}33`,cursor:h.conversation_id?"pointer":"default"}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
-                  <span style={{fontSize:10,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{h.conv_title||h.conversation_id||"untitled"}</span>
-                  <span style={{fontSize:8,padding:"1px 5px",borderRadius:4,background:h.source==="semantic"?`${t.acc}18`:`${t.mut}18`,color:h.source==="semantic"?t.acc:t.mut,fontWeight:700}}>{h.source}</span>
-                  {h.role&&<span style={{fontSize:8,color:t.mut}}>{h.role}</span>}
+                  <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{h.conv_title||h.conversation_id||"untitled"}</span>
+                  <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:4,background:h.source==="semantic"?`${t.acc}18`:`${t.mut}18`,color:h.source==="semantic"?t.acc:t.mut,fontWeight:700}}>{h.source}</span>
+                  {h.role&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{h.role}</span>}
                 </div>
-                <div style={{fontSize:10,color:t.dim,lineHeight:1.45,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical"}} dangerouslySetInnerHTML={{__html:(h.snippet||"").replace(/</g,"&lt;").replace(/&lt;mark>/g,"<mark>").replace(/&lt;\/mark>/g,"</mark>")}}/>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical"}} dangerouslySetInnerHTML={{__html:(h.snippet||"").replace(/</g,"&lt;").replace(/&lt;mark>/g,"<mark>").replace(/&lt;\/mark>/g,"</mark>")}}/>
               </div>)}
-              {!histResults.length&&<div style={{fontSize:11,color:t.mut,textAlign:"center",padding:10}}>No matches. Semantic recall only covers chats with memory enabled.</div>}
+              {!histResults.length&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textAlign:"center",padding:10}}>No matches. Semantic recall only covers chats with memory enabled.</div>}
             </div>}
           </div>
           {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Suggestions ({suggested.length})</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.warm,textTransform:"none",letterSpacing:0}}>Suggestions ({suggested.length})</div>
             {suggested.map(m=>card(m,"suggested"))}
           </div>}
           {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color,textTransform:"uppercase",letterSpacing:.7}}>{label} ({items.length})</div>
-            {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:11,color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color,textTransform:"none",letterSpacing:0}}>{label} ({items.length})</div>
+            {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
           </div>;})}
           {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-            <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"uppercase",letterSpacing:.7}}>Rejected, archived, or superseded ({hidden.length})</summary>
+            <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"none",letterSpacing:0}}>Rejected, archived, or superseded ({hidden.length})</summary>
             <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
           </details>}
         </div>
@@ -1527,8 +1404,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
   if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
   const font="'JetBrains Mono',monospace";
-  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:5});
+  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:undefined,boxSizing:"border-box"};
+  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5});
   const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
   const convIds=(ws.conversations||[]).map(c=>c.id);
   const availableConvs=convs.filter(c=>!convIds.includes(c.id));
@@ -1673,14 +1550,14 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     }catch(e){notify&&notify({type:"error",text:"Artifact delete failed",detail:e.message||String(e)});}
   };
   return<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}44`,flexShrink:0}}>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}F5`,flexShrink:0}}>
       <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:8}}>
         <span style={{fontSize:24,lineHeight:1}}>🗂</span>
         <div style={{flex:1,minWidth:0}}>
           {editMode?<input value={wsName} onChange={e=>setWsName(e.target.value)} style={{...inputS,fontSize:16,fontWeight:700,background:"transparent",border:`1px solid ${t.acc}44`,marginBottom:6}}/>
             :<div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:4}}>{ws.name}</div>}
-          {editMode?<input value={wsDesc} onChange={e=>setWsDesc(e.target.value)} placeholder="Description..." style={{...inputS,fontSize:11,color:t.mut}}/>
-            :<div style={{fontSize:11,color:t.mut}}>{ws.description||"No description"}</div>}
+          {editMode?<input value={wsDesc} onChange={e=>setWsDesc(e.target.value)} placeholder="Description..." style={{...inputS,fontSize:"var(--hc-text-control)",color:t.mut}}/>
+            :<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{ws.description||"No description"}</div>}
         </div>
         <div style={{display:"flex",gap:4,flexShrink:0}}>
           {editMode
@@ -1691,48 +1568,48 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
               <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
         </div>
       </div>
-      {analyzeMsg&&<div style={{fontSize:10,color:analyzeMsg.ok?t.ok:t.err,marginTop:4,padding:"4px 8px",background:analyzeMsg.ok?`${t.ok}15`:`${t.err}15`,borderRadius:6,border:`1px solid ${analyzeMsg.ok?t.ok:t.err}33`}}>{analyzeMsg.text}</div>}
+      {analyzeMsg&&<div style={{fontSize:"var(--hc-text-secondary)",color:analyzeMsg.ok?t.ok:t.err,marginTop:4,padding:"4px 8px",background:analyzeMsg.ok?`${t.ok}15`:`${t.err}15`,borderRadius:6,border:`1px solid ${analyzeMsg.ok?t.ok:t.err}33`}}>{analyzeMsg.text}</div>}
       {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:analyzeMsg?4:0}}>
-        {topics.map((tp,i)=><span key={i} style={{fontSize:10,padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
+        {topics.map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
       </div>}
     </div>
     <div style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["convs","💬 Conversations"],["memory","🧠 Memory"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:tab===id?700:400}}>{label}</button>)}
-      {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:11}}>+ Add Chats</button>}
+      {[["convs","💬 Conversations"],["memory","🧠 Memory"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:tab===id?700:400}}>{label}</button>)}
+      {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>+ Add Chats</button>}
     </div>
     {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
       <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
       <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
         {filteredAvail.length===0&&<EmptyState t={t} font={font} compact icon={<IC.Chat/>} title="All conversations are already in this workspace"/>}
-        {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
+        {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}F5`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
           <span style={{fontSize:12,flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
-          <span style={{fontSize:10,color:t.mut}}>{c.model||""}</span>
-          <span style={{color:t.ok,fontSize:10}}>+ Add</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{c.model||""}</span>
+          <span style={{color:t.ok,fontSize:"var(--hc-text-secondary)"}}>+ Add</span>
         </div>)}
       </div>
     </div>}
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
         {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint={'Click "+ Add Chats" to add some.'}/>}
-        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
+        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>💬</span>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
           </div>
           <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
-          <button onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
+          <button aria-label="Close" onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
         </div>)}
       </div>}
-      {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
+      {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{fontSize:9,fontWeight:800,color:meta[1],textTransform:"uppercase",letterSpacing:.6}}>{meta[0]}</span>
-            <span style={{fontSize:9,color:t.mut}}>importance {m.importance||3}</span>
-            {m.pinned? <span style={{fontSize:9,color:t.warm}}>pinned</span>:null}
-            {m.confidence? <span style={{fontSize:9,color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
+            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:meta[1],textTransform:"none",letterSpacing:0}}>{meta[0]}</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>importance {m.importance||3}</span>
+            {m.pinned? <span style={{fontSize:"var(--hc-text-secondary)",color:t.warm}}>pinned</span>:null}
+            {m.confidence? <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
           </div>
           {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
-          {m.metadata?.reason&&<div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
+          {m.metadata?.reason&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
           <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
             {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
             :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
@@ -1744,57 +1621,57 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <button onClick={toggleMemory} style={btnS(enabled?t.ok:t.mut)}>{enabled?"On":"Off"}</button>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:12,fontWeight:700,color:enabled?t.ok:t.text}}>Workspace memory {enabled?"enabled":"disabled"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>Accepted memories and enabled blocks are injected into workspace chats. Suggestions are never injected until accepted.</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>Accepted memories and enabled blocks are injected into workspace chats. Suggestions are never injected until accepted.</div>
           </div>
           <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
           <button onClick={refreshMemory} disabled={memLoading} style={btnS(t.acc)}>{memLoading?"Loading":"Refresh"}</button>
         </div>
         <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Workspace Instructions</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>Workspace Instructions</div>
             <textarea value={wsInstructions} onChange={e=>setWsInstructions(e.target.value)} placeholder="Stable project instructions, constraints, tone, or goals..." style={{...inputS,minHeight:92,lineHeight:1.5,resize:"vertical"}}/>
             <button onClick={saveInstructions} style={{...btnS(t.ok),alignSelf:"flex-start"}}>Save Instructions</button>
           </div>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:10,fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.7}}>Add Memory</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.pink,textTransform:"none",letterSpacing:0}}>Add Memory</div>
             <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
             <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,alignSelf:"flex-start"}}>Add Accepted Memory</button>
           </div>
         </div>
         {memBlocks.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:10,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.7}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:8}}>
-            {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:10,background:`${t.surface}55`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}><button onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:11,fontWeight:800,color:t.text}}>{b.label}</div></div>
-              <div style={{fontSize:10,color:t.mut,lineHeight:1.35}}>{b.description}</div>
+            {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}><button onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.text}}>{b.label}</div></div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35}}>{b.description}</div>
               <textarea value={b.value||""} onChange={e=>updateBlock(b.id,{value:e.target.value})} style={{...inputS,minHeight:76,lineHeight:1.45,resize:"vertical"}}/>
             </div>)}
           </div>
         </div>}
         {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontSize:10,fontWeight:800,color:t.warm,textTransform:"uppercase",letterSpacing:.7}}>Suggestions ({suggested.length})</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.warm,textTransform:"none",letterSpacing:0}}>Suggestions ({suggested.length})</div>
           {suggested.map(m=>card(m,"suggested"))}
         </div>}
         {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontSize:10,fontWeight:800,color,textTransform:"uppercase",letterSpacing:.7}}>{label} ({items.length})</div>
-          {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:11,color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color,textTransform:"none",letterSpacing:0}}>{label} ({items.length})</div>
+          {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
         </div>;})}
         {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-          <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"uppercase",letterSpacing:.7}}>Rejected, archived, or superseded ({hidden.length})</summary>
+          <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"none",letterSpacing:0}}>Rejected, archived, or superseded ({hidden.length})</summary>
           <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
         </details>}
       </div>;})()}
       {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
         {!(ws.reports||[]).length&&<EmptyState t={t} font={font} icon={<IC.Research/>} title="No reports yet" hint="Add reports from Deep Research."/>}
-        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}66`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
+        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>📊</span>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.title||r.query||"Research Report"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
           </div>
           <button onClick={()=>onOpenReport&&onOpenReport(r.id)} style={btnS(t.acc)}>Open →</button>
-          <button onClick={()=>onRemoveReport&&onRemoveReport(ws.id,r.id)} style={btnS(t.err)}>✕</button>
+          <button aria-label="Close" onClick={()=>onRemoveReport&&onRemoveReport(ws.id,r.id)} style={btnS(t.err)}>✕</button>
         </div>;})}
       </div>}
       {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
@@ -1808,6 +1685,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
 // ============================================================
 function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
   const [sbInfo,setSbInfo]=useState(null);
+  const [cleanupPreview,setCleanupPreview]=useState(null),[previewError,setPreviewError]=useState("");
+  const previewCleanup=async()=>{try{setCleanupPreview(await apiJson("/api/settings/cleanup-preview"));setPreviewError("");}catch(e){if(e.name!=="AbortError")setPreviewError(e.message);}};
   const [cleanupDays,setCleanupDays]=useState(30);
   const [cleaning,setCleaning]=useState(false);
   const [cleanResult,setCleanResult]=useState(null);
@@ -1827,7 +1706,7 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
     setCleaning(true);setCleanResult(null);
     const activityId=addActivity&&addActivity({name:"Sandbox cleanup",kind:"cleanup",message:"Cleaning sandbox outputs...",pct:25});
     try{const r=await fetch(`${API}/api/settings/cleanup-now`,{method:"POST"});const d=await r.json();setCleanResult(d);
-      if(d.error)throw new Error(d.error);
+      if(!r.ok||d.error)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
       updateActivity&&updateActivity(activityId,{status:"done",message:`Deleted ${d.deleted||0} files`,pct:100});
       notify&&notify({type:"success",text:"Sandbox cleanup complete",detail:`Deleted ${d.deleted||0} files.`});
       const r2=await fetch(`${API}/api/settings`);const d2=await r2.json();setSbInfo(d2);
@@ -1838,7 +1717,7 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
     setCbCleaning(true);setCbResult(null);
     const activityId=addActivity&&addActivity({name:"Codebox cleanup",kind:"cleanup",message:"Cleaning Codebox files...",pct:25});
     try{const r=await fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"});const d=await r.json();setCbResult(d);
-      if(d.error)throw new Error(d.error);
+      if(!r.ok||d.error)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
       updateActivity&&updateActivity(activityId,{status:"done",message:`Deleted ${d.deleted||0} files`,pct:100});
       notify&&notify({type:"success",text:"Codebox cleanup complete",detail:`Deleted ${d.deleted||0} files.`});
     }catch(e){setCbResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Codebox cleanup failed",detail:e.message||"Failed"});}
@@ -1868,11 +1747,11 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
   ];
   return <div style={{marginBottom:20}}>
     <label style={labelS}>Sandbox & File Cleanup</label>
-    <div style={{background:`${t.surface}66`,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"10px 14px",marginBottom:10,fontSize:11}}>
+    <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"10px 14px",marginBottom:10,fontSize:"var(--hc-text-secondary)"}}>
       <div style={{display:"flex",flexWrap:"wrap",gap:"6px 20px",marginBottom:sbInfo?.sandbox_dir?6:0}}>
         {sbInfo?.sandbox_dir&&<div style={{color:t.mut}}>
           <span style={{color:t.acc}}>📁 </span>
-          <span style={{fontFamily:"monospace",fontSize:10,color:t.dim,wordBreak:"break-all"}}>{sbInfo.sandbox_dir}</span>
+          <span style={{fontFamily:"var(--hc-font-code)",fontSize:"var(--hc-text-secondary)",color:t.dim,wordBreak:"break-all"}}>{sbInfo.sandbox_dir}</span>
         </div>}
       </div>
       <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
@@ -1882,31 +1761,38 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
       </div>
     </div>
     <div style={{marginBottom:8}}>
-      <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Auto-delete tool output files after:</div>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Reclaim released temporary files after:</div>
       <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
         {INTERVALS.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)}
-          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:10}}>
+          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:"var(--hc-text-control)"}}>
           {iv.label}
         </button>)}
       </div>
-      {cleanupDays===0&&<div style={{fontSize:10,color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
+      {cleanupDays===0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
     </div>
     <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <button onClick={previewCleanup} style={btnS(t.acc)}>Preview sandbox cleanup</button>
+      <button onClick={cleanNow} disabled={cleaning} style={btnS(t.warm)}>Clean released temporary files</button>
       <button onClick={cleanAll} disabled={cleaning||cbCleaning} style={{...btnS(t.err),opacity:(cleaning||cbCleaning)?0.6:1}}>
         {(cleaning||cbCleaning)?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean All"}
       </button>
-      {cleanResult&&!cleanResult.error&&<span style={{fontSize:11,color:t.ok}}>
+      {previewError&&<p role="alert">{previewError}</p>}
+      {cleanupPreview&&<div style={{width:'100%',fontSize:"var(--hc-text-secondary)"}}>
+        <p>{fmtBytes(cleanupPreview.reclaimable_bytes)} reclaimable in {cleanupPreview.reclaimable_files} temporary files. {fmtBytes(cleanupPreview.retained_bytes-cleanupPreview.reclaimable_bytes)} retained.</p>
+        {Object.entries(cleanupPreview.reasons||{}).map(([reason,count])=><div key={reason}>{reason}: {count}</div>)}
+      </div>}
+      {cleanResult&&!cleanResult.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.ok}}>
         ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
       </span>}
-      {cbResult&&!cbResult.error&&<span style={{fontSize:11,color:t.ok}}>
+      {cbResult&&!cbResult.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.ok}}>
         ✓ Codebox: {cbResult.deleted} item{cbResult.deleted!==1?"s":""}{cbResult.freed_bytes>0?`, freed ${fmtBytes(cbResult.freed_bytes)}`:""}
       </span>}
-      {cleanResult?.skipped&&<span style={{fontSize:11,color:t.mut}}>↷ {cleanResult.skipped}</span>}
-      {cleanResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ {cleanResult.error}</span>}
-      {cbResult?.error&&<span style={{fontSize:11,color:t.err}}>✕ Codebox: {cbResult.error}</span>}
+      {cleanResult?.skipped&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>↷ {cleanResult.skipped}</span>}
+      {cleanResult?.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>✕ {cleanResult.error}</span>}
+      {cbResult?.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>✕ Codebox: {cbResult.error}</span>}
     </div>
-    <div style={{fontSize:10,color:t.mut,marginTop:6,lineHeight:1.5}}>
-      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:9}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
+    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6,lineHeight:1.5}}>
+      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:"var(--hc-text-secondary)"}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
     </div>
   </div>;
 }
@@ -2083,7 +1969,6 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   const [runs,setRuns]=useState([]);
   const [loadErr,setLoadErr]=useState("");
   const [pickedPhase,setPickedPhase]=useState("");
-  const [rawPill,setRawPill]=useState(null);
   const runIdsKey=runIds.join("|");
   useEffect(()=>{
     let stop=false,timer=null;
@@ -2179,7 +2064,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   const totalDuration=_runsSpanLabel(runs)||_runsDurationLabel(runs);
   const artifactHref=latestArtifact?(latestArtifact.artifact_id?`${API}/api/artifacts/${latestArtifact.artifact_id}/download`:`${API}${latestArtifact.url||""}`):"";
 
-  const sectionTitle=(label,color=t.acc)=><div style={{fontSize:9,color,textTransform:"uppercase",letterSpacing:.7,fontWeight:900,marginBottom:8}}>{label}</div>;
+  const sectionTitle=(label,color=t.acc)=><div style={{fontSize:"var(--hc-text-secondary)",color,textTransform:"none",letterSpacing:0,fontWeight:900,marginBottom:8}}>{label}</div>;
   const renderMd=(content,preStyle={})=>md?<MDWrap>{md(content)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",...preStyle}}>{content}</pre>;
   const runModel=(run)=>{
     const env=_runEnv(run);
@@ -2268,15 +2153,15 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
           ["Build",planEnv.build_system||"none"],
           ["Files",manifest.length||"—"],
           ["Criteria",criteria.length||"—"],
-        ].map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"8px 9px",background:`${t.surface}35`,minWidth:0}}>
-          <div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.55,fontWeight:900,marginBottom:3}}>{k}</div>
+        ].map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"8px 9px",background:`${t.surface}F5`,minWidth:0}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:900,marginBottom:3}}>{k}</div>
           <div style={{fontSize:12,color:t.text,fontWeight:850,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v}</div>
         </div>)}
       </div>
       {manifest.length>0&&<div>
         {sectionTitle("Manifest",t.acc)}
         <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-          {manifest.map((f,i)=><div key={`${f.path}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(120px,.3fr) minmax(0,1fr) 72px",gap:8,padding:"8px 10px",borderBottom:i<manifest.length-1?`1px solid ${t.brd}16`:"none",fontSize:11,alignItems:"start"}}>
+          {manifest.map((f,i)=><div key={`${f.path}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(120px,.3fr) minmax(0,1fr) 72px",gap:8,padding:"8px 10px",borderBottom:i<manifest.length-1?`1px solid ${t.brd}16`:"none",fontSize:"var(--hc-text-secondary)",alignItems:"start"}}>
             <span style={{color:t.acc,fontWeight:900,wordBreak:"break-word"}}>{f.path||"file"}</span>
             <span style={{color:t.dim,lineHeight:1.45}}>{f.purpose||"No purpose recorded."}</span>
             <span style={{color:t.mut,textAlign:"right"}}>{f.estimated_loc?`~${f.estimated_loc} LOC`:""}</span>
@@ -2286,14 +2171,14 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
       {criteria.length>0&&<div>
         {sectionTitle("Success criteria",t.ok)}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:6}}>
-          {criteria.map((c,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"18px minmax(0,1fr)",gap:7,fontSize:11,color:t.dim,lineHeight:1.45}}>
+          {criteria.map((c,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"18px minmax(0,1fr)",gap:7,fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>
             <span style={{color:t.ok,fontWeight:900}}>✓</span><span>{c}</span>
           </div>)}
         </div>
       </div>}
       {(deps.length>0||risks.length>0)&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:12}}>
-        {deps.length>0&&<div>{sectionTitle("Dependencies",t.warm)}{deps.map((d,i)=><div key={i} style={{fontSize:11,color:t.dim,marginBottom:4}}>• {d.name||"dependency"} {d.version||""}</div>)}</div>}
-        {risks.length>0&&<div>{sectionTitle("Risks",t.err)}{risks.map((r,i)=><div key={i} style={{fontSize:11,color:t.dim,marginBottom:4}}>• {r}</div>)}</div>}
+        {deps.length>0&&<div>{sectionTitle("Dependencies",t.warm)}{deps.map((d,i)=><div key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:4}}>• {d.name||"dependency"} {d.version||""}</div>)}</div>}
+        {risks.length>0&&<div>{sectionTitle("Risks",t.err)}{risks.map((r,i)=><div key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:4}}>• {r}</div>)}</div>}
       </div>}
     </div>;
   };
@@ -2301,7 +2186,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     const rows=phaseFiles(key);
     if(!rows.length)return null;
     return <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-      {rows.map(([path,phase],i)=><div key={path} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 82px",gap:8,padding:"8px 10px",borderBottom:i<rows.length-1?`1px solid ${t.brd}16`:"none",fontSize:11}}>
+      {rows.map(([path,phase],i)=><div key={path} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 82px",gap:8,padding:"8px 10px",borderBottom:i<rows.length-1?`1px solid ${t.brd}16`:"none",fontSize:"var(--hc-text-secondary)"}}>
         <span style={{color:t.text,wordBreak:"break-word",fontWeight:750}}>{path}</span>
         <span style={{color:t.mut,textAlign:"right"}}>{phase}</span>
       </div>)}
@@ -2313,7 +2198,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     return <div>
       {sectionTitle("Issues",t.err)}
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
-        {issues.slice(0,8).map((issue,i)=><div key={i} style={{border:`1px solid ${t.err}24`,background:`${t.err}08`,borderRadius:7,padding:"7px 9px",fontSize:11,color:t.dim,lineHeight:1.45}}>
+        {issues.slice(0,8).map((issue,i)=><div key={i} style={{border:`1px solid ${t.err}24`,background:`${t.err}08`,borderRadius:7,padding:"7px 9px",fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>
           <span style={{color:t.err,fontWeight:900}}>{issue.file||issue.path||issue.category||`Issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
         </div>)}
       </div>
@@ -2337,13 +2222,13 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
           {items.slice(0,30).map(({run,step,idx},i)=>{
             const meta=_stepTimeMeta(step,_runSteps(run)[idx-1],run);
             const icon=_STEP_ACTION_ICONS[step.action]||"·";
-            return <div key={`${run.id}-${idx}-${i}`} style={{display:"grid",gridTemplateColumns:"24px minmax(86px,.22fr) minmax(0,1fr)",gap:8,padding:"7px 9px",borderBottom:i<items.length-1?`1px solid ${t.brd}12`:"none",fontSize:11,alignItems:"start"}}>
+            return <div key={`${run.id}-${idx}-${i}`} style={{display:"grid",gridTemplateColumns:"24px minmax(86px,.22fr) minmax(0,1fr)",gap:8,padding:"7px 9px",borderBottom:i<items.length-1?`1px solid ${t.brd}12`:"none",fontSize:"var(--hc-text-secondary)",alignItems:"start"}}>
               <span style={{textAlign:"center"}}>{icon}</span>
               <span style={{color:_phaseColor(_phaseState([run]),t),fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{step.action||"step"}</span>
-              <span style={{color:t.dim,wordBreak:"break-word",lineHeight:1.4}}>{(step.detail||"").slice(0,240)}{step.count>1?` (${step.count} updates)`:""}{meta&&<span style={{display:"block",fontSize:9,color:t.mut,marginTop:2}}>{meta}</span>}</span>
+              <span style={{color:t.dim,wordBreak:"break-word",lineHeight:1.4}}>{(step.detail||"").slice(0,240)}{step.count>1?` (${step.count} updates)`:""}{meta&&<span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{meta}</span>}</span>
             </div>;
           })}
-          {items.length>30&&<div style={{padding:"7px 9px",fontSize:10,color:t.mut}}>+{items.length-30} more log rows in raw details.</div>}
+          {items.length>30&&<div style={{padding:"7px 9px",fontSize:"var(--hc-text-secondary)",color:t.mut}}>+{items.length-30} more log rows in raw details.</div>}
         </div>
       </div>)}
     </div>;
@@ -2355,17 +2240,17 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
         const href=a.artifact_id?`${API}/api/artifacts/${a.artifact_id}/download`:`${API}${a.url||""}`;
         return <div key={`${a.artifact_id||a.url||a.filename}-${i}`} style={{display:"flex",alignItems:"center",gap:8,border:`1px solid ${t.ok}28`,background:`${t.ok}08`,borderRadius:8,padding:"8px 9px",minWidth:0}}>
           <span style={{fontSize:14}}>📦</span>
-          <a href={href} download={a.filename} style={{color:t.ok,textDecoration:"none",fontSize:11,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{a.filename||"artifact"}</a>
-          {a.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(a.artifact_id)} style={{marginLeft:"auto",fontSize:10,color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}33`,borderRadius:6,padding:"3px 7px",fontFamily:font,cursor:"pointer",fontWeight:850}}>details</button>}
+          <a href={href} download={a.filename} style={{color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{a.filename||"artifact"}</a>
+          {a.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(a.artifact_id)} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}33`,borderRadius:6,padding:"3px 7px",fontFamily:font,cursor:"pointer",fontWeight:850}}>details</button>}
         </div>;
       })}
     </div>;
   };
   const renderRaw=p=><div style={{display:"flex",flexDirection:"column",gap:10}}>
-    <ToolStatus evts={events.filter(e=>(e.data?.tool||"")!=="processing")} savedEvts={[]} msgContent={msgContent} historical={true} t={t} expandedPill={rawPill} setExpandedPill={setRawPill} onPreview={onPreview} onOpenArtifact={onOpenArtifact} md={md}/>
-    {(p.key==="package"?runs:(p.runs||[])).map(run=><details key={run.id} style={{border:`1px solid ${t.brd}24`,borderRadius:8,background:`${t.bgDeep}66`,padding:"7px 9px"}}>
-      <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900}}>{run.role} · {run.status} · {run.id}</summary>
-      <pre style={{margin:"8px 0 0",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10,lineHeight:1.45,color:t.dim,maxHeight:260,overflow:"auto"}}>{JSON.stringify({id:run.id,role:run.role,status:run.status,started_at:run.started_at,ended_at:run.ended_at,result_envelope:run.result_envelope,events_log:run.events_log},null,2)}</pre>
+    <ToolStatus evts={events.filter(e=>(e.data?.tool||"")!=="processing")} savedEvts={[]} msgContent={msgContent} historical={true} t={t} onPreview={onPreview} onOpenArtifact={onOpenArtifact} md={md}/>
+    {(p.key==="package"?runs:(p.runs||[])).map(run=><details key={run.id} style={{border:`1px solid ${t.brd}24`,borderRadius:8,background:`${t.bgDeep}F5`,padding:"7px 9px"}}>
+      <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:900}}>{run.role} · {run.status} · {run.id}</summary>
+      <pre style={{margin:"8px 0 0",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:"var(--hc-text-secondary)",lineHeight:1.45,color:t.dim,maxHeight:260,overflow:"auto"}}>{JSON.stringify({id:run.id,role:run.role,status:run.status,started_at:run.started_at,ended_at:run.ended_at,result_envelope:run.result_envelope,events_log:run.events_log},null,2)}</pre>
     </details>)}
   </div>;
   const renderPanel=p=>{
@@ -2374,27 +2259,27 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     const note=phaseNoteText(p);
     const outcome=p.runs.length||p.key==="package"?p.outcome:"Not started yet.";
     const showActions=!!onQuickAction&&!activeNow&&(p.state==="attention"||(!!attentionPhase&&p.key===attentionPhase.key)||wfBlocked);
-    const actionBtn=(label,color,text)=><button onClick={()=>onQuickAction(text)} style={{padding:"7px 12px",borderRadius:7,border:`1px solid ${color}40`,background:`${color}12`,color,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:900}}>{label}</button>;
+    const actionBtn=(label,color,text)=><button onClick={()=>onQuickAction(text)} style={{padding:"7px 12px",borderRadius:7,border:`1px solid ${color}40`,background:`${color}12`,color,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:900}}>{label}</button>;
     return <div style={{borderTop:`1px solid ${t.brd}20`,padding:"12px 14px 13px",display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
-        <span style={{fontSize:10,fontWeight:950,color:p.color,textTransform:"uppercase",letterSpacing:.6,flexShrink:0}}>{p.label}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:950,color:p.color,textTransform:"none",letterSpacing:0,flexShrink:0}}>{p.label}</span>
         <span style={{fontSize:12.5,lineHeight:1.55,color:t.text,minWidth:0}}>{outcome}</span>
       </div>
       {facts.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-        {facts.map(([label,value,color],i)=><span key={`${label}-${i}`} title={label?`${label} ${value}`:value} style={{fontSize:9.5,color:color||t.dim,border:`1px solid ${(color||t.brd)}2e`,background:`${t.bgDeep}55`,borderRadius:999,padding:"3px 8px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+        {facts.map(([label,value,color],i)=><span key={`${label}-${i}`} title={label?`${label} ${value}`:value} style={{fontSize:"var(--hc-text-secondary)",color:color||t.dim,border:`1px solid ${(color||t.brd)}2e`,background:`${t.bgDeep}F5`,borderRadius:999,padding:"3px 8px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
           {label&&<span style={{color:t.mut,fontWeight:850}}>{label} </span>}{value}
         </span>)}
       </div>}
       {p.key==="plan"&&renderPlanDetails()}
       {renderIssues(p.runs||[])}
-      {note&&<div style={{fontSize:11,color:t.dim,lineHeight:1.55,maxHeight:200,overflow:"auto"}}>{renderMd(note,{color:t.dim})}</div>}
+      {note&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.55,maxHeight:200,overflow:"auto"}}>{renderMd(note,{color:t.dim})}</div>}
       {(p.key==="build"||p.key==="fixes")&&phaseFiles(p.key).length>0&&<div>{sectionTitle("Files",t.acc)}{renderFiles(p.key)}</div>}
       {p.key==="package"&&<div>{sectionTitle("Artifacts",t.ok)}{renderArtifacts()}</div>}
       {p.key==="package"&&filesTouched.size>0&&<div>{sectionTitle("Files",t.acc)}{renderFiles(p.key)}</div>}
       {updates.length>0&&<div>
         {sectionTitle("Recent activity",t.mut)}
         <div style={{display:"flex",flexDirection:"column",gap:4}}>
-          {updates.map((u,i)=><div key={`${p.key}-u-${i}`} style={{fontSize:11,color:i===updates.length-1?t.dim:t.mut,lineHeight:1.45}}>{u}</div>)}
+          {updates.map((u,i)=><div key={`${p.key}-u-${i}`} style={{fontSize:"var(--hc-text-secondary)",color:i===updates.length-1?t.dim:t.mut,lineHeight:1.45}}>{u}</div>)}
         </div>
       </div>}
       {showActions&&<div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -2402,7 +2287,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
         {!delivered&&actionBtn("📦 Download as-is",t.ok,"Download the project as-is; the remaining issues are acceptable.")}
       </div>}
       <details>
-        <summary style={{fontSize:10,color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"uppercase",letterSpacing:.6}}>Developer details</summary>
+        <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"none",letterSpacing:0}}>Developer details</summary>
         <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:12}}>
           {renderLogs(p)}
           {renderRaw(p)}
@@ -2415,19 +2300,19 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     {msgContent&&<div style={{margin:"0 0 12px",color:t.dim,lineHeight:1.68,fontSize:13}}>
       {renderMd(msgContent,{color:t.dim})}
     </div>}
-    {loadErr&&<div style={{fontSize:11,color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:8,padding:"7px 9px",marginBottom:8}}>{loadErr}</div>}
-    <div style={{border:`1px solid ${overall.color}26`,background:`${t.surface}3f`,borderRadius:10,overflow:"hidden",boxShadow:activeNow?`0 0 18px ${overall.color}12`:"none"}}>
+    {loadErr&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:8,padding:"7px 9px",marginBottom:8}}>{loadErr}</div>}
+    <div style={{border:`1px solid ${overall.color}26`,background:`${t.surface}F5`,borderRadius:10,overflow:"hidden",boxShadow:activeNow?`0 0 18px ${overall.color}12`:"none"}}>
       <div style={{padding:"11px 14px 0",display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
         <span style={{width:26,height:26,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",background:`${overall.color}13`,border:`1px solid ${overall.color}36`,color:overall.color,fontSize:14,flexShrink:0}}>✦</span>
         <span style={{fontSize:13,fontWeight:950,color:overall.color,letterSpacing:.3}}>Daedalus</span>
         <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:300}}>{projectName}</span>
-        <span style={{fontSize:9,fontWeight:800,color:overall.color,border:`1px solid ${overall.color}33`,background:`${overall.color}0f`,borderRadius:999,padding:"3px 8px",textTransform:"uppercase",letterSpacing:.5}}>{overall.label}</span>
-        <span style={{marginLeft:"auto",fontSize:10,color:t.mut,whiteSpace:"nowrap"}}>{headerMeta}</span>
-        {latestArtifact&&<a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 9px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:10.5,fontWeight:900,maxWidth:230}}>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:overall.color,border:`1px solid ${overall.color}33`,background:`${overall.color}0f`,borderRadius:999,padding:"3px 8px",textTransform:"none",letterSpacing:0}}>{overall.label}</span>
+        <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.mut,whiteSpace:"nowrap"}}>{headerMeta}</span>
+        {latestArtifact&&<a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 9px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:900,maxWidth:230}}>
           <span>📦</span><span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
         </a>}
       </div>
-      {activeNow&&ticker&&<div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 14px 0",fontSize:11,color:t.dim,minWidth:0}}>
+      {activeNow&&ticker&&<div style={{display:"flex",alignItems:"center",gap:7,padding:"8px 14px 0",fontSize:"var(--hc-text-secondary)",color:t.dim,minWidth:0}}>
         <span style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:"pulse 1.4s infinite",flexShrink:0}}/>
         <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ticker}</span>
       </div>}
@@ -2440,7 +2325,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
           return <React.Fragment key={p.key}>
             {i>0&&<div style={{flex:1,height:2,minWidth:10,borderRadius:2,margin:"10px 5px 0",background:prevDone?`${t.ok}55`:`${t.brd}30`}}/>}
             <button onClick={()=>setPickedPhase(p.key)} title={`${p.label} — ${_phaseStatusLabel(p.state)}`} style={{background:"transparent",border:"none",cursor:"pointer",fontFamily:font,padding:0,display:"flex",flexDirection:"column",alignItems:"center",gap:5,minWidth:44,flexShrink:0}}>
-              <span style={{width:22,height:22,borderRadius:"50%",display:"inline-flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",fontSize:11,fontWeight:900,lineHeight:1,
+              <span style={{width:22,height:22,borderRadius:"50%",display:"inline-flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",fontSize:"var(--hc-text-secondary)",fontWeight:900,lineHeight:1,
                 color:done?t.bgDeep:p.color,
                 background:done?p.color:pendingStep?"transparent":`${p.color}16`,
                 border:`2px solid ${pendingStep?`${t.mut}44`:p.color}`,
@@ -2448,7 +2333,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
                 animation:p.state==="running"?"pulse 1.5s infinite":"none"}}>
                 {done?"✓":p.state==="attention"?"!":p.state==="running"?"●":""}
               </span>
-              <span style={{fontSize:9,fontWeight:850,letterSpacing:.45,textTransform:"uppercase",color:sel?p.color:pendingStep?`${t.mut}99`:t.dim,whiteSpace:"nowrap"}}>{p.label}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:850,letterSpacing:0,textTransform:"none",color:sel?p.color:pendingStep?`${t.mut}99`:t.dim,whiteSpace:"nowrap"}}>{p.label}</span>
             </button>
           </React.Fragment>;
         })}
@@ -2511,14 +2396,14 @@ function CitationChip({n, src, theme, font}){
   const titleText=isQuick?[sourceTitle,src.domain||src.url].filter(Boolean).join(" - "):`${src.filename} (${src.location||`chunk ${src.chunk_index}`})`;
   return <sup ref={ref} style={{fontSize:"0.72em",lineHeight:0,margin:"0 1px",position:"relative",display:"inline-block"}}>
     <button onClick={()=>setOpen(o=>!o)} title={titleText} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
-    {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:11,lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
+    {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:"var(--hc-text-secondary)",lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
       <span style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
         {isQuick?<SourceFavicon url={src.url} domain={src.domain} size={16} theme={theme}/>:<span style={{flexShrink:0}}>📄</span>}
-        <span style={{fontWeight:700,color:theme.acc,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sourceTitle}</span>
-        <span style={{marginLeft:"auto",fontSize:9,color:theme.mut,flexShrink:0}}>{sourceMeta}</span>
+        <span style={{fontWeight:700,color:theme.acc,fontSize:"var(--hc-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sourceTitle}</span>
+        <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:theme.mut,flexShrink:0}}>{sourceMeta}</span>
       </span>
       <span style={{display:"block",color:theme.dim,maxHeight:120,overflow:"auto"}}>{src.snippet||""}{src.snippet&&src.snippet.length>=300?"…":""}</span>
-      {isQuick&&src.url&&<a href={src.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",marginTop:7,color:theme.acc,textDecoration:"none",fontSize:10,fontWeight:700,borderBottom:`1px solid ${theme.acc}44`}}>Open source</a>}
+      {isQuick&&src.url&&<a href={src.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",marginTop:7,color:theme.acc,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,borderBottom:`1px solid ${theme.acc}44`}}>Open source</a>}
     </span>}
   </sup>;
 }
@@ -2565,7 +2450,6 @@ function MDWrap({children}){
 
 
 export {
-  Pill,
   PlanPanel,
   RunCard,
   WorkflowCard,
@@ -2593,7 +2477,6 @@ export {
   _fmtElapsed,
   _parseUtcishMs,
   _stripStatusEmoji,
-  _phaseFromEvent,
   ResearchLiveStatus,
   ToolStatus,
   Chip,

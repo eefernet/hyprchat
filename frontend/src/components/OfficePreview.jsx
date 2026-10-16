@@ -41,9 +41,9 @@ export default function OfficePreview({preview,t,font,autoRender=false,fill=fals
   };
   useEffect(()=>{if(autoRender&&!preview.render_url&&!autoAttempted.current){autoAttempted.current=true;run("preview");}},[autoRender,preview.id]);
   const inspection=data.inspection||{},isSheet=preview.kind==="spreadsheet";
-  const input={background:t.bg,color:t.text,border:`1px solid ${t.brd}55`,borderRadius:6,padding:6,fontFamily:font,fontSize:11};
-  return <div style={{display:"grid",gap:10}}>
-    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+  const input={background:t.bg,color:t.text,border:`1px solid ${t.brd}55`,borderRadius:6,padding:"8px 12px",fontFamily:font,fontSize:14};
+  return <div style={{display:"grid",gap:16}}>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
       <button style={input} disabled={busy} onClick={()=>run("preview")}>{busy?(stopping?"Stopping…":"Processing…"):"Render preview"}</button>
       <select aria-label="Export format" value={format} onChange={e=>setFormat(e.target.value)} style={input}>
         {(isSheet?["pdf","csv"]:["pdf","txt","md"]).map(f=><option key={f} value={f}>{f.toUpperCase()}</option>)}
@@ -51,16 +51,16 @@ export default function OfficePreview({preview,t,font,autoRender=false,fill=fals
       <button style={input} disabled={busy} onClick={()=>run("convert")}>Export</button>
       {busy&&runId&&<button style={input} onClick={()=>request(`/api/runs/${encodeURIComponent(runId)}/cancel`,{method:"POST"}).then(d=>{if(alive.current){setStopping(d.status==="cancelling");setError(d.error||"");}}).catch(e=>{if(alive.current)setError(e.message);})}>{stopping?"Retry Stop":"Stop"}</button>}
     </div>
-    {isSheet&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+    {isSheet&&<div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
       <input style={{...input,width:130}} list={`sheets-${preview.id}`} aria-label="Worksheet name" placeholder="Worksheet name" value={sheet} onChange={e=>setSheet(e.target.value)}/>
       <datalist id={`sheets-${preview.id}`}>{(inspection.sheets||[]).map(s=><option key={s.name} value={s.name}/>)}</datalist>
       <input style={{...input,width:90}} aria-label="Cell range" value={range} onChange={e=>setRange(e.target.value)}/>
       <button style={input} disabled={busy} onClick={()=>run("read")}>Read range</button>
     </div>}
     {error&&<div role="alert" style={{fontSize:12,color:t.err}}>{error}</div>}
-    {(data.warnings||[]).map((w,i)=><div key={i} style={{fontSize:11,color:t.mut}}>{w}</div>)}
+    {(data.warnings||[]).map((w,i)=><div key={i} style={{fontSize:12,color:t.mut}}>{w}</div>)}
     {exports.map(a=><a key={a.artifact_id} href={userScopedUrl(a.url)} target="_blank" rel="noopener noreferrer" style={{color:t.acc,fontSize:12}}>Download {a.filename}</a>)}
-    {data.render_url?<><div style={{fontSize:11,color:t.mut}}>LibreOffice preview</div><iframe title={`${preview.filename} preview`} src={userScopedUrl(data.render_url)} style={{width:"100%",height:fill?"calc(100vh - 270px)":500,minHeight:400,border:`1px solid ${t.brd}44`,background:"white"}}/></>:<div style={{fontSize:12,color:t.mut}}>Render a preview to inspect the layout. The original remains available to download.</div>}
-    {isSheet&&inspection.items?.length>0&&<div style={{overflow:"auto",maxHeight:340}}><table style={{fontSize:11,borderCollapse:"collapse",width:"100%"}}><thead><tr>{["Sheet","Cell","Formula","Cached value / text"].map(h=><th key={h} style={{padding:6,textAlign:"left",color:t.mut}}>{h}</th>)}</tr></thead><tbody>{inspection.items.map((item,i)=><tr key={i}>{[item.sheet,item.cell,item.formula,item.value].map((v,j)=><td key={j} style={{padding:6,borderTop:`1px solid ${t.brd}33`,color:t.text,whiteSpace:"pre-wrap"}}>{v??"—"}</td>)}</tr>)}</tbody></table>{inspection.next_offset!=null&&<p style={{color:t.mut}}>More cells exist; narrow the range to inspect them.</p>}</div>}
+    {data.render_url?<><div style={{fontSize:12,color:t.mut}}>LibreOffice preview</div><iframe title={`${preview.filename} preview`} src={userScopedUrl(data.render_url)} style={{width:"100%",height:fill?"calc(100vh - 270px)":500,minHeight:400,border:`1px solid ${t.brd}44`,background:"white"}}/></>:<div style={{fontSize:12,color:t.mut}}>Render a preview to inspect the layout. The original remains available to download.</div>}
+    {isSheet&&inspection.items?.length>0&&<div style={{overflow:"auto",maxHeight:340}}><table style={{fontSize:12,borderCollapse:"collapse",width:"100%"}}><thead><tr>{["Sheet","Cell","Formula","Cached value / text"].map(h=><th key={h} style={{padding:6,textAlign:"left",color:t.mut}}>{h}</th>)}</tr></thead><tbody>{inspection.items.map((item,i)=><tr key={i}>{[item.sheet,item.cell,item.formula,item.value].map((v,j)=><td key={j} style={{padding:6,borderTop:`1px solid ${t.brd}33`,color:t.text,whiteSpace:"pre-wrap"}}>{v??"—"}</td>)}</tr>)}</tbody></table>{inspection.next_offset!=null&&<p style={{color:t.mut}}>More cells exist; narrow the range to inspect them.</p>}</div>}
   </div>;
 }

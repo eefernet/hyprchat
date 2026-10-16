@@ -45,7 +45,7 @@ export default function ChatHero({t,font,user,tagline,isCouncil,lifted,compact=f
       <div style={{position:"relative",width:68,height:68,animation:"float 6s ease-in-out infinite"}}>
         <div style={{width:68,height:68,borderRadius:18,background:t.bgDeep,border:`1px solid ${t.brd}77`,position:"relative",overflow:"hidden",
           boxShadow:`0 10px 40px ${t.acc}1c, 0 0 26px ${t.acc}14`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-          <div style={{position:"absolute",inset:6,borderRadius:13,border:`1px solid ${t.brd}33`,background:`${t.surface}55`}}/>
+          <div style={{position:"absolute",inset:6,borderRadius:13,border:`1px solid ${t.brd}33`,background:`${t.surface}F5`}}/>
           <div style={{position:"absolute",left:23,top:18,width:10,height:32,borderRadius:2,background:t.acc,opacity:.95}}/>
           <div style={{position:"absolute",right:23,bottom:18,width:10,height:32,borderRadius:2,background:t.warm,opacity:.9}}/>
         </div>

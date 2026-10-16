@@ -62,7 +62,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
       nav={<>
         <button onClick={()=>setTab("todo")} style={{...btnS(tab==="todo"?t.ok:t.mut),padding:"5px 12px"}}>Todos</button>
         <button onClick={()=>setTab("note")} style={{...btnS(tab==="note"?t.ok:t.mut),padding:"5px 12px"}}>Notes</button>
-        <label style={{fontSize:10,color:t.mut,display:"flex",gap:5,alignItems:"center",marginLeft:6}}>
+        <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:5,alignItems:"center",marginLeft:6}}>
           <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/> show done
         </label>
       </>}>
@@ -81,9 +81,9 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
           </div>
           <textarea value={form.content} onChange={e=>setForm(f=>({...f,content:e.target.value}))} placeholder="Details (optional)" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10,alignItems:"center"}}>
-            <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Due (local)</div>
+            <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Due (local)</div>
               <input type="datetime-local" value={form.due_local||""} onChange={e=>setForm(f=>({...f,due_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
-            <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:9,color:t.mut,marginBottom:3}}>Remind me at</div>
+            <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Remind me at</div>
               <input type="datetime-local" value={form.remind_local||""} onChange={e=>setForm(f=>({...f,remind_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
           </div>
           <div style={{display:"flex",gap:8}}>
@@ -97,14 +97,14 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
           {n.kind==="todo"&&<input type="checkbox" checked={n.done} onChange={()=>toggleDone(n)} style={{marginTop:3,cursor:"pointer"}}/>}
           <div style={{flex:1,minWidth:0,overflowWrap:"anywhere"}}>
             <div style={{fontSize:13,fontWeight:700,color:t.text,textDecoration:n.done?"line-through":"none"}}>{n.title}</div>
-            {n.content&&<div style={{fontSize:11,color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.content.slice(0,400)}</div>}
-            <div style={{fontSize:9,color:t.mut,marginTop:4}}>
+            {n.content&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.content.slice(0,400)}</div>}
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>
               {n.due_local?`due ${fmtLocal(n.due_local)}`:""}
               {n.remind_local?` · remind ${fmtLocal(n.remind_local)}${n.reminded?" (sent)":""}`:""}
             </div>
           </div>
-          <button onClick={()=>setForm({id:n.id,kind:n.kind,title:n.title,content:n.content||"",due_local:n.due_local||"",remind_local:n.remind_local||""})} style={{...btnS(t.acc),padding:"3px 8px",fontSize:10}}><IC.Pencil/></button>
-          <button onClick={()=>remove(n.id)} style={{...btnS(t.err),padding:"3px 8px",fontSize:10}}><IC.Trash/></button>
+          <button aria-label="Edit" onClick={()=>setForm({id:n.id,kind:n.kind,title:n.title,content:n.content||"",due_local:n.due_local||"",remind_local:n.remind_local||""})} style={{...btnS(t.acc),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
+          <button aria-label="Delete" onClick={()=>remove(n.id)} style={{...btnS(t.err),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
         </div>)}
       </div>
     </div>

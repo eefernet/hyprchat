@@ -1449,6 +1449,46 @@ async def update_message(message_id: int, *, content: str = None, metadata: dict
         await db.close()
 
 
+async def save_chat_delivery(message_id, content, metadata):
+    """Merge server-owned delivery state atomically without losing run metadata."""
+    conn = await get_db()
+    try:
+        await conn.execute('''UPDATE messages SET content=?, metadata=json_patch(COALESCE(metadata,'{}'),?)
+            WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)''',
+            (content, json.dumps({**metadata, 'server_persists': True}), message_id, _scope_user()))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def patch_message_presentation(conversation_id, message_id, *, content=None, metadata=None):
+    conn = await get_db()
+    try:
+        await conn.execute('BEGIN IMMEDIATE')
+        rows = await conn.execute_fetchall('''SELECT m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            WHERE m.id=? AND c.id=? AND c.user_id=?''', (message_id, conversation_id, _scope_user()))
+        if not rows:
+            raise LookupError('Message not found')
+        previous = json.loads(rows[0]['metadata'] or '{}')
+        if metadata is not None:
+            metadata = {**previous, **metadata}
+            if previous.get('server_persists'):
+                for key in ('server_persists','in_progress','delivery_status','review_history','effort',
+                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens',
+                            'run_ids','run_roles','run_types','has_full_product_build'):
+                    if key in previous:
+                        metadata[key] = previous[key]
+                # Stream-completion PATCHes cannot replace the server's final answer.
+                content = None
+        if content is not None:
+            await conn.execute('UPDATE messages SET content=? WHERE id=?', (content, message_id))
+        if metadata is not None:
+            await conn.execute('UPDATE messages SET metadata=? WHERE id=?', (json.dumps(metadata), message_id))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
 async def delete_messages_from(conversation_id: str, from_id: int) -> list[int] | None:
     """Delete a message and everything after it in a conversation (regenerate/
     edit truncation). User-scoped. Returns the deleted message ids, or None
