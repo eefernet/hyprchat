@@ -33,7 +33,7 @@ export default function ActionMenu({label='More actions',items,compact=false}) {
     if(e.key==='Tab')close();
   };
   return <>
-    <button ref={trigger} type="button" className="hc-button" aria-label={label} aria-haspopup="menu" aria-expanded={open} aria-controls={open?id:undefined} onClick={e=>{e.stopPropagation();setOpen(v=>!v);}}>{compact?<span aria-hidden="true">•••</span>:<>{label} <span aria-hidden="true">⌄</span></>}</button>
+    <button ref={trigger} type="button" className={`hc-button${compact?' is-compact':''}`} aria-label={label} aria-haspopup="menu" aria-expanded={open} aria-controls={open?id:undefined} onClick={e=>{e.stopPropagation();setOpen(v=>!v);}}>{compact?<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="13" cy="8" r="1.25"/></svg>:<>{label} <span aria-hidden="true">⌄</span></>}</button>
     {open&&createPortal(<div ref={menu} id={id} role="menu" aria-label={label} className="hc-popover" style={position} onKeyDown={keyboard}>
       {items.filter(Boolean).map((item,i)=><button key={item.label||i} type="button" role={item.checked===undefined?'menuitem':'menuitemcheckbox'} aria-checked={item.checked} disabled={item.disabled} style={item.destructive?{color:'var(--hc-danger)'}:undefined} onClick={e=>{e.stopPropagation();close();item.onClick();}}>{item.checked!==undefined&&<span aria-hidden="true">{item.checked?'✓':'○'}</span>}{item.label}</button>)}
     </div>,document.body)}

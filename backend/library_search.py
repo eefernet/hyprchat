@@ -62,7 +62,10 @@ async def search(query, *, kind='', workspace_id='', start='', end='', limit=50,
             where+=''' AND EXISTS(SELECT 1 FROM workspaces w WHERE w.id=? AND w.user_id=e.user_id AND (
                 (e.kind='chat' AND EXISTS(SELECT 1 FROM workspace_conversations l WHERE l.workspace_id=w.id AND l.conversation_id=e.parent_id)) OR
                 (e.kind='research' AND EXISTS(SELECT 1 FROM workspace_research_reports l WHERE l.workspace_id=w.id AND l.report_id=e.source_id)) OR
-                (e.kind='artifact' AND EXISTS(SELECT 1 FROM artifact_workspaces l WHERE l.workspace_id=w.id AND l.artifact_id=e.source_id))))'''
+                (e.kind='note' AND EXISTS(SELECT 1 FROM workspace_notes l WHERE l.workspace_id=w.id AND l.note_id=e.source_id)) OR
+                (e.kind='artifact' AND (EXISTS(SELECT 1 FROM artifact_workspaces l WHERE l.workspace_id=w.id AND l.artifact_id=e.source_id)
+                    OR EXISTS(SELECT 1 FROM artifacts a WHERE a.id=e.source_id AND a.workspace_id=w.id)
+                    OR EXISTS(SELECT 1 FROM workspace_conversations l WHERE l.workspace_id=w.id AND l.conversation_id=e.parent_id)))))'''
             args.append(workspace_id)
         rows=await conn.execute_fetchall(f'''SELECT e.kind,e.source_id,e.parent_id,e.title,e.created_at,e.updated_at,
             snippet(library_fts,1,'','',' … ',40) excerpt FROM library_fts JOIN library_entries e ON e.rowid=library_fts.rowid

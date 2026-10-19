@@ -1,4 +1,5 @@
-import React,{useState,useEffect,useCallback} from 'react';
+import {taskBody} from '../taskForm.js';
+import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
@@ -9,17 +10,18 @@ import { EmptyState } from '../components/hyprChatWidgets.jsx';
 import { SkeletonCard } from '../components/Skeleton.jsx';
 import useIsMobile from '../useIsMobile.js';
 
-const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],monthly:["time","day"],cron:["cron"],event:[]};
+const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],monthly:["time","day"],cron:["cron"],event:[],webhook:[]};
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",event:"",every:1,notify:true,delivery:{}};
+const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",event:"",every:1,notify:true,delivery:{},timezone:"",model:"",tool_ids:[],workspace_id:"",conversation_id:""};
 
-export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange,notify}){
+export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange,notify,models=[],workspaces=[],convs=[],workspaceId="",onNavigate,initialCreate=false}){
   const isMobile=useIsMobile();
   const [tasks,setTasks]=useState([]);
+  const [workspace,setWorkspace]=useState(workspaceId),[toolOptions,setToolOptions]=useState([]),[preview,setPreview]=useState(null),[saving,setSaving]=useState(false);
   const [loaded,setLoaded]=useState(false);
   const [notifs,setNotifs]=useState([]);
   const [unseen,setUnseen]=useState(0);
-  const [form,setForm]=useState(null);          // null = closed, {...EMPTY_FORM, id?} = editor open
+  const [form,setForm]=useState(()=>initialCreate?{...EMPTY_FORM,workspace_id:workspaceId}:null);          // null = closed, {...EMPTY_FORM, id?} = editor open
   const [nlText,setNlText]=useState("");
   const [nlBusy,setNlBusy]=useState(false);
   const [runsFor,setRunsFor]=useState(null);    // task id whose run history is expanded
@@ -28,10 +30,13 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
   const [ntfy,setNtfy]=useState({url:"",topic:"",token:"",allow_private:false,token_set:false});
   const [eventNames,setEventNames]=useState([]);
 
+  const loadEpoch=useRef(0),runsEpoch=useRef(0);
   const loadTasks=useCallback(async()=>{
-    try{setTasks(await apiJson("/api/tasks"));}catch(e){setErr(String(e.message||e));}
-    finally{setLoaded(true);}
-  },[]);
+    const version=++loadEpoch.current;
+    try{const data=await apiJson(`/api/tasks?workspace_id=${workspace}`);if(version===loadEpoch.current)setTasks(data);}catch(e){if(version===loadEpoch.current&&e.name!=="AbortError")setErr(String(e.message||e));}
+    finally{if(version===loadEpoch.current)setLoaded(true);}
+  },[workspace]);
+  const loadLatest=useRef(loadTasks);loadLatest.current=loadTasks;
   const loadNotifs=useCallback(async()=>{
     try{
       const d=await apiJson("/api/notifications?limit=100");
@@ -50,42 +55,33 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
   const saveTask=async()=>{
     if(!form)return;
     setErr("");
-    const schedule_json={};
-    for(const f of (KIND_FIELDS[form.schedule_kind]||[]))
-      if(form[f]!==""&&form[f]!=null)schedule_json[f]=(f==="weekday"||f==="day")?Number(form[f]):form[f];
-    // Preserve delivery options the form doesn't surface (ntfy/email flags) —
-    // spreading form.delivery first keeps them across edits.
-    const body={title:form.title,prompt:form.prompt,
-      schedule_kind:form.schedule_kind,schedule_json,
-      delivery_json:{...(form.delivery||{}),conversation:!!form.conversation_id,notify:!!form.notify},
-      conversation_id:form.conversation_id||""};
-    // Never rewrite the type of assistant-managed tasks (check_in): the select
-    // below only offers llm/research, so including it would silently convert a
-    // check-in into a plain agent task and strip its gatherer brief.
-    if(form.task_type==="llm"||form.task_type==="research")body.task_type=form.task_type;
-    if(form.schedule_kind==="event"){
-      if(!form.event){setErr("Pick an event for the trigger.");return;}
-      body.event_trigger_json={event:form.event,every:Math.max(1,Number(form.every)||1)};
-    }
+    if(saving)return;
+    const body=taskBody(form);
+    if(form.schedule_kind==='event'&&!form.event){setErr('Pick an event for the trigger.');return;}
+    setSaving(true);
     try{
       const r=await fetch(`${API}/api/tasks${form.id?`/${form.id}`:""}`,{
         method:form.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
-      setForm(null);loadTasks();
-    }catch(e){setErr(String(e.message||e));}
+      setForm(null);loadLatest.current();
+    }catch(e){setErr(String(e.message||e));}finally{setSaving(false);}
   };
   const taskAction=async(id,action)=>{
     try{
       if(action==="delete"){if(!await confirmAction({title:"Delete task",body:"Delete this scheduled task and its run history?",confirmLabel:"Delete",tone:"danger"}))return;await apiJson(`/api/tasks/${id}`,{method:"DELETE"});}
       else await apiJson(`/api/tasks/${id}/${action}`,{method:"POST"});
     }catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:`Task ${action} failed`,detail:String(e.message||e)});}
-    finally{loadTasks();} // reload either way so buttons reflect server truth
+    finally{loadLatest.current();} // reload either way so buttons reflect server truth
   };
   const refreshRuns=useCallback(async id=>{
-    try{setRuns(await apiJson(`/api/tasks/${id}/runs`));}catch{}
+    const version=++runsEpoch.current;
+    try{const data=await apiJson(`/api/tasks/${id}/runs`);if(version===runsEpoch.current)setRuns(data);}catch(e){if(version===runsEpoch.current&&e.name!=="AbortError")setErr(e.message);}
   },[]);
+  useEffect(()=>{if(!runsFor)return;const timer=setInterval(()=>{refreshRuns(runsFor);loadTasks();},4000);return()=>clearInterval(timer);},[runsFor,refreshRuns,loadTasks]);
+  useEffect(()=>{const c=new AbortController();Promise.all([apiJson('/api/builtin-tools',{signal:c.signal}),apiJson('/api/tools',{signal:c.signal}),apiJson('/api/connector-tools',{signal:c.signal})]).then(groups=>setToolOptions(groups.flatMap(g=>Array.isArray(g)?g:g.tools||[]))).catch(e=>{if(e.name!=='AbortError')setErr(e.message);});return()=>c.abort();},[]);
+  useEffect(()=>{setPreview(null);if(!form)return;const c=new AbortController();const timer=setTimeout(()=>apiJson('/api/tasks/preview',{method:'POST',body:taskBody(form),signal:c.signal}).then(setPreview).catch(e=>{if(e.name!=='AbortError')setPreview({error:e.message});}),350);return()=>{clearTimeout(timer);c.abort();};},[form]);
   const showRuns=async id=>{
-    if(runsFor===id){setRunsFor(null);return;}
+    if(runsFor===id){runsEpoch.current++;setRunsFor(null);return;}
     setRunsFor(id);setRuns([]);
     refreshRuns(id);
   };
@@ -97,7 +93,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
       const d=await r.json();
       if(!r.ok)throw new Error(d.detail||"Could not parse");
       const sj=d.schedule_json||{};
-      setForm({...EMPTY_FORM,title:d.title||"",prompt:d.prompt||"",task_type:d.task_type||"llm",
+      setForm({...EMPTY_FORM,workspace_id:workspace,title:d.title||"",prompt:d.prompt||"",task_type:d.task_type||"llm",
         schedule_kind:d.schedule_kind||"once",time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,
         cron:sj.cron||"",run_at:sj.run_at||""});
       setNlText("");
@@ -132,13 +128,15 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
         </button>
       </>}>
       <button aria-label="Refresh" onClick={()=>{loadTasks();loadNotifs();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
-      {tab==="tasks"&&<button onClick={()=>setForm({...EMPTY_FORM})} style={btnS(t.warm)}><IC.Plus/> New Task</button>}
+      {tab==="tasks"&&<button onClick={()=>setForm({...EMPTY_FORM,workspace_id:workspace})} style={btnS(t.warm)}><IC.Plus/> New Task</button>}
     </PanelHeader>
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:900}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
 
         {tab==="tasks"&&<>
+          <select aria-label="Tasks workspace" disabled={!!workspaceId} value={workspace} onChange={e=>setWorkspace(e.target.value)} style={{...inputS,width:'auto',marginBottom:12}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
+
           <div style={{...cardS,display:"flex",gap:8,alignItems:"center",marginBottom:16}}>
             <input value={nlText} onChange={e=>setNlText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")parseNl();}}
               placeholder='Describe it: "every weekday at 8am summarize AI news"...' style={{...inputS,flex:1}}/>
@@ -181,8 +179,20 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                 <input type="checkbox" checked={!!form.notify} onChange={e=>setForm(f=>({...f,notify:e.target.checked}))}/> notify when done
               </label>
             </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:10,marginBottom:12}}>
+              <label>Workspace<select disabled={form.task_type==='check_in'} value={form.workspace_id||''} onChange={e=>setForm(f=>({...f,workspace_id:e.target.value}))} style={inputS}><option value="">No workspace</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
+              <label>Model<select value={form.model||''} onChange={e=>setForm(f=>({...f,model:e.target.value}))} style={inputS}><option value="">Inherit existing defaults</option>{[...new Set([...models,form.model].filter(Boolean))].map(m=><option key={m}>{m}</option>)}</select></label>
+              <label>Timezone<input value={form.timezone||''} onChange={e=>setForm(f=>({...f,timezone:e.target.value}))} placeholder="Assistant timezone (default)" style={inputS}/></label>
+              <label>Conversation<select value={form.conversation_id||''} disabled={form.task_type==='check_in'} onChange={e=>setForm(f=>({...f,conversation_id:e.target.value}))} style={inputS}><option value="">{form.workspace_id?'Create a project task conversation':'Result in run history'}</option>{convs.map(c=><option key={c.id} value={c.id}>{c.title||'New chat'}</option>)}{form.conversation_id&&!convs.some(c=>c.id===form.conversation_id)&&<option value={form.conversation_id}>Current conversation</option>}</select></label>
+            </div>
+            <details style={{marginBottom:12}}><summary>Tools and delivery</summary><p style={{fontSize:12,color:t.mut}}>No selected tools inherits the conversation or persona tools. Workspace agent tasks save results to a project conversation. Tasks without a conversation use a single completion.</p>
+              {toolOptions.map(tool=><label key={tool.id} style={{display:'block'}}><input type="checkbox" checked={(form.tool_ids||[]).includes(tool.id)} onChange={e=>setForm(f=>({...f,tool_ids:e.target.checked?[...(f.tool_ids||[]),tool.id]:(f.tool_ids||[]).filter(id=>id!==tool.id)}))}/>{tool.name||tool.tool_name}</label>)}
+              {['ntfy','email'].map(channel=><label key={channel} style={{display:'block'}}><input type="checkbox" checked={!!form.delivery?.[channel]} onChange={e=>setForm(f=>({...f,delivery:{...f.delivery,[channel]:e.target.checked}}))}/>{channel} delivery (requires configured channel)</label>)}
+            </details>
+            {/^(openai|anthropic|custom):/.test(form.model||'')&&<p style={{color:t.warm}}>This explicitly selected provider can incur charges on every run.</p>}
+            <div role="status" style={{marginBottom:12,color:preview?.error?t.err:t.mut}}>{!preview?'Checking schedule…':preview.error||`${preview.timezone}: ${preview.occurrences.length?preview.occurrences.map(fmtUtcToLocal).join(' · '):'Runs when triggered'}`}</div>
             <div style={{display:"flex",gap:8}}>
-              <button onClick={saveTask} style={btnS(t.ok)}>{form.id?"Save":"Create"}</button>
+              <button disabled={saving||!preview||!!preview.error} onClick={saveTask} style={btnS(t.ok)}>{form.id?"Save":"Create"}</button>
               <button onClick={()=>setForm(null)} style={btnS(t.mut)}>Cancel</button>
             </div>
           </div>}
@@ -203,7 +213,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
                 <button onClick={()=>taskAction(task.id,"run")} title="Run now" style={{...btnS(t.ok),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Play/> Run</button>
                 <button onClick={()=>taskAction(task.id,task.enabled?"pause":"resume")} style={{...btnS(task.enabled?t.warm:t.ok),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}>{task.enabled?"Pause":"Resume"}</button>
-                <button aria-label="Edit" onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
+                <button aria-label="Edit" onClick={()=>{const sj=task.schedule_json||{};const dj=task.delivery_json||{};const ej=task.event_trigger_json||{};setForm({...EMPTY_FORM,id:task.id,title:task.title,prompt:task.prompt,task_type:task.task_type,schedule_kind:task.schedule_kind,time:sj.time||"08:30",weekday:sj.weekday??0,day:sj.day??1,cron:sj.cron||"",run_at:sj.run_at||"",event:ej.event||"",every:ej.every||1,workspace_id:task.workspace_id||"",model:task.model||"",tool_ids:task.tool_ids||[],timezone:task.timezone||"",conversation_id:task.conversation_id,notify:dj.notify!==false,delivery:dj});}} style={{...btnS(t.acc),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
                 <button onClick={()=>showRuns(task.id)} style={{...btnS(t.mut),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}>History</button>
                 <button aria-label="Delete" onClick={()=>taskAction(task.id,"delete")} style={{...btnS(t.err),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
               </div>
@@ -217,7 +227,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               :runs.map(r=><div key={r.id} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"3px 0",display:"flex",gap:8,alignItems:"baseline"}}>
                 <span style={{color:statusColor(r.status),fontWeight:700,minWidth:70}}>{r.status}</span>
                 <span style={{color:t.mut}}>{fmtTs(r.started_at)}</span>
-                <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.error||r.result_text||""}</span>
+                <details style={{flex:1,minWidth:0,overflowWrap:"anywhere"}}><summary>Read result</summary><div style={{whiteSpace:"pre-wrap"}}>{r.error||r.result_text||"No output saved yet."}</div>{onNavigate&&r.conversation_id&&<button style={btnS(t.acc)} onClick={()=>onNavigate('chat',r.conversation_id)}>Open conversation</button>}{onNavigate&&r.report_id&&<button style={btnS(t.acc)} onClick={()=>onNavigate('research',r.report_id)}>Open report</button>}</details>
                 {r.status==="running"&&<button onClick={async()=>{try{await apiJson(`/api/tasks/runs/${r.id}/cancel`,{method:"POST"});}catch(e){setErr(String(e.message||e));}finally{refreshRuns(task.id);loadTasks();}}} style={{...btnS(t.err),padding:"2px 6px",fontSize:"var(--hc-text-control)"}}>Stop</button>}
               </div>)}
             </div>}

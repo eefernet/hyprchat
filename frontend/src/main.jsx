@@ -1,3 +1,4 @@
+import {WorkspaceHome,KnowledgeReadiness} from './components/workspaceComponents.jsx';
 import useFocusScope from './useFocusScope.js';
 import './ui.css';
 import {UI_THEMES, presentationTokens} from './theme.js';
@@ -749,6 +750,12 @@ function HyprChat(){
     }
   };
   const [workspaces,setWorkspaces]=useState([]);
+  const workspaceLoadEpoch=useRef(0);
+  const [libraryState,setLibraryState]=useState({query:'',kind:'',workspace:'',start:'',end:'',offset:0});
+  const [messageFocus,setMessageFocus]=useState(null);
+  const openWorkspace=async id=>{const epoch=++workspaceLoadEpoch.current;setWsPanel(true);setPanel('workspaces');setActiveWs(id);setWsLoading(true);try{const d=await apiJson(`/api/workspaces/${id}`);if(epoch===workspaceLoadEpoch.current)setWsDetail(d);}catch(e){if(e.name!=='AbortError'&&epoch===workspaceLoadEpoch.current){notify({type:'error',text:'Workspace could not load',detail:e.message});setWsDetail(null);}}finally{if(epoch===workspaceLoadEpoch.current)setWsLoading(false);}};
+  const navigateWorkspaceContent=(panel,id)=>{setWsPanel(false);setPanel(panel);if(panel==='chat')loadConversation(id);if(panel==='research'){setResearchView('reports');loadResearchReport(id);}if(panel==='artifacts')openArtifact(id);if(panel==='kb')setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:'center'}),150);};
+
   const [wsPanel,setWsPanel]=useState(false);
   const [activeWs,setActiveWs]=useState(null);
   const [wsDetail,setWsDetail]=useState(null);
@@ -1193,7 +1200,7 @@ function HyprChat(){
   // Quick search — derived from active conversation tool_ids, or pending empty-chat selections.
   const activeToolIds=act?(act.tool_ids||[]):pendingToolIds;
   const quickSearch = activeToolIds.includes("quick_search");
-  const activeMemoryWs=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&actId&&wsDetail.conversations.some(wc=>wc.id===actId))?wsDetail:null;
+  const activeMemoryWs=act?.effective_workspace||null;
   const workspaceMemoryActive=!ghostActive&&activeMemoryWs&&(activeMemoryWs.memory_enabled==="1"||activeMemoryWs.memory_enabled===1||activeMemoryWs.memory_enabled===true);
   const globalMemoryActive=!ghostActive&&(act?(act.use_memories==="1"||act.use_memories===1||act.use_memories===true):pendingUseMemories);
   const toggleGlobalMemory=()=>{
@@ -1313,6 +1320,7 @@ function HyprChat(){
     if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
   };
   const addKbUrl=async(kbId)=>{
+    const origin=hcCaptureUserContext();
     const url=(kbUrlInputs[kbId]||"").trim();
     if(!url)return;
     const pKey=`${kbId}:url:${Date.now()}`;
@@ -1327,15 +1335,18 @@ function HyprChat(){
       if(!d.replaced)setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename,file_size:d.file_size,source_url:d.source_url}]}:k));
       for(let i=0;i<60;i++){
         await new Promise(res=>setTimeout(res,2000));
+        if(origin.epoch!==hcCaptureUserContext().epoch)return;
         try{
           const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename)}/status`);
           const st=await sr.json();
           if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));clearLater(3000);return;}
+          if(st.status==="partial"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"partial",error:(st.warnings||[]).join("; ")||"Some passages could not be indexed. Review knowledge readiness."}}));return;}
           if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));notify({type:"error",text:"KB indexing failed",detail:st.error||d.filename});clearLater(6000);return;}
         }catch{}
       }
-      setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));clearLater(3000);
+      setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"pending"}}));
     }catch(e){
+      if(e.name==="AbortError"||origin.epoch!==hcCaptureUserContext().epoch)return;
       setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:e.message}}));
       notify({type:"error",text:"URL ingest failed",detail:e.message||String(e)});
       clearLater(6000);
@@ -1399,6 +1410,7 @@ function HyprChat(){
     recChunksRef.current=[];setRecording(false);setTranscribing(false);
     cancelSendPreparation();
     setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
+    workspaceLoadEpoch.current++;setLibraryState({query:'',kind:'',workspace:'',start:'',end:'',offset:0});setMessageFocus(null);
     setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
     researchSelectedRef.current=null;researchAppliedRef.current=null;researchEvidenceRequestRef.current++;researchRequestRef.current++;researchRevisionRef.current=0;setResearchEvidence(null);
@@ -1950,7 +1962,7 @@ function HyprChat(){
   const removeResearchReportFromWorkspace=async(wsId,reportId)=>{
     if(!wsId||!reportId)return;
     try{
-      await fetch(`${API}/api/workspaces/${wsId}/research-reports/${reportId}`,{method:"DELETE"});
+      await apiJson(`/api/workspaces/${wsId}/research-reports/${reportId}`,{method:"DELETE"});
       setWsDetail(d=>d&&d.id===wsId?{...d,reports:(d.reports||[]).filter(r=>r.id!==reportId)}:d);
       const wl=await fetch(`${API}/api/workspaces`).then(r=>r.json()).catch(()=>null);
       if(wl)setWorkspaces(wl);
@@ -2325,7 +2337,7 @@ function HyprChat(){
         // If this conversation is being streamed right now, local state is authoritative for messages —
         // skip the overwrite so the stream's m[m.length-1] assistant update doesn't clobber the user message.
         const skipMessages = streamingCidRef.current === id;
-        setConvs(prev=>prev.map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),rating:m.rating||0,created_at:m.created_at}))}), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+        setConvs(prev=>(prev.some(c=>c.id===id)?prev:[{...full,messages:[]},...prev]).map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),rating:m.rating||0,created_at:m.created_at}))}), workspace_context:full.workspace_context,effective_workspace:full.effective_workspace,model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
         // Fetch suggestions for council chats with no messages yet
         if(isCouncil(full.is_council)&&full.council_config_id&&!(full.messages||[]).length){
           fetchCouncilSuggestions(full.council_config_id);
@@ -2525,7 +2537,8 @@ function HyprChat(){
     if(defaultModel&&models.length>0&&!models.includes(defaultModel))defaultModel=models[0]||"";
     const pendingTools=forceBlank?(persona?.tool_ids||(opts.carryCurrent?(curConv?.tool_ids||[]):pendingToolIds)):[];
     const pendingEffortValue=forceBlank&&pendingEffort!==null?pendingEffort:null;
-    const useGhost=ghostMode||opts.ephemeral;
+    const useGhost=!opts.workspaceId&&(ghostMode||opts.ephemeral);
+    if(opts.workspaceId)setGhostMode(false);
     const pendingMemoryValue=(!useGhost&&forceBlank&&pendingUseMemories)?"1":"0";
     if(useGhost){
       const newId=`ghost-${Date.now()}-${Math.random().toString(16).slice(2,8)}`;
@@ -2541,7 +2554,7 @@ function HyprChat(){
       return opts.returnConv?c:newId;
     }
     try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel,use_memories:pendingMemoryValue}),signal:opts.sendPreparation?.controller.signal});
+      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel,use_memories:pendingMemoryValue,...(opts.workspaceId?{workspace_context:{mode:"selected",workspace_id:opts.workspaceId}}:{})}),signal:opts.sendPreparation?.controller.signal});
       if(!r.ok)throw new Error(`Could not create conversation (HTTP ${r.status})`);
       const c=await r.json();c.messages=[];c.use_memories=c.use_memories??pendingMemoryValue;
       if(opts.sendPreparation?.controller.signal.aborted)return null;
@@ -2565,7 +2578,7 @@ function HyprChat(){
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:c.id;
     }catch(e){
-      if(opts.sendPreparation)throw e;
+      if(opts.sendPreparation||opts.workspaceId)throw e;
       const newId=`l-${Date.now()}`;
       const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{}),tool_ids:pendingTools,use_memories:pendingMemoryValue};
       modelChoiceRef.current.byConv[newId]=c.model||defaultModel;
@@ -2579,7 +2592,16 @@ function HyprChat(){
     }
   };
 
+  useEffect(()=>{if(!messageFocus||messageFocus.conversation!==actId||loadingConv)return;
+    const rows=(act?.messages||[]).filter(m=>['user','assistant'].includes(m.role));const index=rows.findIndex(m=>String(m.id)===String(messageFocus.id));
+    if(index<0)return;const needed=rows.length-index;
+    if(act?.is_council){setExpandedRounds({});}
+    if((visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK)<needed){setVisibleMessageCounts(p=>({...p,[actId]:needed}));return;}
+    const timer=setTimeout(()=>{const el=document.getElementById(`saved-message-${messageFocus.id}`);if(el){el.scrollIntoView({block:'center',behavior:'smooth'});el.animate([{backgroundColor:'transparent'},{backgroundColor:t.acc+'44'},{backgroundColor:'transparent'}],{duration:2200});setMessageFocus(null);}},150);return()=>clearTimeout(timer);
+  },[messageFocus,actId,loadingConv,act?.messages?.length,visibleMessageCounts[actId]]);
+
   const startBlankChat=()=>{
+    setWsPanel(false);
     cancelSendPreparation();
     setGhostMode(false);
     setPendingUseMemories(false);
@@ -3067,8 +3089,7 @@ function HyprChat(){
       if(overrides.documents&&!body.tool_ids.includes("documents"))body.tool_ids=[...body.tool_ids,"documents"];
       Object.assign(body,codingRequestFields(codingOptions,cv));
       if(isGhostSend)body.ephemeral=true;
-      const _wsForChat=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&wsDetail.conversations.some(wc=>wc.id===cid))?wsDetail:null;
-      if(_wsForChat?.id&&!isGhostSend)body.workspace_id=_wsForChat.id;
+
       // Send the user's typed text + attachment metadata separately so the backend's
       // defensive save persists the clean content + image previews (not the bloated
       // `[Attached N image: ...]` model-facing string).
@@ -4682,7 +4703,7 @@ function HyprChat(){
     "--nav-hover-bg":`${t.acc}12`,"--nav-hover-border":`${t.acc}42`,"--nav-hover-color":t.acc,"--nav-hover-ring":`${t.acc}18`,"--nav-hover-shadow":`${t.acc}12`,"--nav-active-hover-bg":`${t.acc}1C`,
     ...extra
   });
-  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:12,marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
+  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:12,marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -4964,7 +4985,7 @@ function HyprChat(){
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
         <div style={{display:"flex",gap:4}}>
           <button onClick={startBlankChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.warm,border:`1px solid ${t.warm}`,color:"#fff",padding:"10px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,boxShadow:"none"}}><IC.Plus/> New Chat</button>
-          <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:"var(--hc-text-control)"}} title="Workspaces">🗂</button>
+          <button onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);setPanel("workspaces");setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:"var(--hc-text-control)"}} title="Workspaces">🗂</button>
         </div>
         {!wsPanel&&<>
         {showMessageSearch&&<div style={{display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s both"}}>
@@ -5032,19 +5053,13 @@ function HyprChat(){
       </div>;};return <>{pinnedC.length>0&&<><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,letterSpacing:0,textTransform:"none",padding:"4px 8px 2px",opacity:.6}}>{"\uD83D\uDCCC"} Pinned</div>{pinnedC.map(renderConv)}{unpinnedC.length>0&&<div style={{borderTop:`1px solid ${t.brd}22`,margin:"4px 0"}}/>}</>}{unpinnedC.map(renderConv)}</>;})()}
       </div>:<div style={{flex:1,overflowY:"auto",padding:"8px 6px"}}>
         <button onClick={async()=>{
-          const r=await fetch(`${API}/api/workspaces`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Workspace"})});
-          const d=await r.json();setWorkspaces(p=>[...p,d]);
-          setActiveWs(d.id);setWsDetail({...d,conversations:[],files:[],reports:[]});
+          try{const d=await apiJson("/api/workspaces",{method:"POST",body:{name:"New Workspace"}});setWorkspaces(p=>[...p,d]);openWorkspace(d.id);}catch(e){notify({type:"error",text:"Workspace not created",detail:e.message});}
         }} style={{...btnS(t.acc),width:"100%",marginBottom:8,justifyContent:"center",fontSize:"var(--hc-text-control)"}}><IC.Plus/> New Workspace</button>
         {!workspaces.length&&<div style={{textAlign:"center",padding:30,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No workspaces yet.<br/>Group related chats and reports together.</div>}
         {workspaces.map(ws=>{
           const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
           const isA=activeWs===ws.id;
-          return <div key={ws.id} onClick={async()=>{
-            setActiveWs(ws.id);setWsLoading(true);
-            const r=await fetch(`${API}/api/workspaces/${ws.id}`);
-            setWsDetail(await r.json());setWsLoading(false);
-          }} style={{padding:"10px 12px",borderRadius:12,border:`1px solid ${isA?t.acc:t.brd}33`,background:isA?`${t.acc}10`:`${t.surface}44`,marginBottom:6,cursor:"pointer",transition:"all .2s",animation:"fadeIn .3s"}}>
+          return <div key={ws.id} onClick={()=>openWorkspace(ws.id)} style={{padding:"10px 12px",borderRadius:12,border:`1px solid ${isA?t.acc:t.brd}33`,background:isA?`${t.acc}10`:`${t.surface}44`,marginBottom:6,cursor:"pointer",transition:"all .2s",animation:"fadeIn .3s"}}>
             <div style={{fontWeight:700,fontSize:12,color:isA?t.acc:t.text,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.name}</div>
             {ws.description&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.description}</div>}
             {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:4}}>
@@ -5202,6 +5217,8 @@ function HyprChat(){
             Memory
             <span style={{color:t.mut,fontWeight:500}}>HyprChat</span>
           </span>}
+          {panel==='chat'&&actId&&!ghostActive&&<select aria-label="Workspace context" title="Choose project context for this chat" value={act?.workspace_context?.mode==='selected'?act.workspace_context.workspace_id:act?.workspace_context?.mode||'auto'} style={{...inputS,width:'auto',maxWidth:190,fontSize:12}} onChange={async e=>{const value=e.target.value;try{if(!['auto','off'].includes(value))await apiJson(`/api/workspaces/${value}/conversations`,{method:'POST',body:{conversation_id:actId}});const saved=await apiJson(`/api/conversations/${actId}`,{method:'PATCH',body:{workspace_context:['auto','off'].includes(value)?{mode:value}:{mode:'selected',workspace_id:value}}});setConvs(p=>p.map(c=>c.id===saved.id?{...c,workspace_context:saved.workspace_context,effective_workspace:saved.effective_workspace}:c));}catch(error){notify({type:'error',text:'Context not changed',detail:error.message});}}}><option value="auto">Workspace: automatic</option><option value="off">Workspace context off</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
+          {panel==="chat"&&!ghostActive&&!!activeMemoryWs?.kb_ids?.length&&<span style={{fontSize:12,color:t.mut}}>{activeMemoryWs.kb_ids.length} project knowledge base(s)</span>}
           {panel==="chat"&&workspaceMemoryActive&&<span title={`Workspace memory active: ${activeMemoryWs.name}`} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.ok}10`,border:`1px solid ${t.ok}30`,color:t.ok,fontSize:10,fontWeight:800,maxWidth:160,overflow:"hidden",whiteSpace:"nowrap"}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:t.ok,flexShrink:0}}/>
             Memory
@@ -5268,7 +5285,10 @@ function HyprChat(){
       <div className={panel!=="chat"||wsPanel&&activeWs?"hc-safe-panel":""} key={wsPanel&&activeWs?"ws":panel} style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0,animation:"fadeIn .18s ease"}}>
       {/* Panels */}
       {wsPanel&&activeWs
-        ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
+        ?<WorkspaceDetail key={activeWs} ws={wsDetail?.id===activeWs?wsDetail:null} wsLoading={wsLoading} t={t} API={API}
+            onNewChat={async()=>{try{await newChat(true,{workspaceId:activeWs});setWsPanel(false);}catch(e){notify({type:'error',text:'Chat not created',detail:e.message});}}}
+            onSearch={()=>{setLibraryState({query:'',kind:'',workspace:activeWs,start:'',end:'',offset:0});setWsPanel(false);setPanel('library');}}
+            onNavigate={navigateWorkspaceContent}
             workspaces={workspaces} setWorkspaces={setWorkspaces}
             setActiveWs={setActiveWs} setWsDetail={setWsDetail}
             convs={convs} onOpenConv={id=>{setWsPanel(false);loadConversation(id);}}
@@ -5276,7 +5296,8 @@ function HyprChat(){
             onRemoveReport={removeResearchReportFromWorkspace}
             onPreview={openPreview} models={models} wsModel={wsModel}
             notify={notify} confirmAction={confirmAction}
-            onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
+            onPersonaCreated={mc=>{setWsPanel(false);apiJson("/api/knowledge-bases").then(setKbs).catch(()=>{});const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
+      :panel==='workspaces'?<WorkspaceHome {...{t,btnS,inputS,workspaces,notify}} onOpen={openWorkspace} onCreated={ws=>{setWorkspaces(p=>[ws,...p]);openWorkspace(ws.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify} confirmAction={confirmAction}/>
       :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
@@ -5305,6 +5326,7 @@ function HyprChat(){
           </div>)}
           {!(kb.files||[]).length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
         </div>
+        <div id={`knowledge-${kb.id}`}><KnowledgeReadiness kbId={kb.id} t={t} btnS={btnS} inputS={inputS}/></div>
         {/* Add web page by URL */}
         <div style={{display:"flex",gap:6,marginBottom:8}}>
           <input value={kbUrlInputs[kb.id]||""} onChange={e=>setKbUrlInputs(p=>({...p,[kb.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addKbUrl(kb.id);}}} placeholder="https://…  add a web page or PDF by URL" style={{flex:1,fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bgDeep,border:`1px solid ${t.brd}33`,color:t.text,borderRadius:7,fontFamily:font,boxSizing:"border-box"}}/>
@@ -5318,7 +5340,7 @@ function HyprChat(){
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"var(--hc-text-secondary)",marginBottom:4}}>
               <span style={{color:t.text,fontWeight:600}}>{info.filename}</span>
               <span style={{color:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.mut,fontWeight:500}}>
-                {info.status==="uploading"?`Uploading ${info.progress}%`:info.status==="indexing"?"Indexing...":info.status==="done"?"Complete":info.status==="error"?(info.error||"Failed"):""}
+                {info.status==="uploading"?`Uploading ${info.progress}%`:info.status==="indexing"?"Indexing...":info.status==="done"?"Complete":info.status==="error"?(info.error||"Failed"):info.status==="pending"?"Not confirmed — check readiness or Jobs":info.status==="partial"?(info.error||"Partially indexed"):""}
               </span>
             </div>
             <div style={{height:4,borderRadius:2,background:`${t.mut}22`,overflow:"hidden"}}>
@@ -5331,6 +5353,7 @@ function HyprChat(){
             const files=[...e.target.files];e.target.value="";if(!files.length)return;
             const kbId=kb.id;
             const uploadOne=f=>{
+              const uploadOrigin=hcCaptureUserContext();
               const stamp=Date.now();
               const pKey=`${kbId}:${f.name}:${stamp}`;
               const activityId=`kb-upload-${stamp}-${Math.random().toString(36).slice(2,6)}`;
@@ -5338,8 +5361,9 @@ function HyprChat(){
               setUploadProgress(p=>({...p,[pKey]:{filename:f.name,progress:0,status:"uploading"}}));
               const fd=new FormData();fd.append("file",f);
               const xhr=new XMLHttpRequest();
-              xhr.upload.onprogress=ev=>{if(ev.lengthComputable){const pct=Math.round(ev.loaded/ev.total*100);setUploadProgress(p=>({...p,[pKey]:{...p[pKey],progress:pct}}));updateActivity(activityId,{status:"uploading",pct:Math.min(85,pct),message:`Uploading ${pct}%`,completedBytes:ev.loaded,totalBytes:ev.total});}};
+              xhr.upload.onprogress=ev=>{if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;if(ev.lengthComputable){const pct=Math.round(ev.loaded/ev.total*100);setUploadProgress(p=>({...p,[pKey]:{...p[pKey],progress:pct}}));updateActivity(activityId,{status:"uploading",pct:Math.min(85,pct),message:`Uploading ${pct}%`,completedBytes:ev.loaded,totalBytes:ev.total});}};
               xhr.onload=()=>{
+                if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;
                 if(xhr.status>=200&&xhr.status<300){
                   let d;try{d=JSON.parse(xhr.responseText);}catch{d={};}
                   setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"indexing",progress:100}}));
@@ -5350,14 +5374,16 @@ function HyprChat(){
                   const poll=async()=>{
                     for(let i=0;i<60;i++){
                       await new Promise(r=>setTimeout(r,2000));
+                      if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;
                       try{
                         const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename||f.name)}/status`);
                         const st=await sr.json();
                         if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));updateActivity(activityId,{status:"done",pct:100,message:"Indexed"});setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);return;}
+                        if(st.status==="partial"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"partial"}}));updateActivity(activityId,{status:"partial",message:"Some passages could not be indexed. Review knowledge readiness."});return;}
                         if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));updateActivity(activityId,{status:"error",error:st.error||"indexing failed",message:"Indexing failed"});notify({type:"error",text:"KB indexing failed",detail:st.error||f.name});setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);return;}
                       }catch{}
                     }
-                    setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));updateActivity(activityId,{status:"done",pct:100,message:"Indexed"});setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);
+                    setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"pending"}}));updateActivity(activityId,{status:"pending",message:"Indexing status not confirmed. Check knowledge readiness or Jobs."});
                   };
                   poll();
                 }else{
@@ -5369,6 +5395,7 @@ function HyprChat(){
                 }
               };
               xhr.onerror=()=>{
+                if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;
                 setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:"Network error"}}));
                 updateActivity(activityId,{status:"error",error:"Network error",message:"Upload failed"});
                 notify({type:"error",text:"KB upload failed",detail:"Network error"});
@@ -7020,15 +7047,15 @@ function HyprChat(){
 
       :panel==="analytics"?<AnalyticsPanel font={font} t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
-      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
+      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel workspaces={workspaces} t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else if(destination==='kb'){setPanel("kb");setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:"center"}),150);}else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
 
-      :panel==="library"?<PanelBoundary key={panel}><LibrarySearchPanel t={t} btnS={btnS} inputS={inputS} onNavigate={result=>{if(result.kind==='chat')loadConversation(result.parent_id);else if(result.kind==='artifact')openArtifact(result.source_id);else if(result.kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(result.source_id);}else{setSelectedLibraryNote(result.source_id);setPanel('notes');}}}/></PanelBoundary>
+      :panel==="library"?<PanelBoundary key={panel}><LibrarySearchPanel state={libraryState} setState={setLibraryState} t={t} btnS={btnS} inputS={inputS} onNavigate={result=>{if(result.kind==='chat'){setMessageFocus({conversation:result.parent_id,id:result.source_id});loadConversation(result.parent_id);}else if(result.kind==='artifact')openArtifact(result.source_id);else if(result.kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(result.source_id);}else{setSelectedLibraryNote(result.source_id);setPanel('notes');}}}/></PanelBoundary>
 
-      :(panel==="tasks"||panel==="notifications")?<PanelBoundary key={panel}><TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/></PanelBoundary>
+      :(panel==="tasks"||panel==="notifications")?<PanelBoundary key={panel}><TasksPanel onNavigate={navigateWorkspaceContent} models={models} workspaces={workspaces} convs={convs} t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/></PanelBoundary>
 
       :panel==="email"?<PanelBoundary key={panel}><EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
 
-      :panel==="notes"?<PanelBoundary key={panel}><NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} initialNoteId={selectedLibraryNote}/></PanelBoundary>
+      :panel==="notes"?<PanelBoundary key={panel}><NotesPanel workspaces={workspaces} t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} initialNoteId={selectedLibraryNote} onInitialNoteConsumed={()=>setSelectedLibraryNote(null)}/></PanelBoundary>
 
       :panel==="calendar"?<PanelBoundary key={panel}><CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
 
@@ -7969,7 +7996,7 @@ function HyprChat(){
               const expanded=expandedRounds[ckey]===true;
               const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
               const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
-              return <div key={ckey} style={{background:`${t.surface}F5`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
+              return <div id={resp.id?`saved-message-${resp.id}`:undefined} key={ckey} style={{scrollMarginTop:80,background:`${t.surface}F5`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
                 <div style={{padding:11,borderBottom:`1px solid ${t.brd}22`,display:"flex",gap:9,alignItems:"center"}}>
                   {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
                   <div style={{minWidth:0,flex:1}}>
@@ -8052,7 +8079,7 @@ function HyprChat(){
                 const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
                 const turnTally=tallyFromVotes(turnVotes);
                 const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
-                return <div key={ti} style={{display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
+                return <div id={turn.user.id?`saved-message-${turn.user.id}`:undefined} key={ti} style={{scrollMarginTop:80,display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
                   <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
                     <div style={{width:26,height:26,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
                     <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
@@ -8066,7 +8093,7 @@ function HyprChat(){
                       const rKey=`${ti}-${rnd}`;
                       const resps=turn.rounds[rnd]||[];
                       const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
-                      const isExpanded=expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true;
+                      const isExpanded=resps.some(m=>String(m.id)===String(messageFocus?.id))|| (expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true);
                       return <div key={rnd} style={{marginBottom:14}}>
                         <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
                           <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
@@ -8090,7 +8117,7 @@ function HyprChat(){
                       </div>
                     </div>}
                     {ballotPanel(turnVotes,hostMeta)}
-                    {(turn.host||(isLive&&councilHostContent))&&<div style={{background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:10,padding:14,marginTop:12,animation:"fadeIn .3s"}}>
+                    {(turn.host||(isLive&&councilHostContent))&&<div id={turn.host?.id?`saved-message-${turn.host.id}`:undefined} style={{scrollMarginTop:80,background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:10,padding:14,marginTop:12,animation:"fadeIn .3s"}}>
                       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
                         <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
                         <div style={{minWidth:0,flex:1}}>
@@ -8172,7 +8199,7 @@ function HyprChat(){
               const quickSearchPayload=renderOpts?.quickSearch;
               const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
               return <React.Fragment key={`${actId}:${msg._activityKey||msg.id||i}`}>
-              <div className="msg-row" style={{marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
+              <div id={`saved-message-${msg.id}`} className="msg-row" style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
                 {grouped?<div style={{width:isU?28:40,flexShrink:0}}/>
                 :<div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}

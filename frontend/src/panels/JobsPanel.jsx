@@ -6,10 +6,11 @@ import { API, userScopedUrl } from '../session.js';
 import { apiJson } from '../api.js';
 
 const kinds=['research','coding','coding_run','document','image','indexing','scheduled'];
-export default function JobsPanel({t,btnS,inputS,onNavigate}){
+export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],workspaceId=""}){
   const [jobs,setJobs]=useState([]),[kind,setKind]=useState(''),[status,setStatus]=useState('');
   const [error,setError]=useState(''),[busy,setBusy]=useState(''),[refresh,setRefresh]=useState(0);
   const [offset,setOffset]=useState(0);
+  const [workspace,setWorkspace]=useState(workspaceId),[runResult,setRunResult]=useState(null);
   const epoch=useRef(0);
   useEffect(()=>{
     const version=++epoch.current,controller=new AbortController();
@@ -17,7 +18,7 @@ export default function JobsPanel({t,btnS,inputS,onNavigate}){
     const load=async()=>{
       if(loading)return;loading=true;
       try{
-        const data=await apiJson(`/api/jobs?kind=${kind}&status=${status}&offset=${offset}&limit=50`,{signal:controller.signal});
+        const data=await apiJson(`/api/jobs?kind=${kind}&status=${status}&offset=${offset}&limit=50&workspace_id=${workspace}`,{signal:controller.signal});
         if(version!==epoch.current)return;
         setJobs(data.jobs);setError('');
         if(!stream){
@@ -30,7 +31,7 @@ export default function JobsPanel({t,btnS,inputS,onNavigate}){
     };
     load();const poll=setInterval(load,10000);
     return()=>{epoch.current++;controller.abort();stream?.close();clearTimeout(timer);clearInterval(poll);};
-  },[kind,status,offset,refresh]);
+  },[kind,status,offset,refresh,workspace]);
   const act=async(job,action)=>{
     const version=epoch.current;setBusy(job.id);setError('');
     try{
@@ -44,6 +45,7 @@ export default function JobsPanel({t,btnS,inputS,onNavigate}){
   return <section style={{padding:20,overflowY:'auto',height:'100%',color:t.text}}>
     <PanelHeader t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/>
     <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+      <select aria-label="Jobs workspace" value={workspace} disabled={!!workspaceId} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
       <select aria-label="Job type" value={kind} onChange={e=>{setKind(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}>
         <option value="">All types</option>{kinds.map(k=><option key={k}>{k}</option>)}
       </select>
@@ -54,6 +56,7 @@ export default function JobsPanel({t,btnS,inputS,onNavigate}){
     </div>
     <OperationsSummary t={t}/>
     {error&&<p role="alert" style={{color:t.err}}>{error}</p>}
+    {runResult&&<article style={{padding:14,border:`1px solid ${t.brd}`,whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}><button style={btnS(t.acc)} onClick={()=>setRunResult(null)}>Close result</button><p>{runResult.result_text||runResult.error||'No output saved yet.'}</p></article>}
     {!jobs.length&&<p style={{color:t.dim}}>No jobs match these filters.</p>}
     <div style={{display:'grid',gap:12}}>{jobs.map(job=><article key={job.id} style={{padding:16,border:`1px solid ${t.brd}`,borderRadius:10,overflowWrap:'anywhere'}}>
       <div style={{fontWeight:700}}>{job.title||job.kind}</div>
@@ -64,6 +67,8 @@ export default function JobsPanel({t,btnS,inputS,onNavigate}){
       {job.status==='interrupted'&&<p style={{fontSize:12}}>Review saved outputs and possible external effects before starting again.</p>}
       {job.details.results?.length>0&&<details><summary>Per-file results</summary>{job.details.results.map(result=><div key={result.artifact_id} style={{margin:8}}>{result.artifact_id}: {result.status}{result.error&&` — ${result.error}`}{result.outputs?.map(output=><a key={output.artifact_id} href={userScopedUrl(output.url)} style={{display:'block',color:t.acc}}>{output.filename}</a>)}</div>)}</details>}
       <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        {job.kind==='scheduled'&&<button style={btnS(t.acc)} onClick={async()=>{try{setRunResult(await apiJson(`/api/tasks/runs/${job.domain_id}`));}catch(e){setError(e.message);}}}>Read result</button>}
+        {job.details.kb_id&&<button style={btnS(t.acc)} onClick={()=>onNavigate('kb',job.details.kb_id)}>Open knowledge base</button>}
         {job.details.conversation_id&&<button style={btnS(t.acc)} onClick={()=>onNavigate('chat',job.details.conversation_id)}>Open conversation</button>}
         {job.details.report_id&&<button style={btnS(t.acc)} onClick={()=>onNavigate('research',job.details.report_id)}>Open report</button>}
         {job.details.artifact_id&&<button style={btnS(t.acc)} onClick={()=>onNavigate('artifacts',job.details.artifact_id)}>Open artifact</button>}

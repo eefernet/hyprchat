@@ -1,3 +1,4 @@
+import {WorkspaceOverview,WorkspaceKnowledge,WorkspaceDaily} from './workspaceComponents.jsx';
 import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
 import {apiJson} from "../api.js";
 import {isDocumentEvent} from "../documentFiles.js";
@@ -1366,9 +1367,17 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   </div>;
 }
 
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearch,onNavigate}){
   const isMobile=useIsMobile();
-  const [tab,setTab]=React.useState("convs");
+  const identity=ws?.id, alive=React.useRef(identity);alive.current=identity;
+  React.useEffect(()=>()=>{alive.current=null;},[]);
+  const [actionBusy,setActionBusy]=React.useState(false);
+  const busyRef=React.useRef(false);
+  const reportError=e=>{if(e.name!=="AbortError")notify?.({type:"error",text:"Workspace change failed; your draft is retained",detail:e.message});};
+  const run=async fn=>{if(busyRef.current)return;busyRef.current=true;setActionBusy(true);try{return await fn();}catch(e){reportError(e);}finally{busyRef.current=false;if(alive.current===identity)setActionBusy(false);}};
+  const fetch=async(url,opts)=>{const response=await window.fetch(url,opts);if(alive.current!==identity)throw new DOMException('Workspace changed','AbortError');if(!response.ok){const d=await response.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${response.status}`);}const read=response.json.bind(response);response.json=async()=>{const data=await read();if(alive.current!==identity)throw new DOMException("Workspace changed","AbortError");return data;};return response;};
+
+  const [tab,setTab]=React.useState("overview");
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
   const [wsDesc,setWsDesc]=React.useState("");
@@ -1377,7 +1386,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   const [addSearch,setAddSearch]=React.useState("");
   const [analyzing,setAnalyzing]=React.useState(false);
   const [analyzeMsg,setAnalyzeMsg]=React.useState(null);
-  const [creatingKb,setCreatingKb]=React.useState(false);
+  const [initialCreate,setInitialCreate]=React.useState(false);
   const [memories,setMemories]=React.useState([]);
   const [memBlocks,setMemBlocks]=React.useState([]);
   const [memLoading,setMemLoading]=React.useState(false);
@@ -1403,19 +1412,19 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   React.useEffect(()=>{if(ws?.id&&tab==="memory")refreshMemory();},[ws?.id,tab,refreshMemory]);
   if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
   if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
-  const font="'JetBrains Mono',monospace";
+  const font="inherit";
   const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:undefined,boxSizing:"border-box"};
   const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5});
   const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
   const convIds=(ws.conversations||[]).map(c=>c.id);
   const availableConvs=convs.filter(c=>!convIds.includes(c.id));
   const filteredAvail=availableConvs.filter(c=>(c.title||"").toLowerCase().includes(addSearch.toLowerCase()));
-  const saveEdit=async()=>{
-    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})}).catch(()=>{});
+  const saveEdit=()=>run(async()=>{
+    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})});
     setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,name:wsName,description:wsDesc}:w));
     setWsDetail(d=>({...d,name:wsName,description:wsDesc}));
     setEditMode(false);
-  };
+  });
   const analyzeTopics=async()=>{
     const analyzableItems=[...(ws.conversations||[]).filter(c=>c.title&&c.title.trim()),...(ws.reports||[]).filter(r=>(r.title||r.query||"").trim())];
     if(!analyzableItems.length){setAnalyzeMsg({ok:false,text:"No chats or reports to analyze. Add workspace content first."});setTimeout(()=>setAnalyzeMsg(null),4000);return;}
@@ -1433,42 +1442,32 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setAnalyzing(false);
     setTimeout(()=>setAnalyzeMsg(null),5000);
   };
-  const createAgent=async()=>{
-    setCreatingKb(true);
-    try{
-      const r=await fetch(`${API}/api/workspaces/${ws.id}/create-kb`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:ws.name})});
-      const kb=await r.json();
-      const mcR=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:`${ws.name} Agent`,base_model:models[0]||"",system_prompt:`You are a specialized assistant with knowledge from: ${ws.name}`,tool_ids:[],kb_ids:[kb.id],parameters:{profile_type:"agent",description:`Workspace agent grounded in ${ws.name}.`}})});
-      const mc=await mcR.json();
-      onPersonaCreated(mc);
-    }catch{}
-    setCreatingKb(false);
-  };
-  const addConv=async(convId)=>{
-    await fetch(`${API}/api/workspaces/${ws.id}/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:convId})}).catch(()=>{});
+  const addConv=(convId)=>run(async()=>{
+    await fetch(`${API}/api/workspaces/${ws.id}/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:convId})});
     const conv=convs.find(c=>c.id===convId);
     if(conv){setWsDetail(d=>({...d,conversations:[...(d.conversations||[]),{id:conv.id,title:conv.title,model:conv.model,updated_at:conv.updated_at}]}));setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:(w.conv_count||0)+1}:w));}
-  };
-  const removeConv=async(convId)=>{
-    await fetch(`${API}/api/workspaces/${ws.id}/conversations/${convId}`,{method:"DELETE"}).catch(()=>{});
+  });
+  const removeConv=(convId)=>run(async()=>{
+    await fetch(`${API}/api/workspaces/${ws.id}/conversations/${convId}`,{method:"DELETE"});
     setWsDetail(d=>({...d,conversations:(d.conversations||[]).filter(c=>c.id!==convId)}));
     setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:Math.max(0,(w.conv_count||0)-1)}:w));
-  };
-  const deleteWs=async()=>{
-    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"DELETE"}).catch(()=>{});
+  });
+  const deleteWs=()=>run(async()=>{
+    if(!await confirmAction({title:"Delete workspace",body:"Remove this workspace and its memory? Linked content is kept. Scheduled tasks are paused and detached.",confirmLabel:"Delete workspace",tone:"danger"}))return;
+    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"DELETE"});
     setWorkspaces(p=>p.filter(w=>w.id!==ws.id));
     setActiveWs(null);setWsDetail(null);
-  };
+  });
   const patchWsMemory=async(fields)=>{
-    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)}).catch(()=>{});
+    await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(fields)});
     setWsDetail(d=>({...d,...fields}));
     setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,...fields}:w));
   };
-  const toggleMemory=()=>patchWsMemory({memory_enabled:(ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true)?0:1});
-  const saveInstructions=async()=>{
+  const toggleMemory=()=>run(()=>patchWsMemory({memory_enabled:(ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true)?0:1}));
+  const saveInstructions=()=>run(async()=>{
     await patchWsMemory({instructions:wsInstructions});
     notify&&notify({type:"success",text:"Workspace instructions saved",duration:2200});
-  };
+  });
   const scanMemory=async()=>{
     if(!ws?.id)return;
     setMemScanning(true);
@@ -1508,7 +1507,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     catch(e){notify&&notify({type:"error",text:"Delete failed",detail:e.message||String(e)});}
   };
   const startMemEdit=(m)=>{setMemEdit(m.id);setMemEditText(m.content||"");};
-  const saveMemEdit=async(m,accept=false)=>{
+  const saveMemEdit=(m,accept=false)=>run(async()=>{
     const r=await fetch(`${API}/api/workspaces/${ws.id}/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:memEditText})});
     let updated=await r.json();
     if(accept&&updated.status!=="accepted"){
@@ -1516,7 +1515,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
       updated=await ar.json();
     }
     updateMemoryLocal(updated);setMemEdit(null);setMemEditText("");
-  };
+  });
   const createManualMemory=async()=>{
     const content=newMemText.trim();if(!content)return;
     try{
@@ -1551,7 +1550,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   };
   return<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}F5`,flexShrink:0}}>
-      <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:8}}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:10,flexWrap:"wrap",marginBottom:8}}>
         <span style={{fontSize:24,lineHeight:1}}>🗂</span>
         <div style={{flex:1,minWidth:0}}>
           {editMode?<input value={wsName} onChange={e=>setWsName(e.target.value)} style={{...inputS,fontSize:16,fontWeight:700,background:"transparent",border:`1px solid ${t.acc}44`,marginBottom:6}}/>
@@ -1559,12 +1558,12 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           {editMode?<input value={wsDesc} onChange={e=>setWsDesc(e.target.value)} placeholder="Description..." style={{...inputS,fontSize:"var(--hc-text-control)",color:t.mut}}/>
             :<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{ws.description||"No description"}</div>}
         </div>
-        <div style={{display:"flex",gap:4,flexShrink:0}}>
+        <div style={{display:"flex",gap:4,flexWrap:"wrap",flex:"0 1 auto",maxWidth:"100%"}}>
           {editMode
             ?<><button onClick={saveEdit} style={btnS(t.ok)}>💾 Save</button><button onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></>
             :<><button onClick={()=>setEditMode(true)} style={btnS(t.mut)}>✏️ Edit</button>
               <button onClick={analyzeTopics} disabled={analyzing} style={btnS(t.acc)}>{analyzing?"⏳":"🔬"} Analyze</button>
-              <button onClick={createAgent} disabled={creatingKb} style={btnS(t.pink)}>{creatingKb?"⏳":"✦"} Create Agent</button>
+              <button onClick={()=>setTab("knowledge")} style={btnS(t.pink)}>✦ Knowledge / Agent</button>
               <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
         </div>
       </div>
@@ -1573,8 +1572,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         {topics.map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
       </div>}
     </div>
-    <div style={{display:"flex",gap:0,borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["convs","💬 Conversations"],["memory","🧠 Memory"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setTab(id);setAddPanel(false);}} style={{padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:tab===id?700:400}}>{label}</button>)}
+    <div style={{display:"flex",gap:0,overflowX:"auto",borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
+      {[["overview","Overview"],["convs","💬 Conversations"],["knowledge","Knowledge"],["memory","🧠 Memory"],["notes","Notes"],["tasks","Tasks"],["jobs","Jobs"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setInitialCreate(false);setTab(id);setAddPanel(false);}} style={{flexShrink:0,whiteSpace:"nowrap",padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:tab===id?700:400}}>{label}</button>)}
       {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>+ Add Chats</button>}
     </div>
     {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
@@ -1588,7 +1587,12 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </div>)}
       </div>
     </div>}
-    <div style={{flex:1,overflowY:"auto",padding:20}}>
+    {actionBusy&&<div role="status" style={{padding:8,color:t.mut}}>Saving…</div>}
+    <div style={{flex:1,overflowY:"auto",padding:isMobile?12:20}}>
+      {tab==='overview'&&<WorkspaceOverview {...{ws,t,btnS,onOpenConv,onOpenReport,onNavigate}} onNewChat={onNewChat} onSearch={onSearch} onTab={(next,create=false)=>{setInitialCreate(create);setTab(next);}}/>}
+      {tab==='knowledge'&&<WorkspaceKnowledge key={ws.id} {...{ws,t,btnS,inputS,onPersonaCreated,models,notify}}/>}
+      {['notes','tasks','jobs'].includes(tab)&&<WorkspaceDaily {...{tab,ws,t,btnS,inputS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate}}/>}
+
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
         {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint={'Click "+ Add Chats" to add some.'}/>}
         {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>

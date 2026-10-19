@@ -74,8 +74,8 @@ async def message_context(message_id: int):
 
 
 @router.get('/api/jobs')
-async def list_jobs(kind: str = '', status: str = '', limit: int = 100, offset: int = 0):
-    return await job_registry.list_jobs(kind=kind, status=status, limit=limit, offset=offset)
+async def list_jobs(kind: str = '', status: str = '', limit: int = 100, offset: int = 0, workspace_id: str = ''):
+    return await job_registry.list_jobs(kind=kind, status=status, limit=limit, offset=offset,workspace_id=workspace_id)
 
 
 @router.get('/api/jobs/{job_id}')

@@ -6,7 +6,7 @@ from datetime import datetime
 import database as db
 
 TASK_FIELDS = ('id', 'user_id', 'title', 'prompt', 'task_type', 'model',
-               'tool_ids', 'delivery_json', 'conversation_id')
+               'tool_ids', 'delivery_json', 'conversation_id', 'workspace_id')
 
 
 async def enqueue(task, *, trigger, extra_context='', advance=None):

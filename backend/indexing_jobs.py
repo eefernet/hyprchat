@@ -90,7 +90,7 @@ async def latest(kb_id,filename):
         if not rows:return None
         row=dict(rows[0]);state=row['status']
         return {**json.loads(row['result_json']), 'filename':filename,'job_id':row['id'],
-            'status':'indexing' if state in {'queued','running'} else 'done' if state=='succeeded' else 'error',
+            'state':state, 'status':'indexing' if state in {'queued','running'} else 'done' if state=='succeeded' else 'partial' if state=='partial' else 'error',
             'error':row['error']}
     finally: await conn.close()
 

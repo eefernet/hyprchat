@@ -13,12 +13,13 @@ def redact(value):
 
 
 async def capture(message_id, *, model, provider, options, memories, retrieved, sources,
-                  tools, messages, original_chars, thinking=None, effort=None):
+                  tools, messages, original_chars, thinking=None, effort=None, knowledge_ids=None):
     if message_id is None: return
     payload={'version':1,'model':model,'provider':provider,
         'settings':{k:v for k,v in options.items() if k in {'num_ctx','num_predict','temperature','top_p','top_k','repeat_penalty','seed'}},
-        'thinking_enabled':thinking, 'effort':effort,
+        'thinking_enabled':thinking, 'effort':effort, 'knowledge_base_ids':knowledge_ids or [],
         'memories':{name:{'ids':list(info.get('memory_ids') or []),'block_ids':list(info.get('block_ids') or []),
+            'workspace': ({'id':info['workspace']['id'],'name':info['workspace']['name']} if info.get('workspace') else None),
             'selected_context':redact(info.get('context'))[:20000]} for name,info in memories.items()},
         'retrieved_context':redact(retrieved)[:60000],
         'search_sources':[{'title':redact(s.get('title'))[:300],'url':redact(s.get('url'))[:2000]} for s in sources[:50] if isinstance(s,dict)],

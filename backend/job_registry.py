@@ -77,7 +77,8 @@ async def migrate(conn):
                 'retryable',json_extract(job_json,'$.retryable')) FROM image_jobs''',
         'task_runs': '''SELECT 'scheduled',r.id,r.user_id,r.status,t.title,r.error,
             COALESCE(i.queued_at,r.started_at),COALESCE(r.finished_at,r.started_at),r.finished_at,
-            json_object('task_id',r.task_id,'conversation_id',t.conversation_id,'report_id',i.child_report_id)
+            json_object('task_id',r.task_id,'conversation_id',COALESCE(json_extract(i.task_json,'$.conversation_id'),t.conversation_id),
+                'workspace_id',COALESCE(json_extract(i.task_json,'$.workspace_id'),t.workspace_id),'report_id',i.child_report_id)
             FROM task_runs r JOIN scheduled_tasks t ON t.id=r.task_id LEFT JOIN task_run_inputs i ON i.run_id=r.id''',
     }
     for table, query in sources.items():
@@ -179,10 +180,17 @@ async def _progress(conn, item):
     return item
 
 
-async def list_jobs(*, kind='', status='', limit=100, offset=0):
+async def list_jobs(*, kind='', status='', limit=100, offset=0, workspace_id=''):
     conn = await db.get_db()
     try:
         where, args = 'user_id=?', [db.current_user_id()]
+        if workspace_id:
+            where += ''' AND EXISTS(SELECT 1 FROM workspaces w WHERE w.id=? AND w.user_id=jobs.user_id AND (
+                EXISTS(SELECT 1 FROM workspace_conversations l WHERE l.workspace_id=w.id AND l.conversation_id=json_extract(jobs.details_json,'$.conversation_id')) OR
+                EXISTS(SELECT 1 FROM workspace_research_reports l WHERE l.workspace_id=w.id AND l.report_id=json_extract(jobs.details_json,'$.report_id')) OR
+                EXISTS(SELECT 1 FROM workspace_knowledge_bases l WHERE l.workspace_id=w.id AND l.kb_id=json_extract(jobs.details_json,'$.kb_id')) OR
+                json_extract(jobs.details_json,'$.workspace_id')=w.id))'''
+            args.append(workspace_id)
         if kind: where += ' AND kind=?'; args.append(kind)
         if status == 'active': where += " AND status IN ('queued','running','cancelling')"
         elif status: where += ' AND status=?'; args.append(status)

@@ -9,25 +9,29 @@ import { EmptyState } from '../components/hyprChatWidgets.jsx';
 import { SkeletonCard } from '../components/Skeleton.jsx';
 import useIsMobile from '../useIsMobile.js';
 
-const EMPTY={kind:"todo",title:"",content:"",due_local:"",remind_local:""};
+const EMPTY={kind:"todo",title:"",content:"",due_local:"",remind_local:"",tags:[],workspace_ids:[]};
 
-export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,initialNoteId}){
+export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,initialNoteId,onInitialNoteConsumed,workspaces=[],workspaceId="",initialCreate=false}){
   const isMobile=useIsMobile();
   const [notes,setNotes]=useState([]);
+  const [workspace,setWorkspace]=useState(workspaceId),[tag,setTag]=useState(""),[offset,setOffset]=useState(0),[allNotes,setAllNotes]=useState([]);
   const [loaded,setLoaded]=useState(false);
   const [tab,setTab]=useState("todo");
-  const [form,setForm]=useState(null);
+  const [form,setForm]=useState(()=>initialCreate?{...EMPTY,workspace_ids:workspaceId?[workspaceId]:[]}:null);
   const [showDone,setShowDone]=useState(false);
   const [err,setErr]=useState("");
   const [loadErr,setLoadErr]=useState("");
   const openedNote=useRef(null);
-  useEffect(()=>{if(initialNoteId&&openedNote.current!==initialNoteId){const note=notes.find(n=>n.id===initialNoteId);if(note){openedNote.current=initialNoteId;setTab(note.kind);setForm({...EMPTY,...note});}}},[initialNoteId,notes]);
+  useEffect(()=>{if(!initialNoteId||openedNote.current===initialNoteId)return;const c=new AbortController();apiJson(`/api/notes/${initialNoteId}`,{signal:c.signal}).then(note=>{openedNote.current=initialNoteId;setTab(note.kind);setForm({...EMPTY,...note});onInitialNoteConsumed?.();}).catch(e=>{if(e.name!=='AbortError')setErr(e.message);});return()=>c.abort();},[initialNoteId]);
 
+  const loadEpoch=useRef(0);
   const load=useCallback(async()=>{
-    try{setNotes(await apiJson("/api/notes"));setLoadErr("");}catch(e){setLoadErr(String(e.message||e));}
-    finally{setLoaded(true);}
-  },[]);
-  useEffect(()=>{load();},[load]);
+    const version=++loadEpoch.current;
+    try{const data=await apiJson(`/api/notes?workspace_id=${workspace}&tag=${encodeURIComponent(tag)}&offset=${offset}&kind=${tab}&include_done=${showDone}`);if(version===loadEpoch.current){setNotes(data);setLoadErr("");}}catch(e){if(version===loadEpoch.current&&e.name!=="AbortError")setLoadErr(String(e.message||e));}
+    finally{if(version===loadEpoch.current)setLoaded(true);}
+  },[workspace,tag,offset,tab,showDone]);
+  const loadLatest=useRef(load);loadLatest.current=load;
+  useEffect(()=>{let alive=true;load();if(workspace)apiJson("/api/notes").then(d=>{if(alive)setAllNotes(d);}).catch(()=>{});return()=>{alive=false;};},[load,workspace]);
 
   const save=async()=>{
     if(!form?.title?.trim())return;
@@ -36,21 +40,21 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
       const r=await fetch(`${API}/api/notes${form.id?`/${form.id}`:""}`,{
         method:form.id?"PATCH":"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({kind:form.kind,title:form.title,content:form.content,
-          due_local:form.due_local||"",remind_local:form.remind_local||""})});
+          due_local:form.due_local||"",remind_local:form.remind_local||"",tags:form.tags||[],workspace_ids:form.workspace_ids||[]})});
       if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
-      setForm(null);load();
+      setForm(null);loadLatest.current();
     }catch(e){setErr(String(e.message||e));}
   };
   const toggleDone=async n=>{
     try{await apiJson(`/api/notes/${n.id}`,{method:"PATCH",body:{done:!n.done}});}
     catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Update failed",detail:String(e.message||e)});}
-    finally{load();} // reload either way so the checkbox reflects server truth
+    finally{loadLatest.current();} // reload either way so the checkbox reflects server truth
   };
   const remove=async id=>{
     if(!await confirmAction({title:"Delete item",body:"Delete this item?",confirmLabel:"Delete",tone:"danger"}))return;
     try{await apiJson(`/api/notes/${id}`,{method:"DELETE"});}
     catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
-    finally{load();}
+    finally{loadLatest.current();}
   };
 
   const shown=notes.filter(n=>n.kind===tab&&(showDone||!n.done));
@@ -60,17 +64,20 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
     <PanelHeader t={t} color={t.ok} icon={<IC.Pencil/>} title="Notes & Todos"
       subtitle="Reminders fire as notifications; the assistant reads these in check-ins."
       nav={<>
-        <button onClick={()=>setTab("todo")} style={{...btnS(tab==="todo"?t.ok:t.mut),padding:"5px 12px"}}>Todos</button>
-        <button onClick={()=>setTab("note")} style={{...btnS(tab==="note"?t.ok:t.mut),padding:"5px 12px"}}>Notes</button>
+        <button onClick={()=>{setTab("todo");setOffset(0);}} style={{...btnS(tab==="todo"?t.ok:t.mut),padding:"5px 12px"}}>Todos</button>
+        <button onClick={()=>{setTab("note");setOffset(0);}} style={{...btnS(tab==="note"?t.ok:t.mut),padding:"5px 12px"}}>Notes</button>
         <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:5,alignItems:"center",marginLeft:6}}>
-          <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}/> show done
+          <input type="checkbox" checked={showDone} onChange={e=>{setShowDone(e.target.checked);setOffset(0);}}/> show done
         </label>
       </>}>
       <button onClick={load} title="Refresh notes" style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
-      <button onClick={()=>setForm({...EMPTY,kind:tab})} style={btnS(t.warm)}><IC.Plus/> New</button>
+      <button onClick={()=>setForm({...EMPTY,kind:tab,workspace_ids:workspace?[workspace]:[]})} style={btnS(t.warm)}><IC.Plus/> New</button>
     </PanelHeader>
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:760}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}><select aria-label="Notes workspace" disabled={!!workspaceId} value={workspace} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select><input aria-label="Filter notes by tag" value={tag} onChange={e=>{setTag(e.target.value);setOffset(0);}} placeholder="Filter by tag" style={{...inputS,width:'auto'}}/>
+        {workspace&&<select value="" aria-label="Link existing note" style={{...inputS,width:'auto'}} onChange={async e=>{const id=e.target.value;if(!id)return;try{await apiJson(`/api/workspaces/${workspace}/links/notes/${id}`,{method:'POST'});loadLatest.current();}catch(error){setErr(error.message);}}}><option value="">Link existing note / todo…</option>{allNotes.filter(n=>!(n.workspace_ids||[]).includes(workspace)).map(n=><option key={n.id} value={n.id}>{n.title}</option>)}</select>}</div>
+
         {(err||loadErr)&&<div role="alert" style={{color:t.err,fontSize:12,marginBottom:12}}>{err||loadErr}</div>}
         {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.ok}55`}}>
           <div style={{display:"flex",gap:8,marginBottom:8}}>
@@ -86,6 +93,8 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
             <div style={{minWidth:0,maxWidth:"100%"}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Remind me at</div>
               <input type="datetime-local" value={form.remind_local||""} onChange={e=>setForm(f=>({...f,remind_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
           </div>
+          <label style={{display:'block',marginBottom:8}}>Tags (comma separated)<input value={(form.tags||[]).join(', ')} onChange={e=>setForm(f=>({...f,tags:e.target.value.split(',').map(v=>v.trim())}))} style={inputS}/></label>
+          <fieldset style={{border:`1px solid ${t.brd}`,marginBottom:10}}><legend>Workspaces</legend>{workspaces.map(w=><label key={w.id} style={{display:'block'}}><input type="checkbox" checked={(form.workspace_ids||[]).includes(w.id)} onChange={e=>setForm(f=>({...f,workspace_ids:e.target.checked?[...(f.workspace_ids||[]),w.id]:(f.workspace_ids||[]).filter(id=>id!==w.id)}))}/>{w.name}</label>)}</fieldset>
           <div style={{display:"flex",gap:8}}>
             <button onClick={save} style={btnS(t.ok)}>{form.id?"Save":"Add"}</button>
             <button onClick={()=>setForm(null)} style={btnS(t.mut)}>Cancel</button>
@@ -103,9 +112,11 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
               {n.remind_local?` · remind ${fmtLocal(n.remind_local)}${n.reminded?" (sent)":""}`:""}
             </div>
           </div>
-          <button aria-label="Edit" onClick={()=>setForm({id:n.id,kind:n.kind,title:n.title,content:n.content||"",due_local:n.due_local||"",remind_local:n.remind_local||""})} style={{...btnS(t.acc),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
+          <button aria-label="Edit" onClick={()=>setForm({...EMPTY,...n})} style={{...btnS(t.acc),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Pencil/></button>
+          {workspace&&<button style={btnS(t.mut)} onClick={async()=>{try{await apiJson(`/api/workspaces/${workspace}/links/notes/${n.id}`,{method:'DELETE'});loadLatest.current();}catch(error){setErr(error.message);}}}>Unlink</button>}
           <button aria-label="Delete" onClick={()=>remove(n.id)} style={{...btnS(t.err),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
         </div>)}
+        <div style={{display:"flex",gap:8}}><button disabled={!offset} style={btnS(t.acc)} onClick={()=>setOffset(n=>Math.max(0,n-200))}>Previous</button><button disabled={notes.length<200} style={btnS(t.acc)} onClick={()=>setOffset(n=>n+200)}>Next</button></div>
       </div>
     </div>
   </div>;

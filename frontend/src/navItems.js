@@ -7,6 +7,8 @@ import { IC } from "./components/icons.jsx";
 // state value in main.jsx. Registry order IS the default order.
 export const NAV_ITEMS = [
   { id: "chat", label: "Chat", short: "Chat", icon: IC.Chat },
+  { id: "workspaces", label: "Workspaces", short: "Workspaces", icon: IC.Layers },
+  { id: "library", label: "Library Search", short: "Search", icon: IC.Search },
   { id: "research", label: "Deep Research", short: "Research", icon: IC.Research },
   { id: "council", label: "Council of AI", short: "Council", icon: IC.Council },
   { id: "personas", label: "Agents", short: "Agents", icon: IC.Cube },
@@ -31,7 +33,7 @@ export const NAV_ITEM_MAP = Object.fromEntries(NAV_ITEMS.map((i) => [i.id, i]));
 export const DEFAULT_NAV_LAYOUT = {
   v: 1,
   bar: ["chat", "research", "council", "personas", "images"],
-  more: ["assistant", "tasks", "jobs", "calendar", "notes", "email", "artifacts", "memory", "prompts", "kb", "tools", "models", "analytics"],
+  more: ["workspaces", "library", "assistant", "tasks", "jobs", "calendar", "notes", "email", "artifacts", "memory", "prompts", "kb", "tools", "models", "analytics"],
   hidden: [],
 };
 

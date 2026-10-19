@@ -31,6 +31,7 @@ export default function ContextInspector({messageId,t,onClose,onRestore}){
         {round.usage&&<p>{round.usage.prompt_tokens} input tokens · {round.usage.gen_tokens} output tokens · {round.usage.elapsed_seconds}s</p>}
         <p>{round.provider} · {round.message_count} messages · {round.context_chars} characters · {round.truncated_chars} characters removed</p>
         <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{JSON.stringify(round.settings,null,2)}</pre>
+        <p>Workspace: {round.memories?.workspace?.workspace?.name||'None'}<br/>Knowledge bases: {(round.knowledge_base_ids||[]).join(', ')||'None'}</p>
         {Object.entries(round.memories||{}).map(([name,memory])=><details key={name}><summary>{name} memories ({memory.ids.length})</summary><p>{memory.ids.join(', ')||'None selected'}</p><pre style={{whiteSpace:'pre-wrap'}}>{memory.selected_context}</pre></details>)}
         <details><summary>Retrieved passages</summary><pre style={{whiteSpace:'pre-wrap'}}>{round.retrieved_context||'None recorded'}</pre></details>
         <details><summary>Search sources</summary>{round.search_sources.map((source,i)=><p key={i}>{source.title}<br/>{source.url}</p>)}</details>

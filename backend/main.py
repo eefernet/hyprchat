@@ -706,6 +706,7 @@ class FetchUrlRequest(BaseModel):
     max_chars: int = config.MAX_FETCH_CHARS
 
 class ConversationCreate(BaseModel):
+    workspace_context: Optional[dict] = None
     title: str = "New Chat"
     model: str = config.DEFAULT_MODEL
     system_prompt: str = ""
@@ -713,6 +714,7 @@ class ConversationCreate(BaseModel):
     use_memories: Optional[str] = "0"
 
 class ConversationUpdate(BaseModel):
+    workspace_context: Optional[dict] = None
     title: Optional[str] = None
     model: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -2019,8 +2021,11 @@ async def cancel_coder_workflow(workflow_id: str):
 @app.post("/api/conversations")
 async def create_conversation(req: ConversationCreate):
     id = f"conv-{uuid.uuid4().hex[:12]}"
-    await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id, req.use_memories or "0")
-    return {"id": id, **req.model_dump()}
+    try:
+        await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id, req.use_memories or "0", req.workspace_context)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_conversation(id)
 
 
 @app.get("/api/conversations")
@@ -2039,8 +2044,12 @@ async def get_conversation(conv_id: str):
 @app.patch("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, req: ConversationUpdate):
     kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
-    await db.update_conversation(conv_id, **kwargs)
-    return {"status": "updated"}
+    if not await db.get_conversation(conv_id): raise HTTPException(404, "Conversation not found")
+    try:
+        await db.update_conversation(conv_id, **kwargs)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_conversation(conv_id)
 
 
 @app.delete("/api/conversations/{conv_id}")
@@ -3209,7 +3218,9 @@ async def list_workspaces():
 @app.post("/api/workspaces")
 async def create_workspace_ep(body: dict = Body(...)):
     ws_id = f"ws-{uuid.uuid4().hex[:8]}"
-    return await db.create_workspace(ws_id, body.get("name", "New Workspace"), body.get("description", ""))
+    name = str(body.get("name", "New Workspace")).strip()
+    if not name or len(name)>200: raise HTTPException(400, "Workspace name must be 1–200 characters")
+    return await db.create_workspace(ws_id, name, str(body.get("description", "")))
 
 
 @app.get("/api/workspaces/{ws_id}")
@@ -3222,8 +3233,18 @@ async def get_workspace_ep(ws_id: str):
 
 @app.patch("/api/workspaces/{ws_id}")
 async def update_workspace_ep(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id): raise HTTPException(404, "Workspace not found")
+    for field in ('description','instructions'):
+        if field in body and (not isinstance(body[field],str) or len(body[field])>20000):
+            raise HTTPException(400, f'{field} must be text of at most 20000 characters')
+    if 'memory_enabled' in body and body['memory_enabled'] not in (0,1,True,False,'0','1'):
+        raise HTTPException(400, 'memory_enabled must be 0 or 1')
+    if 'name' in body:
+        if not isinstance(body['name'],str) or not body['name'].strip() or len(body['name'])>200:
+            raise HTTPException(400, "Workspace name must be 1–200 characters")
+        body['name'] = body['name'].strip()
     await db.update_workspace(ws_id, **body)
-    return {"ok": True}
+    return await db.get_workspace(ws_id)
 
 
 @app.delete("/api/workspaces/{ws_id}")
@@ -3234,12 +3255,15 @@ async def delete_workspace_ep(ws_id: str):
 
 @app.post("/api/workspaces/{ws_id}/conversations")
 async def add_conv_to_ws(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id) or not await db.get_conversation(body.get("conversation_id", "")):
+        raise HTTPException(404, "Workspace or conversation not found")
     await db.add_conv_to_workspace(ws_id, body["conversation_id"])
     return {"ok": True}
 
 
 @app.delete("/api/workspaces/{ws_id}/conversations/{conv_id}")
 async def remove_conv_from_ws(ws_id: str, conv_id: str):
+    if not await db.get_workspace_basic(ws_id): raise HTTPException(404, "Workspace not found")
     await db.remove_conv_from_workspace(ws_id, conv_id)
     return {"ok": True}
 
@@ -3773,17 +3797,20 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
     if not ws:
         raise HTTPException(404)
     parts = [f"# Workspace: {ws['name']}\n{ws.get('description', '')}"]
+    coverage = {"created_at": datetime.utcnow().isoformat(), "conversation_ids": [], "report_ids": [], "truncated": False}
     total = 0
     MAX = 60000
     for conv_meta in ws.get("conversations", []):
         conv = await db.get_conversation(conv_meta["id"])
         if not conv:
             continue
+        coverage["conversation_ids"].append(conv_meta["id"])
         parts.append(f"\n\n=== {conv.get('title', 'Chat')} ===")
         for msg in conv.get("messages", []):
             if msg["role"] not in ("user", "assistant"):
                 continue
-            chunk = msg["content"][:2000]
+            chunk = msg["content"][:min(2000, max(0,MAX-total))]
+            coverage["truncated"] |= len(chunk)<len(msg["content"])
             parts.append(f"\n[{'User' if msg['role'] == 'user' else 'Assistant'}]: {chunk}")
             total += len(chunk)
             if total >= MAX:
@@ -3796,6 +3823,7 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
             report = await db.get_research_report(report_meta["id"])
             if not report:
                 continue
+            coverage["report_ids"].append(report_meta["id"])
             parts.append(f"\n\n=== Research Report: {report.get('title') or report.get('query', 'Untitled')} ===")
             report_bits = [
                 f"Query: {report.get('query', '')}",
@@ -3804,6 +3832,8 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
                 (report.get("report_markdown") or "")[:8000],
             ]
             chunk = "\n".join(bit for bit in report_bits if bit).strip()
+            coverage["truncated"] |= len(chunk)>MAX-total or len(report.get("report_markdown") or "")>8000
+            chunk = chunk[:max(0,MAX-total)]
             parts.append("\n" + chunk)
             total += len(chunk)
             if total >= MAX:
@@ -3819,8 +3849,13 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
     with open(fpath, "w", encoding="utf-8") as fh:
         fh.write(kb_content)
     await db.add_kb_file(kb_id, "workspace_knowledge.md", fpath, len(kb_content.encode()), "text/markdown")
-    all_kbs = await db.get_kbs()
-    return next((k for k in all_kbs if k["id"] == kb_id), {"id": kb_id, "name": kb_name})
+    coverage['omitted_conversations'] = len(ws.get('conversations',[]))-len(coverage['conversation_ids'])
+    coverage['omitted_reports'] = len(ws.get('reports',[]))-len(coverage['report_ids'])
+    import workspace_service, indexing_jobs
+    await workspace_service.link(ws_id, 'knowledge', kb_id, snapshot=coverage)
+    indexing_id = await indexing_jobs.submit(kb_id, 'workspace_knowledge.md', fpath)
+    _track_bg(indexing_jobs.execute(indexing_id))
+    return {**(await db.get_kb(kb_id)), 'indexing_job_id': indexing_id, 'snapshot': coverage}
 
 
 # ============================================================

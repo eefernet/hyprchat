@@ -267,7 +267,14 @@ Councils run multiple models against the same prompt, optionally debate across r
 
 ### 📚 Knowledge Bases & Workspaces
 
-Upload documents, attach knowledge bases to profiles, index uploaded code projects, and group related chats into workspaces. Workspaces can analyze topics and generate profile prompts from accumulated context.
+Upload documents, attach knowledge bases to profiles, index uploaded code projects, and organize related work in **Workspaces** (under More by default). Each workspace has an overview, chats, linked knowledge, reviewed memory, notes/todos, tasks, jobs, reports, and artifacts.
+
+- **Project chat context** — New chat from a workspace saves and links the conversation together. A chat can use a selected workspace, automatic context (only when linked to exactly one workspace), or no workspace context. Linked KBs join profile KBs during retrieval; workspace memory still requires enablement and accepted/current entries. Ghost Mode excludes both. The context inspector records the workspace and KBs used for each response.
+- **Knowledge snapshots** — create a bounded snapshot of linked chats and reports, inspect its creation time and omitted/truncated sources, then wait for indexing before creating an agent. Snapshots do not update automatically. Per-file readiness, retry, and Test knowledge are available in workspace and KB panels; a timeout is never reported as completed indexing.
+- **Daily work** — link notes to several workspaces, edit/filter tags, and view todos by due date. Scheduled tasks can belong to one workspace, with model, tools, timezone, conversation, delivery options, and a three-occurrence schedule preview. Run history retains full results with conversation/report links; queued runs retain their submitted workspace selection.
+- **Find and reopen** — Search this workspace or Library Search finds chats, notes, reports, and artifacts, including artifacts inherited from linked chats. Chat hits open the matching saved message, note hits open the exact note, and returning to search preserves its filters.
+
+Deleting a workspace preserves its chats, notes, knowledge, reports, and artifacts. It removes workspace-specific memory and links, pauses and detaches its tasks, and cancels queued runs for that workspace. Work already running can finish; review it in Jobs. Database upgrades add the association tables and context fields automatically on startup.
 
 KB answers use **hybrid retrieval** (ChromaDB vectors + SQLite FTS5 keywords, fused) and render clickable inline `[n]` citation chips.
 
