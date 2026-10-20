@@ -71,3 +71,108 @@ async def index_file(kb_id: str, file_id: int):
         raise HTTPException(409, 'Saved source is unavailable; upload it again before indexing') from exc
     route_context().track_bg(indexing_jobs.execute(identity))
     return {'job_id': identity, 'status': 'indexing'}
+
+
+@router.get('/api/workspaces/{ws_id}/defaults')
+async def defaults(ws_id: str):
+    try:
+        return await workspaces.resolve_defaults({},ws_id)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@router.get('/api/workspaces/{ws_id}/sources')
+async def sources(ws_id: str, query: str='', kind: str='', limit: int=50, offset: int=0, pinned: bool=False):
+    try:
+        result=await workspaces.list_sources(ws_id,query,kind,limit,offset,pinned)
+        from .context import route_context
+        for item in result['items']:
+            if item['kind']=='artifact' and item['readiness']=='unindexed' and item['enabled']:
+                route_context().track_bg(workspaces.prepare_artifact(ws_id,item['source_id']))
+        return result
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+
+
+@router.patch('/api/workspaces/{ws_id}/sources/{kind}/{identity}')
+async def source_settings(ws_id: str, kind: str, identity: str, body: dict):
+    try:
+        return await workspaces.set_source_preferences(ws_id,kind,identity,body)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.get('/api/workspaces/{ws_id}/picker/{kind}')
+async def picker(ws_id: str, kind: str, query: str='', limit: int=30, offset: int=0):
+    try:
+        return await workspaces.picker(ws_id,kind,query,max(1,min(limit,100)),offset)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.post('/api/workspaces/{ws_id}/sources/{kind}/{identity}/link')
+async def link_source(ws_id: str, kind: str, identity: str):
+    try:
+        await workspaces.link_source(ws_id,kind,identity)
+        return {'ok':True}
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.delete('/api/workspaces/{ws_id}/sources/{kind}/{identity}/link')
+async def unlink_source(ws_id: str, kind: str, identity: str):
+    try:
+        await workspaces.link_source(ws_id,kind,identity,remove=True)
+        return {'ok':True}
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+from fastapi import File, UploadFile
+
+
+@router.post('/api/workspaces/{ws_id}/upload')
+async def upload(ws_id: str, file: UploadFile=File(...)):
+    import config, uuid, hashlib
+    from pathlib import Path
+    from .context import route_context
+    try:
+        await workspaces.require_workspace(ws_id)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    title=Path(file.filename or 'upload').name
+    data=await file.read(config.MAX_UPLOAD_SIZE_MB*1024*1024+1)
+    if len(data)>config.MAX_UPLOAD_SIZE_MB*1024*1024:
+        raise HTTPException(413,'File exceeds upload size limit')
+    return await workspaces.save_source_file(ws_id,'document',uuid.uuid4().hex,hashlib.sha256(data).hexdigest(),title,data,route_context().track_bg)
+
+
+@router.get('/api/workspaces/{ws_id}/overview')
+async def overview(ws_id: str):
+    import asyncio, job_registry
+    try:
+        await workspaces.require_workspace(ws_id)
+    except LookupError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    pinned,todos,jobs,failed,interrupted,partial=await asyncio.gather(
+        workspaces.list_sources(ws_id,limit=8,pinned=True),
+        db.list_notes(workspace_id=ws_id,kind='todo',include_done=False,limit=8),
+        job_registry.list_jobs(workspace_id=ws_id,status='active',limit=8),
+        job_registry.list_jobs(workspace_id=ws_id,status='failed',limit=8),
+        job_registry.list_jobs(workspace_id=ws_id,status='interrupted',limit=8),
+        job_registry.list_jobs(workspace_id=ws_id,status='partial',limit=8))
+    conn=await db.get_db()
+    try:
+        rows=await conn.execute_fetchall("SELECT COUNT(*) n FROM memories WHERE workspace_id=? AND user_id=? AND status='suggested'",(ws_id,db.current_user_id()))
+    finally: await conn.close()
+    return {'pinned':pinned['items'],'todos':todos,'jobs':jobs['jobs'],'failures':(failed['jobs']+interrupted['jobs']+partial['jobs'])[:12],'pending_memories':rows[0]['n']}

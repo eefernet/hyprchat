@@ -48,8 +48,8 @@ async def migrate(conn):
     # Columns: kind, domain_id, owner, domain state, title, error, created,
     # updated, ended, details. Views deliberately exclude prompts and credentials.
     sources = {
-        'indexing_jobs': '''SELECT 'indexing',id,user_id,status,filename,error,created_at,updated_at,ended_at,
-            json_object('kb_id',kb_id,'chunks',json_extract(result_json,'$.chunks')) FROM indexing_jobs''',
+        'indexing_jobs': '''SELECT 'indexing',id,user_id,status,COALESCE((SELECT title FROM workspace_source_files f WHERE f.kb_id=indexing_jobs.kb_id AND f.filename=indexing_jobs.filename LIMIT 1),filename),error,created_at,updated_at,ended_at,
+            json_object('kb_id',kb_id,'chunks',json_extract(result_json,'$.chunks'),'index_phase',json_extract(result_json,'$.phase'),'completed',json_extract(result_json,'$.completed'),'total',json_extract(result_json,'$.total')) FROM indexing_jobs''',
         'research_reports': '''SELECT 'research',id,user_id,status,COALESCE(NULLIF(title,''),query),error,
             created_at,updated_at,completed_at,json_object('report_id',id) FROM research_reports''',
         'coder_workflows': '''SELECT 'coding',w.id,c.user_id,
@@ -138,6 +138,8 @@ def decode(row):
     item = dict(row)
     details = json.loads(item.pop('details_json'))
     item['details'] = details
+    if item['kind']=='indexing' and item['status'] in ACTIVE:
+        item['phase']=details.get('index_phase') or item['phase']
     item['progress'] = None  # Domain phases are real; invented percentages are not.
     item['actions'] = []
     kind, state = item['kind'], item['status']

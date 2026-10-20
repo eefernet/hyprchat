@@ -300,8 +300,10 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     failed item.
     """
     embeddings = []
+    from indexing_jobs import report_progress
     async with httpx.AsyncClient(timeout=120) as client:
         for i in range(0, len(texts), 64):
+            await report_progress('embedding',i,len(texts))
             batch = texts[i:i+64]
             try:
                 resp = await client.post(
@@ -363,6 +365,8 @@ async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
     """
     # Parse file content in a worker thread — PDF parsing (and the scanned-PDF
     # OCR fallback especially) is CPU-bound and must not block the event loop.
+    from indexing_jobs import report_progress
+    await report_progress('extracting')
     text = await asyncio.to_thread(parse_file, filepath, filename)
     if not text.strip():
         return {"filename": filename, "chunks": 0, "error": "empty file"}
@@ -393,6 +397,7 @@ async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
         })
 
     # Embed all chunks
+    await report_progress('embedding',0,len(texts))
     embeddings = await embed_texts(texts)
 
     # A partial replacement would silently lose reference sections. Keep the
@@ -403,6 +408,7 @@ async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
     if not valid:
         return {"filename": filename, "chunks": 0, "error": "all embeddings failed; previous index retained"}
 
+    await report_progress('publishing',len(valid),len(texts))
     v_ids, v_texts, v_metas, v_embeds = zip(*valid)
 
     # Upsert into ChromaDB (idempotent — same IDs overwrite). Sliced because
@@ -441,6 +447,8 @@ async def _index_file(kb_id: str, filename: str, filepath: str) -> dict:
     # Mirror into the SQLite FTS5 keyword index (hybrid retrieval). FTS failure
     # must never fail indexing — vector search still works without it.
     warnings = []
+    if os.path.splitext(filename)[1].lower() in {".docx", ".pptx", ".xlsx"} and len(text) >= 500000:
+        warnings.append("Office extraction reached the 500000 character limit; later content is not indexed")
     try:
         await db.kb_fts_replace_file(kb_id, filename, [
             {"chunk_id": cid, "text": txt, "chunk_index": meta["chunk_index"]}
@@ -574,7 +582,7 @@ def _apply_filename_hints(results: list[dict], hints: list[str]) -> list[dict]:
 
 
 async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
-                       prefer_filename_hints: list[str] | None = None) -> list[dict]:
+                       prefer_filename_hints: list[str] | None = None, deadline: float | None = None) -> list[dict]:
     """Hybrid retrieval: vector (Chroma cosine) + keyword (SQLite FTS5 bm25),
     fused with Reciprocal Rank Fusion.
 
@@ -588,7 +596,7 @@ async def hybrid_query(kb_ids: list[str], query_text: str, top_k: int = 6,
 
     fetch_k = max(top_k * 3, 12)
 
-    deadline = time.monotonic() + max(.01, config.RAG_RETRIEVAL_DEADLINE_SECONDS)
+    deadline = deadline if deadline is not None else time.monotonic() + max(.01, config.RAG_RETRIEVAL_DEADLINE_SECONDS)
     async def vector():
         embedding = await embed_single(query_text)
         if embedding is None: return []

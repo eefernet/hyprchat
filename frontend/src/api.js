@@ -6,8 +6,9 @@ import { API } from './session.js';
 
 export async function apiJson(path, opts = {}) {
   const init = { ...opts };
-  if (init.body != null && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
-  if (init.body != null) init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
+  const multipart = typeof FormData !== 'undefined' && init.body instanceof FormData;
+  if (!multipart && init.body != null && typeof init.body !== 'string') init.body = JSON.stringify(init.body);
+  if (!multipart && init.body != null) init.headers = { 'Content-Type': 'application/json', ...(init.headers || {}) };
   const r = await fetch(`${API}${path}`, init);
   let data;
   try { data = await r.json(); }

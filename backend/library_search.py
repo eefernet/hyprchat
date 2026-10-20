@@ -44,10 +44,14 @@ async def migrate(conn):
     await conn.commit()
 
 
-async def search(query, *, kind='', workspace_id='', start='', end='', limit=50, offset=0):
+async def search(query, *, kind='', workspace_id='', start='', end='', limit=50, offset=0, question=False, exclude_conversation=''):
     words=re.findall(r'\w+',query,flags=re.UNICODE)[:24]
     if not words: return {'results':[]}
-    expression=' AND '.join('"'+word+'"' for word in words)
+    if question:
+        stop=set('a an the is are was were do does did how what which who where when why can could would should please tell me about in on of to for and or it this that my our project workspace'.split())
+        words=[w for w in words if w.lower() not in stop]
+        if not words: return {'results':[]}
+    expression=(' OR ' if question else ' AND ').join('"'+word+'"' for word in words)
     conn=await db.get_db()
     try:
         where='library_fts MATCH ? AND e.user_id=?'
@@ -67,7 +71,13 @@ async def search(query, *, kind='', workspace_id='', start='', end='', limit=50,
                     OR EXISTS(SELECT 1 FROM artifacts a WHERE a.id=e.source_id AND a.workspace_id=w.id)
                     OR EXISTS(SELECT 1 FROM workspace_conversations l WHERE l.workspace_id=w.id AND l.conversation_id=e.parent_id)))))'''
             args.append(workspace_id)
-        rows=await conn.execute_fetchall(f'''SELECT e.kind,e.source_id,e.parent_id,e.title,e.created_at,e.updated_at,
+        if question:
+            where+=''' AND NOT (e.kind='chat' AND e.parent_id=?) AND NOT EXISTS(
+                SELECT 1 FROM workspace_source_preferences p WHERE p.workspace_id=? AND p.kind=e.kind
+                AND p.source_id=CASE WHEN e.kind='chat' THEN e.parent_id ELSE e.source_id END AND p.enabled=0)'''
+            args.extend([exclude_conversation,workspace_id])
+        extra="e.body, (SELECT role FROM messages WHERE id=e.source_id AND e.kind='chat') role," if question else ''
+        rows=await conn.execute_fetchall(f'''SELECT {extra} e.kind,e.source_id,e.parent_id,e.title,e.created_at,e.updated_at,
             snippet(library_fts,1,'','',' … ',40) excerpt FROM library_fts JOIN library_entries e ON e.rowid=library_fts.rowid
             WHERE {where} ORDER BY rank,e.updated_at DESC LIMIT ? OFFSET ?''',(*args,max(1,min(limit,100)),max(0,offset)))
         return {'results':[dict(r) for r in rows]}

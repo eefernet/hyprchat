@@ -175,6 +175,8 @@ def test_chat_retrieves_workspace_knowledge_without_persona(isolated,monkeypatch
         await db.create_workspace('a','Alpha');await db.create_kb('kb','Knowledge')
         await ws.link('a','knowledge','kb')
         await db.create_conversation('c',workspace_context={'mode':'selected','workspace_id':'a'})
+        (isolated/'manual.txt').write_text('cobaltnebula uses port 4872')
+        await db.add_kb_file('kb','manual.txt',str(isolated/'manual.txt'),32,'text/plain')
         await db.update_conversation('c',workspace_context={'mode':mode,**({'workspace_id':'a'} if mode=='selected' else {})})
         req=ChatRequest(conversation_id='c',model='fixture',messages=[{'role':'user','content':'cobaltnebula port?'}],use_memories=False,ephemeral=ghost,effort_mode='auto',reasoning_level='low',reasoning_model='fixture')
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:

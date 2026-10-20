@@ -13,7 +13,7 @@ def redact(value):
 
 
 async def capture(message_id, *, model, provider, options, memories, retrieved, sources,
-                  tools, messages, original_chars, thinking=None, effort=None, knowledge_ids=None):
+                  tools, messages, original_chars, thinking=None, effort=None, knowledge_ids=None, retrieved_sources=None):
     if message_id is None: return
     payload={'version':1,'model':model,'provider':provider,
         'settings':{k:v for k,v in options.items() if k in {'num_ctx','num_predict','temperature','top_p','top_k','repeat_penalty','seed'}},
@@ -22,6 +22,7 @@ async def capture(message_id, *, model, provider, options, memories, retrieved, 
             'workspace': ({'id':info['workspace']['id'],'name':info['workspace']['name']} if info.get('workspace') else None),
             'selected_context':redact(info.get('context'))[:20000]} for name,info in memories.items()},
         'retrieved_context':redact(retrieved)[:60000],
+        'retrieved_sources':[{k:v for k,v in s.items() if k in {'n','kind','source_id','parent_id','revision','filename','location','url','truncated','partial'}} for s in (retrieved_sources or [])],
         'search_sources':[{'title':redact(s.get('title'))[:300],'url':redact(s.get('url'))[:2000]} for s in sources[:50] if isinstance(s,dict)],
         'available_tools':sorted(tools),
         'message_count':len(messages),

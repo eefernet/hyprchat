@@ -32,6 +32,8 @@ function setup(overrides = {}) {
     streaming: false, councilRunning: false, loadingConv: false,
     inp: 'Analyze this', attachments: [attachment()], actId: 'conv-1', currentUserId: 'user-1',
     convs: [{id: 'conv-1', messages: []}], sendPrepRef: {current: null},
+    chatCreationBusy:{current:false},chatNavigation:{current:'initial'},setWsPanel:noop,setWorkspaces:noop,setGhostMode:noop,
+    persistProfileFirstMessage:async()=>null,
     ghostMode: false, isGhostConv: c => !!c?.ephemeral,
     documentsEnabled: false, documentAttachmentContext,
     pendingEffort: null, pendingToolIds: [], pendingPersona: null, pendingUseMemories: false,
@@ -56,6 +58,8 @@ function setup(overrides = {}) {
   };
   vm.createContext(context);
   context.cancelSendPreparation = handler('cancelSendPreparation', context);
+  vm.runInContext(fs.readFileSync(new URL('./api.js',import.meta.url),'utf8').replace(/^import .*$/m,'').replace('export async function','async function'),context);
+  context.createNewChat = handler('createNewChat', context);
   context.newChat = handler('newChat', context);
   return {context, calls, send: handler('send', context)};
 }
@@ -185,4 +189,28 @@ test('malformed upload success does not discard the draft', async () => {
   assert.equal(calls.sent.length, 0);
   assert.equal(context.attachments.length, 1);
   assert.match(calls.notices[0].detail, /no file path/);
+});
+
+
+test('workspace creation sends defaults atomically without unrelated persona or tools', async()=>{
+  let posted;
+  const {context}=setup({pendingPersona:{model_config_id:'unrelated'},pendingToolIds:['codeagent'],
+    fetch:async(url,opts)=>{if(opts?.method==='POST'){posted=JSON.parse(opts.body);return {ok:true,json:async()=>({id:'workspace-chat',model:'project-model',tool_ids:[],is_council:'0',workspace_context:{mode:'selected',workspace_id:'w'}})};}return {ok:true,json:async()=>[]};}});
+  await context.newChat(true,{workspaceId:'w'});
+  assert.deepEqual(posted,{title:'New Chat',use_memories:'0',workspace_context:{mode:'selected',workspace_id:'w'}});
+  assert.equal(context.convs[0].model,'project-model');
+  assert.equal(context.convs[0].is_council,false);
+  assert.deepEqual(context.convs[0].tool_ids,[]);
+});
+
+test('workspace repeated clicks create once and late navigation never activates the response', async()=>{
+  const pending=deferred();let creates=0;
+  const {context}=setup({fetch:async(_url,opts)=>{if(opts?.method==='POST'){creates++;return pending.promise;}return {ok:true,json:async()=>[]};}});
+  const first=context.newChat(true,{workspaceId:'w'});
+  await context.newChat(true,{workspaceId:'w'});
+  context.chatNavigation.current='another workspace';
+  pending.resolve({ok:true,json:async()=>({id:'late',model:'project-model'})});
+  assert.equal(await first,null);
+  assert.equal(creates,1);assert.equal(context.actId,'conv-1');
+  assert.equal(context.chatCreationBusy.current,false);
 });

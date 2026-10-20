@@ -753,8 +753,11 @@ function HyprChat(){
   const workspaceLoadEpoch=useRef(0);
   const [libraryState,setLibraryState]=useState({query:'',kind:'',workspace:'',start:'',end:'',offset:0});
   const [messageFocus,setMessageFocus]=useState(null);
-  const openWorkspace=async id=>{const epoch=++workspaceLoadEpoch.current;setWsPanel(true);setPanel('workspaces');setActiveWs(id);setWsLoading(true);try{const d=await apiJson(`/api/workspaces/${id}`);if(epoch===workspaceLoadEpoch.current)setWsDetail(d);}catch(e){if(e.name!=='AbortError'&&epoch===workspaceLoadEpoch.current){notify({type:'error',text:'Workspace could not load',detail:e.message});setWsDetail(null);}}finally{if(epoch===workspaceLoadEpoch.current)setWsLoading(false);}};
-  const navigateWorkspaceContent=(panel,id)=>{setWsPanel(false);setPanel(panel);if(panel==='chat')loadConversation(id);if(panel==='research'){setResearchView('reports');loadResearchReport(id);}if(panel==='artifacts')openArtifact(id);if(panel==='kb')setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:'center'}),150);};
+  const [workspaceInitialTab,setWorkspaceInitialTab]=useState('overview');
+  const [workspaceJobFocus,setWorkspaceJobFocus]=useState(null);
+  const chatCreationBusy=useRef(false),chatNavigation=useRef('');
+  const openWorkspace=async(id,tab='overview')=>{chatNavigation.current='workspace:'+id;setWorkspaceInitialTab(tab);const epoch=++workspaceLoadEpoch.current;setWsPanel(true);setPanel('workspaces');setActiveWs(id);setWsLoading(true);try{const d=await apiJson(`/api/workspaces/${id}`);if(epoch===workspaceLoadEpoch.current)setWsDetail(d);}catch(e){if(e.name!=='AbortError'&&epoch===workspaceLoadEpoch.current){notify({type:'error',text:'Workspace could not load',detail:e.message});setWsDetail(null);}}finally{if(epoch===workspaceLoadEpoch.current)setWsLoading(false);}};
+  const navigateWorkspaceContent=(panel,id)=>{setWsPanel(false);setPanel(panel);if(panel==='chat')loadConversation(id);if(panel==='research'){setResearchView('reports');loadResearchReport(id);}if(panel==='artifacts')openArtifact(id);if(panel==='notes')setSelectedLibraryNote(id);if(panel==='jobs')setWorkspaceJobFocus(id);if(panel==='kb')setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:'center'}),150);};
 
   const [wsPanel,setWsPanel]=useState(false);
   const [activeWs,setActiveWs]=useState(null);
@@ -2504,7 +2507,14 @@ function HyprChat(){
     }
   };
 
+  chatNavigation.current=JSON.stringify([panel,wsPanel,activeWs,actId,hcCaptureUserContext().epoch]);
   const newChat=async(forceBlank=false,opts={})=>{
+    if(chatCreationBusy.current)return null;
+    chatCreationBusy.current=true;
+    try{return await createNewChat(forceBlank,{...opts,navigation:chatNavigation.current});}
+    finally{chatCreationBusy.current=false;}
+  };
+  const createNewChat=async(forceBlank=false,opts={})=>{
     if(!opts.sendPreparation)cancelSendPreparation();
     const curConv=convs.find(c=>c.id===actId);
 
@@ -2523,7 +2533,7 @@ function HyprChat(){
       persona={...opts.personaOverride,tool_ids:opts.personaOverride.tool_ids||[]};
     }else if(forceBlank&&opts.carryCurrent&&curConv?.persona_name){
       persona={model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar};
-    }else if(forceBlank&&pendingPersona){
+    }else if(forceBlank&&pendingPersona&&!opts.workspaceId){
       persona={...pendingPersona,tool_ids:pendingToolIds};
     }else if(!forceBlank){
       if(curConv?.persona_name){
@@ -2554,27 +2564,24 @@ function HyprChat(){
       return opts.returnConv?c:newId;
     }
     try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel,use_memories:pendingMemoryValue,...(opts.workspaceId?{workspace_context:{mode:"selected",workspace_id:opts.workspaceId}}:{})}),signal:opts.sendPreparation?.controller.signal});
-      if(!r.ok)throw new Error(`Could not create conversation (HTTP ${r.status})`);
-      const c=await r.json();c.messages=[];c.use_memories=c.use_memories??pendingMemoryValue;
-      if(opts.sendPreparation?.controller.signal.aborted)return null;
+      const body={title:"New Chat",use_memories:pendingMemoryValue,
+        ...(opts.workspaceId?{workspace_context:{mode:"selected",workspace_id:opts.workspaceId},...(opts.personaOverride||{})}:{model:defaultModel,tool_ids:pendingTools,...(persona||{})})};
+      const c=await apiJson('/api/conversations',{method:'POST',body,signal:opts.sendPreparation?.controller.signal});
+      c.messages=[];c.is_council=false;c.council_config_id=null;
+      if(opts.workspaceId){
+        try{const refreshed=await apiJson('/api/workspaces');if(opts.navigation===chatNavigation.current)setWorkspaces(refreshed);}
+        catch(error){if(opts.navigation===chatNavigation.current)notify({type:'warning',text:'Chat created; workspace counts could not refresh',detail:error.message});}
+      }
+      if(opts.sendPreparation?.controller.signal.aborted||opts.navigation!==chatNavigation.current)return null;
       modelChoiceRef.current.byConv[c.id]=c.model||defaultModel;
-      // Apply persona directly to the conv object before adding to state
-      if(persona){
-        Object.assign(c,persona);
-        fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(persona)}).catch(()=>{});
-      }
-      const firstMsg=persona?await persistProfileFirstMessage(c.id,persona):null;
-      if(opts.sendPreparation?.controller.signal.aborted)return null;
+      const resolvedPersona=persona||(c.model_config_id?{...c}:null);
+      const firstMsg=resolvedPersona?await persistProfileFirstMessage(c.id,resolvedPersona):null;
+      if(opts.sendPreparation?.controller.signal.aborted||opts.navigation!==chatNavigation.current)return null;
       if(firstMsg)c.messages=[firstMsg];
-      if(pendingTools.length){
-        c.tool_ids=pendingTools;
-        fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_ids:pendingTools})}).catch(()=>{});
-      }
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[c.id]:pendingEffortValue}));
       if(opts.sendPreparation)opts.sendPreparation.conversationId=c.id;
       setPendingUseMemories(false);
-      setConvs(p=>[c,...p]);setActId(c.id);
+      setConvs(p=>[c,...p]);setActId(c.id);setWsPanel(false);
       setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:c.id;
     }catch(e){
@@ -2600,7 +2607,29 @@ function HyprChat(){
     const timer=setTimeout(()=>{const el=document.getElementById(`saved-message-${messageFocus.id}`);if(el){el.scrollIntoView({block:'center',behavior:'smooth'});el.animate([{backgroundColor:'transparent'},{backgroundColor:t.acc+'44'},{backgroundColor:'transparent'}],{duration:2200});setMessageFocus(null);}},150);return()=>clearTimeout(timer);
   },[messageFocus,actId,loadingConv,act?.messages?.length,visibleMessageCounts[actId]]);
 
-  const startBlankChat=()=>{
+  useEffect(()=>{const navigate=()=>{
+    if(!window.location.hash.startsWith('#source?'))return;
+    const params=new URLSearchParams(window.location.hash.slice(8));const kind=params.get('kind'),id=params.get('id'),parent=params.get('parent');
+    if(!id)return;if(kind!=='document')setWsPanel(false);
+    if(kind==='chat'){if(parent)setMessageFocus({conversation:parent,id});loadConversation(parent||id);}
+    else if(kind==='note'){setSelectedLibraryNote(id);setPanel('notes');}
+    else if(kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(id);}
+    else if(kind==='artifact')openArtifact(id);
+    else if(kind==='knowledge')navigateWorkspaceContent('kb',id);
+    else if(kind==='document'&&parent){
+      const base=`/api/knowledge-bases/${encodeURIComponent(parent)}/files/${encodeURIComponent(id)}`;
+      const rawUrl=userScopedUrl(base+'/raw');const key=parent+':'+id;
+      setKbPreview({key,filename:'Source document',rawUrl,content:null,loading:true});
+      apiJson(base+'/preview'+(params.has('chunk')?'?chunk='+encodeURIComponent(params.get('chunk')):'')).then(d=>setKbPreview(p=>p?.key===key?{...p,...d,loading:false}:p)).catch(e=>setKbPreview(p=>p?.key===key?{...p,content:e.message,loading:false}:p));
+    }
+    window.history.replaceState(null,'',window.location.pathname+window.location.search);
+  };window.addEventListener('hashchange',navigate);navigate();return()=>window.removeEventListener('hashchange',navigate);},[]);
+
+  const startWorkspaceChat=async id=>{try{return await newChat(true,{workspaceId:id});}catch(e){notify({type:'error',text:'Chat not created',detail:e.message});return null;}};
+  const startBlankChat=(general=false)=>{
+    const workspaceId=wsPanel&&activeWs?activeWs:panel==='chat'&&!ghostActive?act?.effective_workspace?.id:null;
+    if(general!==true&&workspaceId){startWorkspaceChat(workspaceId);return;}
+    chatNavigation.current='general:'+Date.now();
     setWsPanel(false);
     cancelSendPreparation();
     setGhostMode(false);
@@ -4984,7 +5013,8 @@ function HyprChat(){
       </div>
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
         <div style={{display:"flex",gap:4}}>
-          <button onClick={startBlankChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.warm,border:`1px solid ${t.warm}`,color:"#fff",padding:"10px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,boxShadow:"none"}}><IC.Plus/> New Chat</button>
+          {(wsPanel&&activeWs||panel==='chat'&&act?.effective_workspace)&&<button onClick={()=>startBlankChat(true)} style={btnS(t.mut)}>New general chat</button>}
+          <button onClick={()=>startBlankChat()} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.warm,border:`1px solid ${t.warm}`,color:"#fff",padding:"10px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,boxShadow:"none"}}><IC.Plus/> New Chat</button>
           <button onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);setPanel("workspaces");setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:"var(--hc-text-control)"}} title="Workspaces">🗂</button>
         </div>
         {!wsPanel&&<>
@@ -5217,8 +5247,10 @@ function HyprChat(){
             Memory
             <span style={{color:t.mut,fontWeight:500}}>HyprChat</span>
           </span>}
+          {panel==='chat'&&!ghostActive&&act?.effective_workspace&&<button title="Open workspace" style={{...btnS(t.acc),maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} onClick={()=>openWorkspace(act.effective_workspace.id)}>{act.effective_workspace.name}</button>}
+          {panel==='chat'&&!ghostActive&&act?.effective_workspace&&<button aria-label="Workspace context settings" style={btnS(t.mut)} onClick={()=>openWorkspace(act.effective_workspace.id,'settings')}>{isMobile?'⚙':'Context settings'}</button>}
           {panel==='chat'&&actId&&!ghostActive&&<select aria-label="Workspace context" title="Choose project context for this chat" value={act?.workspace_context?.mode==='selected'?act.workspace_context.workspace_id:act?.workspace_context?.mode||'auto'} style={{...inputS,width:'auto',maxWidth:190,fontSize:12}} onChange={async e=>{const value=e.target.value;try{if(!['auto','off'].includes(value))await apiJson(`/api/workspaces/${value}/conversations`,{method:'POST',body:{conversation_id:actId}});const saved=await apiJson(`/api/conversations/${actId}`,{method:'PATCH',body:{workspace_context:['auto','off'].includes(value)?{mode:value}:{mode:'selected',workspace_id:value}}});setConvs(p=>p.map(c=>c.id===saved.id?{...c,workspace_context:saved.workspace_context,effective_workspace:saved.effective_workspace}:c));}catch(error){notify({type:'error',text:'Context not changed',detail:error.message});}}}><option value="auto">Workspace: automatic</option><option value="off">Workspace context off</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
-          {panel==="chat"&&!ghostActive&&!!activeMemoryWs?.kb_ids?.length&&<span style={{fontSize:12,color:t.mut}}>{activeMemoryWs.kb_ids.length} project knowledge base(s)</span>}
+          {panel==="chat"&&!isMobile&&!ghostActive&&!!activeMemoryWs?.kb_ids?.length&&<span style={{fontSize:12,color:t.mut}}>{activeMemoryWs.kb_ids.length} project knowledge base(s)</span>}
           {panel==="chat"&&workspaceMemoryActive&&<span title={`Workspace memory active: ${activeMemoryWs.name}`} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.ok}10`,border:`1px solid ${t.ok}30`,color:t.ok,fontSize:10,fontWeight:800,maxWidth:160,overflow:"hidden",whiteSpace:"nowrap"}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:t.ok,flexShrink:0}}/>
             Memory
@@ -5286,7 +5318,7 @@ function HyprChat(){
       {/* Panels */}
       {wsPanel&&activeWs
         ?<WorkspaceDetail key={activeWs} ws={wsDetail?.id===activeWs?wsDetail:null} wsLoading={wsLoading} t={t} API={API}
-            onNewChat={async()=>{try{await newChat(true,{workspaceId:activeWs});setWsPanel(false);}catch(e){notify({type:'error',text:'Chat not created',detail:e.message});}}}
+            onNewChat={()=>startWorkspaceChat(activeWs)} initialTab={workspaceInitialTab} personas={mcs} tools={[...builtinTools,...tools,...connectorTools].filter((x,i,a)=>x.id&&a.findIndex(y=>y.id===x.id)===i)}
             onSearch={()=>{setLibraryState({query:'',kind:'',workspace:activeWs,start:'',end:'',offset:0});setWsPanel(false);setPanel('library');}}
             onNavigate={navigateWorkspaceContent}
             workspaces={workspaces} setWorkspaces={setWorkspaces}
@@ -5297,7 +5329,7 @@ function HyprChat(){
             onPreview={openPreview} models={models} wsModel={wsModel}
             notify={notify} confirmAction={confirmAction}
             onPersonaCreated={mc=>{setWsPanel(false);apiJson("/api/knowledge-bases").then(setKbs).catch(()=>{});const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
-      :panel==='workspaces'?<WorkspaceHome {...{t,btnS,inputS,workspaces,notify}} onOpen={openWorkspace} onCreated={ws=>{setWorkspaces(p=>[ws,...p]);openWorkspace(ws.id);}}/>
+      :panel==='workspaces'?<WorkspaceHome {...{t,btnS,inputS,workspaces,notify}} onNewChat={startWorkspaceChat} onOpen={openWorkspace} onCreated={ws=>{setWorkspaces(p=>[ws,...p]);openWorkspace(ws.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify} confirmAction={confirmAction}/>
       :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
@@ -7047,7 +7079,7 @@ function HyprChat(){
 
       :panel==="analytics"?<AnalyticsPanel font={font} t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
-      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel workspaces={workspaces} t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else if(destination==='kb'){setPanel("kb");setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:"center"}),150);}else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
+      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel focusId={workspaceJobFocus} workspaces={workspaces} t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else if(destination==='kb'){setPanel("kb");setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:"center"}),150);}else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
 
       :panel==="library"?<PanelBoundary key={panel}><LibrarySearchPanel state={libraryState} setState={setLibraryState} t={t} btnS={btnS} inputS={inputS} onNavigate={result=>{if(result.kind==='chat'){setMessageFocus({conversation:result.parent_id,id:result.source_id});loadConversation(result.parent_id);}else if(result.kind==='artifact')openArtifact(result.source_id);else if(result.kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(result.source_id);}else{setSelectedLibraryNote(result.source_id);setPanel('notes');}}}/></PanelBoundary>
 
@@ -8640,6 +8672,7 @@ function HyprChat(){
           {kbPreview.isPdf&&!kbPreview.pdfFullView&&kbPreview.truncated&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,flexShrink:0}}>Pages 1-{kbPreview.previewed_pages} of {kbPreview.total_pages}</span>}
           {kbPreview.truncated&&!kbPreview.isPdf&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
           {kbPreview.isPdf&&kbPreview.rawUrl&&<button onClick={()=>setKbPreview(p=>({...p,pdfFullView:!p.pdfFullView}))} style={{background:kbPreview.pdfFullView?`${t.acc}25`:`${t.acc}12`,border:`1px solid ${t.acc}44`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:6,fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>{kbPreview.pdfFullView?"Text View":"Full PDF"}</button>}
+          {kbPreview.rawUrl&&<a href={kbPreview.rawUrl} target="_blank" rel="noopener noreferrer" style={{color:t.acc,fontSize:12}}>Download original</a>}
           <button aria-label="Close" onClick={()=>setKbPreview(null)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>

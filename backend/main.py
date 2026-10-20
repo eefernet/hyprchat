@@ -706,10 +706,13 @@ class FetchUrlRequest(BaseModel):
     max_chars: int = config.MAX_FETCH_CHARS
 
 class ConversationCreate(BaseModel):
+    tool_ids: Optional[list[str]] = None
+    persona_name: Optional[str] = None
+    persona_avatar: Optional[str] = None
     workspace_context: Optional[dict] = None
     title: str = "New Chat"
-    model: str = config.DEFAULT_MODEL
-    system_prompt: str = ""
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
     model_config_id: Optional[str] = None
     use_memories: Optional[str] = "0"
 
@@ -2022,7 +2025,15 @@ async def cancel_coder_workflow(workflow_id: str):
 async def create_conversation(req: ConversationCreate):
     id = f"conv-{uuid.uuid4().hex[:12]}"
     try:
-        await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id, req.use_memories or "0", req.workspace_context)
+        import workspace_service
+        chosen = await workspace_service.validate_selection(req.workspace_context)
+        workspace_id = chosen.get('workspace_id')
+        resolved = await workspace_service.resolve_defaults(req.model_dump(exclude_unset=True), workspace_id)
+        if workspace_id:
+            available = (await list_models())['models']
+            if resolved['model'] not in available:
+                raise ValueError(f"Configured model '{resolved['model']}' is unavailable. Choose an available model in workspace settings or for this chat.")
+        await db.create_conversation(id, title=req.title, use_memories=req.use_memories or "0", workspace_context=chosen, **resolved)
     except (ValueError, LookupError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return await db.get_conversation(id)
@@ -2461,18 +2472,22 @@ async def get_file_index_status(kb_id: str, filename: str):
 
 
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
-async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
+async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200, chunk: Optional[int] = None):
     """Preview first N lines of a KB file."""
     user_id = db.current_user_id()
     _db = await db.get_db()
     try:
         cursor = await _db.execute(
-            """SELECT f.filename FROM kb_files f
+            """SELECT f.filename,COALESCE((SELECT title FROM workspace_source_files sf WHERE sf.file_id=f.id LIMIT 1),f.filename) display_name FROM kb_files f
                JOIN knowledge_bases kb ON kb.id=f.kb_id
                WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
             (file_id, kb_id, user_id),
         )
         row = await cursor.fetchone()
+        if row and chunk is not None:
+            passage=await _db.execute_fetchall('SELECT text FROM kb_chunks_fts WHERE kb_id=? AND filename=? AND CAST(chunk_index AS INTEGER)=? LIMIT 1',(kb_id,row['filename'],chunk))
+            if passage:
+                return {'filename':row['display_name'],'content':passage[0]['text'],'truncated':False,'total_lines':len(passage[0]['text'].splitlines()),'location':rag.location_from_text(passage[0]['text']),'passage':True}
     finally:
         await _db.close()
     if not row:
@@ -2484,14 +2499,21 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
         raise HTTPException(400, "Invalid path")
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
+    import workspace_service
+    if os.path.splitext(filename)[1].lower() not in workspace_service.SUPPORTED_DOCUMENTS:
+        return {'filename':row['display_name'],'content':'Preview unavailable for this format. Download the original file.','truncated':False,'total_lines':0}
+    lines=max(1,min(lines,1000))
     try:
         def _read_lines():
+            if os.path.splitext(filename)[1].lower() in {'.pdf','.docx','.pptx','.xlsx'}:
+                return rag.parse_file(file_path,filename).splitlines(keepends=True)
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                return f.readlines()
+                import itertools
+                return list(itertools.islice(f,lines+1))
         all_lines = await asyncio.to_thread(_read_lines)
         total = len(all_lines)
         content = "".join(all_lines[:lines])
-        return {"filename": filename, "content": content, "truncated": total > lines, "total_lines": total}
+        return {"filename": row["display_name"], "content": content, "truncated": total > lines, "total_lines": total}
     except UnicodeDecodeError:
         return {"filename": filename, "content": "Binary file — preview not available", "truncated": False, "total_lines": 0}
 
@@ -2587,7 +2609,7 @@ async def raw_kb_file(kb_id: str, file_id: int):
     _db = await db.get_db()
     try:
         cursor = await _db.execute(
-            """SELECT f.filename FROM kb_files f
+            """SELECT f.filename,COALESCE((SELECT title FROM workspace_source_files sf WHERE sf.file_id=f.id LIMIT 1),f.filename) display_name FROM kb_files f
                JOIN knowledge_bases kb ON kb.id=f.kb_id
                WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
             (file_id, kb_id, user_id),
@@ -2604,7 +2626,7 @@ async def raw_kb_file(kb_id: str, file_id: int):
         raise HTTPException(400, "Invalid path")
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
-    return FileResponse(file_path, filename=filename)
+    return FileResponse(file_path, filename=row["display_name"])
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
@@ -3220,7 +3242,14 @@ async def create_workspace_ep(body: dict = Body(...)):
     ws_id = f"ws-{uuid.uuid4().hex[:8]}"
     name = str(body.get("name", "New Workspace")).strip()
     if not name or len(name)>200: raise HTTPException(400, "Workspace name must be 1–200 characters")
-    return await db.create_workspace(ws_id, name, str(body.get("description", "")))
+    try:
+        await db.create_workspace(ws_id, name, str(body.get("description", "")),
+                                  chat_defaults=body.get('chat_defaults', {}),
+                                  source_context_enabled=body.get('source_context_enabled', True),
+                                  instructions=str(body.get('instructions', ''))[:20000])
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_workspace(ws_id)
 
 
 @app.get("/api/workspaces/{ws_id}")
@@ -3243,7 +3272,10 @@ async def update_workspace_ep(ws_id: str, body: dict = Body(...)):
         if not isinstance(body['name'],str) or not body['name'].strip() or len(body['name'])>200:
             raise HTTPException(400, "Workspace name must be 1–200 characters")
         body['name'] = body['name'].strip()
-    await db.update_workspace(ws_id, **body)
+    try:
+        await db.update_workspace(ws_id, **body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return await db.get_workspace(ws_id)
 
 

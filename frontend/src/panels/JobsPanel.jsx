@@ -6,7 +6,7 @@ import { API, userScopedUrl } from '../session.js';
 import { apiJson } from '../api.js';
 
 const kinds=['research','coding','coding_run','document','image','indexing','scheduled'];
-export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],workspaceId=""}){
+export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],workspaceId="",focusId=null}){
   const [jobs,setJobs]=useState([]),[kind,setKind]=useState(''),[status,setStatus]=useState('');
   const [error,setError]=useState(''),[busy,setBusy]=useState(''),[refresh,setRefresh]=useState(0);
   const [offset,setOffset]=useState(0);
@@ -20,6 +20,7 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
       try{
         const data=await apiJson(`/api/jobs?kind=${kind}&status=${status}&offset=${offset}&limit=50&workspace_id=${workspace}`,{signal:controller.signal});
         if(version!==epoch.current)return;
+        if(focusId&&!data.jobs.some(j=>j.id===focusId)){const focused=await apiJson(`/api/jobs/${encodeURIComponent(focusId)}`,{signal:controller.signal});if(version!==epoch.current)return;data.jobs=[focused,...data.jobs];}
         setJobs(data.jobs);setError('');
         if(!stream){
           stream=new EventSource(userScopedUrl(`/api/events/jobs?after=${data.cursor}`));
@@ -31,7 +32,8 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
     };
     load();const poll=setInterval(load,10000);
     return()=>{epoch.current++;controller.abort();stream?.close();clearTimeout(timer);clearInterval(poll);};
-  },[kind,status,offset,refresh,workspace]);
+  },[kind,status,offset,refresh,workspace,focusId]);
+  useEffect(()=>{if(focusId&&jobs.some(j=>j.id===focusId))document.getElementById(`job-${focusId}`)?.scrollIntoView({block:'center'});},[focusId,jobs.some(j=>j.id===focusId)]);
   const act=async(job,action)=>{
     const version=epoch.current;setBusy(job.id);setError('');
     try{
@@ -58,7 +60,7 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
     {error&&<p role="alert" style={{color:t.err}}>{error}</p>}
     {runResult&&<article style={{padding:14,border:`1px solid ${t.brd}`,whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}><button style={btnS(t.acc)} onClick={()=>setRunResult(null)}>Close result</button><p>{runResult.result_text||runResult.error||'No output saved yet.'}</p></article>}
     {!jobs.length&&<p style={{color:t.dim}}>No jobs match these filters.</p>}
-    <div style={{display:'grid',gap:12}}>{jobs.map(job=><article key={job.id} style={{padding:16,border:`1px solid ${t.brd}`,borderRadius:10,overflowWrap:'anywhere'}}>
+    <div style={{display:'grid',gap:12}}>{jobs.map(job=><article id={`job-${job.id}`} key={job.id} style={{padding:16,border:`1px solid ${t.brd}`,borderRadius:10,overflowWrap:'anywhere'}}>
       <div style={{fontWeight:700}}>{job.title||job.kind}</div>
       <p style={{color:t.dim,fontSize:12}}>{job.kind} · {job.status} · {job.phase}
         {job.elapsed_seconds!=null&&` · ${Math.floor(job.elapsed_seconds/60)}m ${job.elapsed_seconds%60}s`}</p>

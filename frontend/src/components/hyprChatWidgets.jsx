@@ -1,4 +1,4 @@
-import {WorkspaceOverview,WorkspaceKnowledge,WorkspaceDaily} from './workspaceComponents.jsx';
+import {WorkspaceOverview,WorkspaceSources,WorkspaceDaily,WorkspaceDefaults,WorkspaceDefaultSummary,WorkspaceContentPicker} from './workspaceComponents.jsx';
 import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
 import {apiJson} from "../api.js";
 import {isDocumentEvent} from "../documentFiles.js";
@@ -1367,7 +1367,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   </div>;
 }
 
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearch,onNavigate}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearch,onNavigate,personas,tools,initialTab}){
   const isMobile=useIsMobile();
   const identity=ws?.id, alive=React.useRef(identity);alive.current=identity;
   React.useEffect(()=>()=>{alive.current=null;},[]);
@@ -1377,7 +1377,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   const run=async fn=>{if(busyRef.current)return;busyRef.current=true;setActionBusy(true);try{return await fn();}catch(e){reportError(e);}finally{busyRef.current=false;if(alive.current===identity)setActionBusy(false);}};
   const fetch=async(url,opts)=>{const response=await window.fetch(url,opts);if(alive.current!==identity)throw new DOMException('Workspace changed','AbortError');if(!response.ok){const d=await response.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${response.status}`);}const read=response.json.bind(response);response.json=async()=>{const data=await read();if(alive.current!==identity)throw new DOMException("Workspace changed","AbortError");return data;};return response;};
 
-  const [tab,setTab]=React.useState("overview");
+  const [tab,setTab]=React.useState(initialTab||"overview");
+  React.useEffect(()=>{if(initialTab)setTab(initialTab);},[initialTab]);
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
   const [wsDesc,setWsDesc]=React.useState("");
@@ -1563,34 +1564,27 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
             ?<><button onClick={saveEdit} style={btnS(t.ok)}>💾 Save</button><button onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></>
             :<><button onClick={()=>setEditMode(true)} style={btnS(t.mut)}>✏️ Edit</button>
               <button onClick={analyzeTopics} disabled={analyzing} style={btnS(t.acc)}>{analyzing?"⏳":"🔬"} Analyze</button>
-              <button onClick={()=>setTab("knowledge")} style={btnS(t.pink)}>✦ Knowledge / Agent</button>
+              <button onClick={()=>setTab("settings")} style={btnS(t.pink)}>Context settings</button>
               <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
         </div>
       </div>
+      <button disabled={actionBusy} style={btnS(t.acc)} onClick={()=>run(onNewChat)}>New chat in this workspace</button>
+      <WorkspaceDefaultSummary ws={ws} t={t}/>
       {analyzeMsg&&<div style={{fontSize:"var(--hc-text-secondary)",color:analyzeMsg.ok?t.ok:t.err,marginTop:4,padding:"4px 8px",background:analyzeMsg.ok?`${t.ok}15`:`${t.err}15`,borderRadius:6,border:`1px solid ${analyzeMsg.ok?t.ok:t.err}33`}}>{analyzeMsg.text}</div>}
       {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:analyzeMsg?4:0}}>
         {topics.map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
       </div>}
     </div>
     <div style={{display:"flex",gap:0,overflowX:"auto",borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["overview","Overview"],["convs","💬 Conversations"],["knowledge","Knowledge"],["memory","🧠 Memory"],["notes","Notes"],["tasks","Tasks"],["jobs","Jobs"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setInitialCreate(false);setTab(id);setAddPanel(false);}} style={{flexShrink:0,whiteSpace:"nowrap",padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:tab===id?700:400}}>{label}</button>)}
+      {[["overview","Overview"],["convs","💬 Conversations"],["knowledge","Sources"],["settings","Settings"],["memory","🧠 Memory"],["notes","Notes"],["tasks","Tasks"],["jobs","Jobs"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setInitialCreate(false);setTab(id);setAddPanel(false);}} style={{flexShrink:0,whiteSpace:"nowrap",padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:tab===id?700:400}}>{label}</button>)}
       {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>+ Add Chats</button>}
     </div>
-    {addPanel&&<div style={{padding:12,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s",flexShrink:0}}>
-      <input value={addSearch} onChange={e=>setAddSearch(e.target.value)} placeholder="Search conversations..." style={{...inputS,marginBottom:8}}/>
-      <div style={{maxHeight:180,overflowY:"auto",display:"flex",flexDirection:"column",gap:3}}>
-        {filteredAvail.length===0&&<EmptyState t={t} font={font} compact icon={<IC.Chat/>} title="All conversations are already in this workspace"/>}
-        {filteredAvail.map(c=><div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}F5`,borderRadius:8,cursor:"pointer",border:`1px solid ${t.brd}22`}} onClick={()=>addConv(c.id)}>
-          <span style={{fontSize:12,flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</span>
-          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{c.model||""}</span>
-          <span style={{color:t.ok,fontSize:"var(--hc-text-secondary)"}}>+ Add</span>
-        </div>)}
-      </div>
-    </div>}
+    {addPanel&&<div style={{padding:12,maxHeight:300,overflowY:'auto'}}><WorkspaceContentPicker {...{ws,t,btnS,inputS}} onLinked={async()=>{const next=await apiJson(`/api/workspaces/${ws.id}`);if(alive.current===identity){setWsDetail(next);setWorkspaces(await apiJson('/api/workspaces'));}}}/></div>}
     {actionBusy&&<div role="status" style={{padding:8,color:t.mut}}>Saving…</div>}
     <div style={{flex:1,overflowY:"auto",padding:isMobile?12:20}}>
-      {tab==='overview'&&<WorkspaceOverview {...{ws,t,btnS,onOpenConv,onOpenReport,onNavigate}} onNewChat={onNewChat} onSearch={onSearch} onTab={(next,create=false)=>{setInitialCreate(create);setTab(next);}}/>}
-      {tab==='knowledge'&&<WorkspaceKnowledge key={ws.id} {...{ws,t,btnS,inputS,onPersonaCreated,models,notify}}/>}
+      {tab==='overview'&&<WorkspaceOverview {...{ws,t,btnS,onOpenConv,onOpenReport,onNavigate}} onNewChat={onNewChat} onSearch={onSearch} onTab={(next,create=false)=>{if(next==='add'){setAddPanel(true);return;}setInitialCreate(create);setTab(next);}}/>}
+      {tab==='knowledge'&&<WorkspaceSources key={ws.id} {...{ws,t,btnS,inputS,onPersonaCreated,models,notify}} onLinked={async()=>{const next=await apiJson(`/api/workspaces/${ws.id}`);if(alive.current===identity){setWsDetail(next);setWorkspaces(await apiJson('/api/workspaces'));}}}/>}
+      {tab==='settings'&&<WorkspaceDefaults key={ws.id} {...{ws,t,btnS,inputS,models,personas,tools}} onSaved={saved=>{setWsDetail(saved);setWsInstructions(saved.instructions);setWorkspaces(p=>p.map(w=>w.id===saved.id?{...w,...saved}:w));}}/>}
       {['notes','tasks','jobs'].includes(tab)&&<WorkspaceDaily {...{tab,ws,t,btnS,inputS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate}}/>}
 
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -2404,10 +2398,10 @@ function CitationChip({n, src, theme, font}){
       <span style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
         {isQuick?<SourceFavicon url={src.url} domain={src.domain} size={16} theme={theme}/>:<span style={{flexShrink:0}}>📄</span>}
         <span style={{fontWeight:700,color:theme.acc,fontSize:"var(--hc-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sourceTitle}</span>
-        <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:theme.mut,flexShrink:0}}>{sourceMeta}</span>
+        <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:theme.mut,flexShrink:0}}>{sourceMeta}{src.truncated?' · Excerpt truncated':''}{src.partial?' · Partial extraction':''}</span>
       </span>
       <span style={{display:"block",color:theme.dim,maxHeight:120,overflow:"auto"}}>{src.snippet||""}{src.snippet&&src.snippet.length>=300?"…":""}</span>
-      {isQuick&&src.url&&<a href={src.url} target="_blank" rel="noopener noreferrer" style={{display:"inline-flex",marginTop:7,color:theme.acc,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,borderBottom:`1px solid ${theme.acc}44`}}>Open source</a>}
+      {src.url&&<a href={src.url} target={src.url.startsWith('#')?undefined:"_blank"} rel="noopener noreferrer" style={{display:"inline-flex",marginTop:7,color:theme.acc,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,borderBottom:`1px solid ${theme.acc}44`}}>Open source</a>}
     </span>}
   </sup>;
 }

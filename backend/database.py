@@ -1146,6 +1146,9 @@ async def create_conversation(
     model_config_id: str = None,
     use_memories: str = "0",
     workspace_context: dict | None = None,
+    tool_ids: list | None = None,
+    persona_name: str = "",
+    persona_avatar: str = "",
 ):
     import workspace_service
     chosen = await workspace_service.validate_selection(workspace_context)
@@ -1164,7 +1167,7 @@ async def create_conversation(
                 "1" if str(use_memories).lower() in {"1", "true", "yes", "on"} else "0",
             ),
         )
-        await db.execute('UPDATE conversations SET workspace_context=? WHERE id=?', (json.dumps(chosen), id))
+        await db.execute('UPDATE conversations SET workspace_context=?,tool_ids=?,persona_name=?,persona_avatar=? WHERE id=?', (json.dumps(chosen), json.dumps(tool_ids or []), persona_name, persona_avatar, id))
         if chosen['mode'] == 'selected':
             await db.execute('INSERT INTO workspace_conversations(workspace_id,conversation_id) VALUES(?,?)', (chosen['workspace_id'], id))
         await db.commit()
@@ -2314,7 +2317,11 @@ async def delete_model_config(id: str):
 # ============================================================
 # WORKSPACE CRUD
 # ============================================================
-async def create_workspace(id: str, name: str, description: str = ""):
+async def create_workspace(id: str, name: str, description: str = "", **settings):
+    import workspace_service
+    defaults = workspace_service.chat_defaults(settings.get("chat_defaults", {}))
+    if settings.get("source_context_enabled", True) not in (0,1,False,True):
+        raise ValueError("source_context_enabled must be a boolean")
     user_id = _scope_user()
     db = await get_db()
     try:
@@ -2323,12 +2330,13 @@ async def create_workspace(id: str, name: str, description: str = ""):
             "INSERT INTO workspaces(id,user_id,name,description,topics,memory_enabled,instructions,created_at,updated_at) VALUES(?,?,?,?, '[]',0,'',?,?)",
             (id, user_id, name, description, now, now)
         )
+        await db.execute("UPDATE workspaces SET chat_defaults=?,source_context_enabled=?,instructions=? WHERE id=?", (json.dumps(defaults), int(settings.get("source_context_enabled", True)), settings.get("instructions", ""), id))
         await db.commit()
     finally:
         await db.close()
     return {
         "id": id, "name": name, "description": description, "topics": [],
-        "memory_enabled": 0, "instructions": "",
+        "memory_enabled": 0, "instructions": settings.get("instructions", ""), "chat_defaults": defaults, "source_context_enabled": bool(settings.get("source_context_enabled", True)),
         "conv_count": 0, "file_count": 0, "report_count": 0,
     }
 
@@ -2354,7 +2362,8 @@ async def get_workspaces():
                 d["topics"] = json.loads(d.get("topics", "[]"))
             except Exception:
                 d["topics"] = []
-            result.append(d)
+            import workspace_service
+            result.append(workspace_service.normalize_workspace(d))
         return result
     finally:
         await db.close()
@@ -2367,7 +2376,8 @@ async def get_workspace(ws_id: str):
         row = await db.execute_fetchall("SELECT * FROM workspaces WHERE id=? AND user_id=?", (ws_id, user_id))
         if not row:
             return None
-        ws = dict(row[0])
+        import workspace_service
+        ws = workspace_service.normalize_workspace(dict(row[0]))
         try:
             ws["topics"] = json.loads(ws.get("topics", "[]"))
         except Exception:
@@ -2375,7 +2385,7 @@ async def get_workspace(ws_id: str):
         conv_rows = await db.execute_fetchall(
             """SELECT c.id,c.title,c.model,c.updated_at FROM conversations c
                JOIN workspace_conversations wc ON c.id=wc.conversation_id
-               WHERE wc.workspace_id=? AND c.user_id=? ORDER BY wc.added_at DESC""",
+               WHERE wc.workspace_id=? AND c.user_id=? ORDER BY c.updated_at DESC,c.id""",
             (ws_id, user_id)
         )
         ws["conversations"] = [dict(r) for r in conv_rows]
@@ -2425,10 +2435,17 @@ async def get_workspace(ws_id: str):
 
 
 async def update_workspace(ws_id: str, **kwargs):
-    allowed = {"name", "description", "topics", "memory_enabled", "instructions"}
+    allowed = {"name", "description", "topics", "memory_enabled", "instructions", "chat_defaults", "source_context_enabled"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
+    if "chat_defaults" in fields:
+        import workspace_service
+        fields["chat_defaults"] = json.dumps(workspace_service.chat_defaults(fields["chat_defaults"]))
+    if "source_context_enabled" in fields:
+        if fields["source_context_enabled"] not in (0, 1, False, True):
+            raise ValueError("source_context_enabled must be a boolean")
+        fields["source_context_enabled"] = int(fields["source_context_enabled"])
     if "topics" in fields and isinstance(fields["topics"], list):
         fields["topics"] = json.dumps(fields["topics"])
     if "memory_enabled" in fields:
@@ -3649,7 +3666,8 @@ async def get_workspace_basic(ws_id: str) -> dict | None:
     db = await get_db()
     try:
         rows = await db.execute_fetchall("SELECT * FROM workspaces WHERE id=? AND user_id=?", (ws_id, user_id))
-        return dict(rows[0]) if rows else None
+        import workspace_service
+        return workspace_service.normalize_workspace(dict(rows[0])) if rows else None
     finally:
         await db.close()
 
@@ -3673,7 +3691,8 @@ async def get_workspace_for_conversation(conv_id: str) -> dict | None:
                ORDER BY wc.added_at DESC""",
             (conv_id, user_id, user_id),
         )
-        return dict(rows[0]) if len(rows) == 1 else None
+        import workspace_service
+        return workspace_service.normalize_workspace(dict(rows[0])) if len(rows) == 1 else None
     finally:
         await db.close()
 
@@ -4244,7 +4263,7 @@ async def build_workspace_memory_context(
     import workspace_service
     ws = (await workspace_service.resolve(conversation_id, workspace_id) if conversation_id
           else await get_workspace_basic(workspace_id) if workspace_id else None)
-    if not ws or not int(ws.get("memory_enabled") or 0):
+    if not ws:
         return {"workspace": ws, "context": "", "memory_ids": [], "block_ids": []}
 
     user_id = _scope_user()
@@ -4260,6 +4279,9 @@ async def build_workspace_memory_context(
         lines.append("\n[Instructions]\n" + chunk)
         has_memory_content = True
         remaining -= len(chunk)
+
+    if not int(ws.get("memory_enabled") or 0):
+        return {"workspace": ws, "context": "\n".join(lines) if has_memory_content else "", "memory_ids": [], "block_ids": []}
 
     for block in await get_workspace_memory_blocks(ws_id):
         if remaining <= 400:

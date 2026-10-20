@@ -34,6 +34,7 @@ export default function ContextInspector({messageId,t,onClose,onRestore}){
         <p>Workspace: {round.memories?.workspace?.workspace?.name||'None'}<br/>Knowledge bases: {(round.knowledge_base_ids||[]).join(', ')||'None'}</p>
         {Object.entries(round.memories||{}).map(([name,memory])=><details key={name}><summary>{name} memories ({memory.ids.length})</summary><p>{memory.ids.join(', ')||'None selected'}</p><pre style={{whiteSpace:'pre-wrap'}}>{memory.selected_context}</pre></details>)}
         <details><summary>Retrieved passages</summary><pre style={{whiteSpace:'pre-wrap'}}>{round.retrieved_context||'None recorded'}</pre></details>
+        <details><summary>Source identities and revisions</summary>{(round.retrieved_sources||[]).map(s=><p key={s.n}><a href={s.url} onClick={onClose}>{s.n}. {s.filename}</a><br/>{s.kind} · {s.location} · revision {s.revision}{s.truncated?' · Truncated excerpt':''}{s.partial?' · Partial extraction':''}</p>)}</details>
         <details><summary>Search sources</summary>{round.search_sources.map((source,i)=><p key={i}>{source.title}<br/>{source.url}</p>)}</details>
         <p>Available tools: {round.available_tools.join(', ')||'None'}</p>
         <p>Tool calls: {(round.executed_tools||[]).join(', ')||'None recorded'}</p>
