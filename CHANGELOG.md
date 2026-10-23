@@ -1,7 +1,16 @@
 <details open>
-<summary>Alpha v18.2 — Oct 15, 2026</summary>
+<summary>Alpha v18.2 — Oct 20, 2026</summary>
 
-> Effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.
+> Workspace project hubs, effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.
+
+## Workspaces
+
+- **Project chats** — start chats from workspace headers and cards. New chat stays in your current workspace, with a separate New general chat option and a workspace shortcut in chat.
+- **Workspace defaults** — set instructions and optional model, persona and tool defaults for new chats. Instructions apply independently of workspace memory.
+- **Sources** — chats automatically find relevant passages from linked content and uploaded documents, with citations back to the originals. Pin or exclude sources, track indexing and retry failures; knowledge snapshots remain available.
+- **Project overview** — find pinned content, recent chats, open todos, active jobs and items needing attention. A searchable content picker links existing work without moving it.
+- **Simpler workspace navigation** — Overview, Chats, Sources, Notes, Activity and Settings group related views, with a section picker on mobile, consistent controls and one Add existing content dialog.
+- **Search without losing your place** — search inside a workspace, open a result and return with your query, filters and position intact. Returning to the previous section preserves unsaved drafts.
 
 ## Chat & Reasoning
 

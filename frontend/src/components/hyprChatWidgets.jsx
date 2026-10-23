@@ -1,4 +1,9 @@
-import {WorkspaceOverview,WorkspaceSources,WorkspaceDaily,WorkspaceDefaults,WorkspaceDefaultSummary,WorkspaceContentPicker} from './workspaceComponents.jsx';
+import PanelHeader from './PanelHeader.jsx';
+import SelectionControl from './SelectionControl.jsx';
+import ActionMenu from './ActionMenu.jsx';
+import LibrarySearchPanel from '../panels/LibrarySearchPanel.jsx';
+import {workspaceSections,workspaceSection,workspaceSubviews,workspaceSectionLabel} from '../workspaceNavigation.js';
+import {WorkspaceOverview,WorkspaceSources,WorkspaceDaily,WorkspaceDefaults,WorkspaceDefaultSummary,WorkspaceContentDialog} from './workspaceComponents.jsx';
 import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
 import {apiJson} from "../api.js";
 import {isDocumentEvent} from "../documentFiles.js";
@@ -1325,7 +1330,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
           <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
             <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.pink,textTransform:"none",letterSpacing:0,marginBottom:10}}>Add Memory</div>
             <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"160px 1fr",gap:8,alignItems:"start"}}>
-              <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
+              <SelectionControl label="Memory type" value={newMemType} onChange={setNewMemType} options={["semantic","episodic","procedural"].map(value=>({value,label:value}))}/>
               <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             </div>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,marginTop:8}}>Add Accepted Memory</button>
@@ -1367,7 +1372,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   </div>;
 }
 
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearch,onNavigate,personas,tools,initialTab}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearchResult,onHome,onNavigate,personas,tools,initialTab}){
   const isMobile=useIsMobile();
   const identity=ws?.id, alive=React.useRef(identity);alive.current=identity;
   React.useEffect(()=>()=>{alive.current=null;},[]);
@@ -1378,13 +1383,21 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   const fetch=async(url,opts)=>{const response=await window.fetch(url,opts);if(alive.current!==identity)throw new DOMException('Workspace changed','AbortError');if(!response.ok){const d=await response.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${response.status}`);}const read=response.json.bind(response);response.json=async()=>{const data=await read();if(alive.current!==identity)throw new DOMException("Workspace changed","AbortError");return data;};return response;};
 
   const [tab,setTab]=React.useState(initialTab||"overview");
+  const [searchOpen,setSearchOpen]=React.useState(false);
+  const [searchState,setSearchState]=React.useState({query:'',kind:'',workspace:identity,start:'',end:'',offset:0});
+  const [contentRevision,setContentRevision]=React.useState(0);
+  const contentScroll=React.useRef(null), searchTrigger=React.useRef(null);
+  const onSearch=()=>setSearchOpen(true);
+  const closeSearch=()=>{setSearchOpen(false);requestAnimationFrame(()=>searchTrigger.current?.focus());};
+  const chooseTab=id=>{setSearchOpen(false);setInitialCreate(false);setTab(id);};
   React.useEffect(()=>{if(initialTab)setTab(initialTab);},[initialTab]);
   const [editMode,setEditMode]=React.useState(false);
   const [wsName,setWsName]=React.useState("");
   const [wsDesc,setWsDesc]=React.useState("");
-  const [wsInstructions,setWsInstructions]=React.useState("");
   const [addPanel,setAddPanel]=React.useState(false);
-  const [addSearch,setAddSearch]=React.useState("");
+  const addTrigger=React.useRef(null);
+  const openContent=event=>{addTrigger.current=event?.currentTarget||document.activeElement;setAddPanel(true);};
+  const closeContent=()=>{setAddPanel(false);requestAnimationFrame(()=>addTrigger.current?.isConnected&&addTrigger.current.focus({preventScroll:true}));};
   const [analyzing,setAnalyzing]=React.useState(false);
   const [analyzeMsg,setAnalyzeMsg]=React.useState(null);
   const [initialCreate,setInitialCreate]=React.useState(false);
@@ -1396,7 +1409,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   const [newMemText,setNewMemText]=React.useState("");
   const [newMemType,setNewMemType]=React.useState("semantic");
   const [memScanning,setMemScanning]=React.useState(false);
-  React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");setWsInstructions(ws.instructions||"");};},[ws?.id]);
+  React.useEffect(()=>{if(ws){setWsName(ws.name||"");setWsDesc(ws.description||"");};},[ws?.id]);
   const refreshMemory=React.useCallback(async()=>{
     if(!ws?.id)return;
     setMemLoading(true);
@@ -1417,9 +1430,6 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:undefined,boxSizing:"border-box"};
   const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5});
   const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
-  const convIds=(ws.conversations||[]).map(c=>c.id);
-  const availableConvs=convs.filter(c=>!convIds.includes(c.id));
-  const filteredAvail=availableConvs.filter(c=>(c.title||"").toLowerCase().includes(addSearch.toLowerCase()));
   const saveEdit=()=>run(async()=>{
     await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})});
     setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,name:wsName,description:wsDesc}:w));
@@ -1443,11 +1453,6 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setAnalyzing(false);
     setTimeout(()=>setAnalyzeMsg(null),5000);
   };
-  const addConv=(convId)=>run(async()=>{
-    await fetch(`${API}/api/workspaces/${ws.id}/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({conversation_id:convId})});
-    const conv=convs.find(c=>c.id===convId);
-    if(conv){setWsDetail(d=>({...d,conversations:[...(d.conversations||[]),{id:conv.id,title:conv.title,model:conv.model,updated_at:conv.updated_at}]}));setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:(w.conv_count||0)+1}:w));}
-  });
   const removeConv=(convId)=>run(async()=>{
     await fetch(`${API}/api/workspaces/${ws.id}/conversations/${convId}`,{method:"DELETE"});
     setWsDetail(d=>({...d,conversations:(d.conversations||[]).filter(c=>c.id!==convId)}));
@@ -1465,10 +1470,6 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,...fields}:w));
   };
   const toggleMemory=()=>run(()=>patchWsMemory({memory_enabled:(ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true)?0:1}));
-  const saveInstructions=()=>run(async()=>{
-    await patchWsMemory({instructions:wsInstructions});
-    notify&&notify({type:"success",text:"Workspace instructions saved",duration:2200});
-  });
   const scanMemory=async()=>{
     if(!ws?.id)return;
     setMemScanning(true);
@@ -1549,46 +1550,32 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
       setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,file_count:Math.max(0,(w.file_count||1)-1)}:w));
     }catch(e){notify&&notify({type:"error",text:"Artifact delete failed",detail:e.message||String(e)});}
   };
-  return<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}F5`,flexShrink:0}}>
-      <div style={{display:"flex",alignItems:"flex-start",gap:10,flexWrap:"wrap",marginBottom:8}}>
-        <span style={{fontSize:24,lineHeight:1}}>🗂</span>
-        <div style={{flex:1,minWidth:0}}>
-          {editMode?<input value={wsName} onChange={e=>setWsName(e.target.value)} style={{...inputS,fontSize:16,fontWeight:700,background:"transparent",border:`1px solid ${t.acc}44`,marginBottom:6}}/>
-            :<div style={{fontSize:16,fontWeight:700,color:t.text,marginBottom:4}}>{ws.name}</div>}
-          {editMode?<input value={wsDesc} onChange={e=>setWsDesc(e.target.value)} placeholder="Description..." style={{...inputS,fontSize:"var(--hc-text-control)",color:t.mut}}/>
-            :<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{ws.description||"No description"}</div>}
-        </div>
-        <div style={{display:"flex",gap:4,flexWrap:"wrap",flex:"0 1 auto",maxWidth:"100%"}}>
-          {editMode
-            ?<><button onClick={saveEdit} style={btnS(t.ok)}>💾 Save</button><button onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></>
-            :<><button onClick={()=>setEditMode(true)} style={btnS(t.mut)}>✏️ Edit</button>
-              <button onClick={analyzeTopics} disabled={analyzing} style={btnS(t.acc)}>{analyzing?"⏳":"🔬"} Analyze</button>
-              <button onClick={()=>setTab("settings")} style={btnS(t.pink)}>Context settings</button>
-              <button onClick={deleteWs} style={btnS(t.err)}>🗑</button></>}
-        </div>
-      </div>
-      <button disabled={actionBusy} style={btnS(t.acc)} onClick={()=>run(onNewChat)}>New chat in this workspace</button>
-      <WorkspaceDefaultSummary ws={ws} t={t}/>
-      {analyzeMsg&&<div style={{fontSize:"var(--hc-text-secondary)",color:analyzeMsg.ok?t.ok:t.err,marginTop:4,padding:"4px 8px",background:analyzeMsg.ok?`${t.ok}15`:`${t.err}15`,borderRadius:6,border:`1px solid ${analyzeMsg.ok?t.ok:t.err}33`}}>{analyzeMsg.text}</div>}
-      {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:analyzeMsg?4:0}}>
-        {topics.map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:12,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
-      </div>}
+  const refreshLinked=async()=>{const [next,list]=await Promise.all([apiJson(`/api/workspaces/${ws.id}`),apiJson('/api/workspaces')]);if(alive.current===identity){setWsDetail(next);setWorkspaces(list);setContentRevision(v=>v+1);}};
+  return<div className={`hc-workspace-shell${searchOpen?" is-searching":""}`}>
+    <PanelHeader t={t} icon={<IC.Layers/>} title={<><button className="hc-workspace-link" onClick={onHome}>Workspaces</button><span className="hc-secondary"> → </span><span className="hc-workspace-name" title={ws.name}>{ws.name}</span></>} subtitle={ws.description}>
+      <button disabled={actionBusy} className="hc-button is-primary" onClick={()=>run(onNewChat)}><IC.Plus/> New chat in this workspace</button>
+      <button ref={searchTrigger} className="hc-button" onClick={onSearch}><IC.Search/> Search</button>
+      <ActionMenu compact label="Workspace actions" items={[{label:'Edit',onClick:()=>{setWsName(ws.name);setWsDesc(ws.description||'');setEditMode(true);}},{label:analyzing?'Analyzing…':'Analyze',disabled:analyzing,onClick:analyzeTopics},{label:'Delete workspace',destructive:true,disabled:actionBusy,onClick:deleteWs}]}/>
+    </PanelHeader>
+    <div className="hc-workspace-secondary"><WorkspaceDefaultSummary ws={ws} t={t}/>{analyzeMsg&&<p role="status" style={{color:analyzeMsg.ok?t.ok:t.err}}>{analyzeMsg.text}</p>}
+      {!!topics.length&&<div className="hc-toolbar">{topics.map((tp,i)=><span key={i} style={{fontSize:12,color:t.mut}}>{tp.label}</span>)}</div>}
+      {editMode&&<form className="hc-toolbar" onSubmit={e=>{e.preventDefault();saveEdit();}}><input aria-label="Workspace title" value={wsName} onChange={e=>setWsName(e.target.value)} style={inputS}/><input aria-label="Workspace description" value={wsDesc} onChange={e=>setWsDesc(e.target.value)} style={inputS}/><button disabled={actionBusy||!wsName.trim()} style={btnS(t.ok)}>Save</button><button type="button" onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></form>}
     </div>
-    <div style={{display:"flex",gap:0,overflowX:"auto",borderBottom:`1px solid ${t.brd}22`,flexShrink:0}}>
-      {[["overview","Overview"],["convs","💬 Conversations"],["knowledge","Sources"],["settings","Settings"],["memory","🧠 Memory"],["notes","Notes"],["tasks","Tasks"],["jobs","Jobs"],["reports","📊 Reports"],["files","📎 Artifacts"]].map(([id,label])=><button key={id} onClick={()=>{setInitialCreate(false);setTab(id);setAddPanel(false);}} style={{flexShrink:0,whiteSpace:"nowrap",padding:"10px 16px",background:tab===id?`${t.acc}15`:"transparent",border:"none",borderBottom:tab===id?`2px solid ${t.acc}`:"2px solid transparent",color:tab===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:tab===id?700:400}}>{label}</button>)}
-      {tab==="convs"&&<button onClick={()=>setAddPanel(p=>!p)} style={{marginLeft:"auto",padding:"10px 14px",background:addPanel?`${t.warm}15`:"transparent",border:"none",borderBottom:addPanel?`2px solid ${t.warm}`:"2px solid transparent",color:addPanel?t.warm:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>+ Add Chats</button>}
-    </div>
-    {addPanel&&<div style={{padding:12,maxHeight:300,overflowY:'auto'}}><WorkspaceContentPicker {...{ws,t,btnS,inputS}} onLinked={async()=>{const next=await apiJson(`/api/workspaces/${ws.id}`);if(alive.current===identity){setWsDetail(next);setWorkspaces(await apiJson('/api/workspaces'));}}}/></div>}
+    <nav aria-label="Workspace sections" className="hc-workspace-nav">
+      <div className="hc-workspace-tabs">{workspaceSections.map(([id,label])=><button key={id} aria-current={workspaceSection(tab)===id?'page':undefined} onClick={()=>chooseTab(id)}>{label}</button>)}</div>
+      <div className="hc-workspace-section-select"><SelectionControl label="Workspace section" value={workspaceSection(tab)} options={workspaceSections.map(([value,label])=>({value,label}))} onChange={chooseTab}/></div>
+    </nav>
+    {addPanel&&<WorkspaceContentDialog {...{ws,t,btnS,inputS}} onClose={closeContent} onLinked={refreshLinked}/>}
     {actionBusy&&<div role="status" style={{padding:8,color:t.mut}}>Saving…</div>}
-    <div style={{flex:1,overflowY:"auto",padding:isMobile?12:20}}>
-      {tab==='overview'&&<WorkspaceOverview {...{ws,t,btnS,onOpenConv,onOpenReport,onNavigate}} onNewChat={onNewChat} onSearch={onSearch} onTab={(next,create=false)=>{if(next==='add'){setAddPanel(true);return;}setInitialCreate(create);setTab(next);}}/>}
-      {tab==='knowledge'&&<WorkspaceSources key={ws.id} {...{ws,t,btnS,inputS,onPersonaCreated,models,notify}} onLinked={async()=>{const next=await apiJson(`/api/workspaces/${ws.id}`);if(alive.current===identity){setWsDetail(next);setWorkspaces(await apiJson('/api/workspaces'));}}}/>}
-      {tab==='settings'&&<WorkspaceDefaults key={ws.id} {...{ws,t,btnS,inputS,models,personas,tools}} onSaved={saved=>{setWsDetail(saved);setWsInstructions(saved.instructions);setWorkspaces(p=>p.map(w=>w.id===saved.id?{...w,...saved}:w));}}/>}
-      {['notes','tasks','jobs'].includes(tab)&&<WorkspaceDaily {...{tab,ws,t,btnS,inputS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate}}/>}
+    <div ref={contentScroll} className="hc-workspace-body" style={{display:searchOpen?'none':undefined}}>
+      {!!workspaceSubviews(tab).length&&<nav className="hc-workspace-subnav" aria-label={`${workspaceSectionLabel(tab)} views`}>{workspaceSubviews(tab).map(([id,label])=><button key={id} className="hc-button" aria-current={tab===id?'page':undefined} onClick={()=>chooseTab(id)}>{label}</button>)}</nav>}
+      {tab==='overview'&&<WorkspaceOverview {...{ws,t,btnS,onOpenConv,onOpenReport,onNavigate}} onNewChat={onNewChat} onSearch={onSearch} onTab={(next,create=false,event)=>{if(next==='add'){openContent(event);return;}setInitialCreate(create);setTab(next);}}/>}
+      {tab==='knowledge'&&<WorkspaceSources key={ws.id} {...{ws,t,btnS,inputS,onPersonaCreated,models,notify}} refreshKey={contentRevision} onAdd={openContent} onLinked={refreshLinked}/>}
+      {tab==='settings'&&<WorkspaceDefaults key={ws.id} {...{ws,t,btnS,inputS,models,personas,tools}} onSaved={saved=>{setWsDetail(saved);setWorkspaces(p=>p.map(w=>w.id===saved.id?{...w,...saved}:w));}}/>}
+      {['notes','tasks','jobs'].includes(tab)&&<WorkspaceDaily {...{tab,ws,t,btnS,inputS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate}} refreshKey={contentRevision} onAddContent={openContent}/>}
 
-      {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint={'Click "+ Add Chats" to add some.'}/>}
+      {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="hc-toolbar"><button style={btnS(t.acc)} onClick={openContent}>Add existing content</button></div>
+        {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint="Start a project chat or add existing content."/>}
         {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
           <span style={{fontSize:18}}>💬</span>
           <div style={{flex:1,minWidth:0}}>
@@ -1596,7 +1583,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
           </div>
           <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
-          <button aria-label="Close" onClick={()=>removeConv(c.id)} style={btnS(t.err)}>✕</button>
+          <ActionMenu compact label={`Actions for ${c.title||"chat"}`} items={[{label:"Unlink chat",disabled:actionBusy,onClick:()=>removeConv(c.id)}]}/>
         </div>)}
       </div>}
       {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
@@ -1616,7 +1603,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           </div>
         </div>;};return <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,background:`${enabled?t.ok:t.surface}10`,border:`1px solid ${enabled?t.ok:t.brd}33`}}>
-          <button onClick={toggleMemory} style={btnS(enabled?t.ok:t.mut)}>{enabled?"On":"Off"}</button>
+          <button role="switch" aria-label="Workspace memory" aria-checked={enabled} onClick={toggleMemory} style={btnS(enabled?t.ok:t.mut)}>{enabled?"On":"Off"}</button>
           <div style={{flex:1,minWidth:0}}>
             <div style={{fontSize:12,fontWeight:700,color:enabled?t.ok:t.text}}>Workspace memory {enabled?"enabled":"disabled"}</div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>Accepted memories and enabled blocks are injected into workspace chats. Suggestions are never injected until accepted.</div>
@@ -1624,24 +1611,19 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
           <button onClick={refreshMemory} disabled={memLoading} style={btnS(t.acc)}>{memLoading?"Loading":"Refresh"}</button>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(260px,.55fr)",gap:12,alignItems:"start"}}>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>Workspace Instructions</div>
-            <textarea value={wsInstructions} onChange={e=>setWsInstructions(e.target.value)} placeholder="Stable project instructions, constraints, tone, or goals..." style={{...inputS,minHeight:92,lineHeight:1.5,resize:"vertical"}}/>
-            <button onClick={saveInstructions} style={{...btnS(t.ok),alignSelf:"flex-start"}}>Save Instructions</button>
-          </div>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:12,alignItems:"start"}}>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.pink,textTransform:"none",letterSpacing:0}}>Add Memory</div>
-            <select value={newMemType} onChange={e=>setNewMemType(e.target.value)} style={inputS}><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option></select>
+            <SelectionControl label="Memory type" value={newMemType} onChange={setNewMemType} options={["semantic","episodic","procedural"].map(value=>({value,label:value}))}/>
             <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,alignSelf:"flex-start"}}>Add Accepted Memory</button>
           </div>
         </div>
         {memBlocks.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:8}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(240px,100%),1fr))",gap:8}}>
             {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}><button onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.text}}>{b.label}</div></div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}><button role="switch" aria-label={`${b.label} block enabled`} aria-checked={!!b.enabled} onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.text}}>{b.label}</div></div>
               <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35}}>{b.description}</div>
               <textarea value={b.value||""} onChange={e=>updateBlock(b.id,{value:e.target.value})} style={{...inputS,minHeight:76,lineHeight:1.45,resize:"vertical"}}/>
             </div>)}
@@ -1669,13 +1651,17 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
           </div>
           <button onClick={()=>onOpenReport&&onOpenReport(r.id)} style={btnS(t.acc)}>Open →</button>
-          <button aria-label="Close" onClick={()=>onRemoveReport&&onRemoveReport(ws.id,r.id)} style={btnS(t.err)}>✕</button>
+          <ActionMenu compact label={`Actions for ${r.title||r.query||"report"}`} items={[{label:"Unlink report",onClick:()=>onRemoveReport?.(ws.id,r.id)}]}/>
         </div>;})}
       </div>}
-      {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
+      {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(220px,100%),1fr))",gap:10}}>
         {!(ws.files||[]).length&&<div style={{gridColumn:"1/-1"}}><EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Artifacts are tracked automatically when the AI downloads them in workspace chats."/></div>}
         {(ws.files||[]).map(f=><ArtifactCard key={f.id||`${f.filename}-${f.created_at}`} artifact={f} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} confirmAction={confirmAction} compact/>)}
       </div>}
+    </div>
+    <div className="hc-workspace-search" style={{display:searchOpen?'flex':'none'}}>
+      <button className="hc-button hc-workspace-back" onClick={closeSearch}>← Back to {workspaceSectionLabel(tab)}</button>
+      <LibrarySearchPanel embedded active={searchOpen} workspaceId={ws.id} state={searchState} setState={setSearchState} {...{t,btnS,inputS}} onNavigate={onSearchResult}/>
     </div>
   </div>;
 }

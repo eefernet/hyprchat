@@ -1,3 +1,4 @@
+import SelectionControl from '../components/SelectionControl.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import {IC} from '../components/icons.jsx';
 import React,{useState,useEffect,useRef} from 'react';
@@ -6,7 +7,7 @@ import { API, userScopedUrl } from '../session.js';
 import { apiJson } from '../api.js';
 
 const kinds=['research','coding','coding_run','document','image','indexing','scheduled'];
-export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],workspaceId="",focusId=null}){
+export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],workspaceId="",embedded=false,onAddContent,focusId=null}){
   const [jobs,setJobs]=useState([]),[kind,setKind]=useState(''),[status,setStatus]=useState('');
   const [error,setError]=useState(''),[busy,setBusy]=useState(''),[refresh,setRefresh]=useState(0);
   const [offset,setOffset]=useState(0);
@@ -44,19 +45,15 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
     }catch(e){if(e.name!=='AbortError'&&version===epoch.current)setError(e.message);}
     finally{if(version===epoch.current)setBusy('');}
   };
-  return <section style={{padding:20,overflowY:'auto',height:'100%',color:t.text}}>
-    <PanelHeader t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/>
+  return <section style={{padding:embedded?0:20,overflowY:embedded?'visible':'auto',height:embedded?'auto':'100%',color:t.text}}>
+    <PanelHeader embedded={embedded} t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/>
     <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
-      <select aria-label="Jobs workspace" value={workspace} disabled={!!workspaceId} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
-      <select aria-label="Job type" value={kind} onChange={e=>{setKind(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}>
-        <option value="">All types</option>{kinds.map(k=><option key={k}>{k}</option>)}
-      </select>
-      <select aria-label="Job status" value={status} onChange={e=>{setStatus(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}>
-        <option value="">All states</option>{['active','queued','running','cancelling','succeeded','partial','failed','cancelled','interrupted'].map(s=><option key={s}>{s}</option>)}
-      </select>
+      {!embedded&&<select aria-label="Jobs workspace" value={workspace} disabled={!!workspaceId} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
+      <SelectionControl label="Job type" value={kind} onChange={v=>{setKind(v);setOffset(0);}} options={[{value:'',label:'All types'},...kinds.map(value=>({value,label:value}))]}/>
+      <SelectionControl label="Job status" value={status} onChange={v=>{setStatus(v);setOffset(0);}} options={[{value:'',label:'All states'},...['active','queued','running','cancelling','succeeded','partial','failed','cancelled','interrupted'].map(value=>({value,label:value}))]}/>
       <button style={btnS(t.acc)} onClick={()=>setRefresh(n=>n+1)}>Refresh</button>
     </div>
-    <OperationsSummary t={t}/>
+    {!embedded&&<OperationsSummary t={t}/>}
     {error&&<p role="alert" style={{color:t.err}}>{error}</p>}
     {runResult&&<article style={{padding:14,border:`1px solid ${t.brd}`,whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}><button style={btnS(t.acc)} onClick={()=>setRunResult(null)}>Close result</button><p>{runResult.result_text||runResult.error||'No output saved yet.'}</p></article>}
     {!jobs.length&&<p style={{color:t.dim}}>No jobs match these filters.</p>}

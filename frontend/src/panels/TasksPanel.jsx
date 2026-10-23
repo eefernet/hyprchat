@@ -1,3 +1,5 @@
+import SelectionControl from '../components/SelectionControl.jsx';
+import ModelPicker from '../ModelPicker.jsx';
 import {taskBody} from '../taskForm.js';
 import React,{useState,useEffect,useCallback,useRef} from 'react';
 
@@ -14,7 +16,7 @@ const KIND_FIELDS={once:["run_at"],daily:["time"],weekly:["time","weekday"],mont
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 const EMPTY_FORM={title:"",prompt:"",task_type:"llm",schedule_kind:"daily",time:"08:30",weekday:0,day:1,cron:"",run_at:"",event:"",every:1,notify:true,delivery:{},timezone:"",model:"",tool_ids:[],workspace_id:"",conversation_id:""};
 
-export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange,notify,models=[],workspaces=[],convs=[],workspaceId="",onNavigate,initialCreate=false}){
+export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab,onUnseenChange,notify,models=[],workspaces=[],convs=[],workspaceId="",embedded=false,onAddContent,onNavigate,initialCreate=false}){
   const isMobile=useIsMobile();
   const [tasks,setTasks]=useState([]);
   const [workspace,setWorkspace]=useState(workspaceId),[toolOptions,setToolOptions]=useState([]),[preview,setPreview]=useState(null),[saving,setSaving]=useState(false);
@@ -118,10 +120,10 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
   const fmtTs=fmtUtcToLocal;
   const statusColor=s=>s==="succeeded"?t.ok:s==="failed"?t.err:s==="running"?t.warm:t.mut;
 
-  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <PanelHeader t={t} icon={<IC.Clock/>} title="Scheduled Tasks"
+  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:embedded?"visible":"hidden"}}>
+    <PanelHeader embedded={embedded} t={t} icon={<IC.Clock/>} title="Scheduled Tasks"
       subtitle="Recurring agent work, reminders, and the notification queue."
-      nav={<>
+      nav={embedded?null:<>
         <button onClick={()=>setTab("tasks")} style={{...btnS(tab==="tasks"?t.acc:t.mut),padding:"5px 12px"}}>Tasks</button>
         <button onClick={()=>setTab("notifications")} style={{...btnS(tab==="notifications"?t.acc:t.mut),padding:"5px 12px"}}>
           Notifications{unseen>0?` (${unseen})`:""}
@@ -130,12 +132,12 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
       <button aria-label="Refresh" onClick={()=>{loadTasks();loadNotifs();}} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       {tab==="tasks"&&<button onClick={()=>setForm({...EMPTY_FORM,workspace_id:workspace})} style={btnS(t.warm)}><IC.Plus/> New Task</button>}
     </PanelHeader>
-    <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
+    <div style={{overflowY:embedded?"visible":"auto",padding:embedded?0:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:900}}>
         {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
 
         {tab==="tasks"&&<>
-          <select aria-label="Tasks workspace" disabled={!!workspaceId} value={workspace} onChange={e=>setWorkspace(e.target.value)} style={{...inputS,width:'auto',marginBottom:12}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
+          {!embedded&&<select aria-label="Tasks workspace" disabled={!!workspaceId} value={workspace} onChange={e=>setWorkspace(e.target.value)} style={{...inputS,width:'auto',marginBottom:12}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
 
           <div style={{...cardS,display:"flex",gap:8,alignItems:"center",marginBottom:16}}>
             <input value={nlText} onChange={e=>setNlText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")parseNl();}}
@@ -149,28 +151,18 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
             <textarea value={form.prompt} onChange={e=>setForm(f=>({...f,prompt:e.target.value}))} placeholder="What should the agent do each run?" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8,alignItems:"center"}}>
               {form.task_type==="llm"||form.task_type==="research"
-                ?<select value={form.task_type} onChange={e=>setForm(f=>({...f,task_type:e.target.value}))} style={{...inputS,width:"auto"}}>
-                  <option value="llm">Agent task</option>
-                  <option value="research">Deep research</option>
-                </select>
+                ?<SelectionControl label="Task task type" value={form.task_type} onChange={value=>setForm(f=>({...f,task_type:value}))} options={[{value:'llm',label:'Agent task'},{value:'research',label:'Deep research'}]}/>
                 :<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,border:`1px solid ${t.warm}44`,borderRadius:8,padding:"5px 10px"}}>
                   {form.task_type==="check_in"?"check-in — managed in the Assistant panel":form.task_type}
                 </span>}
-              <select value={form.schedule_kind} onChange={e=>setForm(f=>({...f,schedule_kind:e.target.value}))} style={{...inputS,width:"auto"}}>
-                {Object.keys(KIND_FIELDS).map(k=><option key={k} value={k}>{k}</option>)}
-              </select>
+              <SelectionControl label="Task schedule kind" value={form.schedule_kind} onChange={value=>setForm(f=>({...f,schedule_kind:value}))} options={Object.keys(KIND_FIELDS).map(value=>({value,label:value}))}/>
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("time")&&<input type="time" value={form.time} onChange={e=>setForm(f=>({...f,time:e.target.value}))} style={{...inputS,width:"auto"}}/>}
-              {(KIND_FIELDS[form.schedule_kind]||[]).includes("weekday")&&<select value={form.weekday} onChange={e=>setForm(f=>({...f,weekday:e.target.value}))} style={{...inputS,width:"auto"}}>
-                {WEEKDAYS.map((w,i)=><option key={i} value={i}>{w}</option>)}
-              </select>}
+              {(KIND_FIELDS[form.schedule_kind]||[]).includes("weekday")&&<SelectionControl label="Task weekday" value={form.weekday} onChange={value=>setForm(f=>({...f,weekday:value}))} options={WEEKDAYS.map((label,value)=>({value,label}))}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("day")&&<input type="number" min={1} max={31} value={form.day} onChange={e=>setForm(f=>({...f,day:e.target.value}))} style={{...inputS,width:70}}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("cron")&&<input value={form.cron} onChange={e=>setForm(f=>({...f,cron:e.target.value}))} placeholder="*/30 * * * *" style={{...inputS,width:160}}/>}
               {(KIND_FIELDS[form.schedule_kind]||[]).includes("run_at")&&<input type="datetime-local" value={form.run_at} onChange={e=>setForm(f=>({...f,run_at:e.target.value}))} style={{...inputS,width:"auto"}}/>}
               {form.schedule_kind==="event"&&<>
-                <select value={form.event} onChange={e=>setForm(f=>({...f,event:e.target.value}))} style={{...inputS,width:"auto"}}>
-                  <option value="">when…</option>
-                  {eventNames.map(ev=><option key={ev} value={ev}>{ev.replace(/_/g," ")}</option>)}
-                </select>
+                <SelectionControl label="Task event" value={form.event} onChange={value=>setForm(f=>({...f,event:value}))} options={[{value:'',label:'When…'},...eventNames.map(value=>({value,label:value.replace(/_/g,' ')}))]}/>
                 <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:5,alignItems:"center"}}>
                   every <input type="number" min={1} value={form.every} onChange={e=>setForm(f=>({...f,every:e.target.value}))} style={{...inputS,width:56}}/> occurrence(s)
                 </label>
@@ -179,9 +171,9 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
                 <input type="checkbox" checked={!!form.notify} onChange={e=>setForm(f=>({...f,notify:e.target.checked}))}/> notify when done
               </label>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:10,marginBottom:12}}>
-              <label>Workspace<select disabled={form.task_type==='check_in'} value={form.workspace_id||''} onChange={e=>setForm(f=>({...f,workspace_id:e.target.value}))} style={inputS}><option value="">No workspace</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
-              <label>Model<select value={form.model||''} onChange={e=>setForm(f=>({...f,model:e.target.value}))} style={inputS}><option value="">Inherit existing defaults</option>{[...new Set([...models,form.model].filter(Boolean))].map(m=><option key={m}>{m}</option>)}</select></label>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(min(190px,100%),1fr))',gap:10,marginBottom:12}}>
+              {!embedded&&<label>Workspace<select disabled={form.task_type==='check_in'} value={form.workspace_id||''} onChange={e=>setForm(f=>({...f,workspace_id:e.target.value}))} style={inputS}><option value="">No workspace</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>}
+              <div><span className="hc-field-label">Model</span><ModelPicker label="Task model" placeholder="Inherit existing defaults" value={form.model||''} onChange={value=>setForm(f=>({...f,model:value}))} models={[...new Set([...models,form.model].filter(Boolean))]} t={t} font="inherit"/><button style={btnS(t.mut)} onClick={()=>setForm(f=>({...f,model:''}))}>Inherit existing defaults</button></div>
               <label>Timezone<input value={form.timezone||''} onChange={e=>setForm(f=>({...f,timezone:e.target.value}))} placeholder="Assistant timezone (default)" style={inputS}/></label>
               <label>Conversation<select value={form.conversation_id||''} disabled={form.task_type==='check_in'} onChange={e=>setForm(f=>({...f,conversation_id:e.target.value}))} style={inputS}><option value="">{form.workspace_id?'Create a project task conversation':'Result in run history'}</option>{convs.map(c=><option key={c.id} value={c.id}>{c.title||'New chat'}</option>)}{form.conversation_id&&!convs.some(c=>c.id===form.conversation_id)&&<option value={form.conversation_id}>Current conversation</option>}</select></label>
             </div>

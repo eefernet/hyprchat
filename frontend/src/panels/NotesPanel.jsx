@@ -1,3 +1,4 @@
+import SelectionControl from '../components/SelectionControl.jsx';
 import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
@@ -11,7 +12,7 @@ import useIsMobile from '../useIsMobile.js';
 
 const EMPTY={kind:"todo",title:"",content:"",due_local:"",remind_local:"",tags:[],workspace_ids:[]};
 
-export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,initialNoteId,onInitialNoteConsumed,workspaces=[],workspaceId="",initialCreate=false}){
+export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,initialNoteId,onInitialNoteConsumed,workspaces=[],workspaceId="",embedded=false,onAddContent,refreshKey=0,initialCreate=false}){
   const isMobile=useIsMobile();
   const [notes,setNotes]=useState([]);
   const [workspace,setWorkspace]=useState(workspaceId),[tag,setTag]=useState(""),[offset,setOffset]=useState(0),[allNotes,setAllNotes]=useState([]);
@@ -31,7 +32,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
     finally{if(version===loadEpoch.current)setLoaded(true);}
   },[workspace,tag,offset,tab,showDone]);
   const loadLatest=useRef(load);loadLatest.current=load;
-  useEffect(()=>{let alive=true;load();if(workspace)apiJson("/api/notes").then(d=>{if(alive)setAllNotes(d);}).catch(()=>{});return()=>{alive=false;};},[load,workspace]);
+  useEffect(()=>{let alive=true;load();if(workspace)apiJson("/api/notes").then(d=>{if(alive)setAllNotes(d);}).catch(()=>{});return()=>{alive=false;};},[load,workspace,refreshKey]);
 
   const save=async()=>{
     if(!form?.title?.trim())return;
@@ -60,8 +61,8 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
   const shown=notes.filter(n=>n.kind===tab&&(showDone||!n.done));
   const fmtLocal=fmtLocalMinute;
 
-  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <PanelHeader t={t} color={t.ok} icon={<IC.Pencil/>} title="Notes & Todos"
+  return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:embedded?"visible":"hidden"}}>
+    <PanelHeader embedded={embedded} t={t} color={t.ok} icon={<IC.Pencil/>} title="Notes & Todos"
       subtitle="Reminders fire as notifications; the assistant reads these in check-ins."
       nav={<>
         <button onClick={()=>{setTab("todo");setOffset(0);}} style={{...btnS(tab==="todo"?t.ok:t.mut),padding:"5px 12px"}}>Todos</button>
@@ -70,20 +71,18 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
           <input type="checkbox" checked={showDone} onChange={e=>{setShowDone(e.target.checked);setOffset(0);}}/> show done
         </label>
       </>}>
-      <button onClick={load} title="Refresh notes" style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
+      {embedded&&<button style={btnS(t.acc)} onClick={onAddContent}>Add existing content</button>}<button onClick={load} title="Refresh notes" style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
       <button onClick={()=>setForm({...EMPTY,kind:tab,workspace_ids:workspace?[workspace]:[]})} style={btnS(t.warm)}><IC.Plus/> New</button>
     </PanelHeader>
-    <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
+    <div style={{overflowY:embedded?"visible":"auto",padding:embedded?0:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:760}}>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}><select aria-label="Notes workspace" disabled={!!workspaceId} value={workspace} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select><input aria-label="Filter notes by tag" value={tag} onChange={e=>{setTag(e.target.value);setOffset(0);}} placeholder="Filter by tag" style={{...inputS,width:'auto'}}/>
-        {workspace&&<select value="" aria-label="Link existing note" style={{...inputS,width:'auto'}} onChange={async e=>{const id=e.target.value;if(!id)return;try{await apiJson(`/api/workspaces/${workspace}/links/notes/${id}`,{method:'POST'});loadLatest.current();}catch(error){setErr(error.message);}}}><option value="">Link existing note / todo…</option>{allNotes.filter(n=>!(n.workspace_ids||[]).includes(workspace)).map(n=><option key={n.id} value={n.id}>{n.title}</option>)}</select>}</div>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>{!embedded&&<select aria-label="Notes workspace" disabled={!!workspaceId} value={workspace} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}<input aria-label="Filter notes by tag" value={tag} onChange={e=>{setTag(e.target.value);setOffset(0);}} placeholder="Filter by tag" style={{...inputS,width:'auto'}}/>
+        {workspace&&!embedded&&<select value="" aria-label="Link existing note" style={{...inputS,width:'auto'}} onChange={async e=>{const id=e.target.value;if(!id)return;try{await apiJson(`/api/workspaces/${workspace}/links/notes/${id}`,{method:'POST'});loadLatest.current();}catch(error){setErr(error.message);}}}><option value="">Link existing note / todo…</option>{allNotes.filter(n=>!(n.workspace_ids||[]).includes(workspace)).map(n=><option key={n.id} value={n.id}>{n.title}</option>)}</select>}</div>
 
         {(err||loadErr)&&<div role="alert" style={{color:t.err,fontSize:12,marginBottom:12}}>{err||loadErr}</div>}
         {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.ok}55`}}>
           <div style={{display:"flex",gap:8,marginBottom:8}}>
-            <select value={form.kind} onChange={e=>setForm(f=>({...f,kind:e.target.value}))} style={{...inputS,width:"auto"}}>
-              <option value="todo">Todo</option><option value="note">Note</option>
-            </select>
+            <SelectionControl label="Note type" value={form.kind} onChange={value=>setForm(f=>({...f,kind:value}))} options={[{value:'todo',label:'Todo'},{value:'note',label:'Note'}]}/>
             <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:1,minWidth:0}} autoFocus/>
           </div>
           <textarea value={form.content} onChange={e=>setForm(f=>({...f,content:e.target.value}))} placeholder="Details (optional)" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
@@ -94,7 +93,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
               <input type="datetime-local" value={form.remind_local||""} onChange={e=>setForm(f=>({...f,remind_local:e.target.value}))} style={{...inputS,width:"auto"}}/></div>
           </div>
           <label style={{display:'block',marginBottom:8}}>Tags (comma separated)<input value={(form.tags||[]).join(', ')} onChange={e=>setForm(f=>({...f,tags:e.target.value.split(',').map(v=>v.trim())}))} style={inputS}/></label>
-          <fieldset style={{border:`1px solid ${t.brd}`,marginBottom:10}}><legend>Workspaces</legend>{workspaces.map(w=><label key={w.id} style={{display:'block'}}><input type="checkbox" checked={(form.workspace_ids||[]).includes(w.id)} onChange={e=>setForm(f=>({...f,workspace_ids:e.target.checked?[...(f.workspace_ids||[]),w.id]:(f.workspace_ids||[]).filter(id=>id!==w.id)}))}/>{w.name}</label>)}</fieldset>
+          {!embedded&&<fieldset style={{border:`1px solid ${t.brd}`,marginBottom:10}}><legend>Workspaces</legend>{workspaces.map(w=><label key={w.id} style={{display:'block'}}><input type="checkbox" checked={(form.workspace_ids||[]).includes(w.id)} onChange={e=>setForm(f=>({...f,workspace_ids:e.target.checked?[...(f.workspace_ids||[]),w.id]:(f.workspace_ids||[]).filter(id=>id!==w.id)}))}/>{w.name}</label>)}</fieldset>}
           <div style={{display:"flex",gap:8}}>
             <button onClick={save} style={btnS(t.ok)}>{form.id?"Save":"Add"}</button>
             <button onClick={()=>setForm(null)} style={btnS(t.mut)}>Cancel</button>

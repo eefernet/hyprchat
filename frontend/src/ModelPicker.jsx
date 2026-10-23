@@ -12,7 +12,7 @@ import { IC } from './components/icons.jsx';
 
 // ============================================================
 // ModelPicker — custom dropdown replacing plain <select> for model selection
-export default function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh}){
+export default function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh,label="Model",placeholder="Select model"}){
   const [open,setOpen]=useState(false);
   const [dropPos,setDropPos]=useState({top:0,left:0,width:220,up:false,bottom:0,maxH:360});
   const [hi,setHi]=useState(-1); // keyboard-highlighted index into the flat model list
@@ -143,11 +143,11 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
   const isMissing=value&&models.length>0&&!models.includes(value);
   return <div ref={triggerRef} style={{position:"relative",...style}}>
     <div onClick={openDropdown} onKeyDown={onTriggerKeyDown} tabIndex={0} role="combobox"
-      aria-expanded={open} aria-haspopup="listbox" aria-label="Model"
+      aria-expanded={open} aria-haspopup="listbox" aria-label={label}
       style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none",outline:undefined}}>
       <span style={{fontSize:compact?12:14,flexShrink:0}}>{isMissing?"⚠️":famIcon(name)}</span>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||"Select model"))}</div>
+        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||placeholder))}</div>
         {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
           <span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:700}}>{tag}</span>
           {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{paramSz}</span>}
