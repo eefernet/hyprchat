@@ -87,8 +87,8 @@ export default function DaedalusSettings({t,font,onSaved}){
   const [values,setValues]=useState(null),[message,setMessage]=useState(''),[failed,setFailed]=useState(false),[saving,setSaving]=useState(false);
   const [exclusions,setExclusions]=useState(''),[saved,setSaved]=useState('');
   const vars={'--ds-text':t.text,'--ds-dim':t.dim||t.text,'--ds-muted':t.mut,'--ds-accent':t.acc,'--ds-err':t.err,'--ds-ok':t.ok,'--ds-warn':t.warm||t.acc,
-    '--ds-card':`${t.surface}40`,'--ds-solid':t.surface,'--ds-well':`${t.bgDeep}70`,'--ds-deep':t.bgDeep,'--ds-line':`${t.brd}24`,'--ds-hair':`${t.brd}18`,'--ds-edge':`${t.brd}55`,
-    '--ds-hover':`${t.brd}1f`,'--ds-track':`${t.mut}44`,'--ds-accent-soft':`${t.acc}18`,'--ds-accent-line':`${t.acc}4d`,'--ds-warn-soft':`${t.warm||t.acc}12`,'--ds-warn-line':`${t.warm||t.acc}40`,fontFamily:font};
+    '--ds-card':`var(--hc-elev-1, ${t.surface}40)`,'--ds-solid':t.surface,'--ds-well':`var(--hc-sunken, ${t.bgDeep}70)`,'--ds-deep':t.bgDeep,'--ds-line':`var(--hc-line-subtle, ${t.brd}24)`,'--ds-hair':`var(--hc-line-subtle, ${t.brd}18)`,'--ds-edge':`var(--hc-line, ${t.brd}55)`,
+    '--ds-hover':`var(--hc-hover, ${t.brd}1f)`,'--ds-track':`${t.mut}44`,'--ds-accent-soft':`${t.acc}18`,'--ds-accent-line':`${t.acc}4d`,'--ds-warn-soft':`${t.warm||t.acc}12`,'--ds-warn-line':`${t.warm||t.acc}40`,fontFamily:font};
   const adopt=data=>{const next=loaded(data),dirs=(data.daedalus_exclude_dirs||[]).join(', ');setValues(next);setExclusions(dirs);setSaved(JSON.stringify(payload(next,dirs)));};
   useEffect(()=>{let stopped=false;fetch(`${API}/api/settings`).then(async r=>{
     if(!r.ok)throw new Error('Unable to load coding settings');

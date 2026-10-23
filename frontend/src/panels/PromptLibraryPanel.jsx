@@ -45,7 +45,7 @@ export default function PromptLibraryPanel({
         const p=cleanPrompt(raw);
         const isEditing=editPrompt?.id===p.id;
         return <div key={p.id} style={{...cardS,borderColor:isEditing?`${t.f1}55`:`${t.brd}44`}}>
-          {isEditing?<div style={{animation:"fadeIn .2s"}}>
+          {isEditing?<div className="hc-reveal">
             <div style={{display:"flex",gap:8,marginBottom:8}}>
               <input value={editPrompt.title} onChange={e=>setEditPrompt(ep=>({...ep,title:e.target.value}))} placeholder="Title" style={{...inputS,flex:2,fontWeight:600}}/>
               <input value={editPrompt.category} onChange={e=>setEditPrompt(ep=>({...ep,category:e.target.value}))} placeholder="Category" style={{...inputS,flex:1,fontSize:"var(--hc-text-control)"}}/>
@@ -62,8 +62,8 @@ export default function PromptLibraryPanel({
           </div>:<div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:13,fontWeight:600,color:t.text}}>{p.title}</div>
-                <div style={{fontSize:"var(--hc-text-secondary)",color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:6,background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
+                <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text}}>{p.title}</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.f1,marginTop:1,display:"flex",alignItems:"center",gap:4}}>{p.category||"General"}{p.is_system&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius)",background:`${t.warm}18`,color:t.warm,fontWeight:600}}>System Prompt</span>}</div>
               </div>
               <div style={{display:"flex",gap:4,flexShrink:0}}>
                 <button onClick={()=>{setPanel("chat");if(insertPrompt)insertPrompt(p);else setInp(p.content);}} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)"}}><IC.Zap/> Use</button>

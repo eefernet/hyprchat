@@ -2,9 +2,9 @@
 .ds-root :is(input,select,button,summary){scroll-margin-bottom:76px}
 .ds-root :is(button,summary):focus-visible{outline:2px solid var(--ds-accent);outline-offset:2px}
 .ds-loading{font-size:12px;color:var(--ds-muted)}
-.ds-section{display:flex;flex-direction:column;gap:12px;background:var(--ds-card);border:1px solid var(--ds-line);border-radius:10px;padding:14px 16px}
-.ds-head{display:flex;flex-direction:column;gap:4px;border-bottom:1px solid var(--ds-hair);padding-bottom:8px}
-.ds-title{margin:0;font-size:10px;font-weight:900;color:var(--ds-accent);text-transform:uppercase;letter-spacing:.75px}
+.ds-section{display:flex;flex-direction:column;gap:12px;background:var(--ds-card);border:1px solid var(--ds-line);border-radius:var(--hc-radius-card,10px);padding:16px 18px}
+.ds-head{display:flex;flex-direction:column;gap:4px;padding-bottom:4px}
+.ds-title{margin:0;font-size:14px;font-weight:600;color:var(--ds-text)}
 .ds-help{display:block;font-size:11px;font-weight:400;color:var(--ds-muted);line-height:1.45}
 .ds-err{color:var(--ds-err)}
 .ds-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:12px 14px;align-items:start}

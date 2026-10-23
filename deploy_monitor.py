@@ -46,6 +46,17 @@ REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
 REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
 REMOTE_DOCUMENT_WORKER = "/opt/hyprchat-documents/"
+# The live HyprChat service runs from a staged release since 2026-10-20
+# (/opt/hyprchat/.releases/<stamp>/, created by scripts/staged_release.py; the
+# unit drop-in zz-hyprchat-release.conf points WorkingDirectory/ExecStart at it).
+# Every REMOTE_* path above is written against the legacy root and is rebased
+# onto the active release root at deploy time (see _resolve_hyprchat_root).
+# Files copied to the legacy /opt/hyprchat/backend or /opt/hyprchat/frontend/dist
+# are never served while a release is active. /opt/hyprchat/data and
+# /opt/hyprchat/.env stay fixed (HYPRCHAT_DATA_DIR + EnvironmentFile).
+HYPRCHAT_ROOT = "/opt/hyprchat"
+HYPRCHAT_SERVICE = "hyprchat"
+_LIVE_ROOT = {"root": HYPRCHAT_ROOT, "release": False, "checked": False}
 DOCUMENT_WORKER_FILES = {"backend/document_worker.py", "backend/document_runtime.py", "backend/document-requirements.txt"}
 DOCUMENT_SHARED = {"backend/document_formats.py"}
 SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
@@ -273,6 +284,15 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    # UI motion/surface refresh (2026-10): new modules plus files that were missing.
+    "frontend/src/ui.css", "frontend/src/surfaces.css", "frontend/src/motion.css",
+    "frontend/src/elevation.js", "frontend/src/usePresence.js", "frontend/src/useNewKeys.js",
+    "frontend/src/chatActivityVisual.js", "frontend/src/chatActivity.js",
+    "frontend/src/components/chatActivity.css", "frontend/src/components/Switch.jsx",
+    "frontend/src/useFocusScope.js", "frontend/src/effort.js", "frontend/src/taskForm.js",
+    "frontend/src/workspaceNavigation.js",
+    "frontend/src/components/ActionMenu.jsx", "frontend/src/components/SelectionControl.jsx",
+    "frontend/src/components/ResponsiveDrawer.jsx", "frontend/src/components/workspaceComponents.jsx",
     'frontend/src/panels/JobsPanel.jsx',
     "frontend/src/components/DocumentActivity.jsx", "frontend/src/components/DocumentPreviewPanel.jsx", "frontend/src/daedalusTimeline.js", "frontend/src/documentFiles.js", "frontend/src/components/OfficePreview.jsx", "frontend/src/components/DocumentSettings.jsx",
     "frontend/src/daedalusJobStore.js", "frontend/src/components/daedalusJob.css",
@@ -656,11 +676,42 @@ def _default_env_text(codebox_ip, searxng_ip=""):
     ])
 
 
-def _hyprchat_host_ready(hypr):
+def _resolve_hyprchat_root(hypr):
+    """Return the directory the live hyprchat service runs from.
+
+    Reads the unit's WorkingDirectory: `<root>/backend`. With the staged-release
+    drop-in that is /opt/hyprchat/.releases/<stamp>/backend; without it (or when
+    the lookup fails) the legacy /opt/hyprchat root is used. Resolved once per
+    deploy batch and shown in the monitor header.
+    """
+    ok, out, _err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
+                            f"systemctl show {HYPRCHAT_SERVICE} -p WorkingDirectory --value",
+                            timeout=20)
+    lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
+    workdir = lines[-1] if ok and lines else ""
+    if workdir.endswith("/backend") and "/.releases/" in workdir:
+        _LIVE_ROOT.update(root=workdir[:-len("/backend")], release=True, checked=True)
+    else:
+        _LIVE_ROOT.update(root=HYPRCHAT_ROOT, release=False, checked=True)
+    return _LIVE_ROOT["root"]
+
+
+def _rebase(remote_dir, root):
+    """Map a legacy /opt/hyprchat/... path onto the active release root."""
+    if root == HYPRCHAT_ROOT:
+        return remote_dir
+    if remote_dir.rstrip("/") == HYPRCHAT_ROOT:
+        return root + "/"
+    if remote_dir.startswith(HYPRCHAT_ROOT + "/"):
+        return root + remote_dir[len(HYPRCHAT_ROOT):]
+    return remote_dir
+
+
+def _hyprchat_host_ready(hypr, root=HYPRCHAT_ROOT):
     cmd = (
         "id -u hyprchat >/dev/null 2>&1 && "
-        "test -d /opt/hyprchat/backend && "
-        "test -d /opt/hyprchat/frontend/dist && "
+        f"test -d {shlex.quote(root + '/backend')} && "
+        f"test -d {shlex.quote(root + '/frontend/dist')} && "
         "test -d /opt/hyprchat/data && "
         "test -f /opt/hyprchat/.env && "
         "python3 -m pip --version >/dev/null 2>&1"
@@ -891,13 +942,19 @@ def _ensure_openhands_worker_service(cb):
     return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=30)
 
 
-def _deploy_target(filepath, remote_dir, hypr, cb):
-    """Return (target_server, remote_dir) for a watched file."""
+def _deploy_target(filepath, remote_dir, hypr, cb, root=HYPRCHAT_ROOT):
+    """Return (target_server, remote_dir) for a watched file.
+
+    HyprChat paths are rebased onto the active release root; Codebox paths are
+    fixed. The release's own tree is edited in place, which is the same thing a
+    frontend hotfix does; the next scripts/staged_release.py prepare simply
+    hashes the current tree as its baseline.
+    """
     if filepath in DOCUMENT_WORKER_FILES:
         return cb, REMOTE_DOCUMENT_WORKER
     if filepath in WORKER_FILES:
         return cb, REMOTE_OPENHANDS_WORKER
-    return hypr, remote_dir
+    return hypr, _rebase(remote_dir, root)
 
 
 def _ensure_remote_dir(target, remote_dir):
@@ -960,7 +1017,7 @@ def _aider_worker_ready(cb):
     return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
 
 
-def _build_and_deploy_frontend(target):
+def _build_and_deploy_frontend(target, root=HYPRCHAT_ROOT):
     """Build the Vite frontend locally, then sync the whole dist/ to the server.
 
     The frontend now has a build step: editing files under frontend/src/ (or the
@@ -989,9 +1046,11 @@ def _build_and_deploy_frontend(target):
 
     # Upload to a staging dir, then swap. Wiping the live assets/ BEFORE the
     # copy meant a failed scp left the server with no frontend at all (and the
-    # wipe→copy window served index.html with missing chunks).
-    remote_dist = REMOTE_FRONTEND.rstrip("/")
+    # wipe→copy window served index.html with missing chunks). The previous
+    # dist is kept beside it as dist.prev (one copy) for a quick rollback.
+    remote_dist = _rebase(REMOTE_FRONTEND, root).rstrip("/")
     staging = remote_dist + ".new"
+    previous = remote_dist + ".prev"
     ssh_cmd(
         target["ip"], target["user"], target["pass"],
         f"rm -rf {shlex.quote(staging)} && mkdir -p {shlex.quote(staging)}",
@@ -1003,7 +1062,9 @@ def _build_and_deploy_frontend(target):
         return False, err
     swap_ok, _out, swap_err = ssh_cmd(
         target["ip"], target["user"], target["pass"],
-        f"rm -rf {shlex.quote(remote_dist)} && mv {shlex.quote(staging)} {shlex.quote(remote_dist)}",
+        f"rm -rf {shlex.quote(previous)} && "
+        f"{{ test -d {shlex.quote(remote_dist)} && mv {shlex.quote(remote_dist)} {shlex.quote(previous)} || true; }} && "
+        f"mv {shlex.quote(staging)} {shlex.quote(remote_dist)}",
         timeout=30,
     )
     return swap_ok, swap_err
@@ -1049,8 +1110,16 @@ def deploy_changes(changed, cfg):
 
     print()
     print(f"  {Y}\u25b6{RST} Checking remote install prerequisites...")
-    hypr_ready, _out, hypr_err = _hyprchat_host_ready(hypr)
-    if not hypr_ready:
+    root = _resolve_hyprchat_root(hypr)
+    if _LIVE_ROOT["release"]:
+        print(f"  {G}\u2713{RST} Live HyprChat release: {DIM}{root}{RST}")
+    else:
+        print(f"  {Y}!{RST} No staged release active; deploying to the legacy root {DIM}{root}{RST}")
+    hypr_ready, _out, hypr_err = _hyprchat_host_ready(hypr, root)
+    if not hypr_ready and _LIVE_ROOT["release"]:
+        # Never scaffold legacy dirs on a release host; the release tree is authoritative.
+        print(f"  {Y}!{RST} HyprChat release tree check failed: {(hypr_err or '')[:300]}")
+    elif not hypr_ready:
         ok, out, err = _bootstrap_hyprchat_host(hypr, cb["ip"], sx["ip"] if sx else "")
         if ok:
             print(f"  {G}\u2713{RST} HyprChat host bootstrapped")
@@ -1098,7 +1167,7 @@ def deploy_changes(changed, cfg):
             # Digest every changed src file BEFORE the build reads them, so all
             # batch members re-baseline (not just the one that triggered the build).
             fe_digests = {fp2: file_digest(fp2) for fp2, _i in changed if fp2 in FRONTEND_SRC_FILES}
-            ok, err = _build_and_deploy_frontend(hypr)
+            ok, err = _build_and_deploy_frontend(hypr, root)
             results.append(("Frontend (build)", filepath, ok, err, hypr))
             if ok:
                 for fp2, d2 in fe_digests.items():
@@ -1106,7 +1175,7 @@ def deploy_changes(changed, cfg):
                         pushed[fp2] = d2
             continue
 
-        target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb)
+        target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb, root)
 
         dir_key = (target["ip"], remote_dir)
         if dir_key not in ensured_dirs:
@@ -1327,6 +1396,9 @@ def draw_monitor(file_states, prev_times, cfg, last_event=""):
     print(f"  {BLD}Servers{RST}")
     print(f"  {bar()}")
     print(f"  {C}\u25cf{RST} {BLD}HyprChat{RST}  {G}{hypr['user']}@{hypr['ip']}{RST}")
+    if _LIVE_ROOT["checked"]:
+        kind = "staged release" if _LIVE_ROOT["release"] else "legacy root"
+        print(f"    {DIM}live {kind}: {_LIVE_ROOT['root']}{RST}")
     print(f"  {M}\u25cf{RST} {BLD}Codebox{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
     sx = cfg.get("searxng")
     if _server_configured(sx):
@@ -1463,6 +1535,8 @@ def main():
             push_all(cfg, file_states)
             _run_first_time_searxng_setup(cfg)
 
+    if not _LIVE_ROOT["checked"]:
+        _resolve_hyprchat_root(cfg["hyprchat"])
     last_event = f"{DIM}Watching for changes...{RST}"
     draw_monitor(file_states, prev_times, cfg, last_event)
 

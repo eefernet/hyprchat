@@ -1,0 +1,82 @@
+/* Motion tokens, keyframes and shared animation classes. The single
+   reduced-motion block at the end zeroes the tokens and shortens every
+   remaining animation, including inline ones not yet migrated to classes. */
+:root {
+  --hc-dur-1: 120ms; --hc-dur-2: 180ms; --hc-dur-3: 240ms;
+  --hc-ease-out: cubic-bezier(.2,.8,.2,1);
+  --hc-ease-in: cubic-bezier(.4,0,1,1);
+  --hc-ease-spring: cubic-bezier(.34,1.3,.64,1);
+  --hc-press-scale: .98; --hc-pop-scale: .96; --hc-pop-dy: 6px; --hc-drawer-dx: 24px;
+}
+@keyframes hc-pop-in { from { opacity:0; transform:translateY(var(--hc-pop-dy)) scale(var(--hc-pop-scale)); } }
+@keyframes hc-pop-out { to { opacity:0; transform:translateY(calc(var(--hc-pop-dy) * .5)) scale(.98); } }
+@keyframes hc-pop-in-center { from { opacity:0; transform:translate(-50%, var(--hc-pop-dy)) scale(var(--hc-pop-scale)); } to { opacity:1; transform:translate(-50%, 0) scale(1); } }
+@keyframes hc-pop-out-center { from { opacity:1; transform:translate(-50%, 0) scale(1); } to { opacity:0; transform:translate(-50%, calc(var(--hc-pop-dy) * .5)) scale(.98); } }
+@keyframes hc-fade-in { from { opacity:0; } }
+@keyframes hc-fade-out { to { opacity:0; } }
+@keyframes hc-dialog-in { from { opacity:0; transform:scale(.97) translateY(8px); } }
+@keyframes hc-dialog-out { to { opacity:0; transform:scale(.98) translateY(4px); } }
+@keyframes hc-drawer-in { from { opacity:.4; transform:translateX(var(--hc-drawer-dx)); } }
+@keyframes hc-drawer-out { to { opacity:0; transform:translateX(calc(var(--hc-drawer-dx) * .5)); } }
+@keyframes hc-toast-in { from { opacity:0; transform:translateY(12px) scale(.98); } }
+@keyframes hc-toast-out { to { opacity:0; transform:translateY(6px); } }
+@keyframes hc-indicator-in { from { opacity:0; transform:scaleY(.3); } }
+@keyframes hc-reveal { from { opacity:0; transform:translateY(2px); } }
+@keyframes hc-label-in { from { opacity:0; transform:translateY(4px); } }
+@keyframes hc-icon-pop { from { opacity:0; transform:scale(.6); } 60% { transform:scale(1.12); } to { opacity:1; transform:scale(1); } }
+@keyframes hc-check-pop { 0% { transform:scale(.6); } 60% { transform:scale(1.18); } 100% { transform:scale(1); } }
+@keyframes hc-sheen { to { transform:translateX(100%); } }
+@keyframes hc-breathe { 0%,100% { transform:scale(1); opacity:.85; } 50% { transform:scale(1.06); opacity:1; } }
+@keyframes hc-progress { 0% { transform:translateX(-100%) scaleX(.6); } 50% { transform:translateX(60%) scaleX(1); } 100% { transform:translateX(260%) scaleX(.6); } }
+@keyframes hc-expand { from { grid-template-rows:0fr; opacity:0; } to { grid-template-rows:1fr; opacity:1; } }
+@keyframes hc-collapse { from { grid-template-rows:1fr; opacity:1; } to { grid-template-rows:0fr; opacity:0; } }
+
+/* Popovers and menus: pop in from their anchor edge, fade out on close. */
+.hc-pop { animation: hc-pop-in var(--hc-dur-2) var(--hc-ease-spring) both; transform-origin: var(--hc-pop-origin, top left); }
+.hc-pop[data-placement="top"] { --hc-pop-origin: bottom left; --hc-pop-dy: 6px; }
+.hc-pop[data-placement="bottom"] { --hc-pop-origin: top left; --hc-pop-dy: -6px; }
+.hc-pop[data-align="end"][data-placement="top"] { --hc-pop-origin: bottom right; }
+.hc-pop[data-align="end"][data-placement="bottom"] { --hc-pop-origin: top right; }
+.hc-pop[data-align="center"] { --hc-pop-origin: bottom center; animation-name: hc-pop-in-center; }
+.hc-pop[data-align="center"][data-placement="bottom"] { --hc-pop-origin: top center; }
+.hc-pop[data-state="closing"] { animation: hc-pop-out var(--hc-dur-1) var(--hc-ease-in) both; pointer-events: none; }
+.hc-pop[data-align="center"][data-state="closing"] { animation-name: hc-pop-out-center; }
+
+/* Dialogs, drawers, toasts. The overlay carries data-state while closing. */
+.hc-scrim { animation: hc-fade-in var(--hc-dur-2) var(--hc-ease-out) both; }
+.hc-scrim[data-state="closing"] { animation: hc-fade-out var(--hc-dur-1) var(--hc-ease-in) both; pointer-events: none; }
+.hc-dialog { animation: hc-dialog-in var(--hc-dur-3) var(--hc-ease-spring) both; transform-origin: center; }
+[data-state="closing"] > .hc-dialog { animation: hc-dialog-out var(--hc-dur-1) var(--hc-ease-in) both; }
+.hc-drawer, .hc-side-sheet { animation: hc-drawer-in var(--hc-dur-3) var(--hc-ease-out) both; }
+[data-state="closing"] > .hc-drawer, [data-state="closing"] > .hc-side-sheet { animation: hc-drawer-out var(--hc-dur-1) var(--hc-ease-in) both; }
+.hc-toast { animation: hc-toast-in var(--hc-dur-3) var(--hc-ease-spring) both; }
+.hc-toast[data-leaving] { animation: hc-toast-out var(--hc-dur-1) var(--hc-ease-in) both; pointer-events: none; }
+
+/* Inline reveals, pane crossfades, new message rows. */
+.hc-reveal { animation: hc-reveal var(--hc-dur-2) var(--hc-ease-out) both; }
+.hc-pane, .hc-tab-pane, .hc-msg-list { animation: hc-fade-in var(--hc-dur-2) var(--hc-ease-out) both; }
+.hc-msg-enter { animation: hc-reveal var(--hc-dur-2) var(--hc-ease-out) both; }
+
+/* Chevrons, live sheen, switches. */
+.hc-chevron { display: inline-flex; align-items: center; transition: transform var(--hc-dur-2) var(--hc-ease-spring); }
+.hc-chevron[data-open="true"] { transform: rotate(var(--hc-chev-rot, 180deg)); }
+.hc-live-head { position: relative; overflow: hidden; }
+.hc-live-head.is-active::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(100deg, transparent 35%, var(--hc-sheen) 50%, transparent 65%); transform: translateX(-100%); animation: hc-sheen 2.8s var(--hc-ease-out) .4s infinite; }
+.hc-switch { --w: 34px; --h: 18px; position: relative; display: inline-block; width: var(--w); height: var(--h); border-radius: var(--hc-radius-pill); background: color-mix(in srgb, var(--hc-muted) 35%, transparent); transition: background-color var(--hc-dur-2) var(--hc-ease-out); flex-shrink: 0; vertical-align: middle; }
+.hc-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: calc(var(--h) - 4px); height: calc(var(--h) - 4px); border-radius: 50%; background: var(--hc-text); box-shadow: 0 1px 3px rgba(0,0,0,.35); transition: transform var(--hc-dur-2) var(--hc-ease-spring), width var(--hc-dur-1) var(--hc-ease-out), background-color var(--hc-dur-2) var(--hc-ease-out); }
+.hc-switch[data-on="true"] { background: var(--switch-c, var(--hc-accent)); }
+.hc-switch[data-on="true"]::after { transform: translateX(calc(var(--w) - var(--h))); background: var(--hc-bg); }
+:is(button, [role="switch"]):active .hc-switch::after { width: calc(var(--h) - 1px); }
+.hc-switch-btn { display: inline-flex; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; min-height: 0; overflow: visible; }
+
+/* Buttons: tokenised hover/press. :where() keeps specificity low so a class
+   can opt out. overflow:hidden stays (many fixed-size buttons rely on it). */
+button { transition: background-color var(--hc-dur-1) var(--hc-ease-out), border-color var(--hc-dur-1) var(--hc-ease-out), color var(--hc-dur-1) var(--hc-ease-out), box-shadow var(--hc-dur-2) var(--hc-ease-out), transform var(--hc-dur-1) var(--hc-ease-out), opacity var(--hc-dur-1) var(--hc-ease-out), filter var(--hc-dur-1) var(--hc-ease-out); position: relative; overflow: hidden; }
+:where(button:not(:disabled)):hover { filter: brightness(1.06); }
+:where(button:not(:disabled)):active { transform: scale(var(--hc-press-scale)); }
+.hc-popover button:active, .conv-row:active, .hc-tool-row:active, .hc-settings-nav-item:active, .hc-activity-header:active, .hc-workspace-tabs button:active, .hc-switch-btn:active, .hc-search-result:active { transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --hc-dur-1: 0ms; --hc-dur-2: 0ms; --hc-dur-3: 0ms; --hc-press-scale: 1; --hc-pop-scale: 1; --hc-pop-dy: 0px; --hc-drawer-dx: 0px; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0ms !important; scroll-behavior: auto !important; }
+}

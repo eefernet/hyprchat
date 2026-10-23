@@ -1,4 +1,5 @@
 // Theme and welcome-message constants.
+import {channels, luminance, elevationTokens} from './elevation.js';
 export const THEMES = {
   hyprflat:{name:"HyprFlat",bg:"#282C34",bgDeep:"#111418",surface:"#171B21",sfHov:"#20262E",sfBri:"#2B343D",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#E06C75",ok:"#50FA7B",err:"#E06C75",pink:"#B48EAD",f1:"#88C0D0",f4:"#81A1C1"},
   nord:{name:"Nord",bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",sfHov:"#434C5E",sfBri:"#4C566A",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",ok:"#A3BE8C",err:"#BF616A",pink:"#B48EAD",f1:"#8FBCBB",f4:"#5E81AC"},
@@ -26,6 +27,13 @@ export const FONTS = [
   {name:"Cascadia Code",v:"'Cascadia Code',monospace",i:"Cascadia+Code:wght@300;400;500;600;700"},
   {name:"Space Mono",v:"'Space Mono',monospace",i:"Space+Mono:wght@400;700"},
   {name:"Geist Mono",v:"'Geist Mono',monospace",i:"Geist+Mono:wght@300;400;500;600;700"},
+];
+// Optional proportional faces for the interface only (code keeps FONTS).
+// Kept separate from FONTS so saved `hc-font` indices never shift.
+export const UI_FONTS = [
+  {name:"Inter",v:"'Inter',sans-serif",i:"Inter:wght@400;500;600;700"},
+  {name:"Geist",v:"'Geist',sans-serif",i:"Geist:wght@400;500;600;700"},
+  {name:"System",v:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",i:null},
 ];
 
 export const BACKGROUND_EFFECTS = [
@@ -93,8 +101,6 @@ export const fallbackWelcome=(name="")=>{
 
 // Interface colors are adjusted independently of the decorative theme palette.
 // Keep hex output: existing components append alpha to theme colors.
-const channels = hex => hex.slice(1).match(/../g).map(x => parseInt(x, 16));
-const luminance = hex => channels(hex).map(v => {v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;}).reduce((s,v,i) => s + v * [.2126,.7152,.0722][i], 0);
 export function contrastRatio(a, b) {
   const x = luminance(a), y = luminance(b);
   return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);
@@ -117,5 +123,6 @@ export function presentationTokens(t, font, codeFont, scale = 1) {
   return {'--hc-font-ui':font,'--hc-font-code':codeFont,'--hc-ui-scale':scale,
     '--hc-surface':t.surface,'--hc-surface-raised':t.bgDeep,'--hc-hover':t.sfHov,
     '--hc-border':t.brd,'--hc-text':t.text,'--hc-secondary':t.dim,'--hc-muted':t.mut,
-    '--hc-accent':t.acc,'--hc-danger':t.err};
+    '--hc-accent':t.acc,'--hc-danger':t.err,
+    ...elevationTokens(t)};
 }

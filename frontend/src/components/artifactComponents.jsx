@@ -41,12 +41,12 @@ function ArtifactPreviewBlock({preview,t,font}){
   const [entryPreview,setEntryPreview]=useState(null);
   const [entryLoading,setEntryLoading]=useState(false);
   useEffect(()=>{setMode("rendered");setFilter("");setArchiveDir("");setArchiveQuery("");setEntryPreview(null);},[preview?.id,preview?.updated_at,preview?.preview_type]);
-  if(!preview)return <div style={{padding:18,color:t.mut,fontSize:12}}>Loading preview...</div>;
+  if(!preview)return <div style={{padding:18,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading preview...</div>;
   const type=preview.preview_type||"metadata";
   if(type==="office")return <OfficePreview key={preview.id} preview={preview} t={t} font={font}/>;
-  if(type==="missing")return <div style={{padding:14,border:`1px solid ${t.err}35`,background:`${t.err}08`,borderRadius:8,color:t.err,fontSize:12}}>File metadata is retained, but the physical file is missing.</div>;
-  if(type==="image")return <img src={userScopedUrl(preview.download_url||preview.url)} alt={preview.filename} style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${t.brd}22`,display:"block"}}/>;
-  if(type==="pdf")return <iframe src={userScopedUrl(preview.download_url||preview.url)} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
+  if(type==="missing")return <div style={{padding:14,border:`1px solid ${t.err}35`,background:`${t.err}08`,borderRadius:"var(--hc-radius)",color:t.err,fontSize:"var(--hc-text-secondary)"}}>File metadata is retained, but the physical file is missing.</div>;
+  if(type==="image")return <img src={userScopedUrl(preview.download_url||preview.url)} alt={preview.filename} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",display:"block"}}/>;
+  if(type==="pdf")return <iframe src={userScopedUrl(preview.download_url||preview.url)} title={preview.filename} style={{width:"100%",height:520,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:"#fff"}}/>;
   if(type==="archive"){
     const raw=(preview.preview?.entries||[]).filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/");
     const norm=raw.map(e=>{const path=(e.path||String(e.name||"").replace(/\/$/,"")).replace(/^\.\/+/,"");const parent=e.parent??(path.includes("/")?path.split("/").slice(0,-1).join("/"):"");const base=e.display_name||String(e.name||path).replace(/\/$/,"").split("/").pop()+(e.is_dir?"/":"");return{...e,path,parent,display_name:base};});
@@ -65,20 +65,20 @@ function ArtifactPreviewBlock({preview,t,font}){
       }catch(e){setEntryPreview({error:e.message||String(e),entry});}
       setEntryLoading(false);
     };
-    return <div style={{border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden",display:"grid",gridTemplateRows:"auto auto minmax(240px,1fr)",maxHeight:680}}>
+    return <div style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",overflow:"hidden",display:"grid",gridTemplateRows:"auto auto minmax(240px,1fr)",maxHeight:680}}>
       <div style={{padding:"8px 10px",background:`${t.surface}F5`,display:"flex",justifyContent:"space-between",gap:8,fontSize:"var(--hc-text-secondary)",color:t.mut}}>
         <span>{preview.preview?.file_count||0} files · {preview.preview?.folder_count||0} folders</span>
         <span>{preview.preview?.archive_type||"archive"}</span>
       </div>
-      <div style={{padding:8,borderTop:`1px solid ${t.brd}12`,display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-        <button onClick={()=>{setArchiveDir("");setEntryPreview(null);}} style={{background:archiveDir?`${t.surface}66`:`${t.acc}14`,border:`1px solid ${archiveDir?t.brd:t.acc}35`,color:archiveDir?t.mut:t.acc,borderRadius:6,padding:"4px 7px",fontSize:"var(--hc-text-control)",fontFamily:font,cursor:"pointer"}}>/</button>
-        {crumbs.map((part,i)=>{const next=crumbs.slice(0,i+1).join("/");return <button key={next} onClick={()=>{setArchiveDir(next);setEntryPreview(null);}} style={{background:next===archiveDir?`${t.acc}14`:`${t.surface}66`,border:`1px solid ${next===archiveDir?t.acc:t.brd}35`,color:next===archiveDir?t.acc:t.mut,borderRadius:6,padding:"4px 7px",fontSize:"var(--hc-text-control)",fontFamily:font,cursor:"pointer"}}>{part}</button>;})}
-        <input value={archiveQuery} onChange={e=>setArchiveQuery(e.target.value)} placeholder="Filter files" style={{marginLeft:"auto",minWidth:120,background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"5px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
+      <div style={{padding:8,borderTop:"1px solid var(--hc-line-subtle)",display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+        <button onClick={()=>{setArchiveDir("");setEntryPreview(null);}} style={{background:archiveDir?`${t.surface}66`:`${t.acc}14`,border:`1px solid ${archiveDir?t.brd:t.acc}35`,color:archiveDir?t.mut:t.acc,borderRadius:"var(--hc-radius)",padding:"4px 7px",fontSize:"var(--hc-text-control)",fontFamily:font,cursor:"pointer"}}>/</button>
+        {crumbs.map((part,i)=>{const next=crumbs.slice(0,i+1).join("/");return <button key={next} onClick={()=>{setArchiveDir(next);setEntryPreview(null);}} style={{background:next===archiveDir?`${t.acc}14`:`${t.surface}66`,border:`1px solid ${next===archiveDir?t.acc:t.brd}35`,color:next===archiveDir?t.acc:t.mut,borderRadius:"var(--hc-radius)",padding:"4px 7px",fontSize:"var(--hc-text-control)",fontFamily:font,cursor:"pointer"}}>{part}</button>;})}
+        <input value={archiveQuery} onChange={e=>setArchiveQuery(e.target.value)} placeholder="Filter files" style={{marginLeft:"auto",minWidth:120,background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"5px 8px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"minmax(130px,42%) minmax(0,1fr)",minHeight:0,borderTop:`1px solid ${t.brd}12`}}>
-        <div style={{overflow:"auto",borderRight:`1px solid ${t.brd}18`,minHeight:240}}>
+      <div style={{display:"grid",gridTemplateColumns:"minmax(130px,42%) minmax(0,1fr)",minHeight:0,borderTop:"1px solid var(--hc-line-subtle)"}}>
+        <div style={{overflow:"auto",borderRight:"1px solid var(--hc-line-subtle)",minHeight:240}}>
           {!shown.length&&<div style={{padding:14,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No entries.</div>}
-          {shown.map((entry,i)=><button key={`${entry.path}-${i}`} onClick={()=>openEntry(entry)} style={{width:"100%",display:"grid",gridTemplateColumns:"18px 1fr auto",gap:6,alignItems:"center",padding:"7px 9px",border:"none",borderTop:i?`1px solid ${t.brd}10`:"none",background:entryPreview?.entry?.path===entry.path?`${t.acc}12`:"transparent",color:entry.is_dir?t.warm:entry.previewable?t.dim:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>
+          {shown.map((entry,i)=><button key={`${entry.path}-${i}`} onClick={()=>openEntry(entry)} style={{width:"100%",display:"grid",gridTemplateColumns:"18px 1fr auto",gap:6,alignItems:"center",padding:"7px 9px",border:"none",borderTop:i?"1px solid var(--hc-line-subtle)":"none",background:entryPreview?.entry?.path===entry.path?`${t.acc}12`:"transparent",color:entry.is_dir?t.warm:entry.previewable?t.dim:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>
             <span>{entry.is_dir?"▸":entry.previewable?"•":"-"}</span>
             <span title={entry.path} style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{entry.display_name||entry.name||entry.path}</span>
             {!entry.is_dir&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontFamily:"var(--hc-font-code)"}}>{entry.size||0}B</span>}
@@ -87,8 +87,8 @@ function ArtifactPreviewBlock({preview,t,font}){
         <div style={{overflow:"auto",padding:10,minHeight:240}}>
           {entryLoading&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Loading entry...</div>}
           {!entryLoading&&!entryPreview&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.6}}>Select a small text-like file to preview it inside the archive.</div>}
-          {!entryLoading&&entryPreview?.error&&<div style={{border:`1px solid ${t.warm}30`,background:`${t.warm}08`,borderRadius:7,padding:10,color:t.warm,fontSize:"var(--hc-text-secondary)",lineHeight:1.55}}>
-            <div style={{fontWeight:900,marginBottom:4}}>Preview unavailable</div>
+          {!entryLoading&&entryPreview?.error&&<div style={{border:`1px solid ${t.warm}30`,background:`${t.warm}08`,borderRadius:"var(--hc-radius)",padding:10,color:t.warm,fontSize:"var(--hc-text-secondary)",lineHeight:1.55}}>
+            <div style={{fontWeight:700,marginBottom:4}}>Preview unavailable</div>
             <div>{entryPreview.error}</div>
             {entryPreview.entry&&<div style={{marginTop:6,color:t.mut,wordBreak:"break-word"}}>{entryPreview.entry.path} · {entryPreview.entry.size||0}B</div>}
             <div style={{marginTop:6,color:t.mut}}>Download the archive to inspect this entry.</div>
@@ -102,11 +102,11 @@ function ArtifactPreviewBlock({preview,t,font}){
     const cols=preview.columns||[];
     const rows=(preview.rows||[]).filter(r=>!filter||r.join(" ").toLowerCase().includes(filter.toLowerCase()));
     return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-      <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter rows" style={{background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"7px 9px",borderRadius:7,fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
-      <div style={{overflow:"auto",border:`1px solid ${t.brd}22`,borderRadius:8,maxHeight:430}}>
+      <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter rows" style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
+      <div style={{overflow:"auto",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",maxHeight:430}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
-          <thead><tr>{cols.map((c,i)=><th key={i} style={{position:"sticky",top:0,background:t.surface,padding:"6px 8px",textAlign:"left",color:t.text,borderBottom:`1px solid ${t.brd}22`}}>{c||`col ${i+1}`}</th>)}</tr></thead>
-          <tbody>{rows.map((r,i)=><tr key={i}>{cols.map((_,j)=><td key={j} style={{padding:"5px 8px",borderTop:`1px solid ${t.brd}10`,whiteSpace:"nowrap"}}>{r[j]||""}</td>)}</tr>)}</tbody>
+          <thead><tr>{cols.map((c,i)=><th key={i} style={{position:"sticky",top:0,background:t.surface,padding:"6px 8px",textAlign:"left",color:t.text,borderBottom:"1px solid var(--hc-line-subtle)"}}>{c||`col ${i+1}`}</th>)}</tr></thead>
+          <tbody>{rows.map((r,i)=><tr key={i}>{cols.map((_,j)=><td key={j} style={{padding:"5px 8px",borderTop:"1px solid var(--hc-line-subtle)",whiteSpace:"nowrap"}}>{r[j]||""}</td>)}</tr>)}</tbody>
         </table>
       </div>
       {preview.truncated&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm}}>Preview truncated.</div>}
@@ -118,17 +118,17 @@ function ArtifactPreviewBlock({preview,t,font}){
       const cols=Array.from(new Set(data.slice(0,100).flatMap(o=>Object.keys(o||{})))).slice(0,20);
       const rows=data.filter(o=>!filter||JSON.stringify(o).toLowerCase().includes(filter.toLowerCase())).slice(0,100);
       return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-        <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter JSON rows" style={{background:t.bgDeep,border:`1px solid ${t.brd}35`,color:t.text,padding:"7px 9px",borderRadius:7,fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
-        <div style={{overflow:"auto",border:`1px solid ${t.brd}22`,borderRadius:8,maxHeight:430}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:"var(--hc-text-secondary)",color:t.dim}}><thead><tr>{cols.map(c=><th key={c} style={{position:"sticky",top:0,background:t.surface,padding:"6px 8px",textAlign:"left",color:t.text,borderBottom:`1px solid ${t.brd}22`}}>{c}</th>)}</tr></thead><tbody>{rows.map((o,i)=><tr key={i}>{cols.map(c=><td key={c} style={{padding:"5px 8px",borderTop:`1px solid ${t.brd}10`,whiteSpace:"nowrap"}}>{typeof o[c]==="object"?JSON.stringify(o[c]):String(o[c]??"")}</td>)}</tr>)}</tbody></table></div>
+        <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter JSON rows" style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
+        <div style={{overflow:"auto",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",maxHeight:430}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:"var(--hc-text-secondary)",color:t.dim}}><thead><tr>{cols.map(c=><th key={c} style={{position:"sticky",top:0,background:t.surface,padding:"6px 8px",textAlign:"left",color:t.text,borderBottom:"1px solid var(--hc-line-subtle)"}}>{c}</th>)}</tr></thead><tbody>{rows.map((o,i)=><tr key={i}>{cols.map(c=><td key={c} style={{padding:"5px 8px",borderTop:"1px solid var(--hc-line-subtle)",whiteSpace:"nowrap"}}>{typeof o[c]==="object"?JSON.stringify(o[c]):String(o[c]??"")}</td>)}</tr>)}</tbody></table></div>
       </div>;
     }
     return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:"var(--hc-font-code)",lineHeight:1.55}}>{preview.parse_error?preview.content:JSON.stringify(data??preview.content,null,2)}</pre>;
   }
   if(type==="markdown")return <div style={{display:"flex",flexDirection:"column",gap:8}}>
-    <div style={{display:"flex",gap:5}}>{["rendered","raw"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"5px 9px",borderRadius:6,border:`1px solid ${mode===m?t.acc:t.brd}35`,background:mode===m?`${t.acc}14`:"transparent",color:mode===m?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:800}}>{m}</button>)}</div>
-    {mode==="raw"?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:"var(--hc-font-code)",lineHeight:1.55}}>{preview.content}</pre>:<div className="md" style={{fontSize:12,color:t.dim,lineHeight:1.65}} dangerouslySetInnerHTML={{__html:preview.html||""}}/>}
+    <div style={{display:"flex",gap:5}}>{["rendered","raw"].map(m=><button key={m} onClick={()=>setMode(m)} style={{padding:"5px 9px",borderRadius:"var(--hc-radius)",border:`1px solid ${mode===m?t.acc:t.brd}35`,background:mode===m?`${t.acc}14`:"transparent",color:mode===m?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>{m}</button>)}</div>
+    {mode==="raw"?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:"var(--hc-font-code)",lineHeight:1.55}}>{preview.content}</pre>:<div className="md" style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.65}} dangerouslySetInnerHTML={{__html:preview.html||""}}/>}
   </div>;
-  if(type==="html")return <iframe sandbox="" srcDoc={preview.content||""} title={preview.filename} style={{width:"100%",height:520,border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff"}}/>;
+  if(type==="html")return <iframe sandbox="" srcDoc={preview.content||""} title={preview.filename} style={{width:"100%",height:520,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:"#fff"}}/>;
   return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:"var(--hc-font-code)",lineHeight:1.55}}>{preview.content||preview.message||"No preview available."}</pre>;
 }
 
@@ -492,25 +492,25 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   };
   // Shared settings design-system styles arrive as props from App (same
   // pattern as PromptLibraryPanel/AnalyticsPanel) so inputs match app-wide.
-  const smallNum={...inputS,width:"100%",padding:"7px 8px",fontSize:12};
+  const smallNum={...inputS,width:"100%",padding:"7px 8px",fontSize:"var(--hc-text-secondary)"};
   const labelS=fieldLabelS;
-  const railSectionS={padding:"0 0 14px",borderBottom:`1px solid ${t.brd}24`,display:"flex",flexDirection:"column",gap:10};
+  const railSectionS={padding:"0 0 14px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",flexDirection:"column",gap:10};
   const sectionHead=(label,Icon,extra=null)=><div style={{display:"flex",alignItems:"center",gap:7,minHeight:22}}>
     {Icon&&<span style={{display:"flex",color:t.acc}}><Icon/></span>}
-    <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:900,letterSpacing:0,textTransform:"none",color:t.acc}}>{label}</span>
+    <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>{label}</span>
     <div style={{flex:1}}/>
     {extra}
   </div>;
   const section=(label,Icon,children,extra=null)=><section style={railSectionS}>{sectionHead(label,Icon,extra)}{children}</section>;
   const grid2={display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8,alignItems:"end"};
-  const railBtn=(c,opts={})=>({minHeight:34,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:"7px 10px",borderRadius:7,background:opts.solid?c:`${c}14`,border:opts.solid?`1px solid ${c}`:`1px solid ${c}3d`,color:opts.solid?t.bgDeep:c,cursor:opts.disabled?"default":"pointer",fontFamily:font,fontWeight:800,fontSize:"var(--hc-text-secondary)",opacity:opts.disabled?0.55:1,boxSizing:"border-box"});
+  const railBtn=(c,opts={})=>({minHeight:34,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:"7px 10px",borderRadius:"var(--hc-radius)",background:opts.solid?c:`${c}14`,border:opts.solid?`1px solid ${c}`:`1px solid ${c}3d`,color:opts.solid?t.bgDeep:c,cursor:opts.disabled?"default":"pointer",fontFamily:font,fontWeight:600,fontSize:"var(--hc-text-secondary)",opacity:opts.disabled?0.55:1,boxSizing:"border-box"});
   if(!configured)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,color:t.mut}}>
     <span style={{fontSize:42,opacity:.5}}>🎨</span>
-    <div style={{fontSize:14,fontWeight:700,color:t.dim}}>Image Studio</div>
-    <div style={{fontSize:12,maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
+    <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.dim}}>Image Studio</div>
+    <div style={{fontSize:"var(--hc-text-secondary)",maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
   </div>;
   const elapsed=job?Math.round((Date.now()-job.started)/1000):0;
-  const smallBtn=(c)=>({fontSize:"var(--hc-text-secondary)",padding:"6px 9px",borderRadius:7,background:`${c}14`,border:`1px solid ${c}35`,color:c,cursor:"pointer",fontFamily:font,fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
+  const smallBtn=(c)=>({fontSize:"var(--hc-text-secondary)",padding:"6px 9px",borderRadius:"var(--hc-radius)",background:`${c}14`,border:`1px solid ${c}35`,color:c,cursor:"pointer",fontFamily:font,fontWeight:600,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
   const cur=gallery[viewIdx]||null;
   const curMeta=(cur&&cur.metadata)||{};
   const metaLine=(m)=>`seed ${m.seed} · ${m.steps} steps · ${m.width}×${m.height}${m.checkpoint?` · ${String(m.checkpoint).replace(/\.(safetensors|ckpt)$/i,"")}`:""}`;
@@ -521,10 +521,10 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     {m.seed!=null&&<button onClick={()=>setSeed(String(m.seed))} title="Reuse this seed only" style={smallBtn(t.warm)}><IC.Star/>Seed</button>}
     <button onClick={()=>deleteOne(a)} title="Delete this image" style={smallBtn(t.err)}><IC.Trash/>Delete</button>
   </div>);
-  const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:`1px solid ${t.brd}40`,background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?0.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
+  const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:"1px solid var(--hc-line)",background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?0.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
-      <IC.Image/><span style={{fontSize:22,fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Image Studio</span>
+    <div style={{padding:"16px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
+      <IC.Image/><span style={{fontSize:"var(--hc-text-display)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Image Studio</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:8}}>Local Stable Diffusion via ComfyUI</span>
       <div style={{flex:1}}/>
       {gallery.length>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginRight:6}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
@@ -532,7 +532,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     </div>
     <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
       {/* LEFT RAIL — prompt + all generation inputs */}
-      <div style={{width:isMobile?"100%":"clamp(330px,30vw,420px)",flexShrink:0,borderRight:isMobile?"none":`1px solid ${t.brd}28`,overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12,...(isMobile?{maxHeight:"46%",borderBottom:`1px solid ${t.brd}28`}:{})}}>
+      <div style={{width:isMobile?"100%":"clamp(330px,30vw,420px)",flexShrink:0,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12,...(isMobile?{maxHeight:"46%",borderBottom:"1px solid var(--hc-line-subtle)"}:{})}}>
         {section("Prompt",IC.Pencil,<>
           <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)){e.preventDefault();generate();}}} placeholder="Subject, style, lighting, mood" rows={5} style={{...inputS,resize:"vertical",lineHeight:1.55,fontSize:"var(--hc-text-control)",padding:"11px 13px"}}/>
           <textarea value={negPrompt} onChange={e=>setNegPrompt(e.target.value)} placeholder="Negative prompt" rows={1} style={{...inputS,resize:"vertical",fontSize:"var(--hc-text-control)",minHeight:38}}/>
@@ -601,22 +601,22 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
           </div>}
         </>)}
         {section("Status",IC.Activity,<>
-          {job?<div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:8,fontSize:12,color:t.dim}}>
+          {job?<div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 11px",background:`${t.acc}0d`,border:`1px solid ${t.acc}28`,borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
             <div style={{width:14,height:14,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
             {job.status==="queued"&&job.queuePos>0?`Queued behind ${job.queuePos}`:elapsed<8?"Generating":elapsed<60?`Generating ${elapsed}s`:`Generating ${elapsed}s`}
           </div>:<div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:8,alignItems:"center",fontSize:"var(--hc-text-secondary)",color:t.mut}}>
             <span>Ready</span><span>{gallery.length} image{gallery.length===1?"":"s"}</span>
           </div>}
-          {comfyMemory&&<div style={{padding:"8px 10px",background:`${comfyMemory.available?t.surface:t.warm}22`,border:`1px solid ${comfyMemory.available?t.brd:t.warm}33`,borderRadius:8,fontSize:"var(--hc-text-secondary)",color:comfyMemory.available?t.mut:t.warm,lineHeight:1.45}}>
+          {comfyMemory&&<div style={{padding:"8px 10px",background:`${comfyMemory.available?t.surface:t.warm}22`,border:`1px solid ${comfyMemory.available?t.brd:t.warm}33`,borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",color:comfyMemory.available?t.mut:t.warm,lineHeight:1.45}}>
             {comfyMemory.available
               ?`Queue ${comfyMemory.running||0}/${comfyMemory.pending||0} · idle ${comfyMemory.idle_seconds||0}s · loaded ${comfyMemory.loaded_models??"?"}`
               :`Control node unavailable: ${comfyMemory.message}`}
           </div>}
-          {error&&<div style={{padding:"9px 11px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:8,fontSize:12,color:t.err}}>{error}</div>}
+          {error&&<div style={{padding:"9px 11px",background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",color:t.err}}>{error}</div>}
         </>)}
         <section style={railSectionS}>
           <button onClick={toggleAdvanced} style={{display:"flex",alignItems:"center",gap:7,width:"100%",padding:0,background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font}}>
-            <IC.Settings/><span style={{fontSize:"var(--hc-text-secondary)",fontWeight:900,letterSpacing:0,textTransform:"none"}}>Advanced Sampling</span><div style={{flex:1}}/><span style={{display:"flex",transform:showAdvanced?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
+            <IC.Settings/><span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:0,textTransform:"none"}}>Advanced Sampling</span><div style={{flex:1}}/><span style={{display:"flex",transform:showAdvanced?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
           </button>
           {showAdvanced&&<div style={{display:"flex",flexDirection:"column",gap:10}}>
             <div style={grid2}>
@@ -680,14 +680,14 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
             ?<Skeleton t={t} h="100%" r={12} style={{flex:1,minHeight:0}}/>
             :<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
               <span style={{fontSize:40,opacity:.4}}>🖼️</span>
-              <div style={{fontSize:12}}>No generations yet — describe an image on the left and hit Generate.</div>
+              <div style={{fontSize:"var(--hc-text-secondary)"}}>No generations yet — describe an image on the left and hit Generate.</div>
             </div>)
           :<>
-            <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}30`,borderRadius:12,overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
+            <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
               {cur&&(cur.exists_status==="missing"
-                ?<div style={{fontSize:12,color:t.mut}}>file missing on disk</div>
+                ?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>file missing on disk</div>
                 :<img src={userScopedUrl(cur.url)} alt={cur.filename} style={{maxWidth:"100%",maxHeight:"100%",objectFit:"contain",display:"block"}}/>)}
-              {job&&<div style={{position:"absolute",top:10,left:10,display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:"rgba(0,0,0,.55)",border:`1px solid ${t.acc}40`,borderRadius:20,fontSize:"var(--hc-text-secondary)",color:t.text,backdropFilter:"blur(4px)"}}>
+              {job&&<div style={{position:"absolute",top:10,left:10,display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:"rgba(0,0,0,.55)",border:`1px solid ${t.acc}40`,borderRadius:"var(--hc-radius-dialog)",fontSize:"var(--hc-text-secondary)",color:t.text,backdropFilter:"blur(4px)"}}>
                 <div style={{width:11,height:11,border:`2px solid ${t.acc}44`,borderTopColor:t.acc,borderRadius:"50%",animation:"spin 1s linear infinite"}}/>Generating…
               </div>}
             </div>
@@ -696,7 +696,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
             {gallery.length>1&&<div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
               {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)))}
               <div ref={thumbsRef} style={{display:"flex",gap:8,overflowX:"auto",flex:1,padding:"4px 2px"}}>
-                {gallery.map((a,i)=><div key={a.id} data-idx={i} onClick={()=>setViewIdx(i)} title={(a.metadata||{}).prompt} style={{width:74,height:74,flexShrink:0,borderRadius:8,overflow:"hidden",cursor:"pointer",border:`2px solid ${i===viewIdx?t.acc:`${t.brd}40`}`,opacity:i===viewIdx?1:.6,transition:"opacity .15s, border-color .15s",background:t.bgDeep}}>
+                {gallery.map((a,i)=><div key={a.id} data-idx={i} onClick={()=>setViewIdx(i)} title={(a.metadata||{}).prompt} style={{width:74,height:74,flexShrink:0,borderRadius:"var(--hc-radius)",overflow:"hidden",cursor:"pointer",border:`2px solid ${i===viewIdx?t.acc:`${t.brd}40`}`,opacity:i===viewIdx?1:.6,transition:"opacity .15s, border-color .15s",background:t.bgDeep}}>
                   {a.exists_status==="missing"
                     ?<div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",color:t.mut}}>missing</div>
                     :<img src={userScopedUrl(a.url)} loading="lazy" alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>}
@@ -709,13 +709,13 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
     </div>
     {/* LIGHTBOX — front-and-center full preview with arrow navigation */}
     {lightbox&&cur&&createPortal(
-      <div onClick={e=>{if(e.target===e.currentTarget)setLightbox(false);}} className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:200,background:"rgba(0,0,0,.85)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",gap:14,animation:"fadeIn .2s"}}>
-        <button onClick={()=>setLightbox(false)} title="Close (Esc)" style={{position:"absolute",top:"calc(16px + env(safe-area-inset-top, 0px))",right:18,width:36,height:36,borderRadius:18,border:`1px solid ${t.brd}55`,background:"rgba(0,0,0,.5)",color:t.text,fontSize:15,cursor:"pointer",fontFamily:font}}>✕</button>
+      <div onClick={e=>{if(e.target===e.currentTarget)setLightbox(false);}} className="hc-viewport-overlay hc-scrim hc-scrim-media" style={{position:"fixed",inset:0,zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",gap:14}}>
+        <button onClick={()=>setLightbox(false)} title="Close (Esc)" style={{position:"absolute",top:"calc(16px + env(safe-area-inset-top, 0px))",right:18,width:36,height:36,borderRadius:"var(--hc-radius-dialog)",border:"1px solid var(--hc-line)",background:"rgba(0,0,0,.5)",color:t.text,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font}}>✕</button>
         {navBtn("◀",viewIdx<=0,()=>setViewIdx(i=>Math.max(0,i-1)),true)}
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,maxWidth:"86vw",minWidth:0}}>
           {cur.exists_status==="missing"
-            ?<div style={{padding:60,fontSize:13,color:t.mut}}>file missing on disk</div>
-            :<img src={userScopedUrl(cur.url)} alt={cur.filename} style={{maxWidth:"86vw",maxHeight:"78vh",objectFit:"contain",borderRadius:10,boxShadow:"0 8px 48px #000a"}}/>}
+            ?<div style={{padding:60,fontSize:"var(--hc-text-control)",color:t.mut}}>file missing on disk</div>
+            :<img src={userScopedUrl(cur.url)} alt={cur.filename} style={{maxWidth:"86vw",maxHeight:"78vh",objectFit:"contain",borderRadius:"var(--hc-radius-card)",boxShadow:"var(--hc-shadow-2)"}}/>}
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,maxWidth:"80vw",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={curMeta.prompt}>{cur.filename} · {metaLine(curMeta)} · {viewIdx+1}/{gallery.length}</div>
           {actionChips(cur,curMeta)}
         </div>
@@ -734,7 +734,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const [kbId,setKbId]=useState(kbs?.[0]?.id||"");
   const [canvasOpen,setCanvasOpen]=useState(false);
   const a=artifact||{};
-  const btnS=(c,bg)=>({background:bg||`${c}14`,border:`1px solid ${c}35`,color:c,padding:"6px 9px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:800,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
+  const btnS=(c,bg)=>({background:bg||`${c}14`,border:`1px solid ${c}35`,color:c,padding:"6px 9px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
   const gridBtn=(c)=>({...btnS(c),justifyContent:"center",padding:"7px 6px",minWidth:0,whiteSpace:"nowrap"});
   useEffect(()=>{if(!kbId&&kbs?.[0]?.id)setKbId(kbs[0].id);},[kbs,kbId]);
   useEffect(()=>{let stop=false;setPreview(null);if(!a.id)return;fetch(`${API}/api/artifacts/${encodeURIComponent(a.id)}/preview`).then(r=>r.json()).then(d=>{if(!stop)setPreview(d);}).catch(e=>{if(!stop)setPreview({preview_type:"metadata",message:e.message||String(e)});});return()=>{stop=true;};},[a.id,a.updated_at,a.exists_status]);
@@ -768,22 +768,22 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const addTag=async()=>{const tag=tagDraft.trim();if(!tag)return;await patch({tags:[...(a.tags||[]),tag]});setTagDraft("");};
   const duplicateRows=a.duplicates||[];
   const timelineRows=timeline||[];
-  return <div style={{width:isMobile?"auto":"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:isMobile?"none":`1px solid ${t.brd}28`,background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0,...(isMobile?{position:"absolute",inset:0,zIndex:40}:{})}}>
-    <div style={{padding:"12px 14px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8}}>
+  return <div style={{width:isMobile?"auto":"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0,...(isMobile?{position:"absolute",inset:0,zIndex:40}:{})}}>
+    <div style={{padding:"12px 14px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:8}}>
       <span style={{color:km.color,display:"flex"}}>{DetailIcon?<DetailIcon/>:null}</span>
-      <div style={{minWidth:0,flex:1}}><div style={{fontSize:13,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.title||a.filename}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.filename}</div></div>
-      <button aria-label="Close" onClick={onClose} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,lineHeight:1}}>×</button>
+      <div style={{minWidth:0,flex:1}}><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.title||a.filename}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.filename}</div></div>
+      <button aria-label="Close" onClick={onClose} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-title)",lineHeight:1}}>×</button>
     </div>
     <div style={{flex:1,overflow:"auto",padding:14,display:"flex",flexDirection:"column",gap:14}}>
-      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Preview</div><ArtifactPreviewBlock preview={preview} t={t} font={font}/></section>
+      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Preview</div><ArtifactPreviewBlock preview={preview} t={t} font={font}/></section>
       {["document","presentation","spreadsheet"].includes(a.kind)&&<DocumentRevisionReview artifact={a} t={t} font={font} onOpen={onOpenArtifact}/>}
       <section style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim}}>
-        <div><span style={{color:t.mut}}>Status</span><select value={a.status||"draft"} onChange={e=>patch({status:e.target.value})} style={{width:"100%",marginTop:4,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-control)"}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-        <div><span style={{color:t.mut}}>Health</span><div style={{marginTop:4,color:a.exists_status==="missing"?t.err:a.exists_status==="present"?t.ok:t.warm,fontWeight:800}}>{a.exists_status||"unknown"}</div></div>
+        <div><span style={{color:t.mut}}>Status</span><select value={a.status||"draft"} onChange={e=>patch({status:e.target.value})} style={{width:"100%",marginTop:4,background:t.bg,border:"1px solid var(--hc-line)",color:t.text,padding:"6px 8px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)"}}>{["draft","accepted","archived"].map(s=><option key={s} value={s}>{s}</option>)}</select></div>
+        <div><span style={{color:t.mut}}>Health</span><div style={{marginTop:4,color:a.exists_status==="missing"?t.err:a.exists_status==="present"?t.ok:t.warm,fontWeight:600}}>{a.exists_status||"unknown"}</div></div>
         <div><span style={{color:t.mut}}>Size</span><div style={{marginTop:4}}>{a.size_bytes?`${(a.size_bytes/1024).toFixed(a.size_bytes>1048576?1:0)} KB`:"unknown"}</div></div>
         <div><span style={{color:t.mut}}>Created</span><div style={{marginTop:4}}>{a.created_at?new Date(parseUtcishMs(a.created_at)).toLocaleString():""}</div></div>
       </section>
-      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Actions</div>
+      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Actions</div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
           {["text","markdown","json","html","table"].includes(preview?.preview_type)&&a.exists_status!=="missing"&&
             <button onClick={()=>setCanvasOpen(true)} style={gridBtn(t.pink)}>✏️ Edit</button>}
@@ -794,16 +794,16 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
           <button onClick={async()=>{const d=await action("check-file");await onPatch?.(a.id,{});notify&&notify({type:"success",text:"File health checked",detail:d.exists_status||"",duration:1800});}} style={gridBtn(t.mut)}>Check file</button>
         </div>
         {kbs?.length>0&&<div style={{display:"flex",gap:6,marginTop:6}}>
-          <select value={kbId} onChange={e=>setKbId(e.target.value)} style={{flex:1,minWidth:0,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined,cursor:"pointer"}}>{kbs.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</select>
+          <select value={kbId} onChange={e=>setKbId(e.target.value)} style={{flex:1,minWidth:0,background:t.bg,border:"1px solid var(--hc-line)",color:t.text,padding:"6px 8px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined,cursor:"pointer"}}>{kbs.map(k=><option key={k.id} value={k.id}>{k.name}</option>)}</select>
           <button onClick={async()=>{await action("add-to-kb",{kb_id:kbId});notify&&notify({type:"success",text:"Artifact imported to KB",duration:1800});}} style={{...btnS(t.ok),flexShrink:0}}>Add to KB</button>
         </div>}
       </section>
-      {duplicateRows.length>0&&<section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Duplicates</div>
+      {duplicateRows.length>0&&<section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Duplicates</div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {duplicateRows.map(d=><div key={d.id} style={{border:`1px solid ${t.brd}24`,background:`${t.surface}F5`,borderRadius:8,padding:8,display:"flex",flexDirection:"column",gap:6}}>
+          {duplicateRows.map(d=><div key={d.id} style={{border:"1px solid var(--hc-line-subtle)",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",padding:8,display:"flex",flexDirection:"column",gap:6}}>
             <div style={{display:"flex",gap:8,alignItems:"center",minWidth:0}}>
-              <div style={{minWidth:0,flex:1}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.title||d.filename}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.filename}</div></div>
-              <span style={{fontSize:"var(--hc-text-secondary)",color:d.status==="archived"?t.mut:t.warm,border:`1px solid ${t.brd}24`,borderRadius:6,padding:"2px 5px"}}>{d.status}</span>
+              <div style={{minWidth:0,flex:1}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.title||d.filename}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.filename}</div></div>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:d.status==="archived"?t.mut:t.warm,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"2px 5px"}}>{d.status}</span>
             </div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:7,flexWrap:"wrap"}}><span>{d.file_health?.size_bytes?`${(d.file_health.size_bytes/1024).toFixed(0)} KB`:"unknown size"}</span>{d.pinned? <span style={{color:t.warm}}>pinned</span>:null}{(d.workspaces||[]).slice(0,2).map(w=><span key={w.id}>{w.name}</span>)}</div>
             <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
@@ -814,29 +814,29 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
           </div>)}
         </div>
       </section>}
-      {timelineRows.length>0&&<section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Timeline</div>
+      {timelineRows.length>0&&<section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Timeline</div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
           {timelineRows.slice(0,40).map(ev=>{const md=ev.metadata||{};const rel=md.related_artifact_id||(Array.isArray(md.related_artifact_ids)?md.related_artifact_ids[0]:null);return <div key={ev.id} style={{display:"grid",gridTemplateColumns:"82px 1fr",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>
             <div style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>{ev.created_at?new Date(parseUtcishMs(ev.created_at)).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</div>
             <div style={{borderLeft:`2px solid ${ev.source==="event"?t.acc:t.brd}55`,paddingLeft:8,minWidth:0}}>
-              <div style={{color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(ev.event_type||"event").replace(/_/g," ")}</div>
+              <div style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(ev.event_type||"event").replace(/_/g," ")}</div>
               <div style={{wordBreak:"break-word"}}>{ev.summary||""}</div>
               {rel&&<button onClick={()=>onOpenArtifact?.(rel)} style={{marginTop:4,background:"transparent",border:"none",padding:0,color:t.acc,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Open related artifact</button>}
             </div>
           </div>;})}
         </div>
       </section>}
-      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Tags</div>
-        <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:7}}>{(a.tags||[]).map(tag=><button key={tag} onClick={()=>patch({tags:(a.tags||[]).filter(x=>x!==tag)})} title="Remove tag" style={{background:`${t.acc}12`,border:`1px solid ${t.acc}30`,color:t.acc,padding:"3px 7px",borderRadius:6,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font}}>#{tag} ×</button>)}</div>
-        <div style={{display:"flex",gap:6}}><input value={tagDraft} onChange={e=>setTagDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addTag();}} placeholder="Add tag" style={{flex:1,background:t.bg,border:`1px solid ${t.brd}35`,color:t.text,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/><button onClick={addTag} style={btnS(t.acc)}>Add</button></div>
+      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Tags</div>
+        <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:7}}>{(a.tags||[]).map(tag=><button key={tag} onClick={()=>patch({tags:(a.tags||[]).filter(x=>x!==tag)})} title="Remove tag" style={{background:`${t.acc}12`,border:`1px solid ${t.acc}30`,color:t.acc,padding:"3px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font}}>#{tag} ×</button>)}</div>
+        <div style={{display:"flex",gap:6}}><input value={tagDraft} onChange={e=>setTagDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addTag();}} placeholder="Add tag" style={{flex:1,background:t.bg,border:"1px solid var(--hc-line)",color:t.text,padding:"6px 8px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/><button onClick={addTag} style={btnS(t.acc)}>Add</button></div>
       </section>
-      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Workspaces</div>
+      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Workspaces</div>
         <div style={{display:"flex",flexDirection:"column",gap:5}}>{workspaces.map(w=>{const checked=(a.workspace_ids||[]).includes(w.id);return <label key={w.id} style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:checked?t.text:t.mut}}><input type="checkbox" checked={checked} onChange={e=>{const cur=new Set(a.workspace_ids||[]);if(e.target.checked)cur.add(w.id);else cur.delete(w.id);patch({workspace_ids:Array.from(cur)});}}/> {w.name}</label>;})}</div>
       </section>
-      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Lineage</div>
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:"var(--hc-text-secondary)",color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:800,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:800,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={userScopedUrl(`/api/artifacts/${v.id}/download`)} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
+      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Lineage</div>
+        <div style={{display:"flex",flexDirection:"column",gap:5}}>{(a.versions||[]).map(v=><div key={v.id} style={{fontSize:"var(--hc-text-secondary)",color:v.id===a.id?t.acc:t.dim,display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}><span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v.title||v.filename}{v.latest_for_project&&!v.stale&&<span style={{color:t.ok,fontWeight:600,marginLeft:5}}>latest</span>}{v.stale&&<span title="Project changed after this was packaged" style={{color:t.warm,fontWeight:600,marginLeft:5}}>⚠ stale</span>}</span><span style={{display:"inline-flex",alignItems:"center",gap:6,flexShrink:0}}>{v.status}<a href={userScopedUrl(`/api/artifacts/${v.id}/download`)} download={v.filename} title="Download this version" style={{color:t.ok,textDecoration:"none"}}>⬇</a></span></div>)}</div>
       </section>
-      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:900,textTransform:"none",marginBottom:7}}>Provenance</div>
+      <section><div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:700,textTransform:"none",marginBottom:7}}>Provenance</div>
         <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.7,wordBreak:"break-word"}}>
           {a.conversation_title&&<div>Chat: {a.conversation_title}</div>}
           {a.run_id&&<div>Run: {a.run_id}</div>}
@@ -871,21 +871,21 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
     const wsId=e.target.value||null;
     await onPatch?.(a.id,{workspace_id:wsId});
   };
-  const primaryBtn=(c)=>({display:"flex",alignItems:"center",justifyContent:"center",background:`${c}14`,border:`1px solid ${c}38`,color:c,cursor:"pointer",padding:"7px 0",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:800,textDecoration:"none",minWidth:0});
-  const utilBtn=(c,active)=>({flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"transparent",border:`1px solid ${t.brd}33`,color:active?c:t.mut,cursor:"pointer",padding:"5px 0",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:700,minWidth:0,whiteSpace:"nowrap"});
-  const selS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}36`,color:t.dim,padding:"6px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-secondary)",outline:undefined,cursor:"pointer"};
+  const primaryBtn=(c)=>({display:"flex",alignItems:"center",justifyContent:"center",background:`${c}14`,border:`1px solid ${c}38`,color:c,cursor:"pointer",padding:"7px 0",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600,textDecoration:"none",minWidth:0});
+  const utilBtn=(c,active)=>({flex:1,display:"flex",alignItems:"center",justifyContent:"center",background:"transparent",border:"1px solid var(--hc-line)",color:active?c:t.mut,cursor:"pointer",padding:"5px 0",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:700,minWidth:0,whiteSpace:"nowrap"});
+  const selS={width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.dim,padding:"6px 8px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-secondary)",outline:undefined,cursor:"pointer"};
   const primaryCount=1+(onDetails?1:0)+1;
-  return <div style={{border:`1px solid ${km.color}30`,background:`${t.surface}F5`,borderRadius:10,padding:compact?11:13,display:"flex",flexDirection:"column",gap:10,minWidth:0,animation:"fadeIn .18s"}}>
+  return <div style={{border:`1px solid ${km.color}30`,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-card)",padding:compact?11:13,display:"flex",flexDirection:"column",gap:10,minWidth:0,animation:"fadeIn .18s"}}>
     <div style={{display:"flex",alignItems:"center",gap:9,minWidth:0}}>
       {!compact&&onSelect&&<input type="checkbox" checked={!!selected} onChange={e=>onSelect(a.id,e.target.checked)} style={{flexShrink:0,cursor:"pointer"}}/>}
-      <div style={{width:34,height:34,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${km.color}14`,border:`1px solid ${km.color}38`,color:km.color,fontSize:17,flexShrink:0}}>{KindIcon?<KindIcon/>:null}</div>
+      <div style={{width:34,height:34,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${km.color}14`,border:`1px solid ${km.color}38`,color:km.color,fontSize:"var(--hc-text-title)",flexShrink:0}}>{KindIcon?<KindIcon/>:null}</div>
       <div style={{minWidth:0,flex:1}}>
-        <div title={title} style={{fontSize:12.5,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</div>
+        <div title={title} style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</div>
         <div title={a.filename} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{a.filename}</div>
       </div>
-      <span style={{fontSize:"var(--hc-text-secondary)",color:km.color,background:`${km.color}14`,border:`1px solid ${km.color}34`,borderRadius:6,padding:"2px 7px",fontWeight:800,flexShrink:0,letterSpacing:.3}}>{km.label}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:km.color,background:`${km.color}14`,border:`1px solid ${km.color}34`,borderRadius:"var(--hc-radius)",padding:"2px 7px",fontWeight:600,flexShrink:0,letterSpacing:.3}}>{km.label}</span>
     </div>
-    <div style={{display:"flex",flexDirection:"column",gap:5,fontSize:"var(--hc-text-secondary)",color:t.mut,minWidth:0,paddingBottom:2,borderBottom:`1px solid ${t.brd}1c`}}>
+    <div style={{display:"flex",flexDirection:"column",gap:5,fontSize:"var(--hc-text-secondary)",color:t.mut,minWidth:0,paddingBottom:2,borderBottom:"1px solid var(--hc-line-subtle)"}}>
       {a.conversation_title&&<button onClick={()=>a.conversation_id&&onOpenConv?.(a.conversation_id)} title={a.conversation_title} style={{background:"none",border:"none",padding:0,color:t.acc,cursor:a.conversation_id?"pointer":"default",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.conversation_title}</button>}
       <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
         {created&&<span>{created}</span>}
@@ -895,8 +895,8 @@ const ArtifactCard=({artifact,t,font,workspaces,onPreview,onOpenConv,onPatch,onD
         {compact&&a.status&&<span style={{textTransform:"capitalize"}}>{a.status}</span>}
         {a.pinned&&<span style={{color:t.warm,fontWeight:700}}>pinned</span>}
         {a.exists_status==="missing"&&<span style={{color:t.err,fontWeight:700}}>missing</span>}
-        {a.stale&&<span title="The project changed after this artifact was packaged — repackage for the latest" style={{color:t.warm,fontWeight:800}}>⚠ stale</span>}
-        {a.latest_for_project&&!a.stale&&<span title="Newest delivery for this project" style={{color:t.ok,fontWeight:800}}>latest</span>}
+        {a.stale&&<span title="The project changed after this artifact was packaged — repackage for the latest" style={{color:t.warm,fontWeight:600}}>⚠ stale</span>}
+        {a.latest_for_project&&!a.stale&&<span title="Newest delivery for this project" style={{color:t.ok,fontWeight:600}}>latest</span>}
       </div>}
     </div>
     <div style={{display:"grid",gridTemplateColumns:`repeat(${primaryCount},1fr)`,gap:6}}>
@@ -1002,15 +1002,15 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
   const toggleSelected=(id,on)=>setSelected(p=>{const n=new Set(p);if(on)n.add(id);else n.delete(id);return n;});
   return <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
   <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:160}}><IC.Layers/><span style={{fontSize:22,fontWeight:800,letterSpacing:0,textTransform:"none",color:t.acc}}>Artifacts</span></div>
+    <div style={{padding:"16px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:160}}><IC.Layers/><span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc}}>Artifacts</span></div>
       <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-        {filters.map(([id,label])=><button key={id} onClick={()=>setView(id)} style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${view===id?t.acc:t.brd}35`,background:view===id?`${t.acc}18`:"transparent",color:view===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:view===id?800:600}}>{label}</button>)}
+        {filters.map(([id,label])=><button key={id} onClick={()=>setView(id)} style={{padding:"6px 10px",borderRadius:"var(--hc-radius)",border:`1px solid ${view===id?t.acc:t.brd}35`,background:view===id?`${t.acc}18`:"transparent",color:view===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:view===id?800:600}}>{label}</button>)}
       </div>
-      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search artifacts..." style={{marginLeft:"auto",minWidth:180,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
-      {selected.size>0&&<><select aria-label="Batch export format" value={batchFormat} onChange={e=>setBatchFormat(e.target.value)}>{['pdf','txt','csv','docx','pptx','xlsx'].map(f=><option key={f}>{f}</option>)}</select><button onClick={async()=>{try{const ids=Array.from(selected);const conversationId=items.find(a=>selected.has(a.id))?.conversation_id;await apiJson('/api/documents/batch-export',{method:'POST',body:{artifact_ids:ids,format:batchFormat,conversation_id:conversationId}});notify?.({type:'success',text:'Batch export queued',detail:'Follow progress and per-file results in Jobs.'});}catch(e){notify?.({type:'error',text:'Export failed',detail:e.message});}}} style={{background:t.surface,color:t.text,border:`1px solid ${t.brd}`,borderRadius:6,padding:7}}>Export {selected.size}</button></>}
-      {selected.size>0&&<button onClick={bundleSelected} style={{background:`${t.warm}16`,border:`1px solid ${t.warm}35`,color:t.warm,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:800}}>Bundle {selected.size}</button>}
-      <button onClick={load} style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:800}}>Refresh</button>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search artifacts..." style={{marginLeft:"auto",minWidth:180,background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
+      {selected.size>0&&<><select aria-label="Batch export format" value={batchFormat} onChange={e=>setBatchFormat(e.target.value)}>{['pdf','txt','csv','docx','pptx','xlsx'].map(f=><option key={f}>{f}</option>)}</select><button onClick={async()=>{try{const ids=Array.from(selected);const conversationId=items.find(a=>selected.has(a.id))?.conversation_id;await apiJson('/api/documents/batch-export',{method:'POST',body:{artifact_ids:ids,format:batchFormat,conversation_id:conversationId}});notify?.({type:'success',text:'Batch export queued',detail:'Follow progress and per-file results in Jobs.'});}catch(e){notify?.({type:'error',text:'Export failed',detail:e.message});}}} style={{background:t.surface,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:7}}>Export {selected.size}</button></>}
+      {selected.size>0&&<button onClick={bundleSelected} style={{background:`${t.warm}16`,border:`1px solid ${t.warm}35`,color:t.warm,cursor:"pointer",padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Bundle {selected.size}</button>}
+      <button onClick={load} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Refresh</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {loading&&<SkeletonGrid t={t} cards={6} minW={250} cardH={120}/>}

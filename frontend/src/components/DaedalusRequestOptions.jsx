@@ -24,7 +24,7 @@ export default function DaedalusRequestOptions({conversationId,currentProjectId,
       daedalus_visual_review:nextVisual==='inherit'?null:nextVisual==='on'});
   };
   if(!enabled)return null;
-  const style={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:6,padding:6,fontFamily:font,fontSize:"var(--hc-text-secondary)"};
+  const style={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:6,fontFamily:font,fontSize:"var(--hc-text-secondary)"};
   return <div style={{display:'flex',gap:8,flexWrap:'wrap',margin:'6px 0',alignItems:'center'}}>
     <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Project <select aria-label="Daedalus project" style={style} value={target} onChange={e=>update(e.target.value,visual)}>
       <option value="">{currentProjectId?'Continue current project':'Start a new project'}</option>{currentProjectId&&<option value="new">Start a new project</option>}

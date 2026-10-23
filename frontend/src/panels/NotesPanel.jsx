@@ -79,7 +79,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
         <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>{!embedded&&<select aria-label="Notes workspace" disabled={!!workspaceId} value={workspace} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}<input aria-label="Filter notes by tag" value={tag} onChange={e=>{setTag(e.target.value);setOffset(0);}} placeholder="Filter by tag" style={{...inputS,width:'auto'}}/>
         {workspace&&!embedded&&<select value="" aria-label="Link existing note" style={{...inputS,width:'auto'}} onChange={async e=>{const id=e.target.value;if(!id)return;try{await apiJson(`/api/workspaces/${workspace}/links/notes/${id}`,{method:'POST'});loadLatest.current();}catch(error){setErr(error.message);}}}><option value="">Link existing note / todo…</option>{allNotes.filter(n=>!(n.workspace_ids||[]).includes(workspace)).map(n=><option key={n.id} value={n.id}>{n.title}</option>)}</select>}</div>
 
-        {(err||loadErr)&&<div role="alert" style={{color:t.err,fontSize:12,marginBottom:12}}>{err||loadErr}</div>}
+        {(err||loadErr)&&<div role="alert" style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:12}}>{err||loadErr}</div>}
         {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.ok}55`}}>
           <div style={{display:"flex",gap:8,marginBottom:8}}>
             <SelectionControl label="Note type" value={form.kind} onChange={value=>setForm(f=>({...f,kind:value}))} options={[{value:'todo',label:'Todo'},{value:'note',label:'Note'}]}/>
@@ -104,7 +104,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
         :shown.map(n=><div key={n.id} style={{...cardS,marginBottom:8,display:"flex",gap:10,alignItems:"flex-start",opacity:n.done?.55:1}}>
           {n.kind==="todo"&&<input type="checkbox" checked={n.done} onChange={()=>toggleDone(n)} style={{marginTop:3,cursor:"pointer"}}/>}
           <div style={{flex:1,minWidth:0,overflowWrap:"anywhere"}}>
-            <div style={{fontSize:13,fontWeight:700,color:t.text,textDecoration:n.done?"line-through":"none"}}>{n.title}</div>
+            <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textDecoration:n.done?"line-through":"none"}}>{n.title}</div>
             {n.content&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.content.slice(0,400)}</div>}
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>
               {n.due_local?`due ${fmtLocal(n.due_local)}`:""}

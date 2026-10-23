@@ -1,0 +1,48 @@
+/* Chat Activity pill (hyprChatWidgets.jsx ChatActivity). Colour comes from the
+   --activity-* vars set inline per phase (chatActivityVisual.js); the dependent
+   properties transition, so phases morph instead of snapping. Also used by the
+   composer's live run pill and the Daedalus run-card headers (.hc-run-icon). */
+.hc-chat-activity{container-type:inline-size;width:100%;max-width:680px;box-sizing:border-box;margin:0 0 10px;border:1px solid transparent;border-radius:var(--hc-radius-card);background:var(--activity-surface);color:var(--activity-color);overflow:hidden;box-shadow:0 0 0 1px var(--activity-ring),var(--hc-shadow-1);font-size:12px;transition:box-shadow var(--hc-dur-3) var(--hc-ease-out),background-color var(--hc-dur-3) var(--hc-ease-out),color var(--hc-dur-3) var(--hc-ease-out);animation:hc-pop-in var(--hc-dur-3) var(--hc-ease-spring) both;transform-origin:top left;--hc-pop-dy:4px;}
+.hc-activity-header{display:flex;align-items:center;gap:9px;width:100%;min-height:38px;box-sizing:border-box;padding:8px 12px;background:var(--activity-tint);border:0;color:inherit;font:inherit;text-align:left;position:relative;overflow:hidden;transition:background-color var(--hc-dur-3) var(--hc-ease-out);}
+button.hc-activity-header{cursor:pointer;}
+button.hc-activity-header:hover{background:var(--activity-tint-strong);filter:none;}
+.hc-chat-activity[data-active="true"] .hc-activity-header::after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(100deg,transparent 35%,var(--hc-sheen) 50%,transparent 65%);transform:translateX(-100%);animation:hc-sheen 2.8s var(--hc-ease-out) .4s infinite;}
+.hc-activity-progress{position:absolute;left:0;right:0;bottom:0;height:2px;overflow:hidden;pointer-events:none;}
+.hc-activity-progress::before{content:"";display:block;width:40%;height:100%;border-radius:2px;background:var(--activity-color);animation:hc-progress 1.6s var(--hc-ease-out) infinite;}
+.hc-activity-label{flex-shrink:0;max-width:calc(100% - 44px);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;animation:hc-label-in var(--hc-dur-2) var(--hc-ease-out) both;}
+.hc-activity-icon{width:22px;height:22px;flex-shrink:0;display:inline-flex;animation:hc-icon-pop var(--hc-dur-2) var(--hc-ease-spring) both;}
+.hc-activity-badge{width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:var(--activity-tint-strong);color:var(--activity-color);transition:background-color var(--hc-dur-3) var(--hc-ease-out),color var(--hc-dur-3) var(--hc-ease-out);}
+.hc-activity-badge svg{width:13px;height:13px;}
+.hc-chat-activity[data-active="true"] .hc-activity-badge{animation:hc-breathe 2.4s ease-in-out infinite;}
+.hc-chat-activity[data-settled="true"] .hc-activity-badge{animation:hc-check-pop var(--hc-dur-3) var(--hc-ease-spring) both;}
+.hc-activity-preview{position:relative;flex:1;min-width:0;height:1.5em;overflow:hidden;color:var(--activity-muted);font-weight:400;line-height:1.5;}
+.hc-activity-preview.is-overflowing{mask-image:linear-gradient(90deg,transparent,#000 16px);-webkit-mask-image:linear-gradient(90deg,transparent,#000 16px);}
+.hc-activity-preview-frame{display:block;position:relative;height:100%;}
+.hc-activity-preview-current,.hc-activity-preview-old{position:absolute;right:0;min-width:100%;white-space:nowrap;}
+.hc-activity-preview-current{animation:hc-preview-in .25s ease-out both;}
+.hc-activity-preview-old{animation:hc-preview-out .25s ease-out both;}
+.hc-activity-chips{display:inline-flex;gap:4px;min-width:0;overflow:hidden;}
+.hc-activity-chip{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:var(--hc-radius-pill);background:var(--activity-tint-strong);color:var(--activity-muted);font-size:var(--hc-text-micro);font-weight:500;white-space:nowrap;animation:hc-reveal var(--hc-dur-2) var(--hc-ease-out) both;animation-delay:calc(var(--i,0) * 40ms);}
+.hc-activity-chevron{margin-left:auto;flex-shrink:0;opacity:.65;color:var(--activity-muted);}
+.hc-activity-body{display:grid;grid-template-rows:1fr;animation:hc-expand var(--hc-dur-3) var(--hc-ease-out) both;}
+.hc-activity-body[data-state="closing"]{animation:hc-collapse var(--hc-dur-1) var(--hc-ease-in) both;}
+.hc-activity-body>div{min-height:0;overflow:hidden;}
+.hc-activity-scroll{max-height:min(320px,calc(40vh / var(--hc-ui-scale,1)));overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-top:1px solid var(--hc-line-subtle);padding:4px 14px;overflow-wrap:anywhere;}
+.hc-activity-entry{padding:12px 0;color:var(--activity-text);animation:hc-reveal var(--hc-dur-2) var(--hc-ease-out) both;animation-delay:min(calc(var(--i,0) * 30ms),150ms);}
+.hc-activity-entry+.hc-activity-entry{border-top:1px solid var(--hc-line-subtle);}
+.hc-activity-entry-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;font-weight:600;margin-bottom:7px;}
+.hc-activity-entry-heading>span:last-child{display:inline-flex;align-items:center;gap:6px;font-size:10px;font-weight:400;flex-shrink:0;transition:color var(--hc-dur-3) var(--hc-ease-out);}
+.hc-activity-dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0;display:inline-block;}
+.hc-activity-dot.is-running{animation:hc-breathe 1.4s ease-in-out infinite;}
+.hc-run-icon{display:inline-flex;transform-origin:center;}
+.hc-run-icon.is-active{animation:hc-breathe 2.4s ease-in-out infinite;}
+.hc-activity-detail,.hc-activity-description{font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
+.hc-activity-detail pre{font-family:inherit;}
+.hc-activity-tool-detail summary{cursor:pointer;color:var(--activity-muted);font-size:11px;margin:6px 0;}
+.hc-activity-jump{display:block;margin:7px auto;padding:4px 10px;background:var(--activity-tint);border:1px solid var(--activity-ring);border-radius:var(--hc-radius-sm);color:var(--activity-color);font:inherit;font-size:11px;cursor:pointer;}
+.hc-chat-activity button:focus-visible,.hc-activity-scroll:focus-visible,.hc-activity-tool-detail summary:focus-visible{outline:2px solid var(--activity-color);outline-offset:-3px;}
+@media(max-width:480px){.hc-activity-chips{display:none;}.hc-activity-header{gap:6px;padding:8px 8px;}.hc-activity-label{flex-shrink:1;}}
+@container(max-width:220px){.hc-activity-header{flex-wrap:wrap;}.hc-activity-preview{order:1;flex-basis:100%;}}
+@keyframes hc-preview-in{from{opacity:0}to{opacity:1}}
+@keyframes hc-preview-out{from{opacity:1}to{opacity:0}}
+@media(prefers-reduced-motion:reduce){.hc-chat-activity,.hc-chat-activity *{animation:none!important;transition:none!important;}.hc-activity-preview-old{display:none;}}

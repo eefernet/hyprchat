@@ -30,7 +30,7 @@ export function KnowledgeReadiness({kbId,t,btnS,inputS,onReady}){
   useEffect(()=>{const version=++epoch.current,c=new AbortController();let pending=false;const load=async()=>{if(pending)return;pending=true;try{const d=await apiJson(`/api/knowledge-bases/${kbId}/readiness`,{signal:c.signal});if(version===epoch.current){setKb(d);setError('');onReady?.(d.ready);}}catch(e){if(e.name!=='AbortError'&&version===epoch.current)setError(e.message);}finally{pending=false;}};load();const timer=setInterval(load,5000);return()=>{epoch.current++;c.abort();clearInterval(timer);};},[kbId]);
   const index=async f=>{setError('');try{await apiJson(`/api/knowledge-bases/${kbId}/files/${f.id}/index`,{method:'POST'});setKb(p=>({...p,ready:false,files:p.files.map(x=>x.id===f.id?{...x,indexing:{status:'indexing'}}:x)}));onReady?.(false);}catch(e){setError(e.message);}};
   const probe=async()=>{setBusy(true);setError('');try{setChunks((await apiJson('/api/knowledge-bases/query',{method:'POST',body:{kb_ids:[kbId],query}})).chunks);}catch(e){setError(e.message);}finally{setBusy(false);}};
-  return <div style={{fontSize:12,marginTop:8}}>{error&&<p role="alert" style={{color:t.err}}>{error}</p>}
+  return <div style={{fontSize:"var(--hc-text-secondary)",marginTop:8}}>{error&&<p role="alert" style={{color:t.err}}>{error}</p>}
     {!kb?<p>Checking knowledge readiness…</p>:kb.files.map(f=><div key={f.id} style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',margin:'8px 0'}}><span style={{overflowWrap:'anywhere'}}>{f.filename}: <strong>{({done:'Ready',indexing:'Indexing',partial:'Partial — review warnings',error:'Needs attention',unknown:'Not verified'})[f.indexing.status]||f.indexing.status}</strong>{f.indexing.chunks!=null&&` · ${f.indexing.chunks} passages`}</span>
       {f.indexing.error&&<span style={{color:t.err}}>{f.indexing.error}</span>}{f.indexing.warnings?.map(w=><span key={w} style={{color:t.warm}}>{w}</span>)}
       {f.indexing.status!=='indexing'&&<button style={btnS(t.acc)} onClick={()=>index(f)}>{f.indexing.status==='done'?'Reindex':'Index / retry'}</button>}</div>)}
@@ -49,9 +49,9 @@ export function WorkspaceKnowledge({ws,t,btnS,inputS,onPersonaCreated,models,not
   return <div><p>Snapshots are explicit copies of bounded excerpts. Live sources are managed above.</p>
     <div style={{display:'flex',gap:8,flexWrap:'wrap'}}><SelectionControl label="Link knowledge base" value="" disabled={busy} onChange={id=>{if(id)action(()=>apiJson(`/api/workspaces/${ws.id}/links/knowledge/${id}`,{method:'POST'}));}} options={[{value:'',label:'Link an existing knowledge base…'},...available.filter(k=>!items.some(i=>i.id===k.id)).map(k=>({value:k.id,label:k.name}))]}/>
       <button disabled={busy} style={btnS(t.acc)} onClick={()=>action(()=>apiJson(`/api/workspaces/${ws.id}/create-kb`,{method:'POST',body:{name:`${ws.name} snapshot`}}))}>Create knowledge snapshot</button></div>
-    <p style={{color:t.mut,fontSize:12}}>Snapshots include bounded excerpts from linked chats and reports. They are not automatically refreshed.</p>{error&&<p role="alert" style={{color:t.err}}>{error}</p>}
-    {items.map(k=><article key={k.id} style={{border:`1px solid ${t.brd}`,borderRadius:8,padding:14,marginTop:12}}><strong>{k.name}</strong>
-      {k.snapshot?.created_at&&<p style={{fontSize:12,color:t.mut}}>Snapshot {k.snapshot.created_at} · {k.snapshot.conversation_ids.length} chats · {k.snapshot.report_ids.length} reports{k.snapshot.truncated?' · Excerpts truncated':''}{k.snapshot.omitted_conversations||k.snapshot.omitted_reports?` · Omitted: ${k.snapshot.omitted_conversations} chats, ${k.snapshot.omitted_reports} reports`:''}</p>}
+    <p style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Snapshots include bounded excerpts from linked chats and reports. They are not automatically refreshed.</p>{error&&<p role="alert" style={{color:t.err}}>{error}</p>}
+    {items.map(k=><article key={k.id} style={{border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:14,marginTop:12}}><strong>{k.name}</strong>
+      {k.snapshot?.created_at&&<p style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Snapshot {k.snapshot.created_at} · {k.snapshot.conversation_ids.length} chats · {k.snapshot.report_ids.length} reports{k.snapshot.truncated?' · Excerpts truncated':''}{k.snapshot.omitted_conversations||k.snapshot.omitted_reports?` · Omitted: ${k.snapshot.omitted_conversations} chats, ${k.snapshot.omitted_reports} reports`:''}</p>}
       <KnowledgeReadiness kbId={k.id} t={t} btnS={btnS} inputS={inputS} onReady={value=>setReady(p=>({...p,[k.id]:value}))}/>
       <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:10}}>{k.snapshot?.created_at&&<button disabled={busy||!ready[k.id]} onClick={()=>agent(k)} style={btnS(t.acc)}>Create agent from snapshot</button>}<button disabled={busy} style={btnS(t.mut)} onClick={()=>action(()=>apiJson(`/api/workspaces/${ws.id}/links/knowledge/${k.id}`,{method:'DELETE'}))}>Unlink</button></div></article>)}
     <div style={{display:'flex',gap:8,marginTop:10}}><button disabled={busy||!page} onClick={()=>setPage(p=>p-1)} style={btnS(t.acc)}>Previous</button><button disabled={busy||!more} onClick={()=>setPage(p=>p+1)} style={btnS(t.acc)}>Next</button></div>
@@ -60,7 +60,7 @@ export function WorkspaceKnowledge({ws,t,btnS,inputS,onPersonaCreated,models,not
 
 export function WorkspaceDaily({tab,ws,t,btnS,inputS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate,onAddContent,refreshKey}){
   const [taskTab,setTaskTab]=useState('tasks');
-  const cardS={padding:14,borderRadius:8,border:`1px solid ${t.brd}`,background:t.surface};
+  const cardS={padding:14,borderRadius:"var(--hc-radius)",border:`1px solid ${t.brd}`,background:t.surface};
   return tab==='notes'?<NotesPanel key={ws.id} {...{t,btnS,inputS,cardS,confirmAction,notify,workspaces,initialCreate,onAddContent,refreshKey}} embedded workspaceId={ws.id}/>:tab==='tasks'?<TasksPanel key={ws.id} {...{t,btnS,inputS,cardS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate}} embedded workspaceId={ws.id} tab={taskTab} setTab={setTaskTab}/>:<JobsPanel key={ws.id} {...{t,btnS,inputS,onNavigate,workspaces}} embedded workspaceId={ws.id}/>;
 }
 
@@ -102,7 +102,7 @@ export function WorkspaceDefaults({ws,t,btnS,inputS,models=[],personas=[],tools=
 export function WorkspaceDefaultSummary({ws,t}){
   const [defaults,setDefaults]=useState(null),[error,setError]=useState('');
   useEffect(()=>{const c=new AbortController();setDefaults(null);setError('');apiJson(`/api/workspaces/${ws.id}/defaults`,{signal:c.signal}).then(setDefaults).catch(e=>{if(e.name!=='AbortError')setError(e.message);});return()=>c.abort();},[ws.id,JSON.stringify(ws.chat_defaults)]);
-  return <p style={{fontSize:12,color:error?t.err:t.mut,overflowWrap:'anywhere'}} role={error?'alert':undefined}>{error||(!defaults?'Loading chat defaults…':`New chats: ${defaults.model} · ${defaults.persona_name||'No persona'} · ${defaults.tool_ids.length?defaults.tool_ids.join(', '):'No optional tools'}`)}</p>;
+  return <p style={{fontSize:"var(--hc-text-secondary)",color:error?t.err:t.mut,overflowWrap:'anywhere'}} role={error?'alert':undefined}>{error||(!defaults?'Loading chat defaults…':`New chats: ${defaults.model} · ${defaults.persona_name||'No persona'} · ${defaults.tool_ids.length?defaults.tool_ids.join(', '):'No optional tools'}`)}</p>;
 }
 
 export function WorkspaceContentPicker({ws,t,btnS,inputS,onLinked}){

@@ -15,9 +15,9 @@ export default function DocumentSettings({enabled,onChange,t,font}){
       onChange(d.document_tools_enabled===true);
     }catch(e){setMessage(e.message);}finally{setBusy(false);}
   };
-  return <div style={{padding:16,border:`1px solid ${t.brd}44`,borderRadius:12,marginBottom:16,fontFamily:font}}>
+  return <div style={{padding:16,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",marginBottom:16,fontFamily:font}}>
     <label style={{display:"flex",gap:10,alignItems:"center",color:t.text,fontWeight:700}}><input type="checkbox" checked={enabled} disabled={busy} onChange={toggle}/> Documents</label>
-    <p style={{fontSize:12,color:t.mut}}>Read, compose, edit and export uploaded Word, PowerPoint and Excel files. Originals are retained; edits create revisions.</p>
-    {message&&<div role="alert" style={{fontSize:12,color:t.err}}>{message}</div>}
+    <p style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Read, compose, edit and export uploaded Word, PowerPoint and Excel files. Originals are retained; edits create revisions.</p>
+    {message&&<div role="alert" style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>{message}</div>}
   </div>;
 }

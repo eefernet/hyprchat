@@ -15,7 +15,7 @@ const CADENCES=["daily","weekly","monthly","cron"];
 function CheckInRow({t,btnS,inputS,ci,patch,confirmAction,runNow}){
   const sj=ci.schedule_json||{};
   const kind=CADENCES.includes(ci.schedule_kind)?ci.schedule_kind:"daily";
-  return <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10,marginBottom:10}}>
+  return <div style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:10,marginBottom:10}}>
     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:6}}>
       <input defaultValue={ci.title} onBlur={e=>{if(e.target.value!==ci.title)patch({check_ins:[{id:ci.id,name:e.target.value}]});}} style={{...inputS,flex:1,minWidth:140}}/>
       <select value={kind} onChange={e=>patch({check_ins:[{id:ci.id,schedule_kind:e.target.value,...(e.target.value==="cron"?{cron:sj.cron||"0 8 * * *"}:{})}]})} style={{...inputS,width:"auto"}}>
@@ -129,7 +129,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
   };
 
   if(!data||!draft){
-    if(err)return <div style={{flex:1,display:"flex",flexDirection:"column",gap:12,alignItems:"center",justifyContent:"center",padding:20,color:t.err,fontSize:12}}>
+    if(err)return <div style={{flex:1,display:"flex",flexDirection:"column",gap:12,alignItems:"center",justifyContent:"center",padding:20,color:t.err,fontSize:"var(--hc-text-secondary)"}}>
       <div role="alert">{err}</div><button onClick={load} style={btnS(t.acc)}>Retry</button>
     </div>;
     return <div style={{flex:1,overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px"}}>
@@ -150,11 +150,11 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
     </PanelHeader>
     <div style={{overflowY:"auto",padding:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:820}}>
-        {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
+        {err&&<div style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:12}}>{err}</div>}
 
         {brief&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.warm}44`}}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-            <div style={{fontSize:12,fontWeight:800,color:t.warm}}>Latest brief</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm}}>Latest brief</div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{fmtUtcToLocal(brief.created_at)}</div>
             <div style={{flex:1}}/>
             <button onClick={speakBrief} disabled={speaking} title="Read aloud" style={{...btnS(t.acc),padding:"3px 9px",fontSize:"var(--hc-text-control)"}}>{speaking?"Speaking…":<><IC.Volume/> Speak</>}</button>
@@ -164,7 +164,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
         </div>}
 
         <div style={{...cardS,marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:10}}>Profile</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:10}}>Profile</div>
           <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
             <div style={{flex:1,minWidth:180}}>
               <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:4}}>Name</div>
@@ -206,7 +206,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
         </div>
 
         <div style={{...cardS,marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:6}}>Quiet hours</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:6}}>Quiet hours</div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:10}}>Pauses ntfy/email pushes during the window (assistant timezone). In-app notifications always land.</div>
           <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",marginBottom:10}}>
             <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,display:"flex",gap:6,alignItems:"center"}}>
@@ -226,7 +226,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
         </div>
 
         <div style={{...cardS,marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:6}}>Check-in data sources</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:6}}>Check-in data sources</div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:10}}>What the assistant gathers before writing a check-in brief. Empty selection = everything.</div>
           <div style={{display:"flex",gap:12,flexWrap:"wrap",marginBottom:10}}>
             {gatherers.map(g=><label key={g} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,display:"flex",gap:6,alignItems:"center"}}>
@@ -247,10 +247,10 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
         </div>
 
         <div style={{...cardS,marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:6}}>Check-ins</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:6}}>Check-ins</div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:12}}>Scheduled briefs posted in the assistant chat: gathered context → prioritized summary → actions. Daily, weekly, monthly, or cron.</div>
           {checkIns.map(ci=><CheckInRow key={ci.id} t={t} btnS={btnS} inputS={inputS} ci={ci} patch={patch} confirmAction={confirmAction} runNow={runNow}/>)}
-          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:12,borderTop:`1px solid ${t.brd}33`,paddingTop:12}}>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:12,borderTop:"1px solid var(--hc-line)",paddingTop:12}}>
             <input value={newCheckIn.name} onChange={e=>setNewCheckIn(c=>({...c,name:e.target.value}))} placeholder="Name" style={{...inputS,flex:1,minWidth:140}}/>
             <input type="time" value={newCheckIn.time} onChange={e=>setNewCheckIn(c=>({...c,time:e.target.value}))} style={{...inputS,width:"auto"}}/>
             <input value={newCheckIn.prompt} onChange={e=>setNewCheckIn(c=>({...c,prompt:e.target.value}))} placeholder="Optional focus (e.g. 'emphasize deadlines')" style={{...inputS,flex:2,minWidth:180}}/>

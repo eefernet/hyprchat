@@ -134,7 +134,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
     </PanelHeader>
     <div style={{overflowY:embedded?"visible":"auto",padding:embedded?0:isMobile?"14px 12px":"20px 28px",flex:1}}>
       <div style={{maxWidth:900}}>
-        {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
+        {err&&<div style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:12}}>{err}</div>}
 
         {tab==="tasks"&&<>
           {!embedded&&<select aria-label="Tasks workspace" disabled={!!workspaceId} value={workspace} onChange={e=>setWorkspace(e.target.value)} style={{...inputS,width:'auto',marginBottom:12}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
@@ -146,13 +146,13 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
           </div>
 
           {form&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.acc}55`}}>
-            <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:10}}>{form.id?"Edit task":"New task (review before saving)"}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:10}}>{form.id?"Edit task":"New task (review before saving)"}</div>
             <input value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="Title" style={{...inputS,marginBottom:8}}/>
             <textarea value={form.prompt} onChange={e=>setForm(f=>({...f,prompt:e.target.value}))} placeholder="What should the agent do each run?" rows={3} style={{...inputS,marginBottom:8,resize:"vertical"}}/>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8,alignItems:"center"}}>
               {form.task_type==="llm"||form.task_type==="research"
                 ?<SelectionControl label="Task task type" value={form.task_type} onChange={value=>setForm(f=>({...f,task_type:value}))} options={[{value:'llm',label:'Agent task'},{value:'research',label:'Deep research'}]}/>
-                :<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,border:`1px solid ${t.warm}44`,borderRadius:8,padding:"5px 10px"}}>
+                :<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,border:`1px solid ${t.warm}44`,borderRadius:"var(--hc-radius)",padding:"5px 10px"}}>
                   {form.task_type==="check_in"?"check-in — managed in the Assistant panel":form.task_type}
                 </span>}
               <SelectionControl label="Task schedule kind" value={form.schedule_kind} onChange={value=>setForm(f=>({...f,schedule_kind:value}))} options={Object.keys(KIND_FIELDS).map(value=>({value,label:value}))}/>
@@ -177,7 +177,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               <label>Timezone<input value={form.timezone||''} onChange={e=>setForm(f=>({...f,timezone:e.target.value}))} placeholder="Assistant timezone (default)" style={inputS}/></label>
               <label>Conversation<select value={form.conversation_id||''} disabled={form.task_type==='check_in'} onChange={e=>setForm(f=>({...f,conversation_id:e.target.value}))} style={inputS}><option value="">{form.workspace_id?'Create a project task conversation':'Result in run history'}</option>{convs.map(c=><option key={c.id} value={c.id}>{c.title||'New chat'}</option>)}{form.conversation_id&&!convs.some(c=>c.id===form.conversation_id)&&<option value={form.conversation_id}>Current conversation</option>}</select></label>
             </div>
-            <details style={{marginBottom:12}}><summary>Tools and delivery</summary><p style={{fontSize:12,color:t.mut}}>No selected tools inherits the conversation or persona tools. Workspace agent tasks save results to a project conversation. Tasks without a conversation use a single completion.</p>
+            <details style={{marginBottom:12}}><summary>Tools and delivery</summary><p style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No selected tools inherits the conversation or persona tools. Workspace agent tasks save results to a project conversation. Tasks without a conversation use a single completion.</p>
               {toolOptions.map(tool=><label key={tool.id} style={{display:'block'}}><input type="checkbox" checked={(form.tool_ids||[]).includes(tool.id)} onChange={e=>setForm(f=>({...f,tool_ids:e.target.checked?[...(f.tool_ids||[]),tool.id]:(f.tool_ids||[]).filter(id=>id!==tool.id)}))}/>{tool.name||tool.tool_name}</label>)}
               {['ntfy','email'].map(channel=><label key={channel} style={{display:'block'}}><input type="checkbox" checked={!!form.delivery?.[channel]} onChange={e=>setForm(f=>({...f,delivery:{...f.delivery,[channel]:e.target.checked}}))}/>{channel} delivery (requires configured channel)</label>)}
             </details>
@@ -194,7 +194,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
           :tasks.map(task=><div key={task.id} style={{...cardS,marginBottom:10,opacity:task.enabled?1:.55}}>
             <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
               <div style={{flex:1,minWidth:200}}>
-                <div style={{fontSize:13,fontWeight:800,color:t.text}}>{task.title}</div>
+                <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text}}>{task.title}</div>
                 <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>
                   {kindLabel(task.schedule_kind)}
                   {task.next_run?` · next ${fmtTs(task.next_run)}`:""}
@@ -214,7 +214,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               Webhook: POST {API||window.location.origin}/api/hooks/{task.webhook_token}
             </div>}
             {task.prompt&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:6,whiteSpace:"pre-wrap"}}>{task.prompt.slice(0,300)}{task.prompt.length>300?"…":""}</div>}
-            {runsFor===task.id&&<div style={{marginTop:10,borderTop:`1px solid ${t.brd}33`,paddingTop:8}}>
+            {runsFor===task.id&&<div style={{marginTop:10,borderTop:"1px solid var(--hc-line)",paddingTop:8}}>
               {runs.length===0?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No runs yet.</div>
               :runs.map(r=><div key={r.id} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"3px 0",display:"flex",gap:8,alignItems:"baseline"}}>
                 <span style={{color:statusColor(r.status),fontWeight:700,minWidth:70}}>{r.status}</span>
@@ -228,14 +228,14 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
 
         {tab==="notifications"&&<>
           <div style={{display:"flex",gap:8,marginBottom:14,alignItems:"center"}}>
-            <div style={{fontSize:12,color:t.mut}}>{unseen} unseen</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{unseen} unseen</div>
             <div style={{flex:1}}/>
             <button onClick={markAllSeen} style={btnS(t.acc)}>Mark all seen</button>
           </div>
           {notifs.length===0?<EmptyState t={t} icon={<IC.Flash/>} title="No notifications" hint="Scheduled task results and reminders will land here."/>
           :notifs.map(n=><div key={n.id} style={{...cardS,marginBottom:8,borderLeft:`3px solid ${n.seen?t.brd:t.warm}`,display:"flex",gap:10,alignItems:"flex-start"}}>
             <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:12,fontWeight:n.seen?600:800,color:t.text}}>{n.title}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:n.seen?600:800,color:t.text}}>{n.title}</div>
               {n.body&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:3,whiteSpace:"pre-wrap"}}>{n.body}</div>}
               {(n.deliveries||[]).map(d=><div key={d.channel} style={{fontSize:"var(--hc-text-secondary)",color:d.status==='uncertain'||d.status==='failed'?t.err:t.dim,marginTop:4}}>{d.channel}: {d.status.replaceAll('_',' ')} · {d.attempts} attempt{d.attempts===1?'':'s'}{d.error?` · ${d.error}`:''}{d.status==='uncertain'?' — Check the destination before sending again.':''}</div>)}
               <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>{n.kind} · {fmtTs(n.created_at)}</div>
@@ -244,7 +244,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
           </div>)}
 
           <div style={{...cardS,marginTop:20}}>
-            <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:8}}>ntfy push channel</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:8}}>ntfy push channel</div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:10}}>Optional push notifications via an ntfy server. Tasks with the ntfy delivery option send here; in-app notifications always work.</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
               <input value={ntfy.url} onChange={e=>setNtfy(n=>({...n,url:e.target.value}))} placeholder="https://ntfy.sh" style={{...inputS,flex:2,minWidth:180}}/>

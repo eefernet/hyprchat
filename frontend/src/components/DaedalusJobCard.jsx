@@ -15,8 +15,8 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const active=!terminalJobStates.has(job.state),status=jobStatusLabel(job);
   useEffect(()=>{if(!active)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[active]);
   useEffect(()=>{if(details){opener.current=document.activeElement;dialog.current?.showModal();}else if(dialog.current?.open){dialog.current.close();opener.current?.focus();}},[details]);
-  const button={background:t.bgDeep,border:`1px solid ${t.brd}`,borderRadius:8,padding:'8px 12px',color:t.text,fontFamily:font,fontSize:13,cursor:'pointer',textDecoration:'none',display:'inline-block'};
-  const vars={'--dj-surface':t.surface,'--dj-bg':t.bgDeep,'--dj-text':t.text,'--dj-muted':t.dim||t.mut,'--dj-border':t.brd,'--dj-accent':t.acc,'--dj-good':t.ok,fontFamily:font};
+  const button={background:t.bgDeep,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:'8px 12px',color:t.text,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:'pointer',textDecoration:'none',display:'inline-block'};
+  const vars={'--dj-surface':`var(--hc-elev-1, ${t.surface})`,'--dj-bg':t.bgDeep,'--dj-text':t.text,'--dj-muted':t.dim||t.mut,'--dj-border':`var(--hc-line, ${t.brd})`,'--dj-accent':t.acc,'--dj-good':t.ok,fontFamily:font};
   const name=job.presentation?.project_name||job.project_name||'Daedalus project';
   const elapsed=(job.seconds_used||0)+(active?Math.max(job.operation_seconds||0,job.worker_contact_at?(now-timestamp(job.worker_contact_at))/1000+(job.operation_seconds||0):0):0);
   const updated=timestamp(job.meaningful_update_at||job.updated_at||job.created_at);
@@ -130,7 +130,7 @@ function ProjectEvidence({jobId,t,font}){
       setResult(data);setRequest(body);
     }catch(e){if(version===generation.current)setError(e.message);}finally{if(version===generation.current)setBusy(false);}
   };
-  const control={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:5,padding:'5px 8px',fontFamily:font,fontSize:"var(--hc-text-secondary)"};
+  const control={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius-sm)",padding:'5px 8px',fontFamily:font,fontSize:"var(--hc-text-secondary)"};
   const next=()=>{
     if(result.next_offset!=null)load({...request,offset:result.next_offset,sha256:result.sha256});
     else if(result.next_line!=null)load({...request,start:result.next_line,sha256:result.sha256});

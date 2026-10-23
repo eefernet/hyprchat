@@ -57,13 +57,13 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
     {error&&<p role="alert" style={{color:t.err}}>{error}</p>}
     {runResult&&<article style={{padding:14,border:`1px solid ${t.brd}`,whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}><button style={btnS(t.acc)} onClick={()=>setRunResult(null)}>Close result</button><p>{runResult.result_text||runResult.error||'No output saved yet.'}</p></article>}
     {!jobs.length&&<p style={{color:t.dim}}>No jobs match these filters.</p>}
-    <div style={{display:'grid',gap:12}}>{jobs.map(job=><article id={`job-${job.id}`} key={job.id} style={{padding:16,border:`1px solid ${t.brd}`,borderRadius:10,overflowWrap:'anywhere'}}>
+    <div style={{display:'grid',gap:12}}>{jobs.map(job=><article id={`job-${job.id}`} key={job.id} style={{padding:16,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius-card)",overflowWrap:'anywhere'}}>
       <div style={{fontWeight:700}}>{job.title||job.kind}</div>
-      <p style={{color:t.dim,fontSize:12}}>{job.kind} · {job.status} · {job.phase}
+      <p style={{color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{job.kind} · {job.status} · {job.phase}
         {job.elapsed_seconds!=null&&` · ${Math.floor(job.elapsed_seconds/60)}m ${job.elapsed_seconds%60}s`}</p>
       {job.progress!=null&&<progress value={job.progress} max="100" aria-label="Job progress"/>}
       {job.error&&<p role="status" style={{color:t.err}}>{job.error}</p>}
-      {job.status==='interrupted'&&<p style={{fontSize:12}}>Review saved outputs and possible external effects before starting again.</p>}
+      {job.status==='interrupted'&&<p style={{fontSize:"var(--hc-text-secondary)"}}>Review saved outputs and possible external effects before starting again.</p>}
       {job.details.results?.length>0&&<details><summary>Per-file results</summary>{job.details.results.map(result=><div key={result.artifact_id} style={{margin:8}}>{result.artifact_id}: {result.status}{result.error&&` — ${result.error}`}{result.outputs?.map(output=><a key={output.artifact_id} href={userScopedUrl(output.url)} style={{display:'block',color:t.acc}}>{output.filename}</a>)}</div>)}</details>}
       <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
         {job.kind==='scheduled'&&<button style={btnS(t.acc)} onClick={async()=>{try{setRunResult(await apiJson(`/api/tasks/runs/${job.domain_id}`));}catch(e){setError(e.message);}}}>Read result</button>}

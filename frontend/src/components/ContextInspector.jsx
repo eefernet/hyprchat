@@ -14,8 +14,8 @@ export default function ContextInspector({messageId,t,onClose,onRestore}){
     const saved=await apiJson(`/api/messages/${messageId}/reviews/${index}/restore`,{method:'POST'});
     onRestore?.(messageId,saved);onClose();
   }catch(e){if(e.name!=='AbortError')setError(e.message);}finally{setRestoring(false);}};
-  return <div ref={focus} role="dialog" aria-modal="true" aria-label="Response context" style={{position:'fixed',inset:0,zIndex:500,background:'#0008'}} onClick={onClose}>
-    <section onClick={e=>e.stopPropagation()} style={{position:'absolute',right:0,top:0,bottom:0,width:'min(620px,100%)',overflowY:'auto',background:t.bgDeep,color:t.text,padding:20,boxSizing:'border-box'}}>
+  return <div ref={focus} role="dialog" aria-modal="true" aria-label="Response context" className="hc-scrim" style={{position:'fixed',inset:0,zIndex:500}} onClick={onClose}>
+    <section onClick={e=>e.stopPropagation()} className="hc-side-sheet hc-elev-3" style={{position:'absolute',right:0,top:0,bottom:0,width:'min(620px,100%)',overflowY:'auto',color:t.text,padding:20,boxSizing:'border-box',borderRadius:'var(--hc-radius-dialog) 0 0 var(--hc-radius-dialog)',borderRight:0}}>
       <button aria-label="Close context" onClick={onClose} style={{float:'right'}}>Close</button><h2>Response context</h2>
       {error&&<p role="alert">{error}</p>}{!data&&!error&&<p>Loading…</p>}
       {data&&!data.available&&<p>Context was not recorded for this response.</p>}

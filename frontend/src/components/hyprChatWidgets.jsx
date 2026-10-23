@@ -5,6 +5,9 @@ import LibrarySearchPanel from '../panels/LibrarySearchPanel.jsx';
 import {workspaceSections,workspaceSection,workspaceSubviews,workspaceSectionLabel} from '../workspaceNavigation.js';
 import {WorkspaceOverview,WorkspaceSources,WorkspaceDaily,WorkspaceDefaults,WorkspaceDefaultSummary,WorkspaceContentDialog} from './workspaceComponents.jsx';
 import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
+import {activityVisual, summaryChips} from "../chatActivityVisual.js";
+import usePresence from "../usePresence.js";
+import "./chatActivity.css";
 import {apiJson} from "../api.js";
 import {isDocumentEvent} from "../documentFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -38,11 +41,11 @@ const ActivityDetail = ({ev,t,active=false})=>{
   };
   const isImageDetail=detail&&typeof detail==="object"&&detail.tool==="generate_image";
   const ImagePromptDetail=()=>{
-    const preS={margin:0,padding:8,background:`${t.surface}F5`,borderRadius:5,whiteSpace:"pre-wrap",wordBreak:"break-word",color:t.dim,fontSize:"var(--hc-text-secondary)",border:`1px solid ${t.brd}18`};
+    const preS={margin:0,padding:8,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-sm)",whiteSpace:"pre-wrap",wordBreak:"break-word",color:t.dim,fontSize:"var(--hc-text-secondary)",border:"1px solid var(--hc-line-subtle)"};
     const block=(key,label,value)=>value?<div style={{marginBottom:8}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>{label}</span>
-        <button onClick={()=>copyDetailText(key,value)} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",padding:"2px 7px",borderRadius:6,border:`1px solid ${t.acc}33`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:"inherit"}}>{copiedDetail===key?"Copied":"Copy"}</button>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0}}>{label}</span>
+        <button onClick={()=>copyDetailText(key,value)} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",padding:"2px 7px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,background:`${t.acc}10`,color:t.acc,cursor:"pointer",fontFamily:"inherit"}}>{copiedDetail===key?"Copied":"Copy"}</button>
       </div>
       <pre style={preS}>{value}</pre>
     </div>:null;
@@ -59,11 +62,11 @@ const ActivityDetail = ({ev,t,active=false})=>{
       ["Fallback",detail.prompt_fallback?"yes":"no"],
     ].filter(([,v])=>v!==undefined&&v!==null&&v!=="");
     return <div>
-      {detail.auto_enhanced&&<div style={{display:"inline-flex",alignItems:"center",gap:4,marginBottom:8,fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc2,background:`${t.acc2}12`,border:`1px solid ${t.acc2}30`,borderRadius:6,padding:"2px 8px"}}>✨ prompt auto-enhanced</div>}
+      {detail.auto_enhanced&&<div style={{display:"inline-flex",alignItems:"center",gap:4,marginBottom:8,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc2,background:`${t.acc2}12`,border:`1px solid ${t.acc2}30`,borderRadius:"var(--hc-radius)",padding:"2px 8px"}}>✨ prompt auto-enhanced</div>}
       {block("prompt","Prompt sent to ComfyUI",detail.prompt)}
       {block("negative","Negative prompt",detail.negative_prompt)}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:6,marginTop:2}}>
-        {flags.map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}22`,background:`${t.surface}F5`,borderRadius:6,padding:"6px 8px",minWidth:0}}>
+        {flags.map(([k,v])=><div key={k} style={{border:"1px solid var(--hc-line-subtle)",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",padding:"6px 8px",minWidth:0}}>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:2}}>{k}</div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(v)}</div>
         </div>)}
@@ -78,17 +81,17 @@ const ActivityDetail = ({ev,t,active=false})=>{
       :detail.thinking?<div style={{color:t.dim,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{detail.thinking}</div>
       :detail.code?<div>
         {detail.language&&<div style={{color:t.mut,marginBottom:4,fontSize:"var(--hc-text-secondary)"}}>🔧 <span style={{color:t.acc}}>{detail.language}</span></div>}
-        <pre style={{margin:0,padding:8,background:`${t.surface}F5`,borderRadius:4,whiteSpace:"pre-wrap",color:t.warm,fontSize:"var(--hc-text-secondary)",border:`1px solid ${t.brd}18`}}>{detail.code}</pre>
-        {detail.stdout&&<><div style={{color:t.ok,marginTop:6,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 stdout:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",background:`${t.ok}08`,borderRadius:4,marginTop:2}}>{detail.stdout}</pre></>}
-        {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",background:`${t.err}08`,borderRadius:4,marginTop:2}}>{detail.stderr}</pre></>}
+        <pre style={{margin:0,padding:8,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-sm)",whiteSpace:"pre-wrap",color:t.warm,fontSize:"var(--hc-text-secondary)",border:"1px solid var(--hc-line-subtle)"}}>{detail.code}</pre>
+        {detail.stdout&&<><div style={{color:t.ok,marginTop:6,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 stdout:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",background:`${t.ok}08`,borderRadius:"var(--hc-radius-sm)",marginTop:2}}>{detail.stdout}</pre></>}
+        {detail.stderr&&<><div style={{color:t.err,marginTop:6,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>⚠️ stderr:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",background:`${t.err}08`,borderRadius:"var(--hc-radius-sm)",marginTop:2}}>{detail.stderr}</pre></>}
       </div>
       :detail.results?<div>{detail.results.map((r,i)=><div key={i} style={{marginBottom:4}}><a href={r.url} target="_blank" style={{color:t.acc,textDecoration:"none",fontSize:"var(--hc-text-secondary)"}}>🔗 {r.title}</a></div>)}</div>
       :detail.steps?<div>
         <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
           <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc}}>Agent Timeline</span>
-          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,background:`${t.surface}F5`,padding:"1px 6px",borderRadius:8}}>{detail.steps.length} step{detail.steps.length!==1?"s":""}</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,background:`${t.surface}F5`,padding:"1px 6px",borderRadius:"var(--hc-radius)"}}>{detail.steps.length} step{detail.steps.length!==1?"s":""}</span>
         </div>
-        {detail.steps.length>0&&(()=>{const last=detail.steps[detail.steps.length-1];return <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,padding:"4px 8px",background:`${t.acc}11`,borderRadius:6,border:`1px solid ${t.acc}22`}}>
+        {detail.steps.length>0&&(()=>{const last=detail.steps[detail.steps.length-1];return <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,padding:"4px 8px",background:`${t.acc}11`,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}22`}}>
           <div style={{width:8,height:8,borderRadius:"50%",background:t.acc,animation:active?"pulse 1.4s infinite":"none",flexShrink:0}}/>
           <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600}}>{active?"Current:":"Latest:"}</span>
           <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc}}>{last.icon} {last.label}</span>
@@ -105,7 +108,7 @@ const ActivityDetail = ({ev,t,active=false})=>{
       </div>
       :detail.method?<div>
         <div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",marginBottom:4}}>⚙️ <span style={{color:t.acc}}>{detail.method}</span></div>
-        {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}F5`,borderRadius:4,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail.args,null,2)}</pre>}
+        {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-sm)",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail.args,null,2)}</pre>}
         {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{detail.result}</pre></>}
       </div>
       :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail,null,2)}</pre>}
@@ -140,8 +143,6 @@ function ThinkingPreview({text}){
   </span>;
 }
 
-const ACTIVITY_ICONS={starting:"🔮",thinking:"🧠",writing:"✍️",reviewing:"✨",searching:"🔎",tool:"🛠️",complete:"✅",stopped:"⏹️",failed:"❌"};
-const ACTIVITY_TOOL_ICONS={fetch_url:"🌐",execute_code:"💻",run_shell:"💻",read_file:"📖",write_file:"📝",list_files:"📂",generate_image:"🎨",kb:"📚",memory:"🧠",download_file:"📦",download_project:"📦",install_package:"📦",deep_research:"🔬"};
 
 export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t}){
   const state=chatActivity({events,savedEvents,live,content,status});
@@ -163,31 +164,36 @@ export function ChatActivity({events=[],savedEvents=[],live=false,content="",sta
   },[expanded,detailVersion]);
   const toggle=()=>{manual.current=true;setExpanded(v=>!v);};
   const jump=()=>{followRef.current=true;setFollowing(true);if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;};
-  if(!state.visible)return null;
-  const color=state.phase==="failed"?t.err:state.phase==="thinking"?t.f4:state.phase==="reviewing"?t.warm:state.phase==="stopped"?t.mut:state.active?t.acc:t.dim;
+  // Once a pill has been live, its first settle plays the check pop (hooks stay above the early return).
+  const wasActive=useRef(false);if(state.active)wasActive.current=true;
   const expandable=state.entries.length>0;
+  const body=usePresence(expanded&&expandable,{token:"--hc-dur-1"});
+  if(!state.visible)return null;
+  const settled=!state.active&&wasActive.current&&state.phase==="complete";
   const thought=state.entries.filter(row=>row.kind==="reasoning").at(-1);
   const preview=!expanded&&(state.phase==="thinking"||(state.phase==="reviewing"&&thought?.state==="running"))?(activityDetail(thought?.event)?.thinking||activityText(thought?.event)):"";
   const tool=state.entries.filter(row=>row.kind==="tool"&&row.state==="running").at(-1)?.tool;
-  const icon=(state.phase==="tool"&&ACTIVITY_TOOL_ICONS[tool])||ACTIVITY_ICONS[state.phase];
-  const summary=[hasReasoning?"Reasoning":"",state.tools?`${state.tools} tool${state.tools===1?"":"s"}`:"",state.entries.some(e=>e.kind==="review")?"Review":""].filter(Boolean).join(" · ");
+  const visual=activityVisual(state,t,tool);
+  const Icon=IC[visual.icon]||IC.Activity;
+  const chips=state.active?[]:summaryChips(state);
   const header=<>
-    <span aria-hidden="true" className={`hc-activity-icon${state.active?" is-active":""}`}>{icon}</span>
-    <span className="hc-activity-label">{state.label}</span>
+    <span key={visual.icon} aria-hidden="true" className="hc-activity-icon"><span className="hc-activity-badge"><Icon/></span></span>
+    <span key={state.label} className="hc-activity-label">{state.label}</span>
     {preview&&<ThinkingPreview key={thought.id} text={preview}/>}
-    {!state.active&&summary&&<span className="hc-activity-summary">{summary}</span>}
-    {expandable&&<span className="hc-activity-chevron" aria-hidden="true">{expanded?"▴":"▾"}</span>}
+    {chips.length>0&&<span className="hc-activity-chips">{chips.map((chip,i)=><span key={chip} className="hc-activity-chip" style={{"--i":i}}>{chip}</span>)}</span>}
+    {expandable&&<span className="hc-activity-chevron hc-chevron" data-open={expanded?"true":"false"} aria-hidden="true"><IC.ChevDown/></span>}
+    {state.active&&<span className="hc-activity-progress" aria-hidden="true"/>}
   </>;
-  return <section className="hc-chat-activity" data-phase={state.phase} style={{"--activity-color":color,"--activity-border":`${color}30`,"--activity-tint":`${color}08`,"--activity-glow":`${color}12`,"--activity-surface":t.bgDeep,"--activity-muted":t.mut,"--activity-text":t.dim}}>
+  return <section className="hc-chat-activity" data-phase={state.phase} data-active={state.active?"true":"false"} data-settled={settled?"true":"false"} style={visual.vars}>
     <span className="hc-sr-only" role="status" aria-live="polite" aria-atomic="true">{state.label}</span>
     {expandable?<button type="button" className="hc-activity-header" onClick={toggle} aria-expanded={expanded} aria-controls={panelId} aria-label={`${state.label} details`}>{header}</button>:<div className="hc-activity-header">{header}</div>}
-    {expanded&&expandable&&<>
+    {body.mounted&&<div className="hc-activity-body" {...body.props}><div>
       <div id={panelId} ref={scrollRef} className="hc-activity-scroll" tabIndex={0} aria-label="Activity details" onScroll={e=>{
         const el=e.currentTarget,near=el.scrollHeight-el.scrollTop-el.clientHeight<24;
         followRef.current=near;setFollowing(near);
       }}>
-        {state.entries.map(row=><div key={row.id} className="hc-activity-entry" data-state={row.state}>
-          <div className="hc-activity-entry-heading"><span>{row.label}</span><span style={{color:row.state==="failed"?t.err:row.state==="complete"?t.ok:t.mut}}>{{running:"In progress",complete:"Complete",failed:"Failed",interrupted:"Interrupted",retained:"Answer retained",unknown:"Result unavailable"}[row.state]}</span></div>
+        {state.entries.map((row,i)=><div key={row.id} className="hc-activity-entry" data-state={row.state} style={{"--i":Math.min(i,5)}}>
+          <div className="hc-activity-entry-heading"><span>{row.label}</span><span style={{color:row.state==="failed"?t.err:row.state==="complete"?t.ok:t.mut}}>{row.state==="running"&&<span className="hc-activity-dot is-running" aria-hidden="true"/>}{{running:"In progress",complete:"Complete",failed:"Failed",interrupted:"Interrupted",retained:"Answer retained",unknown:"Result unavailable"}[row.state]}</span></div>
           {row.kind==="reasoning"||row.kind==="error"?<ActivityDetail ev={row.event} t={t} active={row.state==="running"}/>:<>
             {activityText(row.event)&&<div className="hc-activity-description">{activityText(row.event)}</div>}
             {activityDetail(row.event)&&<details className="hc-activity-tool-detail"><summary>Details</summary><ActivityDetail ev={row.event} t={t} active={row.state==="running"}/></details>}
@@ -195,7 +201,7 @@ export function ChatActivity({events=[],savedEvents=[],live=false,content="",sta
         </div>)}
       </div>
       {!following&&state.active&&<button type="button" className="hc-activity-jump" onClick={jump}>Jump to latest ↓</button>}
-    </>}
+    </div></div>}
   </section>;
 }
 
@@ -212,15 +218,15 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
     try{await navigator.clipboard.writeText(plan);setCopied(true);setTimeout(()=>setCopied(false),1400);}catch{}
     onCopy&&onCopy();
   };
-  return <div style={{marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 12px ${t.acc}22`:"none",transition:"all .3s"}}>
-    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:streaming?"pillGlow 2s ease-in-out infinite":"none"}}>
-      <span style={{fontSize:13,lineHeight:1,animation:streaming?"bop 2s ease-in-out infinite":"none",transformOrigin:"center"}}>📐</span>
-      <span style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:tc,letterSpacing:.3}}>Architecture Plan</span>
+  return <div className="hc-reveal" style={{marginBottom:6,borderRadius:"var(--hc-radius-card)",border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 0 1px ${t.acc}55`:"none",transition:"border-color var(--hc-dur-3) var(--hc-ease-out),box-shadow var(--hc-dur-3) var(--hc-ease-out),background-color var(--hc-dur-3) var(--hc-ease-out)"}}>
+    <div onClick={()=>setExpanded(p=>!p)} className={`hc-live-head${streaming?" is-active":""}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
+      <span className={`hc-run-icon${streaming?" is-active":""}`} style={{fontSize:"var(--hc-text-control)",lineHeight:1}}>📐</span>
+      <span style={{fontWeight:600,fontSize:"var(--hc-text-secondary)",color:tc}}>Architecture Plan</span>
       {streaming&&<span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
-      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:6,fontSize:"var(--hc-text-control)",fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
+      <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
       <span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
     </div>
-    {expanded&&<div style={{padding:"10px 14px",fontSize:12,lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
+    {expanded&&<div style={{padding:"10px 14px",fontSize:"var(--hc-text-secondary)",lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
       {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
     </div>}
   </div>;
@@ -525,12 +531,12 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   },[run,needsAttention,autoExpanded]);
   const DetailBody = ({compact=false}={}) => <div style={{padding:compact?"8px 0 0":"8px 12px",fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.dim,maxHeight:compact?360:320,overflowY:"auto",fontFamily:font}}>
     {chips.length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:8}}>
-      {chips.map(([label,value],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,border:`1px solid ${t.brd}2e`,background:`${t.surface}F5`,borderRadius:999,padding:"2px 7px",maxWidth:compact?260:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-        <span style={{color:t.dim,fontWeight:800}}>{label}</span> {value}
+      {chips.map(([label,value],i)=><span key={`${label}-${i}`} title={value} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,border:"1px solid var(--hc-line-subtle)",background:`${t.surface}F5`,borderRadius:"var(--hc-radius-pill)",padding:"2px 7px",maxWidth:compact?260:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+        <span style={{color:t.dim,fontWeight:600}}>{label}</span> {value}
       </span>)}
     </div>}
-    {architectPlan&&<div style={{marginBottom:9,padding:"8px 10px",borderRadius:7,border:`1px solid ${t.acc}28`,background:`${t.acc}09`,color:t.dim}}>
-      <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:900,marginBottom:5}}>Architecture Plan</div>
+    {architectPlan&&<div style={{marginBottom:9,padding:"8px 10px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}28`,background:`${t.acc}09`,color:t.dim}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:700,marginBottom:5}}>Architecture Plan</div>
       {md?<MDWrap>{md(architectPlan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{architectPlan}</pre>}
     </div>}
     {allSteps.length===0 && <div style={{color:t.mut,fontStyle:"italic"}}>No steps recorded yet…</div>}
@@ -538,7 +544,7 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
       const stepIcon = _STEP_ACTION_ICONS[s.action] || "·";
       const stepNo = s.step ?? i+1;
       const meta = _stepTimeMeta(s, allSteps[i-1], run);
-      return <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?`1px solid ${t.brd}12`:"none",display:"grid",gridTemplateColumns:"28px 18px minmax(76px,auto) minmax(0,1fr)",alignItems:"baseline",gap:6}}>
+      return <div key={i} style={{padding:"3px 0",borderBottom:i<allSteps.length-1?"1px solid var(--hc-line-subtle)":"none",display:"grid",gridTemplateColumns:"28px 18px minmax(76px,auto) minmax(0,1fr)",alignItems:"baseline",gap:6}}>
         <span style={{color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"right"}}>#{stepNo}</span>
         <span style={{fontSize:"var(--hc-text-secondary)",opacity:.85,textAlign:"center"}}>{stepIcon}</span>
         <span style={{color:colour,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.action||"?"}</span>
@@ -548,17 +554,17 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
         </span>
       </div>;
     })}
-    {summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{summary}</div>}
-    {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:6,background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
+    {summary && <div style={{marginTop:8,padding:"6px 8px",borderRadius:"var(--hc-radius)",background:`${colour}10`,color:t.dim,fontStyle:"italic"}}>{summary}</div>}
+    {env.error && <div style={{marginTop:8,padding:"6px 8px",borderRadius:"var(--hc-radius)",background:`${t.err}10`,color:t.err}}>⚠ {env.error}</div>}
     {(env.manifest_missing||[]).length>0 && <div style={{marginTop:6,fontSize:"var(--hc-text-secondary)",color:t.mut}}>missing: {(env.manifest_missing||[]).slice(0,8).join(", ")}</div>}
     {baseRole==="reviewer"&&(env.issues||[]).length>0&&<div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>
-      {(env.issues||[]).slice(0,6).map((issue,i)=><div key={i} style={{padding:"6px 8px",borderRadius:6,border:`1px solid ${t.err}25`,background:`${t.err}08`,color:t.dim}}>
-        <span style={{color:t.err,fontWeight:800}}>{issue.file||issue.path||`issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
+      {(env.issues||[]).slice(0,6).map((issue,i)=><div key={i} style={{padding:"6px 8px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.err}25`,background:`${t.err}08`,color:t.dim}}>
+        <span style={{color:t.err,fontWeight:600}}>{issue.file||issue.path||`issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
       </div>)}
     </div>}
-    {baseRole==="qa" && env.answer && <div style={{marginTop:10,padding:"10px 12px",borderRadius:8,background:`${colour}08`,border:`1px solid ${colour}22`,color:t.dim,fontSize:12,lineHeight:1.6}}>
+    {baseRole==="qa" && env.answer && <div style={{marginTop:10,padding:"10px 12px",borderRadius:"var(--hc-radius)",background:`${colour}08`,border:`1px solid ${colour}22`,color:t.dim,fontSize:"var(--hc-text-secondary)",lineHeight:1.6}}>
       {md?<MDWrap>{md(env.answer)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit"}}>{env.answer}</pre>}
-      {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:5,background:`${t.acc}18`,color:t.acc,fontSize:"var(--hc-text-secondary)",fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
+      {env.looks_like_change_request && <div style={{marginTop:8,padding:"4px 8px",borderRadius:"var(--hc-radius-sm)",background:`${t.acc}18`,color:t.acc,fontSize:"var(--hc-text-secondary)",fontWeight:600,display:"inline-block"}}>⚡ Flagged as change request</div>}
       {(env.files_examined||[]).length>0 && <div style={{marginTop:8,fontSize:"var(--hc-text-secondary)",color:t.mut}}>📂 examined: {(env.files_examined||[]).slice(0,5).join(", ")}{(env.files_examined||[]).length>5?` +${(env.files_examined||[]).length-5} more`:""}</div>}
     </div>}
   </div>;
@@ -567,13 +573,13 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
     return <div style={{display:"grid",gridTemplateColumns:"28px minmax(0,1fr)",gap:10,position:"relative"}}>
       <div style={{position:"relative",display:"flex",justifyContent:"center"}}>
         {!isLast&&<span style={{position:"absolute",top:24,bottom:-2,width:1,background:`${t.brd}33`}}/>}
-        <span style={{width:24,height:24,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,color:colour,background:`${colour}12`,border:`1px solid ${colour}32`,zIndex:1,boxShadow:isStreaming?`0 0 12px ${colour}22`:"none"}}>{visual.icon}</span>
+        <span style={{width:24,height:24,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",color:colour,background:`${colour}12`,border:`1px solid ${colour}32`,zIndex:1,boxShadow:isStreaming?`0 0 12px ${colour}22`:"none"}}>{visual.icon}</span>
       </div>
-      <div style={{minWidth:0,padding:"1px 0 12px",borderBottom:!isLast?`1px solid ${t.brd}16`:"none"}}>
+      <div style={{minWidth:0,padding:"1px 0 12px",borderBottom:!isLast?"1px solid var(--hc-line-subtle)":"none"}}>
         <div onClick={()=>setExpanded(p=>!p)} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"start",cursor:"pointer",userSelect:"none"}}>
           <div style={{minWidth:0}}>
             <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
-              <span style={{fontWeight:900,color:colour,fontSize:"var(--hc-text-secondary)"}}>{visual.label}</span>
+              <span style={{fontWeight:700,color:colour,fontSize:"var(--hc-text-secondary)"}}>{visual.label}</span>
               <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{statusLabel}</span>
               <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.72}}>{role}</span>
               {dur&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.72}}>{dur}</span>}
@@ -583,7 +589,7 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45,marginTop:3,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:expanded?3:2,WebkitBoxOrient:"vertical",wordBreak:"break-word"}}>{summary}</div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:5}}>
-            {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:"var(--hc-text-control)",color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
+            {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:"var(--hc-text-control)",color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:"var(--hc-radius)",padding:"2px 7px",fontWeight:600,cursor:"pointer",fontFamily:font}}>artifact</button>}
             <span style={{fontSize:"var(--hc-text-secondary)",color:colour,opacity:.55,paddingTop:1}}>{expanded?"▴":"▾"}</span>
           </div>
         </div>
@@ -593,23 +599,23 @@ const RunCard = ({runId, liveEvts, t, font, md, onOpenArtifact, variant="card", 
   }
   const bc = isStreaming ? `${colour}66` : needsAttention ? `${colour}55` : `${t.brd}24`;
   const bg = isStreaming ? `${colour}0c` : needsAttention ? `${colour}10` : `${t.surface}36`;
-  return <div style={{marginTop:6,marginBottom:6,animation:"fadeIn .3s",borderRadius:10,border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 12px ${colour}22`:"none",transition:"all .3s"}}>
-    <div onClick={()=>setExpanded(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none",animation:isStreaming?"pillGlow 2s ease-in-out infinite":"none"}}>
-      <span style={{fontSize:13,lineHeight:1,animation:isStreaming?"bop 2s ease-in-out infinite":"none"}}>{visual.icon}</span>
-      <span style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:colour,letterSpacing:.3}}>{visual.label}</span>
+  return <div className="hc-reveal" style={{marginTop:6,marginBottom:6,borderRadius:"var(--hc-radius-card)",border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:isStreaming?`0 0 0 1px ${colour}55`:"none",transition:"border-color var(--hc-dur-3) var(--hc-ease-out),box-shadow var(--hc-dur-3) var(--hc-ease-out),background-color var(--hc-dur-3) var(--hc-ease-out)"}}>
+    <div onClick={()=>setExpanded(p=>!p)} className={`hc-live-head${isStreaming?" is-active":""}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
+      <span className={`hc-run-icon${isStreaming?" is-active":""}`} style={{fontSize:"var(--hc-text-control)",lineHeight:1}}>{visual.icon}</span>
+      <span style={{fontWeight:600,fontSize:"var(--hc-text-secondary)",color:colour}}>{visual.label}</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6}}>· {role}</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:colour,opacity:.7,fontStyle:isStreaming?"italic":"normal"}}>· {statusLabel}</span>
       {filesN>0 && <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>· {filesN} file{filesN===1?"":"s"}</span>}
       {artifacts.length>0 && <span style={{fontSize:"var(--hc-text-secondary)",color:t.ok}}>· {artifacts.length} artifact{artifacts.length===1?"":"s"}</span>}
       {dur && <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>· {dur}</span>}
       {err && <span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>· {err}</span>}
-      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>artifact</button>}
+      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",color:t.ok,background:`${t.ok}10`,border:`1px solid ${t.ok}35`,borderRadius:"var(--hc-radius)",padding:"2px 7px",fontWeight:600,cursor:"pointer",fontFamily:font}}>artifact</button>}
       <span style={{fontSize:"var(--hc-text-secondary)",color:colour,opacity:.45,marginLeft:artifacts.length>0&&onOpenArtifact?0:"auto"}}>{expanded?"▴":"▾"}</span>
     </div>
     {!expanded && needsAttention && <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",borderTop:`1px solid ${bc}`,fontSize:"var(--hc-text-secondary)",color:t.err,background:`${t.err}08`}}>
-      <span style={{fontWeight:800}}>Failed run</span>
+      <span style={{fontWeight:600}}>Failed run</span>
       <span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{env.error||env.summary||"Open details for the recorded issue."}</span>
-      <button onClick={()=>setExpanded(true)} style={{background:"none",border:`1px solid ${t.err}35`,color:t.err,cursor:"pointer",padding:"2px 8px",borderRadius:6,fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Details</button>
+      <button onClick={()=>setExpanded(true)} style={{background:"none",border:`1px solid ${t.err}35`,color:t.err,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Details</button>
     </div>}
     {expanded && <DetailBody/>}
   </div>;
@@ -663,15 +669,15 @@ const LegacyWorkflowCard = ({workflow, t, font, onOpenArtifact})=>{
   const colour=state==="accepted"||artifact==="delivered"?t.ok:state==="blocked"||state==="cancelled"?t.err:artifact==="partial_delivered"?t.warm:t.acc;
   const modeLabel=(wf.mode||"workflow").replaceAll("_"," ");
   const contract=wf.contract_json||{};
-  return <div style={{marginTop:6,marginBottom:6,borderRadius:10,border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
+  return <div style={{marginTop:6,marginBottom:6,borderRadius:"var(--hc-radius-card)",border:`1px solid ${colour}38`,background:`${colour}0c`,padding:"7px 12px",fontFamily:font,maxWidth:"100%"}}>
     <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
-      <span style={{fontSize:13}}>🧭</span>
+      <span style={{fontSize:"var(--hc-text-control)"}}>🧭</span>
       <span style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:colour,letterSpacing:.3}}>Workflow</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>· {modeLabel}</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:colour}}>· {state}</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>· artifact: {artifact}</span>
-      {artifacts.length>0&&<a href={artifacts[0].id?`${API}/api/artifacts/${artifacts[0].id}/download`:`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:6,padding:"2px 7px",fontWeight:700}}>download</a>}
-      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:"var(--hc-text-control)",color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}35`,borderRadius:6,padding:"2px 7px",fontWeight:800,cursor:"pointer",fontFamily:font}}>details</button>}
+      {artifacts.length>0&&<a href={artifacts[0].id?`${API}/api/artifacts/${artifacts[0].id}/download`:`${API}${artifacts[0].url}`} download={artifacts[0].filename} onClick={e=>e.stopPropagation()} style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.ok,textDecoration:"none",border:`1px solid ${t.ok}35`,borderRadius:"var(--hc-radius)",padding:"2px 7px",fontWeight:700}}>download</a>}
+      {artifacts.length>0&&onOpenArtifact&&<button onClick={e=>{e.stopPropagation();onOpenArtifact(artifacts[0].id);}} style={{fontSize:"var(--hc-text-control)",color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}35`,borderRadius:"var(--hc-radius)",padding:"2px 7px",fontWeight:600,cursor:"pointer",fontFamily:font}}>details</button>}
     </div>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:5,fontSize:"var(--hc-text-secondary)",color:t.mut}}>
       {wf.project_id&&<span>project: {wf.project_id}</span>}
@@ -764,9 +770,9 @@ function SourceFavicon({url,domain,size=18,theme,title}){
   const host=domain||_qsHost(url);
   const initial=(host||"?").slice(0,1).toUpperCase();
   const bg=theme?`${theme.surface}DD`:"#111";
-  const border=theme?`1px solid ${theme.brd}55`:"1px solid rgba(255,255,255,.18)";
+  const border=theme?"1px solid var(--hc-line)":"1px solid rgba(255,255,255,.18)";
   const box={width:size,height:size,borderRadius:Math.max(4,Math.floor(size*.22)),border,background:bg,display:"inline-flex",alignItems:"center",justifyContent:"center",flexShrink:0,overflow:"hidden",boxSizing:"border-box"};
-  if(!host||failed)return <span title={title||host} style={{...box,color:theme?.acc||"currentColor",fontSize:Math.max(8,Math.floor(size*.52)),fontWeight:800}}>{initial}</span>;
+  if(!host||failed)return <span title={title||host} style={{...box,color:theme?.acc||"currentColor",fontSize:Math.max(8,Math.floor(size*.52)),fontWeight:600}}>{initial}</span>;
   return <span title={title||host} style={box}>
     <img src={_qsFaviconUrl(host,size>=24?64:32)} alt="" style={{width:"100%",height:"100%",display:"block"}} onError={()=>setFailed(true)}/>
   </span>;
@@ -777,10 +783,10 @@ function QuickSourceInlineChip({href,label,source,t,font,onPreview}){
   const short=text.length>34?`${text.slice(0,31)}...`:text;
   const title=[source?.title||text,host,source?.snippet].filter(Boolean).join("\n");
   return <span style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 1px",verticalAlign:"middle",maxWidth:"100%"}}>
-    <a href={href} target="_blank" rel="noopener" title={title} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",background:`${t.f1}12`,border:`1px solid ${t.f1}38`,borderRadius:onPreview?"7px 0 0 7px":7,color:t.f1,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:750,maxWidth:260,overflow:"hidden",whiteSpace:"nowrap",boxSizing:"border-box"}}>
+    <a href={href} target="_blank" rel="noopener" title={title} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",background:`${t.f1}12`,border:`1px solid ${t.f1}38`,borderRadius:onPreview?"7px 0 0 7px":7,color:t.f1,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,overflow:"hidden",whiteSpace:"nowrap",boxSizing:"border-box"}}>
       <SourceFavicon url={href} domain={host} size={14} theme={t}/>
       <span style={{overflow:"hidden",textOverflow:"ellipsis"}}>{short}</span>
-      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:800,textTransform:"none",letterSpacing:0}}>{host}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0}}>{host}</span>
     </a>
     {onPreview&&<button type="button" onClick={()=>onPreview(source?.title||text,href)} title="Preview source" style={{display:"inline-flex",alignItems:"center",justifyContent:"center",height:24,padding:"0 7px",background:`${t.acc}10`,border:`1px solid ${t.f1}38`,borderLeft:"none",borderRadius:"0 7px 7px 0",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>
       <IC.Search/>
@@ -797,15 +803,15 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
   const freshness=payload?.freshness_mode||payload?.resolved_date||"";
   const shown=results.slice(0,18);
   const meta=[freshness,domains.slice(0,3).join(", ")].filter(Boolean).join(" - ");
-  return <div style={{margin:"12px 0 4px",border:`1px solid ${t.brd}44`,borderRadius:8,background:`${t.surface}F5`,overflow:"hidden",boxShadow:"none"}}>
+  return <div style={{margin:"12px 0 4px",border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`,overflow:"hidden",boxShadow:"none"}}>
     <button type="button" aria-expanded={open} onClick={()=>setOpen(o=>!o)} style={{width:"100%",border:"none",background:`${t.surface}F5`,color:t.dim,cursor:"pointer",fontFamily:font,padding:"7px 10px",display:"grid",gridTemplateColumns:"auto 1fr auto",alignItems:"center",gap:9,textAlign:"left"}}>
-      <span style={{display:"inline-flex",alignItems:"center",gap:6,color:t.f1,fontSize:"var(--hc-text-secondary)",fontWeight:900,textTransform:"none",letterSpacing:0,whiteSpace:"nowrap"}}>
+      <span style={{display:"inline-flex",alignItems:"center",gap:6,color:t.f1,fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0,whiteSpace:"nowrap"}}>
         <span style={{transition:"transform .16s",transform:open?"rotate(90deg)":"rotate(0)",display:"inline-block",fontSize:"var(--hc-text-secondary)"}}>▶</span>
         <IC.Search/> Sources
-        <span style={{color:t.mut,fontWeight:800,letterSpacing:0}}>({results.length})</span>
+        <span style={{color:t.mut,fontWeight:600,letterSpacing:0}}>({results.length})</span>
       </span>
       <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:1}}>
-        <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:750,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{query}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{query}</span>
         {meta&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta}</span>}
       </span>
       <span style={{display:"flex",alignItems:"center",justifyContent:"flex-end",minWidth:0,paddingLeft:4}}>
@@ -814,26 +820,26 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
         </span>)}
       </span>
     </button>
-    {open&&<div style={{padding:9,borderTop:`1px solid ${t.brd}28`,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:7}}>
+    {open&&<div style={{padding:9,borderTop:"1px solid var(--hc-line-subtle)",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:7}}>
       {shown.map((r,i)=>{
         const isMedia=r.type==="youtube"||r.type==="image";
         const thumb=r.thumbnail&&isMedia;
         const badges=[r.published_date,r.freshness,r.source_tier].filter(Boolean).join(" - ");
-        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"30px minmax(0,1fr) 54px":"30px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:7,border:`1px solid ${t.brd}32`,background:`${t.bgDeep}F5`,color:t.dim,boxSizing:"border-box"}}>
+        return <a key={`${r.url}-${i}`} href={r.url} target="_blank" rel="noreferrer" title={r.score_reason||r.title||r.url} style={{textDecoration:"none",display:"grid",gridTemplateColumns:thumb?"30px minmax(0,1fr) 54px":"30px minmax(0,1fr)",gap:8,alignItems:"start",minWidth:0,padding:"8px 9px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.bgDeep}F5`,color:t.dim,boxSizing:"border-box"}}>
           <span style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,width:30,minWidth:30}}>
             <SourceFavicon url={r.url} domain={r.domain} size={22} theme={t} title={r.domain}/>
-            <span title={`Source ${i+1}`} style={{fontSize:"var(--hc-text-secondary)",lineHeight:1,fontWeight:900,color:t.acc,padding:"2px 3px",borderRadius:4,background:`${t.acc}10`,border:`1px solid ${t.acc}24`}}>[{i+1}]</span>
+            <span title={`Source ${i+1}`} style={{fontSize:"var(--hc-text-secondary)",lineHeight:1,fontWeight:700,color:t.acc,padding:"2px 3px",borderRadius:"var(--hc-radius-sm)",background:`${t.acc}10`,border:`1px solid ${t.acc}24`}}>[{i+1}]</span>
           </span>
           <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:3}}>
-            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.text,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.title||r.domain||"Source"}</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.title||r.domain||"Source"}</span>
             {r.snippet&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{r.snippet}</span>}
             <span style={{display:"flex",alignItems:"center",gap:5,minWidth:0,fontSize:"var(--hc-text-secondary)",color:t.dim}}>
-              <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:750,color:r.type==="youtube"?t.err:r.type==="image"?t.acc:t.f1}}>{r.domain||"web"}</span>
+              <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:600,color:r.type==="youtube"?t.err:r.type==="image"?t.acc:t.f1}}>{r.domain||"web"}</span>
               {badges&&<span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:t.mut}}>{badges}</span>}
               {typeof r.score==="number"&&<span style={{marginLeft:"auto",color:t.mut,flexShrink:0}}>{Math.round(r.score)}</span>}
             </span>
           </span>
-          {thumb&&<img src={proxiedImageUrl(r.thumbnail)} alt="" loading="lazy" referrerPolicy="no-referrer" style={{width:54,height:42,objectFit:"cover",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep}} onError={e=>{e.currentTarget.style.display="none";}}/>}
+          {thumb&&<img src={proxiedImageUrl(r.thumbnail)} alt="" loading="lazy" referrerPolicy="no-referrer" style={{width:54,height:42,objectFit:"cover",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:t.bgDeep}} onError={e=>{e.currentTarget.style.display="none";}}/>}
         </a>;
       })}
     </div>}
@@ -898,21 +904,21 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
     ["Elapsed",elapsedLabel,null],
   ];
   const recent=visible.filter(e=>["research_phase","research_source_found","research_source_read","research_finding","research_audit","research_done","research_error"].includes(e.type)).slice(-6);
-  return <div style={{border:`1px solid ${t.brd}33`,borderRadius:8,padding:22,background:`${t.surface}F5`,color:t.mut,fontSize:12,lineHeight:1.55,animation:"fadeIn .2s"}}>
+  return <div style={{border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:22,background:`${t.surface}F5`,color:t.mut,fontSize:"var(--hc-text-secondary)",lineHeight:1.55,animation:"fadeIn .2s"}}>
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-      <div style={{width:34,height:34,borderRadius:8,border:`1px solid ${t.acc}33`,background:`${t.acc}12`,display:"flex",alignItems:"center",justifyContent:"center",color:t.acc,flexShrink:0}}><IC.Search/></div>
+      <div style={{width:34,height:34,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,background:`${t.acc}12`,display:"flex",alignItems:"center",justifyContent:"center",color:t.acc,flexShrink:0}}><IC.Search/></div>
       <div style={{minWidth:0}}>
-        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:900,textTransform:"none",letterSpacing:0,color:t.acc}}>{phaseTitle}</div>
-        <div style={{fontSize:12,color:t.text,lineHeight:1.35}}>{latestPhase?.data?.detail||phaseDetail}</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0,color:t.acc}}>{phaseTitle}</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",color:t.text,lineHeight:1.35}}>{latestPhase?.data?.detail||phaseDetail}</div>
       </div>
-      {researchRunning&&<span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",padding:"3px 7px",borderRadius:7,border:`1px solid ${t.f1}33`,color:t.f1,background:`${t.f1}10`,textTransform:"none",letterSpacing:0}}>live</span>}
+      {researchRunning&&<span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",padding:"3px 7px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.f1}33`,color:t.f1,background:`${t.f1}10`,textTransform:"none",letterSpacing:0}}>live</span>}
     </div>
-    <div style={{height:6,borderRadius:99,background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}24`,overflow:"hidden",marginBottom:12}}>
+    <div style={{height:6,borderRadius:"var(--hc-radius-pill)",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)",overflow:"hidden",marginBottom:12}}>
       <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg, ${t.acc}, ${t.f1})`,boxShadow:`0 0 18px ${t.acc}66`,transition:"width .45s ease"}}/>
     </div>
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:7,marginBottom:14}}>
-      {metricLine.map(([label,value,target])=><div key={label} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"7px 8px",background:`${t.bgDeep}F5`,minWidth:0}}>
-        <div style={{fontSize:13,fontWeight:900,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{target?`${value}/${target}`:value}</div>
+      {metricLine.map(([label,value,target])=><div key={label} style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"7px 8px",background:`${t.bgDeep}F5`,minWidth:0}}>
+        <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{target?`${value}/${target}`:value}</div>
         <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,marginTop:2}}>{label}</div>
       </div>)}
     </div>
@@ -963,7 +969,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   // collapsible code output, so ToolStatus shouldn't render another copy here.
   const CodeOutputCards = ()=>historical?null:<>{codeOutputEvts.map((e,i)=>{
     const d=e.data||{};
-    return <div key={i} style={{marginTop:6,borderRadius:8,overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:"var(--hc-text-secondary)"}}>
+    return <div key={i} style={{marginTop:6,borderRadius:"var(--hc-radius)",overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:"var(--hc-text-secondary)"}}>
       <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
         <span>{d.success?"🎯":"❌"}</span>
         <span style={{fontWeight:600,color:d.success?t.ok:t.err}}>{d.language} output</span>
@@ -998,14 +1004,14 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
     // markdown) and post-clear refinement paths fall back to rendering it here.
     const inlineAlready=isImg&&d.url&&typeof msgContent==="string"&&msgContent.includes(d.url);
     return <div key={i} style={{marginTop:5}}>
-      {isImg&&!inlineAlready&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
+      {isImg&&!inlineAlready&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:"var(--hc-radius)",display:"block",margin:"6px 0",border:"1px solid var(--hc-line-subtle)",cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
       <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
       <a href={d.artifact_id?`${API}/api/artifacts/${d.artifact_id}/download`:`${API}${d.url}`} download={d.filename}
-        style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-        <span style={{fontSize:16}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:"var(--hc-text-secondary)",background:t.acc,color:t.bg,borderRadius:8,padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:"var(--hc-text-secondary)",opacity:.6}}>⬇</span>
+        style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,cursor:"pointer"}}>
+        <span style={{fontSize:"var(--hc-text-reading)"}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:"var(--hc-text-secondary)",background:t.acc,color:t.bg,borderRadius:"var(--hc-radius)",padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:"var(--hc-text-secondary)",opacity:.6}}>⬇</span>
       </a>
       {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",display:"flex",alignItems:"center"}}>👁</button>}
-      {d.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{padding:"7px 10px",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,borderRadius:8,color:t.pink,cursor:"pointer",fontSize:"var(--hc-text-control)",fontFamily:"inherit",fontWeight:800,display:"flex",alignItems:"center"}}>Artifact</button>}
+      {d.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{padding:"7px 10px",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,borderRadius:"var(--hc-radius)",color:t.pink,cursor:"pointer",fontSize:"var(--hc-text-control)",fontFamily:"inherit",fontWeight:600,display:"flex",alignItems:"center"}}>Artifact</button>}
       </div>
     </div>;
   })}</>;};
@@ -1013,10 +1019,10 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   const CodeAgentNoteCards = ()=><>{codeAgentNoteEvts.map((e,i)=>{
     const d=e.data||{};
     const text=d.status||d.detail||"CodeAgent is starting a direct build.";
-    return <div key={i} style={{marginTop:6,border:`1px solid ${t.acc}30`,background:`${t.acc}0F`,borderRadius:8,padding:"7px 10px",display:"flex",alignItems:"flex-start",gap:8,maxWidth:640}}>
-      <span style={{fontSize:13,lineHeight:1.35,flexShrink:0}}>🧬</span>
+    return <div key={i} style={{marginTop:6,border:`1px solid ${t.acc}30`,background:`${t.acc}0F`,borderRadius:"var(--hc-radius)",padding:"7px 10px",display:"flex",alignItems:"flex-start",gap:8,maxWidth:640}}>
+      <span style={{fontSize:"var(--hc-text-control)",lineHeight:1.35,flexShrink:0}}>🧬</span>
       <div style={{minWidth:0}}>
-        <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:800,marginBottom:2}}>Direct build</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:2}}>Direct build</div>
         <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>{text}</div>
       </div>
     </div>;
@@ -1027,8 +1033,8 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
     const sources = latestKb?.data?.sources||[];
     if(!sources.length)return null;
     const names=[...new Set(sources.map(s=>s.filename).filter(Boolean))];
-    return <div style={{marginTop:6,border:`1px solid ${t.acc}28`,background:`${t.surface}F5`,borderRadius:8,padding:"7px 10px",maxWidth:680}}>
-      <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:800,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+    return <div style={{marginTop:6,border:`1px solid ${t.acc}28`,background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",padding:"7px 10px",maxWidth:680}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
         <span>📚</span><span>Knowledge sources</span><span style={{color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0}}>· {sources.length} chunk{sources.length!==1?"s":""}</span>
       </div>
       <div style={{fontSize:"var(--hc-text-secondary)",color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:5}}>
@@ -1037,7 +1043,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
       </div>
       <div style={{display:"flex",flexDirection:"column",gap:4}}>
         {sources.slice(0,3).map((s,si)=><div key={`${s.filename||"source"}-${s.chunk_index||si}-${si}`} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.35}}>
-          <span style={{fontWeight:800,color:t.acc,flexShrink:0}}>[{s.n||si+1}]</span>
+          <span style={{fontWeight:600,color:t.acc,flexShrink:0}}>[{s.n||si+1}]</span>
           <span style={{minWidth:0,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>
             <span style={{color:t.text,fontWeight:700}}>{s.filename||"source"}</span>
             {typeof s.chunk_index==="number"?<span style={{color:t.mut}}> chunk {s.chunk_index}</span>:null}
@@ -1062,20 +1068,20 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
           const isYT=r.type==="youtube";
           const isImg=r.type==="image";
           const hasThumbnail=!!r.thumbnail;
-          return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F5`,border:`1px solid ${t.brd}44`,borderRadius:10,overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
+          return <a key={ri} href={r.url} target="_blank" rel="noreferrer" style={{textDecoration:"none",display:"flex",flexDirection:"column",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",overflow:"hidden",cursor:"pointer",minWidth:155,maxWidth:190,flexShrink:0,transition:"border-color .15s"}}
             onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
             <div style={{width:"100%",height:88,background:hasThumbnail?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep}DD,${t.surface}AA,${t.acc}18)`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
               {hasThumbnail
                 ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                 :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                  <img src={_qsFaviconUrl(hn,64)} style={{width:28,height:28,borderRadius:4,display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                  <img src={_qsFaviconUrl(hn,64)} style={{width:28,height:28,borderRadius:"var(--hc-radius-sm)",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                   <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>
                 </div>}
               {isYT&&<div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",color:"#fff",boxShadow:"0 2px 8px rgba(0,0,0,.5)"}}>▶</div>
+                <div style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",color:"#fff",boxShadow:"var(--hc-shadow-2)"}}>▶</div>
               </div>}
-              {hasThumbnail&&hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:5,padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:`1px solid ${t.brd}33`}}>
-                <img src={_qsFaviconUrl(hn,32)} style={{width:16,height:16,borderRadius:2,display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
+              {hasThumbnail&&hn&&<div style={{position:"absolute",top:5,right:5,background:`${t.bg}CC`,backdropFilter:"blur(6px)",borderRadius:"var(--hc-radius-sm)",padding:3,display:"flex",alignItems:"center",justifyContent:"center",border:"1px solid var(--hc-line)"}}>
+                <img src={_qsFaviconUrl(hn,32)} style={{width:16,height:16,borderRadius:"var(--hc-radius-sm)",display:"block"}} alt="" onError={e=>e.target.parentElement.style.display="none"}/>
               </div>}
             </div>
             <div style={{padding:"6px 8px",flex:1,display:"flex",flexDirection:"column",gap:2}}>
@@ -1105,7 +1111,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
           return <div key={i} style={{display:"inline-flex",alignItems:"center",gap:0}}>
             <a href={lnk.url} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",transition:"all .15s"}}
               onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}20`} onMouseLeave={e=>e.currentTarget.style.background=`${t.warm}10`}>
-              {isPdf?<span>📄</span>:<img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2}} alt="" onError={e=>e.target.style.display="none"}/>}
+              {isPdf?<span>📄</span>:<img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:"var(--hc-radius-sm)"}} alt="" onError={e=>e.target.style.display="none"}/>}
               <span>{title}</span>
             </a>
             {onPreview&&<button onClick={()=>onPreview(title,lnk.url)} title="Preview in panel"
@@ -1114,7 +1120,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
           </div>;
         })}
       </div>
-      {allLinks.length>8&&<button onClick={()=>setSlExpanded(p=>!p)} style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}22`,color:t.mut,padding:"2px 8px",borderRadius:10,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{slExpanded?`Show less ▴`:`+${allLinks.length-8} more ▾`}</button>}
+      {allLinks.length>8&&<button onClick={()=>setSlExpanded(p=>!p)} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",color:t.mut,padding:"2px 8px",borderRadius:"var(--hc-radius-card)",fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{slExpanded?`Show less ▴`:`+${allLinks.length-8} more ▾`}</button>}
     </div>;
   };
 
@@ -1131,7 +1137,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   </div>;
 };
 
-const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:20,fontSize:"var(--hc-text-secondary)",fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
+const Chip=({l,c,bg,onX})=><span style={{display:"inline-flex",alignItems:"center",gap:4,background:bg,color:c,padding:"3px 8px",borderRadius:"var(--hc-radius-dialog)",fontSize:"var(--hc-text-secondary)",fontWeight:600}}>{l}{onX&&<span onClick={onX} style={{cursor:"pointer",opacity:.7}}>&times;</span>}</span>;
 
 // Shared designed empty state — now lives in its own module (components/EmptyState.jsx)
 // so artifactComponents.jsx can import it without a cycle; re-exported below.
@@ -1149,15 +1155,15 @@ const TIPS={
   research_top_k:"Number of chunks retrieved from research memory per query. Default: 4",
   research_max_chars:"Maximum characters from research memory injected into context. Default: 3000",
 };
-const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k];if(!txt)return null;return <span style={{position:"relative",display:"inline-flex",alignItems:"center",cursor:"help",marginLeft:3}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)}><span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6}}>&#9432;</span>{show&&<div style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:"8px 12px",fontSize:"var(--hc-text-secondary)",lineHeight:1.5,color:t.dim,boxShadow:"0 4px 16px #0006",zIndex:999,minWidth:200,maxWidth:280,whiteSpace:"normal",pointerEvents:"none"}}>{txt}</div>}</span>;};
+const Tip=({k,t})=>{const [show,setShow]=React.useState(false);const txt=TIPS[k];if(!txt)return null;return <span style={{position:"relative",display:"inline-flex",alignItems:"center",cursor:"help",marginLeft:3}} onMouseEnter={()=>setShow(true)} onMouseLeave={()=>setShow(false)}><span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6}}>&#9432;</span>{show&&<div className="hc-pop hc-elev-2" data-placement="top" data-align="center" style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",borderRadius:"var(--hc-radius)",padding:"8px 12px",fontSize:"var(--hc-text-secondary)",lineHeight:1.5,color:t.dim,zIndex:999,minWidth:200,maxWidth:280,whiteSpace:"normal",pointerEvents:"none"}}>{txt}</div>}</span>;};
 
 // ============================================================
 // WORKSPACE DETAIL COMPONENT
 // ============================================================
 function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   const isMobile=useIsMobile();
-  const inputS={width:"100%",background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:undefined,boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
+  const inputS={width:"100%",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line)",color:t.text,padding:"9px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined,boxSizing:"border-box"};
+  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
   const emptyDraft={display_name:"",legal_name:"",birthday:"",age:"",bio:"",interestsText:"",linksText:"",notes:""};
   const [profile,setProfile]=React.useState(null);
   const [draft,setDraft]=React.useState(emptyDraft);
@@ -1285,14 +1291,14 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   const suggested=byStatus("suggested");
   const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);
   const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Events & People",t.warm],procedural:["Procedures",t.pink]};
-  const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:8,background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
+  const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
     <div style={{display:"flex",alignItems:"center",gap:6}}>
-      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:meta[1],textTransform:"none",letterSpacing:0}}>{meta[0]}</span>
+      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:meta[1],textTransform:"none",letterSpacing:0}}>{meta[0]}</span>
       <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>importance {m.importance||3}</span>
       {m.pinned?<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm}}>pinned</span>:null}
       {m.confidence?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
     </div>
-    {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
+    {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
     {m.metadata?.reason&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
     <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
       {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
@@ -1302,14 +1308,14 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
     </div>
   </div>;};
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:22,fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Memory & Profile</span></div>
+    <div style={{padding:"16px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:"var(--hc-text-display)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Memory & Profile</span></div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
-        <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0,marginBottom:12}}>User Profile</div>
+        <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:16}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0,marginBottom:12}}>User Profile</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
             <div><label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Preferred name</label><input value={draft.display_name} onChange={e=>setDraft(p=>({...p,display_name:e.target.value}))} style={inputS}/></div>
             <div><label style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:4}}>Full name</label><input value={draft.legal_name} onChange={e=>setDraft(p=>({...p,legal_name:e.target.value}))} style={inputS}/></div>
@@ -1327,26 +1333,26 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
           <button onClick={saveProfile} disabled={saving} style={{...btnS(t.ok),justifyContent:"center"}}>{saving?"Saving":"Save Profile"}</button>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
-          <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.pink,textTransform:"none",letterSpacing:0,marginBottom:10}}>Add Memory</div>
+          <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:16}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.pink,textTransform:"none",letterSpacing:0,marginBottom:10}}>Add Memory</div>
             <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"160px 1fr",gap:8,alignItems:"start"}}>
               <SelectionControl label="Memory type" value={newMemType} onChange={setNewMemType} options={["semantic","episodic","procedural"].map(value=>({value,label:value}))}/>
               <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             </div>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,marginTop:8}}>Add Accepted Memory</button>
           </div>
-          <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:16}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.f1,textTransform:"none",letterSpacing:0,marginBottom:10}}>Search Past Conversations</div>
+          <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:16}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.f1,textTransform:"none",letterSpacing:0,marginBottom:10}}>Search Past Conversations</div>
             <div style={{display:"flex",gap:8}}>
               <input value={histQ} onChange={e=>setHistQ(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")searchHistory();}} placeholder="What did we discuss about..." style={inputS}/>
               <button onClick={searchHistory} disabled={histLoading||!histQ.trim()} style={{...btnS(t.f1),whiteSpace:"nowrap",opacity:histQ.trim()?1:.5}}>{histLoading?"Searching":"Search"}</button>
             </div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6}}>Semantic recall over memory-enabled chats plus keyword search over all chats.</div>
             {histResults!==null&&<div style={{display:"flex",flexDirection:"column",gap:6,marginTop:10,maxHeight:300,overflowY:"auto"}}>
-              {histResults.map((h,i)=><div key={i} onClick={()=>h.conversation_id&&onOpenConv&&onOpenConv(h.conversation_id)} style={{padding:"8px 10px",borderRadius:8,background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}33`,cursor:h.conversation_id?"pointer":"default"}}>
+              {histResults.map((h,i)=><div key={i} onClick={()=>h.conversation_id&&onOpenConv&&onOpenConv(h.conversation_id)} style={{padding:"8px 10px",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line)",cursor:h.conversation_id?"pointer":"default"}}>
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
                   <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{h.conv_title||h.conversation_id||"untitled"}</span>
-                  <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:4,background:h.source==="semantic"?`${t.acc}18`:`${t.mut}18`,color:h.source==="semantic"?t.acc:t.mut,fontWeight:700}}>{h.source}</span>
+                  <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",background:h.source==="semantic"?`${t.acc}18`:`${t.mut}18`,color:h.source==="semantic"?t.acc:t.mut,fontWeight:700}}>{h.source}</span>
                   {h.role&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{h.role}</span>}
                 </div>
                 <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical"}} dangerouslySetInnerHTML={{__html:(h.snippet||"").replace(/</g,"&lt;").replace(/&lt;mark>/g,"<mark>").replace(/&lt;\/mark>/g,"</mark>")}}/>
@@ -1355,15 +1361,15 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
             </div>}
           </div>
           {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.warm,textTransform:"none",letterSpacing:0}}>Suggestions ({suggested.length})</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm,textTransform:"none",letterSpacing:0}}>Suggestions ({suggested.length})</div>
             {suggested.map(m=>card(m,"suggested"))}
           </div>}
           {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color,textTransform:"none",letterSpacing:0}}>{label} ({items.length})</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color,textTransform:"none",letterSpacing:0}}>{label} ({items.length})</div>
             {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
           </div>;})}
-          {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-            <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"none",letterSpacing:0}}>Rejected, archived, or superseded ({hidden.length})</summary>
+          {hidden.length>0&&<details style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:10}}>
+            <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:600,textTransform:"none",letterSpacing:0}}>Rejected, archived, or superseded ({hidden.length})</summary>
             <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
           </details>}
         </div>
@@ -1427,8 +1433,8 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
   if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
   const font="inherit";
-  const inputS={width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}40`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:undefined,boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:6,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5});
+  const inputS={width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-secondary)",outline:undefined,boxSizing:"border-box"};
+  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5});
   const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
   const saveEdit=()=>run(async()=>{
     await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})});
@@ -1558,7 +1564,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
       <ActionMenu compact label="Workspace actions" items={[{label:'Edit',onClick:()=>{setWsName(ws.name);setWsDesc(ws.description||'');setEditMode(true);}},{label:analyzing?'Analyzing…':'Analyze',disabled:analyzing,onClick:analyzeTopics},{label:'Delete workspace',destructive:true,disabled:actionBusy,onClick:deleteWs}]}/>
     </PanelHeader>
     <div className="hc-workspace-secondary"><WorkspaceDefaultSummary ws={ws} t={t}/>{analyzeMsg&&<p role="status" style={{color:analyzeMsg.ok?t.ok:t.err}}>{analyzeMsg.text}</p>}
-      {!!topics.length&&<div className="hc-toolbar">{topics.map((tp,i)=><span key={i} style={{fontSize:12,color:t.mut}}>{tp.label}</span>)}</div>}
+      {!!topics.length&&<div className="hc-toolbar">{topics.map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{tp.label}</span>)}</div>}
       {editMode&&<form className="hc-toolbar" onSubmit={e=>{e.preventDefault();saveEdit();}}><input aria-label="Workspace title" value={wsName} onChange={e=>setWsName(e.target.value)} style={inputS}/><input aria-label="Workspace description" value={wsDesc} onChange={e=>setWsDesc(e.target.value)} style={inputS}/><button disabled={actionBusy||!wsName.trim()} style={btnS(t.ok)}>Save</button><button type="button" onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></form>}
     </div>
     <nav aria-label="Workspace sections" className="hc-workspace-nav">
@@ -1576,24 +1582,24 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
 
       {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="hc-toolbar"><button style={btnS(t.acc)} onClick={openContent}>Add existing content</button></div>
         {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint="Start a project chat or add existing content."/>}
-        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
-          <span style={{fontSize:18}}>💬</span>
+        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
+          <span style={{fontSize:"var(--hc-text-title)"}}>💬</span>
           <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
           </div>
           <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
           <ActionMenu compact label={`Actions for ${c.title||"chat"}`} items={[{label:"Unlink chat",disabled:actionBusy,onClick:()=>removeConv(c.id)}]}/>
         </div>)}
       </div>}
-      {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
+      {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:meta[1],textTransform:"none",letterSpacing:0}}>{meta[0]}</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:meta[1],textTransform:"none",letterSpacing:0}}>{meta[0]}</span>
             <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>importance {m.importance||3}</span>
             {m.pinned? <span style={{fontSize:"var(--hc-text-secondary)",color:t.warm}}>pinned</span>:null}
             {m.confidence? <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{Math.round((m.confidence||0)*100)}%</span>:null}
           </div>
-          {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:12,lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
+          {editing?<textarea value={memEditText} onChange={e=>setMemEditText(e.target.value)} style={{...inputS,minHeight:72,lineHeight:1.5,resize:"vertical"}}/>:<div style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.text,whiteSpace:"pre-wrap"}}>{m.content}</div>}
           {m.metadata?.reason&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4}}>Why: {m.metadata.reason}</div>}
           <div style={{display:"flex",gap:5,flexWrap:"wrap",alignItems:"center"}}>
             {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
@@ -1602,10 +1608,10 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
             {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source →</button>}
           </div>
         </div>;};return <div style={{display:"flex",flexDirection:"column",gap:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,background:`${enabled?t.ok:t.surface}10`,border:`1px solid ${enabled?t.ok:t.brd}33`}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:"var(--hc-radius-card)",background:`${enabled?t.ok:t.surface}10`,border:`1px solid ${enabled?t.ok:t.brd}33`}}>
           <button role="switch" aria-label="Workspace memory" aria-checked={enabled} onClick={toggleMemory} style={btnS(enabled?t.ok:t.mut)}>{enabled?"On":"Off"}</button>
           <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:700,color:enabled?t.ok:t.text}}>Workspace memory {enabled?"enabled":"disabled"}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:enabled?t.ok:t.text}}>Workspace memory {enabled?"enabled":"disabled"}</div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>Accepted memories and enabled blocks are injected into workspace chats. Suggestions are never injected until accepted.</div>
           </div>
           <button onClick={scanMemory} disabled={memScanning} style={btnS(t.warm)}>{memScanning?"Scanning":"Scan Recent"}</button>
@@ -1613,41 +1619,41 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
         </div>
         <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:12,alignItems:"start"}}>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.pink,textTransform:"none",letterSpacing:0}}>Add Memory</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.pink,textTransform:"none",letterSpacing:0}}>Add Memory</div>
             <SelectionControl label="Memory type" value={newMemType} onChange={setNewMemType} options={["semantic","episodic","procedural"].map(value=>({value,label:value}))}/>
             <textarea value={newMemText} onChange={e=>setNewMemText(e.target.value)} placeholder="Add an accepted memory manually..." style={{...inputS,minHeight:78,lineHeight:1.5,resize:"vertical"}}/>
             <button onClick={createManualMemory} disabled={!newMemText.trim()} style={{...btnS(t.ok),opacity:newMemText.trim()?1:.45,alignSelf:"flex-start"}}>Add Accepted Memory</button>
           </div>
         </div>
         {memBlocks.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.acc,textTransform:"none",letterSpacing:0}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0}}>Pinned Blocks</div><button onClick={()=>saveBlocks()} style={btnS(t.ok)}>Save Blocks</button></div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(240px,100%),1fr))",gap:8}}>
-            {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
-              <div style={{display:"flex",alignItems:"center",gap:8}}><button role="switch" aria-label={`${b.label} block enabled`} aria-checked={!!b.enabled} onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.text}}>{b.label}</div></div>
+            {memBlocks.map(b=><div key={b.id} style={{padding:10,borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:`1px solid ${b.enabled?t.acc:t.brd}28`,display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}><button role="switch" aria-label={`${b.label} block enabled`} aria-checked={!!b.enabled} onClick={()=>updateBlock(b.id,{enabled:b.enabled?0:1})} style={btnS(b.enabled?t.ok:t.mut)}>{b.enabled?"On":"Off"}</button><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>{b.label}</div></div>
               <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35}}>{b.description}</div>
               <textarea value={b.value||""} onChange={e=>updateBlock(b.id,{value:e.target.value})} style={{...inputS,minHeight:76,lineHeight:1.45,resize:"vertical"}}/>
             </div>)}
           </div>
         </div>}
         {suggested.length>0&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.warm,textTransform:"none",letterSpacing:0}}>Suggestions ({suggested.length})</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm,textTransform:"none",letterSpacing:0}}>Suggestions ({suggested.length})</div>
           {suggested.map(m=>card(m,"suggested"))}
         </div>}
         {Object.entries(typeMeta).map(([typ,[label,color]])=>{const items=accepted.filter(m=>m.type===typ);return <div key={typ} style={{display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color,textTransform:"none",letterSpacing:0}}>{label} ({items.length})</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color,textTransform:"none",letterSpacing:0}}>{label} ({items.length})</div>
           {items.length?items.map(m=>card(m,"accepted")):<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"12px 0"}}>No accepted {typ} memories.</div>}
         </div>;})}
-        {hidden.length>0&&<details style={{borderTop:`1px solid ${t.brd}22`,paddingTop:10}}>
-          <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:800,textTransform:"none",letterSpacing:0}}>Rejected, archived, or superseded ({hidden.length})</summary>
+        {hidden.length>0&&<details style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:10}}>
+          <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:600,textTransform:"none",letterSpacing:0}}>Rejected, archived, or superseded ({hidden.length})</summary>
           <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
         </details>}
       </div>;})()}
       {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
         {!(ws.reports||[]).length&&<EmptyState t={t} font={font} icon={<IC.Research/>} title="No reports yet" hint="Add reports from Deep Research."/>}
-        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:10,background:`${t.surface}F5`,border:`1px solid ${t.brd}33`,display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
-          <span style={{fontSize:18}}>📊</span>
+        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
+          <span style={{fontSize:"var(--hc-text-title)"}}>📊</span>
           <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.title||r.query||"Research Report"}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.title||r.query||"Research Report"}</div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
           </div>
           <button onClick={()=>onOpenReport&&onOpenReport(r.id)} style={btnS(t.acc)}>Open →</button>
@@ -1731,7 +1737,7 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
   ];
   return <div style={{marginBottom:20}}>
     <label style={labelS}>Sandbox & File Cleanup</label>
-    <div style={{background:`${t.surface}F5`,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"10px 14px",marginBottom:10,fontSize:"var(--hc-text-secondary)"}}>
+    <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"10px 14px",marginBottom:10,fontSize:"var(--hc-text-secondary)"}}>
       <div style={{display:"flex",flexWrap:"wrap",gap:"6px 20px",marginBottom:sbInfo?.sandbox_dir?6:0}}>
         {sbInfo?.sandbox_dir&&<div style={{color:t.mut}}>
           <span style={{color:t.acc}}>📁 </span>
@@ -1776,7 +1782,7 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
       {cbResult?.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>✕ Codebox: {cbResult.error}</span>}
     </div>
     <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6,lineHeight:1.5}}>
-      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:3,fontSize:"var(--hc-text-secondary)"}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
+      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",fontSize:"var(--hc-text-secondary)"}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
     </div>
   </div>;
 }
@@ -2048,7 +2054,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   const totalDuration=_runsSpanLabel(runs)||_runsDurationLabel(runs);
   const artifactHref=latestArtifact?(latestArtifact.artifact_id?`${API}/api/artifacts/${latestArtifact.artifact_id}/download`:`${API}${latestArtifact.url||""}`):"";
 
-  const sectionTitle=(label,color=t.acc)=><div style={{fontSize:"var(--hc-text-secondary)",color,textTransform:"none",letterSpacing:0,fontWeight:900,marginBottom:8}}>{label}</div>;
+  const sectionTitle=(label,color=t.acc)=><div style={{fontSize:"var(--hc-text-secondary)",color,textTransform:"none",letterSpacing:0,fontWeight:700,marginBottom:8}}>{label}</div>;
   const renderMd=(content,preStyle={})=>md?<MDWrap>{md(content)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",...preStyle}}>{content}</pre>;
   const runModel=(run)=>{
     const env=_runEnv(run);
@@ -2128,7 +2134,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     const criteria=Array.isArray(planEnv.success_criteria)?planEnv.success_criteria:[];
     const deps=Array.isArray(planEnv.external_deps)?planEnv.external_deps:[];
     const risks=Array.isArray(planEnv.risk_notes)?planEnv.risk_notes:[];
-    if(!planRun&&!planText)return <div style={{fontSize:12,color:t.mut}}>No completed Architect plan is available yet.</div>;
+    if(!planRun&&!planText)return <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No completed Architect plan is available yet.</div>;
     return <div style={{display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:8}}>
         {[
@@ -2137,16 +2143,16 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
           ["Build",planEnv.build_system||"none"],
           ["Files",manifest.length||"—"],
           ["Criteria",criteria.length||"—"],
-        ].map(([k,v])=><div key={k} style={{border:`1px solid ${t.brd}24`,borderRadius:7,padding:"8px 9px",background:`${t.surface}F5`,minWidth:0}}>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:900,marginBottom:3}}>{k}</div>
-          <div style={{fontSize:12,color:t.text,fontWeight:850,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v}</div>
+        ].map(([k,v])=><div key={k} style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"8px 9px",background:`${t.surface}F5`,minWidth:0}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:700,marginBottom:3}}>{k}</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{v}</div>
         </div>)}
       </div>
       {manifest.length>0&&<div>
         {sectionTitle("Manifest",t.acc)}
-        <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-          {manifest.map((f,i)=><div key={`${f.path}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(120px,.3fr) minmax(0,1fr) 72px",gap:8,padding:"8px 10px",borderBottom:i<manifest.length-1?`1px solid ${t.brd}16`:"none",fontSize:"var(--hc-text-secondary)",alignItems:"start"}}>
-            <span style={{color:t.acc,fontWeight:900,wordBreak:"break-word"}}>{f.path||"file"}</span>
+        <div style={{display:"flex",flexDirection:"column",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",overflow:"hidden"}}>
+          {manifest.map((f,i)=><div key={`${f.path}-${i}`} style={{display:"grid",gridTemplateColumns:"minmax(120px,.3fr) minmax(0,1fr) 72px",gap:8,padding:"8px 10px",borderBottom:i<manifest.length-1?"1px solid var(--hc-line-subtle)":"none",fontSize:"var(--hc-text-secondary)",alignItems:"start"}}>
+            <span style={{color:t.acc,fontWeight:700,wordBreak:"break-word"}}>{f.path||"file"}</span>
             <span style={{color:t.dim,lineHeight:1.45}}>{f.purpose||"No purpose recorded."}</span>
             <span style={{color:t.mut,textAlign:"right"}}>{f.estimated_loc?`~${f.estimated_loc} LOC`:""}</span>
           </div>)}
@@ -2156,7 +2162,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
         {sectionTitle("Success criteria",t.ok)}
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:6}}>
           {criteria.map((c,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"18px minmax(0,1fr)",gap:7,fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>
-            <span style={{color:t.ok,fontWeight:900}}>✓</span><span>{c}</span>
+            <span style={{color:t.ok,fontWeight:700}}>✓</span><span>{c}</span>
           </div>)}
         </div>
       </div>}
@@ -2169,9 +2175,9 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   const renderFiles=key=>{
     const rows=phaseFiles(key);
     if(!rows.length)return null;
-    return <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}22`,borderRadius:8,overflow:"hidden"}}>
-      {rows.map(([path,phase],i)=><div key={path} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 82px",gap:8,padding:"8px 10px",borderBottom:i<rows.length-1?`1px solid ${t.brd}16`:"none",fontSize:"var(--hc-text-secondary)"}}>
-        <span style={{color:t.text,wordBreak:"break-word",fontWeight:750}}>{path}</span>
+    return <div style={{display:"flex",flexDirection:"column",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",overflow:"hidden"}}>
+      {rows.map(([path,phase],i)=><div key={path} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 82px",gap:8,padding:"8px 10px",borderBottom:i<rows.length-1?"1px solid var(--hc-line-subtle)":"none",fontSize:"var(--hc-text-secondary)"}}>
+        <span style={{color:t.text,wordBreak:"break-word",fontWeight:600}}>{path}</span>
         <span style={{color:t.mut,textAlign:"right"}}>{phase}</span>
       </div>)}
     </div>;
@@ -2182,8 +2188,8 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     return <div>
       {sectionTitle("Issues",t.err)}
       <div style={{display:"flex",flexDirection:"column",gap:6}}>
-        {issues.slice(0,8).map((issue,i)=><div key={i} style={{border:`1px solid ${t.err}24`,background:`${t.err}08`,borderRadius:7,padding:"7px 9px",fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>
-          <span style={{color:t.err,fontWeight:900}}>{issue.file||issue.path||issue.category||`Issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
+        {issues.slice(0,8).map((issue,i)=><div key={i} style={{border:`1px solid ${t.err}24`,background:`${t.err}08`,borderRadius:"var(--hc-radius)",padding:"7px 9px",fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45}}>
+          <span style={{color:t.err,fontWeight:700}}>{issue.file||issue.path||issue.category||`Issue ${i+1}`}</span>{issue.summary||issue.message?` — ${issue.summary||issue.message}`:""}
         </div>)}
       </div>
     </div>;
@@ -2198,17 +2204,17 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
       });
     });
     const groups=Object.entries(grouped);
-    if(!groups.length)return <div style={{fontSize:12,color:t.mut}}>No readable logs recorded for this phase.</div>;
+    if(!groups.length)return <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No readable logs recorded for this phase.</div>;
     return <div style={{display:"flex",flexDirection:"column",gap:12}}>
       {groups.map(([group,items])=><div key={group}>
         {sectionTitle(group,group==="Commands"?t.warm:group==="File changes"?t.ok:group==="Verification"?t.acc:t.mut)}
-        <div style={{display:"flex",flexDirection:"column",border:`1px solid ${t.brd}20`,borderRadius:8,overflow:"hidden"}}>
+        <div style={{display:"flex",flexDirection:"column",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",overflow:"hidden"}}>
           {items.slice(0,30).map(({run,step,idx},i)=>{
             const meta=_stepTimeMeta(step,_runSteps(run)[idx-1],run);
             const icon=_STEP_ACTION_ICONS[step.action]||"·";
-            return <div key={`${run.id}-${idx}-${i}`} style={{display:"grid",gridTemplateColumns:"24px minmax(86px,.22fr) minmax(0,1fr)",gap:8,padding:"7px 9px",borderBottom:i<items.length-1?`1px solid ${t.brd}12`:"none",fontSize:"var(--hc-text-secondary)",alignItems:"start"}}>
+            return <div key={`${run.id}-${idx}-${i}`} style={{display:"grid",gridTemplateColumns:"24px minmax(86px,.22fr) minmax(0,1fr)",gap:8,padding:"7px 9px",borderBottom:i<items.length-1?"1px solid var(--hc-line-subtle)":"none",fontSize:"var(--hc-text-secondary)",alignItems:"start"}}>
               <span style={{textAlign:"center"}}>{icon}</span>
-              <span style={{color:_phaseColor(_phaseState([run]),t),fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{step.action||"step"}</span>
+              <span style={{color:_phaseColor(_phaseState([run]),t),fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{step.action||"step"}</span>
               <span style={{color:t.dim,wordBreak:"break-word",lineHeight:1.4}}>{(step.detail||"").slice(0,240)}{step.count>1?` (${step.count} updates)`:""}{meta&&<span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{meta}</span>}</span>
             </div>;
           })}
@@ -2218,22 +2224,22 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     </div>;
   };
   const renderArtifacts=()=>{
-    if(!artifactEvents.length)return <div style={{fontSize:12,color:t.mut}}>No delivered artifact recorded.</div>;
+    if(!artifactEvents.length)return <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No delivered artifact recorded.</div>;
     return <div style={{display:"flex",flexDirection:"column",gap:7}}>
       {artifactEvents.map((a,i)=>{
         const href=a.artifact_id?`${API}/api/artifacts/${a.artifact_id}/download`:`${API}${a.url||""}`;
-        return <div key={`${a.artifact_id||a.url||a.filename}-${i}`} style={{display:"flex",alignItems:"center",gap:8,border:`1px solid ${t.ok}28`,background:`${t.ok}08`,borderRadius:8,padding:"8px 9px",minWidth:0}}>
-          <span style={{fontSize:14}}>📦</span>
-          <a href={href} download={a.filename} style={{color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{a.filename||"artifact"}</a>
-          {a.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(a.artifact_id)} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}33`,borderRadius:6,padding:"3px 7px",fontFamily:font,cursor:"pointer",fontWeight:850}}>details</button>}
+        return <div key={`${a.artifact_id||a.url||a.filename}-${i}`} style={{display:"flex",alignItems:"center",gap:8,border:`1px solid ${t.ok}28`,background:`${t.ok}08`,borderRadius:"var(--hc-radius)",padding:"8px 9px",minWidth:0}}>
+          <span style={{fontSize:"var(--hc-text-control)"}}>📦</span>
+          <a href={href} download={a.filename} style={{color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{a.filename||"artifact"}</a>
+          {a.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(a.artifact_id)} style={{marginLeft:"auto",fontSize:"var(--hc-text-control)",color:t.acc,background:`${t.acc}10`,border:`1px solid ${t.acc}33`,borderRadius:"var(--hc-radius)",padding:"3px 7px",fontFamily:font,cursor:"pointer",fontWeight:600}}>details</button>}
         </div>;
       })}
     </div>;
   };
   const renderRaw=p=><div style={{display:"flex",flexDirection:"column",gap:10}}>
     <ToolStatus evts={events.filter(e=>(e.data?.tool||"")!=="processing")} savedEvts={[]} msgContent={msgContent} historical={true} t={t} onPreview={onPreview} onOpenArtifact={onOpenArtifact} md={md}/>
-    {(p.key==="package"?runs:(p.runs||[])).map(run=><details key={run.id} style={{border:`1px solid ${t.brd}24`,borderRadius:8,background:`${t.bgDeep}F5`,padding:"7px 9px"}}>
-      <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:900}}>{run.role} · {run.status} · {run.id}</summary>
+    {(p.key==="package"?runs:(p.runs||[])).map(run=><details key={run.id} style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,padding:"7px 9px"}}>
+      <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:700}}>{run.role} · {run.status} · {run.id}</summary>
       <pre style={{margin:"8px 0 0",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:"var(--hc-text-secondary)",lineHeight:1.45,color:t.dim,maxHeight:260,overflow:"auto"}}>{JSON.stringify({id:run.id,role:run.role,status:run.status,started_at:run.started_at,ended_at:run.ended_at,result_envelope:run.result_envelope,events_log:run.events_log},null,2)}</pre>
     </details>)}
   </div>;
@@ -2243,15 +2249,15 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
     const note=phaseNoteText(p);
     const outcome=p.runs.length||p.key==="package"?p.outcome:"Not started yet.";
     const showActions=!!onQuickAction&&!activeNow&&(p.state==="attention"||(!!attentionPhase&&p.key===attentionPhase.key)||wfBlocked);
-    const actionBtn=(label,color,text)=><button onClick={()=>onQuickAction(text)} style={{padding:"7px 12px",borderRadius:7,border:`1px solid ${color}40`,background:`${color}12`,color,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:900}}>{label}</button>;
-    return <div style={{borderTop:`1px solid ${t.brd}20`,padding:"12px 14px 13px",display:"flex",flexDirection:"column",gap:12}}>
+    const actionBtn=(label,color,text)=><button onClick={()=>onQuickAction(text)} style={{padding:"7px 12px",borderRadius:"var(--hc-radius)",border:`1px solid ${color}40`,background:`${color}12`,color,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>{label}</button>;
+    return <div style={{borderTop:"1px solid var(--hc-line-subtle)",padding:"12px 14px 13px",display:"flex",flexDirection:"column",gap:12}}>
       <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
-        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:950,color:p.color,textTransform:"none",letterSpacing:0,flexShrink:0}}>{p.label}</span>
-        <span style={{fontSize:12.5,lineHeight:1.55,color:t.text,minWidth:0}}>{outcome}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:p.color,textTransform:"none",letterSpacing:0,flexShrink:0}}>{p.label}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.text,minWidth:0}}>{outcome}</span>
       </div>
       {facts.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-        {facts.map(([label,value,color],i)=><span key={`${label}-${i}`} title={label?`${label} ${value}`:value} style={{fontSize:"var(--hc-text-secondary)",color:color||t.dim,border:`1px solid ${(color||t.brd)}2e`,background:`${t.bgDeep}F5`,borderRadius:999,padding:"3px 8px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-          {label&&<span style={{color:t.mut,fontWeight:850}}>{label} </span>}{value}
+        {facts.map(([label,value,color],i)=><span key={`${label}-${i}`} title={label?`${label} ${value}`:value} style={{fontSize:"var(--hc-text-secondary)",color:color||t.dim,border:`1px solid ${(color||t.brd)}2e`,background:`${t.bgDeep}F5`,borderRadius:"var(--hc-radius-pill)",padding:"3px 8px",maxWidth:300,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+          {label&&<span style={{color:t.mut,fontWeight:600}}>{label} </span>}{value}
         </span>)}
       </div>}
       {p.key==="plan"&&renderPlanDetails()}
@@ -2271,7 +2277,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
         {!delivered&&actionBtn("📦 Download as-is",t.ok,"Download the project as-is; the remaining issues are acceptable.")}
       </div>}
       <details>
-        <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:900,textTransform:"none",letterSpacing:0}}>Developer details</summary>
+        <summary style={{fontSize:"var(--hc-text-control)",color:t.mut,cursor:"pointer",fontWeight:700,textTransform:"none",letterSpacing:0}}>Developer details</summary>
         <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:12}}>
           {renderLogs(p)}
           {renderRaw(p)}
@@ -2281,18 +2287,18 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
   };
   const headerMeta=[totalDuration,filesTouched.size?`${filesTouched.size} file${filesTouched.size===1?"":"s"}`:"",runs.length?`${runs.length} run${runs.length===1?"":"s"}`:""].filter(Boolean).join(" · ");
   return <div style={{margin:"0 0 12px",maxWidth:"100%"}}>
-    {msgContent&&<div style={{margin:"0 0 12px",color:t.dim,lineHeight:1.68,fontSize:13}}>
+    {msgContent&&<div style={{margin:"0 0 12px",color:t.dim,lineHeight:1.68,fontSize:"var(--hc-text-control)"}}>
       {renderMd(msgContent,{color:t.dim})}
     </div>}
-    {loadErr&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:8,padding:"7px 9px",marginBottom:8}}>{loadErr}</div>}
-    <div style={{border:`1px solid ${overall.color}26`,background:`${t.surface}F5`,borderRadius:10,overflow:"hidden",boxShadow:activeNow?`0 0 18px ${overall.color}12`:"none"}}>
+    {loadErr&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,border:`1px solid ${t.err}30`,background:`${t.err}08`,borderRadius:"var(--hc-radius)",padding:"7px 9px",marginBottom:8}}>{loadErr}</div>}
+    <div style={{border:`1px solid ${overall.color}26`,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-card)",overflow:"hidden",boxShadow:activeNow?`0 0 18px ${overall.color}12`:"none"}}>
       <div style={{padding:"11px 14px 0",display:"flex",alignItems:"center",gap:9,flexWrap:"wrap"}}>
-        <span style={{width:26,height:26,borderRadius:7,display:"inline-flex",alignItems:"center",justifyContent:"center",background:`${overall.color}13`,border:`1px solid ${overall.color}36`,color:overall.color,fontSize:14,flexShrink:0}}>✦</span>
-        <span style={{fontSize:13,fontWeight:950,color:overall.color,letterSpacing:.3}}>Daedalus</span>
-        <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:300}}>{projectName}</span>
-        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:overall.color,border:`1px solid ${overall.color}33`,background:`${overall.color}0f`,borderRadius:999,padding:"3px 8px",textTransform:"none",letterSpacing:0}}>{overall.label}</span>
+        <span style={{width:26,height:26,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",justifyContent:"center",background:`${overall.color}13`,border:`1px solid ${overall.color}36`,color:overall.color,fontSize:"var(--hc-text-control)",flexShrink:0}}>✦</span>
+        <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:overall.color,letterSpacing:.3}}>Daedalus</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:300}}>{projectName}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:overall.color,border:`1px solid ${overall.color}33`,background:`${overall.color}0f`,borderRadius:"var(--hc-radius-pill)",padding:"3px 8px",textTransform:"none",letterSpacing:0}}>{overall.label}</span>
         <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.mut,whiteSpace:"nowrap"}}>{headerMeta}</span>
-        {latestArtifact&&<a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 9px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:7,color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:900,maxWidth:230}}>
+        {latestArtifact&&<a href={artifactHref} download={latestArtifact.filename} style={{display:"inline-flex",alignItems:"center",gap:5,padding:"5px 9px",background:`${t.ok}13`,border:`1px solid ${t.ok}40`,borderRadius:"var(--hc-radius)",color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,maxWidth:230}}>
           <span>📦</span><span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{latestArtifact.filename||"Artifact"}</span>
         </a>}
       </div>
@@ -2307,9 +2313,9 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
           const pendingStep=!done&&p.state!=="running"&&p.state!=="attention";
           const prevDone=i>0&&["succeeded","complete"].includes(phases[i-1].state);
           return <React.Fragment key={p.key}>
-            {i>0&&<div style={{flex:1,height:2,minWidth:10,borderRadius:2,margin:"10px 5px 0",background:prevDone?`${t.ok}55`:`${t.brd}30`}}/>}
+            {i>0&&<div style={{flex:1,height:2,minWidth:10,borderRadius:"var(--hc-radius-sm)",margin:"10px 5px 0",background:prevDone?`${t.ok}55`:`${t.brd}30`}}/>}
             <button onClick={()=>setPickedPhase(p.key)} title={`${p.label} — ${_phaseStatusLabel(p.state)}`} style={{background:"transparent",border:"none",cursor:"pointer",fontFamily:font,padding:0,display:"flex",flexDirection:"column",alignItems:"center",gap:5,minWidth:44,flexShrink:0}}>
-              <span style={{width:22,height:22,borderRadius:"50%",display:"inline-flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",fontSize:"var(--hc-text-secondary)",fontWeight:900,lineHeight:1,
+              <span style={{width:22,height:22,borderRadius:"50%",display:"inline-flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",fontSize:"var(--hc-text-secondary)",fontWeight:700,lineHeight:1,
                 color:done?t.bgDeep:p.color,
                 background:done?p.color:pendingStep?"transparent":`${p.color}16`,
                 border:`2px solid ${pendingStep?`${t.mut}44`:p.color}`,
@@ -2317,7 +2323,7 @@ function LegacyDaedalusSummary({runIds=[],savedEvents=[],liveEvts=[],workflows=[
                 animation:p.state==="running"?"pulse 1.5s infinite":"none"}}>
                 {done?"✓":p.state==="attention"?"!":p.state==="running"?"●":""}
               </span>
-              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:850,letterSpacing:0,textTransform:"none",color:sel?p.color:pendingStep?`${t.mut}99`:t.dim,whiteSpace:"nowrap"}}>{p.label}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,letterSpacing:0,textTransform:"none",color:sel?p.color:pendingStep?`${t.mut}99`:t.dim,whiteSpace:"nowrap"}}>{p.label}</span>
             </button>
           </React.Fragment>;
         })}
@@ -2379,8 +2385,8 @@ function CitationChip({n, src, theme, font}){
     : `${src.location||`chunk ${src.chunk_index}`}${typeof src.score==="number"?` · ${Math.round(src.score*100)}%`:""}`;
   const titleText=isQuick?[sourceTitle,src.domain||src.url].filter(Boolean).join(" - "):`${src.filename} (${src.location||`chunk ${src.chunk_index}`})`;
   return <sup ref={ref} style={{fontSize:"0.72em",lineHeight:0,margin:"0 1px",position:"relative",display:"inline-block"}}>
-    <button onClick={()=>setOpen(o=>!o)} title={titleText} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:3,fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
-    {open&&<span style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",background:theme.bgDeep,border:`1px solid ${theme.brd}66`,borderRadius:8,padding:"9px 11px",boxShadow:"0 8px 24px rgba(0,0,0,.45)",textAlign:"left",fontSize:"var(--hc-text-secondary)",lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
+    <button onClick={()=>setOpen(o=>!o)} title={titleText} style={{background:`${theme.acc}18`,border:"none",color:theme.acc,padding:"0 4px",borderRadius:"var(--hc-radius-sm)",fontWeight:700,cursor:"pointer",fontFamily:font,fontSize:"inherit",lineHeight:1.5}}>{n}</button>
+    {open&&<span className="hc-pop hc-elev-2" data-placement="top" data-align="center" style={{position:"absolute",bottom:"calc(100% + 6px)",left:"50%",transform:"translateX(-50%)",zIndex:30,width:300,maxWidth:"72vw",borderRadius:"var(--hc-radius)",padding:"9px 11px",textAlign:"left",fontSize:"var(--hc-text-secondary)",lineHeight:1.5,fontWeight:400,display:"block",whiteSpace:"normal"}}>
       <span style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
         {isQuick?<SourceFavicon url={src.url} domain={src.domain} size={16} theme={theme}/>:<span style={{flexShrink:0}}>📄</span>}
         <span style={{fontWeight:700,color:theme.acc,fontSize:"var(--hc-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sourceTitle}</span>

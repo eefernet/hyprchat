@@ -22,6 +22,11 @@
 
 ## Interface
 
+- **Motion** — menus, popovers, dialogs, drawers and toasts pop in from their anchor and fade out when closed; tabs and panes crossfade; new messages animate in while loaded history does not. Everything honours Reduce Motion.
+- **Sleeker surfaces** — tonal elevation with soft, theme-aware shadows replaces most one-pixel boxes, with one radius scale and lighter type weights across Settings, navigation, the composer, the Tools popover and the model picker. Light themes get light scrims and shadows.
+- **Activity pill** — redesigned with crisp icons, a live progress line, icon and label transitions, colour that morphs between Thinking, Searching, Running code, Writing and Reviewing, an animated details drawer and summary chips when the answer completes.
+- **Chat layout** — assistant replies read directly on the canvas, your messages sit right-aligned in a tinted bubble, and message actions are icon buttons with tooltips.
+- **Interface font** — Appearance gains an optional proportional interface font (Inter, Geist or System); code keeps your monospace choice.
 - **Clearer reading** — stronger content surfaces, consistent controls and larger labels across panels and themes. Your selected monospace font applies throughout the interface, chat and code.
 - **Familiar chat controls** — restored the original toolbar with separate memory and Ghost mode icons, theme, export and import controls. The composer keeps its subtle outer focus styling without an inner highlighted box.
 - **Room to work** — conversation lists collapse outside Chat and restore on return. Research adapts to available width with report-list and evidence drawers; exports and secondary actions use labeled menus.

@@ -107,19 +107,19 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     finally{sendingRef.current=false;setSending(false);}
   };
 
-  const urgencyChip=u=>u==="urgent"?<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:800,color:t.bg,background:t.err,borderRadius:4,padding:"1px 5px"}}>URGENT</span>
-    :u==="low"?<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,border:`1px solid ${t.brd}55`,borderRadius:4,padding:"1px 5px"}}>low</span>:null;
+  const urgencyChip=u=>u==="urgent"?<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.bg,background:t.err,borderRadius:"var(--hc-radius-sm)",padding:"1px 5px"}}>URGENT</span>
+    :u==="low"?<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-sm)",padding:"1px 5px"}}>low</span>:null;
   const fmtTs=fmtLocalMinute;
   const senderAvatar=addr=>{const key=emailOf(addr);const m=key.match(/[a-z0-9]/i);const c=colorFor(key,t);
-    return <div style={{width:30,height:30,borderRadius:"50%",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:c,background:`${c}2E`,border:`1px solid ${c}44`}}>{(m?m[0]:"?").toUpperCase()}</div>;};
+    return <div style={{width:30,height:30,borderRadius:"50%",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",fontWeight:600,color:c,background:`${c}2E`,border:`1px solid ${c}44`}}>{(m?m[0]:"?").toUpperCase()}</div>;};
 
   const settingsCard=(showSettings||accounts.length===0)&&<div style={{...cardS,marginBottom:16}}>
     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-      <div style={{fontSize:12,fontWeight:800,color:t.acc}}>Accounts (IMAP/SMTP)</div>
+      <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc}}>Accounts (IMAP/SMTP)</div>
       <div style={{flex:1}}/>
       <button onClick={()=>setAcctForm({...EMPTY_ACCOUNT})} style={{...btnS(t.warm),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}><IC.Plus/> Add</button>
     </div>
-    {accounts.map(a=><div key={a.id} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"6px 0",borderBottom:`1px solid ${t.brd}18`}}>
+    {accounts.map(a=><div key={a.id} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"6px 0",borderBottom:"1px solid var(--hc-line-subtle)"}}>
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
         <span style={{fontWeight:700,color:t.text}}>{a.label||a.username}</span>
         <span style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>{a.imap_host}</span>
@@ -139,7 +139,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
         Allow the assistant to DELETE email autonomously (off = it must ask you first; deleting here in the panel always works)
       </label>
     </div>)}
-    {acctForm&&<div style={{marginTop:10,borderTop:`1px solid ${t.brd}33`,paddingTop:10}}>
+    {acctForm&&<div style={{marginTop:10,borderTop:"1px solid var(--hc-line)",paddingTop:10}}>
       <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
         <input value={acctForm.label} onChange={e=>setAcctForm(f=>({...f,label:e.target.value}))} placeholder="Label" style={{...inputS,flex:1,minWidth:100}}/>
         <input value={acctForm.username} onChange={e=>setAcctForm(f=>({...f,username:e.target.value}))} placeholder="Email / username" style={{...inputS,flex:2,minWidth:180}}/>
@@ -163,7 +163,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
   </div>;
 
   const composeCard=compose&&<div style={{...cardS,marginBottom:16,border:`1px solid ${t.warm}55`}}>
-    <div style={{fontSize:12,fontWeight:800,color:t.warm,marginBottom:10}}>New email</div>
+    <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm,marginBottom:10}}>New email</div>
     <input value={compose.to} onChange={e=>setCompose(c=>({...c,to:e.target.value}))} placeholder="To" style={{...inputS,marginBottom:8}}/>
     <input value={compose.subject} onChange={e=>setCompose(c=>({...c,subject:e.target.value}))} placeholder="Subject" style={{...inputS,marginBottom:8}}/>
     <textarea value={compose.body} onChange={e=>setCompose(c=>({...c,body:e.target.value}))} rows={6} placeholder="Message" style={{...inputS,marginBottom:10,resize:"vertical"}}/>
@@ -177,7 +177,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
       {!isMobile&&senderAvatar(reader.msg.from_addr)}
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:13,fontWeight:800,color:t.text}}>{reader.msg.subject}</div>
+        <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text}}>{reader.msg.subject}</div>
         <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{reader.msg.from_addr} · {fmtTs(reader.msg.date_at)}</div>
       </div>
       <button onClick={()=>msgAction(reader.msg.id,"archive")} style={{...btnS(t.mut),padding:"4px 9px",fontSize:"var(--hc-text-control)"}}>Archive</button>
@@ -187,7 +187,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     {reader.msg.summary&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,marginBottom:8}}>AI summary: {reader.msg.summary}</div>}
     {reader.msg.triage_error&&<div role="status" style={{fontSize:"var(--hc-text-secondary)",color:t.err,marginBottom:8}}>{reader.msg.triage_error} <button style={btnS(t.acc)} onClick={async()=>{try{const msg=await apiJson(`/api/email/messages/${reader.msg.id}/triage/retry`,{method:'POST'});setReader(p=>p?.msg.id===msg.id?{...p,msg}:p);}catch(e){if(e.name!=='AbortError')setErr(e.message);}}}>Retry triage</button></div>}
     {(()=>{
-      const textBodyS={fontSize:12,color:t.dim,whiteSpace:"pre-wrap",maxHeight:isMobile?320:"46vh",overflowY:"auto",background:`${t.bgDeep}F5`,border:`1px solid ${t.brd}22`,borderRadius:8,padding:12};
+      const textBodyS={fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"pre-wrap",maxHeight:isMobile?320:"46vh",overflowY:"auto",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:12};
       if(reader.loading)return <div style={textBodyS}>Loading body from server...</div>;
       const hasHtml=!!(reader.body?.html||"").trim();
       const showHtml=hasHtml&&reader.view!=="text";
@@ -197,7 +197,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
           // email HTML is untrusted (backend sanitizes as layer one).
           // allow-popups(+escape) only so <base target="_blank"> links open.
           ?<iframe sandbox="allow-popups allow-popups-to-escape-sandbox" srcDoc={reader.body.html} title="email"
-            style={{width:"100%",height:isMobile?360:"52vh",border:`1px solid ${t.brd}22`,borderRadius:8,background:"#fff",display:"block"}}/>
+            style={{width:"100%",height:isMobile?360:"52vh",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:"#fff",display:"block"}}/>
           :<div style={textBodyS}>{reader.body?.body||""}</div>}
         {hasHtml&&(reader.body?.body||"").trim()&&
           <button onClick={()=>setReader(p=>p&&({...p,view:showHtml?"text":"html"}))}
@@ -218,9 +218,9 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
       {!isMobile&&senderAvatar(m.from_addr)}
       <div style={{flex:1,minWidth:0}}>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <span style={{fontSize:12,fontWeight:m.unread?800:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.subject||"(no subject)"}</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:m.unread?800:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.subject||"(no subject)"}</span>
           {urgencyChip(m.urgency)}
-          {m.draft_reply&&<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc,border:`1px solid ${t.acc}55`,borderRadius:4,padding:"1px 5px"}}>draft ready</span>}
+          {m.draft_reply&&<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc,border:`1px solid ${t.acc}55`,borderRadius:"var(--hc-radius-sm)",padding:"1px 5px"}}>draft ready</span>}
         </div>
         <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
           {m.from_addr} · {fmtTs(m.date_at)}{m.summary?` — ${m.summary}`:m.snippet?` — ${m.snippet.slice(0,90)}`:""}
@@ -250,7 +250,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
     {isMobile
       ?<div style={{overflowY:"auto",padding:"14px 12px",flex:1}}>
         <div style={{maxWidth:900}}>
-          {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
+          {err&&<div style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:12}}>{err}</div>}
           {settingsCard}
           {composeCard}
           {readerCard}
@@ -258,12 +258,12 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
         </div>
       </div>
       :<div style={{flex:1,display:"flex",overflow:"hidden",minHeight:0}}>
-        <div style={{width:"clamp(300px,40%,420px)",flexShrink:0,borderRight:`1px solid ${t.brd}22`,overflowY:"auto",padding:"14px 14px 20px"}}>
+        <div style={{width:"clamp(300px,40%,420px)",flexShrink:0,borderRight:"1px solid var(--hc-line-subtle)",overflowY:"auto",padding:"14px 14px 20px"}}>
           {err&&<div style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:10}}>{err}</div>}
           {emptyList||messages.map(msgRow)}
         </div>
         <div style={{flex:1,minWidth:0,overflowY:"auto",padding:"14px 20px 20px"}}>
-          {err&&<div style={{color:t.err,fontSize:12,marginBottom:12}}>{err}</div>}
+          {err&&<div style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:12}}>{err}</div>}
           {settingsCard}
           {composeCard}
           {readerCard}

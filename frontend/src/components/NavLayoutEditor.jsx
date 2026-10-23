@@ -62,7 +62,7 @@ export default function NavLayoutEditor({ t, layout, onChange, isMobile }) {
 
   const miniBtnS = (disabled) => ({
     width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center",
-    background: "transparent", border: `1px solid ${t.brd}44`, borderRadius: 5, color: t.mut,
+    background: "transparent", border: "1px solid var(--hc-line)", borderRadius: 5, color: t.mut,
     fontSize: "var(--hc-text-secondary)", lineHeight: 1, cursor: disabled ? "default" : "pointer", padding: 0,
     opacity: disabled ? 0.3 : 1, pointerEvents: disabled ? "none" : "auto", flexShrink: 0,
   });
@@ -78,7 +78,7 @@ export default function NavLayoutEditor({ t, layout, onChange, isMobile }) {
       <div key={id} data-nav-row draggable
         onDragStart={(e) => { e.dataTransfer.setData("text/plain", id); e.dataTransfer.effectAllowed = "move"; setDrag({ id, from: zone }); }}
         onDragEnd={clearDnd}
-        style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", background: `${t.surface}F5`, border: `1px solid ${t.brd}33`, borderRadius: 7, cursor: "grab", fontSize: 12, color: t.text, opacity: drag && drag.id === id ? 0.4 : 1, userSelect: "none" }}>
+        style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", background: `${t.surface}F5`, border: "1px solid var(--hc-line)", borderRadius: 7, cursor: "grab", fontSize: 12, color: t.text, opacity: drag && drag.id === id ? 0.4 : 1, userSelect: "none" }}>
         <span style={{ color: t.mut, fontSize: "var(--hc-text-secondary)", letterSpacing: -1, cursor: "grab" }}>⋮⋮</span>
         <span style={{ display: "flex", alignItems: "center", color: t.dim, fontSize: 14 }}><it.icon /></span>
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.label}</span>
@@ -100,7 +100,7 @@ export default function NavLayoutEditor({ t, layout, onChange, isMobile }) {
             <div key={zone} style={zone === "hidden" ? { gridColumn: "1 / -1" } : undefined}>
               <div style={{ fontSize: "var(--hc-text-secondary)", textTransform: "none", letterSpacing: 0, color: t.mut, fontWeight: 700, marginBottom: 5 }}>{title}</div>
               <div onDragOver={onZoneDragOver(zone)} onDrop={onZoneDrop(zone)} onDragLeave={onZoneDragLeave}
-                style={{ background: `${t.bgDeep}F5`, border: `1px solid ${t.brd}24`, borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 4, minHeight: 52 }}>
+                style={{ background: `${t.bgDeep}F5`, border: "1px solid var(--hc-line-subtle)", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 4, minHeight: 52 }}>
                 {ids.map((id, i) => (
                   <React.Fragment key={id}>
                     {hintHere && dropHint.index === i && indicator}
@@ -108,7 +108,7 @@ export default function NavLayoutEditor({ t, layout, onChange, isMobile }) {
                   </React.Fragment>
                 ))}
                 {hintHere && dropHint.index === ids.length && indicator}
-                {!ids.length && <div style={{ border: `1px dashed ${t.brd}55`, borderRadius: 7, padding: "10px 0", textAlign: "center", fontSize: "var(--hc-text-secondary)", color: t.mut }}>Drag items here</div>}
+                {!ids.length && <div style={{ border: "1px dashed var(--hc-line)", borderRadius: 7, padding: "10px 0", textAlign: "center", fontSize: "var(--hc-text-secondary)", color: t.mut }}>Drag items here</div>}
               </div>
             </div>
           );
