@@ -267,7 +267,7 @@ Councils run multiple models against the same prompt, optionally debate across r
 
 ### 📚 Knowledge Bases & Workspaces
 
-Upload documents, attach knowledge bases to profiles, index uploaded code projects, and organize related work in **Workspaces** (under More by default). Each workspace has an overview, chats, linked knowledge, reviewed memory, notes/todos, tasks, jobs, reports, and artifacts.
+Upload documents, attach knowledge bases to profiles, index uploaded code projects, and organize related work in **Workspaces** (on the nav rail by default; rearrange it in Settings → Appearance → Navigation Bar). Each workspace has an overview, chats, linked knowledge, reviewed memory, notes/todos, tasks, jobs, reports, and artifacts.
 
 - **Project chat context** — New chat from a workspace saves and links the conversation together. A chat can use a selected workspace, automatic context (only when linked to exactly one workspace), or no workspace context. Linked KBs join profile KBs during retrieval; workspace memory still requires enablement and accepted/current entries. Ghost Mode excludes both. The context inspector records the workspace and KBs used for each response.
 - **Knowledge snapshots** — create a bounded snapshot of linked chats and reports, inspect its creation time and omitted/truncated sources, then wait for indexing before creating an agent. Snapshots do not update automatically. Per-file readiness, retry, and Test knowledge are available in workspace and KB panels; a timeout is never reported as completed indexing.

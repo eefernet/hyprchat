@@ -6,6 +6,7 @@ import Switch from './components/Switch.jsx';
 import './ui.css';
 import './surfaces.css';
 import './motion.css';
+import './components/workspace.css';
 import {UI_THEMES, presentationTokens} from './theme.js';
 import ActionMenu from './components/ActionMenu.jsx';
 import ResponsiveDrawer from './components/ResponsiveDrawer.jsx';
@@ -89,6 +90,13 @@ import CalendarPanel from './panels/CalendarPanel.jsx';
 import EmailPanel from './panels/EmailPanel.jsx';
 import BackgroundCanvas from './components/BackgroundCanvas.jsx';
 import ChatHero, { daypartOf, greetableName } from './components/ChatHero.jsx';
+import StarterChips from './components/StarterChips.jsx';
+import WaitingQuote from './components/WaitingQuote.jsx';
+import ShortcutSheet, { MOD_KEY } from './components/ShortcutSheet.jsx';
+import { Spinner, Dots } from './components/Spinner.jsx';
+import { groupByRecency } from './convGroups.js';
+import { formatDocumentTitle } from './documentTitle.js';
+import { hfCompatibilityReport, isMmproj as hfIsMmproj, fmtBytes as fmtPullBytes } from './hfCompat.js';
 import { IC, TIC } from './components/icons.jsx';
 import { SkeletonList } from './components/Skeleton.jsx';
 import {
@@ -338,6 +346,7 @@ function HyprChat(){
   const [modelSearch,setModelSearch]=useState("");
   const [prompts,setPrompts]=useState(()=>{try{return normalizePrompts(JSON.parse(localStorage.getItem("hc-prompts")||"[]"));}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [showShortcuts,setShowShortcuts]=useState(false);
   const [slashIdx,setSlashIdx]=useState(0);            // highlighted row in the "/" slash menu
   const [slashVarFill,setSlashVarFill]=useState(null); // {title, content, vars:[{name,value}]} — {{var}} fill-in card
   const [slashDismissed,setSlashDismissed]=useState(false); // Esc closes the slash menu until inp stops starting with "/"
@@ -372,7 +381,8 @@ function HyprChat(){
   const [hfModelInfo,setHfModelInfo]=useState(null); // detailed info + files
   const [hfReadme,setHfReadme]=useState(null);
   const [hfReadmeLoading,setHfReadmeLoading]=useState(false);
-  const [hfDownloading,setHfDownloading]=useState(false);
+  const [hfDownloadRepo,setHfDownloadRepo]=useState(null); // repo id whose download is streaming (one at a time)
+  const [hfCompat,setHfCompat]=useState(null); // {key,data,loading} from /api/hf/compat for the selected main file
   const [hfDownloadName,setHfDownloadName]=useState("");
   const [downloads,setDownloads]=useState([]); // [{id,name,status,pct,message,error,completedBytes,totalBytes,startTime,speed,eta}]
   const [downloadsExpanded,setDownloadsExpanded]=useState(false);
@@ -2737,6 +2747,7 @@ function HyprChat(){
       if((e.ctrlKey||e.metaKey)&&e.key==="k"){e.preventDefault();openSidebarSearch("messages");}
       if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();startBlankChat();}
       if((e.ctrlKey||e.metaKey)&&e.key==="/"){e.preventDefault();setSidebar(p=>!p);}
+      if(e.key==="?"&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||"")&&!e.target?.isContentEditable){e.preventDefault();setShowShortcuts(v=>!v);}
       if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile){setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
     };
     document.addEventListener("keydown",handler);
@@ -4299,41 +4310,33 @@ function HyprChat(){
     if(readmeR.status==="fulfilled")setHfReadme(hfCleanReadme(readmeR.value?.content||""));
     setHfReadmeLoading(false);
   };
-  const hfCompatibilityReport=(model,info,readme,selectedFiles=[])=>{
-    const files=info?.gguf_files||[];
-    const selected=files.filter(f=>selectedFiles.includes(f.name));
-    const text=[model?.id||"",model?.pipeline_tag||"",(model?.tags||[]).join(" "),readme||"",files.map(f=>f.name).join(" ")].join(" ").toLowerCase();
-    const issues=[];
-    const add=(level,label,detail)=>{if(!issues.some(i=>i.label===label))issues.push({level,label,detail});};
-    const has=rx=>rx.test(text);
-    if(info&&files.length===0)add("bad","No GGUF files","This repo does not expose Ollama-loadable GGUF files.");
-    if(has(/not supported in ollama|ollama[^.\n]{0,80}not supported|requires[^.\n]{0,80}llama\.cpp|llama\.cpp[^.\n]{0,80}only|requires[^.\n]{0,80}pull request|custom architecture/))add("bad","Runtime support warning","The README suggests this may require a specific runtime or newer loader support.");
-    if(has(/gated deltanet|linear attention|state space|hybrid architecture|hybrid[^.\n]{0,50}attention|\bssm\b|\bmamba\b|\brwkv\b|\bjamba\b/))add("warn","Architecture risk","Download may succeed while the local Ollama loader fails to load the blob.");
-    if(files.some(f=>/^mmproj/i.test(f.name))||has(/\bmmproj\b|vision encoder|multimodal|vision support|image\/video|image-to-text|image text/))add("warn","Vision/mmproj package","Multimodal models can need projector files and newer Ollama support; text-only loading may still fail.");
-    if(files.some(f=>/-\d{5}-of-\d{5}\.gguf$/i.test(f.name)))add("info","Split GGUF","Select every part in the set before downloading.");
-    if(selected.length){
-      const selectedSize=selected.reduce((a,f)=>a+(f.size||0),0);
-      if(selected.every(f=>/^mmproj/i.test(f.name)))add("bad","Projector only","A mmproj file is not a standalone chat model; select a main GGUF too.");
-      if(selected.some(f=>/^mmproj/i.test(f.name))&&selected.some(f=>!/^mmproj/i.test(f.name)))add("info","Includes projector","This will register both main GGUF and projector blobs when the runtime supports them.");
-      if(selected.some(f=>/\b(BF16|F16|F32)\b/i.test(f.name)))add("warn","Large full-precision file","BF16/F16/F32 downloads are large and much more likely to exceed VRAM.");
-      if(selectedSize>42*1024*1024*1024)add("warn","Very large selection",`${fmtSize(selectedSize)} selected; this may exceed available VRAM even if it downloads.`);
-      else if(selectedSize>24*1024*1024*1024)add("info","Large selection",`${fmtSize(selectedSize)} selected; load time and VRAM pressure may be high.`);
-    }
-    const level=issues.some(i=>i.level==="bad")?"bad":issues.some(i=>i.level==="warn")?"warn":"ok";
-    return {level,issues};
-  };
+  // Compatibility facts for the selected main file (exact pull tag, GGUF header, registry manifest, local architectures).
+  const hfCompatKey=hfSelected&&hfSelectedFiles.length?`${hfSelected.id}::${hfSelectedFiles.find(f=>!hfIsMmproj(f))||hfSelectedFiles[0]}`:null;
+  const hfCompatData=hfCompat&&hfCompat.key===hfCompatKey?hfCompat.data:null;
+  const hfCompatLoading=!!hfCompatKey&&(!hfCompat||hfCompat.key!==hfCompatKey||hfCompat.loading);
+  useEffect(()=>{
+    if(!hfCompatKey)return;
+    const sep=hfCompatKey.indexOf("::");const repoId=hfCompatKey.slice(0,sep),filename=hfCompatKey.slice(sep+2);
+    const c=new AbortController();
+    setHfCompat({key:hfCompatKey,data:null,loading:true});
+    fetch(`${API}/api/hf/compat?repo_id=${encodeURIComponent(repoId)}&filename=${encodeURIComponent(filename)}`,{signal:c.signal})
+      .then(r=>r.ok?r.json():null).then(d=>{if(!c.signal.aborted)setHfCompat({key:hfCompatKey,data:d,loading:false});})
+      .catch(()=>{if(!c.signal.aborted)setHfCompat({key:hfCompatKey,data:null,loading:false});});
+    return()=>c.abort();
+  },[hfCompatKey]);
+  const hfReport=hfCompatibilityReport({model:hfSelected,info:hfModelInfo,readme:hfReadme,selectedFiles:hfSelectedFiles,compat:hfCompatData});
   const hfDownload=async()=>{
     if(!hfSelected||!hfSelectedFiles.length)return;
     const dlId=`dl-${Date.now()}`;
     const dlName=hfDownloadName.trim();
     const totalSize=(hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0);
-    setHfDownloading(true);
+    setHfDownloadRepo(hfSelected.id);
     setDownloads(p=>[...p,{id:dlId,name:dlName||hfSelectedFiles[0],kind:"model",status:"creating",pct:0,message:"Contacting Ollama...",error:null,completedBytes:0,totalBytes:totalSize,startTime:Date.now(),speed:0,eta:0,retry:()=>{notify({type:"info",text:"Retry from HuggingFace tab",detail:"The same file selection is still available if the model panel has not changed.",duration:5000});}}]);
     setDownloadsExpanded(true);
     const updDl=upd=>setDownloads(p=>p.map(d=>d.id===dlId?{...d,...upd}:d));
     try{
-      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName})});
-      if(!res.ok){const msg=`Server error: ${res.status} ${res.statusText}`;updDl({status:"error",error:msg});notify({type:"error",text:"HuggingFace download failed",detail:msg});setHfDownloading(false);return;}
+      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName,force:hfReport.flagged})});
+      if(!res.ok){const msg=`Server error: ${res.status} ${res.statusText}`;updDl({status:"error",error:msg});notify({type:"error",text:"HuggingFace download failed",detail:msg});setHfDownloadRepo(null);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
       let lastBytes=0,lastTime=Date.now(),lastSpeedUpdate=0,curSpeed=0,curEta=0;
       while(true){
@@ -4368,7 +4371,7 @@ function HyprChat(){
         }
       }
     }catch(e){updDl({status:"error",error:e.message});notify({type:"error",text:"HuggingFace download failed",detail:e.message});}
-    setHfDownloading(false);
+    setHfDownloadRepo(null);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"—";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
   // capTags colors are intentionally fixed (not theme tokens): they mirror ModelPicker.modelCaps as cross-theme capability identity badges.
@@ -4776,7 +4779,7 @@ function HyprChat(){
     border:"1px solid transparent",position:"relative",flexShrink:0,padding:showNavLabels?"3px 0 1px":0,fontFamily:font,
     ...extra
   });
-  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
+  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -4860,6 +4863,14 @@ function HyprChat(){
     </div>);
   const standaloneCoderJobs=coderWorkflows.filter(w=>w.workflow_version===3&&w.conversation_id===actId);
   const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&!standaloneCoderJobs.length&&(!act||(!(act.messages||[]).length&&!act.is_council));
+  // Starter chips for the empty chat surface: prompt-library picks, the latest workspace, and two generic nudges.
+  const starterItems=isEmptyChatSurface?[
+    ...prompts.filter(p=>p&&!p.is_system&&typeof p.content==="string"&&p.content.trim()).slice(0,2).map(p=>({key:`prompt:${p.id}`,label:p.title,text:p.content,icon:<IC.Zap/>,color:t.pink,hint:"From your prompt library"})),
+    ...(workspaces[0]?[{key:"workspace",label:`Continue in ${workspaces[0].name}`,icon:<IC.Folder/>,color:t.acc,hint:"Start a chat inside this workspace",run:()=>startWorkspaceChat(workspaces[0].id)}]:[]),
+    {key:"todos",label:"Summarise my open todos",text:"Summarise my open todos and suggest what to tackle first.",icon:<IC.Check/>,color:t.ok},
+    {key:"explain",label:"Explain something step by step",text:"Explain step by step how ",icon:<IC.Brain/>,color:t.f1||t.acc},
+  ]:[];
+  useEffect(()=>{try{document.title=formatDocumentTitle({title:panel==="chat"?act?.title:panel==="workspaces"?((wsPanel&&wsDetail?.name)||"Workspaces"):(NAV_ITEM_MAP[panel]?.label||""),streaming});}catch{}},[panel,act?.title,wsPanel,wsDetail?.name,streaming]);
   const emptyComposerLift=isEmptyChatSurface&&!isMobile?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
   useEffect(()=>{
     if(!isEmptyChatSurface||isMobile)return;
@@ -4930,16 +4941,16 @@ function HyprChat(){
     }
   };
   const settingsTabs=[
-    ["users","👤","Users","Profiles and sign-in"],
-    ["connections","🔌","Connections","Runtime endpoints and status"],
-    ["generation","⚙️","Model & Generation","Global model behavior"],
-    ["daedalus","🏛️","Daedalus","Coder-agent routing"],
-    ["appearance","🎨","Appearance","Theme, font, and density"],
-    ["rag","🧠","RAG Pipeline","Indexing and retrieval"],
-    ["quotes","💬","Loading Quotes","Custom waiting text"],
-    ["cleanup","🗃️","Sandbox & Cleanup","Storage maintenance"],
-    ["danger","⚠️","Danger Zone","Destructive actions"],
-    ["changelog","📋","Changelog","Release notes and updates"],
+    ["users",<IC.User/>,"Users","Profiles and sign-in"],
+    ["connections",<IC.Plug/>,"Connections","Runtime endpoints and status"],
+    ["generation",<IC.Sliders/>,"Model & Generation","Global model behavior"],
+    ["daedalus",<IC.Code/>,"Daedalus","Coder-agent routing"],
+    ["appearance",<IC.Palette/>,"Appearance","Theme, font, and density"],
+    ["rag",<IC.Database/>,"RAG Pipeline","Indexing and retrieval"],
+    ["quotes",<IC.Chat/>,"Loading Quotes","Custom waiting text"],
+    ["cleanup",<IC.HardDrive/>,"Sandbox & Cleanup","Storage maintenance"],
+    ["danger",<IC.Alert/>,"Danger Zone","Destructive actions"],
+    ["changelog",<IC.File/>,"Changelog","Release notes and updates"],
   ];
   const activeSettingsTitle=(settingsTabs.find(([id])=>id===settingsTab)||settingsTabs[0])[2];
   const selectedLoginUser=users.find(u=>u.id===loginUserId)||users[0]||null;
@@ -4979,7 +4990,7 @@ function HyprChat(){
   return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
     {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>({...c,messages:(c.messages||[]).map(m=>m.id===id?{...m,...saved}:m)})))}/>}
     {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
-    <BackgroundCanvas effect={bgEffect} t={THEMES[tm]}/>
+    <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
     {userGateOpen&&<div className="hc-viewport-overlay hc-scrim" style={{position:"fixed",inset:0,zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
@@ -5015,7 +5026,7 @@ function HyprChat(){
     {/* NAV RAIL */}
     <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...chromeS,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
-        <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={navBtnS(!!sidebarSearchActive)}>
+        <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title={`Search conversations (${MOD_KEY} K)`} style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
           {showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>Search</div>}
           {sidebarSearchActive&&<div className="nav-indicator"/>}
@@ -5062,8 +5073,7 @@ function HyprChat(){
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
         <div style={{display:"flex",gap:4}}>
           {(wsPanel&&activeWs||panel==='chat'&&act?.effective_workspace)&&<button onClick={()=>startBlankChat(true)} style={btnS(t.mut)}>New general chat</button>}
-          <button onClick={()=>startBlankChat()} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.warm,border:`1px solid ${t.warm}`,color:"#fff",padding:"10px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,boxShadow:"none"}}><IC.Plus/> New Chat</button>
-          <button onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);setPanel("workspaces");setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:"var(--hc-text-control)"}} title="Workspaces">🗂</button>
+          <button onClick={()=>startBlankChat()} title={`New chat (${MOD_KEY} N)`} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.acc,border:`1px solid ${t.acc}`,color:t.bg,padding:"10px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600,boxShadow:"none"}}><IC.Plus/> New Chat</button>
         </div>
         {!wsPanel&&<>
         {showMessageSearch&&<div className="hc-reveal" style={{display:"flex",flexDirection:"column",gap:4}}>
@@ -5098,6 +5108,8 @@ function HyprChat(){
         </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:profileType==="persona"?t.pink:hasPersona?t.acc:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;const title=c.title||"New Chat";const rowBg=isAct?`${accentColor}14`:"transparent";const effectiveRowBg=rowBg==="transparent"?`${t.bgDeep}F2`:rowBg;const hoverRowBg=isAct?effectiveRowBg:`${t.sfBri}1f`;const measureTitle=e=>{const row=e.currentTarget;const clip=row.querySelector(".conv-title-clip");const text=row.querySelector(".conv-title-text");if(!clip||!text)return;const overflow=Math.max(0,text.scrollWidth-clip.clientWidth);row.style.setProperty("--conv-title-marquee",`${overflow+18}px`);row.setAttribute("data-title-overflow",overflow>3?"1":"0");};const resetTitle=e=>{e.currentTarget.setAttribute("data-title-overflow","0");};return <div key={c.id} style={{marginBottom:2}}>
         <div className={`conv-row${isAct?" is-act":""}`} data-sticky-actions={isPinned||tags.length?"1":"0"} onClick={()=>loadConversation(c.id)} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle} style={{padding:"0 7px 0 12px",minHeight:48,boxSizing:"border-box",borderRadius:"var(--hc-radius)",cursor:"pointer",background:rowBg,border:"1px solid transparent",display:"flex",alignItems:"center",gap:0,position:"relative",overflow:"hidden","--conv-accent":accentColor,"--conv-row-bg":effectiveRowBg,"--conv-row-hover-bg":hoverRowBg,"--conv-action-bg":effectiveRowBg}}>
           <div style={{overflow:"hidden",whiteSpace:"nowrap",fontSize:"var(--hc-text-control)",color:isAct?t.text:t.dim,flex:1,minWidth:0,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:6}}>
+            {streaming&&c.id===actId&&<span className="hc-stream-dot" role="status" aria-label="Generating"/>}
+            {c.effective_workspace?.name&&<span style={{flexShrink:0,color:t.mut,display:"flex",opacity:.7}} title={`Workspace: ${c.effective_workspace.name}`}><IC.Folder/></span>}
             {isCouncil&&<span style={{flexShrink:0,color:t.pink,display:"flex",opacity:isAct?1:.7}}><IC.Council/></span>}
             {hasPersona&&(convAvatar?<img src={avatarSrc(convAvatar)} style={{width:18,height:18,borderRadius:"var(--hc-radius)",objectFit:"cover",flexShrink:0,opacity:isAct?1:.85}} alt=""/>:<span style={{flexShrink:0,color:accentColor,display:"flex",alignItems:"center",justifyContent:"center",width:18,height:18,opacity:isAct?1:.75}}>{profileType==="persona"?<IC.User/>:<IC.Bot/>}</span>)}
             {c.forked_from&&<span style={{flexShrink:0,color:t.f1||t.acc,display:"flex",opacity:.6}} title="Forked conversation"><IC.GitBranch/></span>}
@@ -5128,12 +5140,12 @@ function HyprChat(){
             </span>)}
           </div>}
         </div>}
-      </div>;};return <>{pinnedC.length>0&&<><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,letterSpacing:0,textTransform:"none",padding:"4px 8px 2px",opacity:.6}}>{"\uD83D\uDCCC"} Pinned</div>{pinnedC.map(renderConv)}{unpinnedC.length>0&&<div style={{borderTop:"1px solid var(--hc-line-subtle)",margin:"4px 0"}}/>}</>}{unpinnedC.map(renderConv)}</>;})()}
+      </div>;};return <>{pinnedC.length>0&&<><div className="hc-conv-group-head" style={{color:t.warm}}><IC.Pin/> Pinned</div>{pinnedC.map(renderConv)}</>}{groupByRecency(unpinnedC,Date.now(),c=>_parseUtcishMs(c.updated_at)).map(g=><React.Fragment key={g.key}><div className="hc-conv-group-head">{g.label}</div>{g.items.map(renderConv)}</React.Fragment>)}</>;})()}
       </div>:<div style={{flex:1,overflowY:"auto",padding:"8px 6px"}}>
         <button onClick={async()=>{
           try{const d=await apiJson("/api/workspaces",{method:"POST",body:{name:"New Workspace"}});setWorkspaces(p=>[...p,d]);openWorkspace(d.id);}catch(e){notify({type:"error",text:"Workspace not created",detail:e.message});}
         }} style={{...btnS(t.acc),width:"100%",marginBottom:8,justifyContent:"center",fontSize:"var(--hc-text-control)"}}><IC.Plus/> New Workspace</button>
-        {!workspaces.length&&<div style={{textAlign:"center",padding:30,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No workspaces yet.<br/>Group related chats and reports together.</div>}
+        {!workspaces.length&&<EmptyState compact icon={<IC.Folder/>} title="No workspaces yet" hint="Group related chats, sources and notes together."/>}
         {workspaces.map(ws=>{
           const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
           const isA=activeWs===ws.id;
@@ -5169,7 +5181,7 @@ function HyprChat(){
               <span style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:c,opacity:.85}}>{label}</span>
               <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:500,color:type==="persona"?t.text:c}}>{pendingPersona.persona_name}</span>
             </div>
-            <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
+            <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave {label}</button></>;})()}
           </>}
           {panel==="chat"&&act&&<>
             {act.forked_from&&<div className="hc-chip" style={{"--chip-c":t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
@@ -5183,14 +5195,14 @@ function HyprChat(){
                 <span style={{fontSize:"var(--hc-text-micro)",color:t.mut}}>{(cfg?.members||[]).length} members</span>
                 {councilRunning&&<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
               </div>
-              <button onClick={()=>newChat(true)} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}>✕ Leave Council</button></>;
+              <button onClick={()=>newChat(true)} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave Council</button></>;
             })():<ModelPicker value={act.model||models[0]||""} onChange={v=>uConv(actId,{model:v})} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>}
             {!act.is_council&&act.persona_name&&(()=>{const type=getConversationProfileType(act);const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=act.persona_avatar||profileAvatar(getProfileForConversation(act));return <><div className="hc-chip" style={{"--chip-c":c}}>
               {avatar?<img src={avatarSrc(avatar)} style={{width:type==="persona"?28:16,height:type==="persona"?28:16,borderRadius:type==="persona"?8:5,objectFit:"cover"}} alt=""/>:<span style={{display:"flex",color:c,alignItems:"center",justifyContent:"center",width:type==="persona"?28:16,height:type==="persona"?28:16}}>{type==="persona"?<IC.User/>:<IC.Bot/>}</span>}
               <span style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:c,opacity:.85}}>{label}</span>
               <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:500,color:type==="persona"?t.text:c}}>{act.persona_name}</span>
             </div>
-            <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
+            <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave {label}</button></>;})()}
             {!act.is_council&&!act.persona_name&&<div className="hc-header-secondary" style={{position:"relative"}}>
               <button onClick={()=>setShowSysPromptPicker(p=>!p)} className="hc-chip" style={{"--chip-c":act.system_prompt?t.warm:t.mut,fontFamily:font,...(act.system_prompt?{}:{background:"transparent"})}}>
                 {act.system_prompt?"\u{1F4CB} System Prompt":"\u002B System Prompt"}
@@ -5320,7 +5332,7 @@ function HyprChat(){
           {panel==="chat"&&<button onClick={toggleGlobalMemory} aria-label="HyprChat memory" aria-pressed={globalMemoryActive} disabled={ghostActive} title={act?(globalMemoryActive?"HyprChat memory on: this chat recalls accepted global memories and queues suggestions":"HyprChat memory: recall accepted global memories and queue suggestions for this chat"):(globalMemoryActive?"HyprChat memory on for the next chat":"HyprChat memory: enable recall for the next chat")} className={`hc-icon-btn is-lg${globalMemoryActive?" is-open":""}`} style={{color:ghostActive?`${t.mut}66`:globalMemoryActive?t.acc:t.mut,cursor:ghostActive?"default":"pointer",opacity:ghostActive?0.45:1}}><IC.Brain/></button>}
           {panel==="chat"&&<button onClick={toggleGhostMode} aria-label="Ghost mode" aria-pressed={ghostActive} title={ghostActive?"Ghost mode on: this chat is local only and will not be saved or indexed":"Ghost mode: start a chat that is never saved or indexed"} className="hc-icon-btn is-lg" style={{color:ghostActive?t.pink:t.mut,background:ghostActive?`${t.pink}18`:undefined}}><IC.Ghost/></button>}
           {/* Dark/Light mode toggle */}
-          <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} aria-label={isLightTheme?"Switch to dark mode":"Switch to light mode"} className="hc-icon-btn is-lg" style={{color:t.mut,fontSize:"var(--hc-text-control)"}}>{isLightTheme?"\u2600\uFE0F":"\uD83C\uDF19"}</button>
+          <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} aria-label={isLightTheme?"Switch to dark mode":"Switch to light mode"} className="hc-icon-btn is-lg" style={{color:t.mut,fontSize:"var(--hc-text-control)"}}><span key={isLightTheme?"sun":"moon"} className="hc-theme-icon">{isLightTheme?<IC.Sun/>:<IC.Moon/>}</span></button>
           {/* Export / Import */}
           {panel==="chat"&&act&&(act.messages||[]).length>0&&<>
             <div ref={exportMenuRef} onBlur={e=>{if(!e.currentTarget.contains(e.relatedTarget))setShowExportMenu(false);}} onKeyDown={e=>{
@@ -5330,7 +5342,7 @@ function HyprChat(){
                 items[e.key==='Home'?0:e.key==='End'?items.length-1:(i+(e.key==='ArrowDown'?1:-1)+items.length)%items.length]?.focus();
               }
             }} style={{position:"relative"}}>
-              <button onClick={()=>setShowExportMenu(p=>!p)} aria-label="Export chat" aria-expanded={showExportMenu} aria-haspopup="menu" title="Export chat" className="hc-chip" style={{"--chip-c":showExportMenu?t.acc:t.mut,fontFamily:font,...(showExportMenu?{}:{background:"transparent"})}}><IC.Upload/> export</button>
+              <button onClick={()=>setShowExportMenu(p=>!p)} aria-label="Export chat" aria-expanded={showExportMenu} aria-haspopup="menu" title="Export chat" className="hc-chip" style={{"--chip-c":showExportMenu?t.acc:t.mut,fontFamily:font,...(showExportMenu?{}:{background:"transparent"})}}><IC.Upload/> Export</button>
               {showExportMenu&&<div role="menu" aria-label="Export chat" className="hc-pop hc-elev-2" data-placement="bottom" data-align="end" style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:250,minWidth:150,padding:5}}>
                 <button role="menuitem" onClick={()=>{setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();exportChat();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",textAlign:"left"}}><span>Markdown</span><span style={{color:t.mut,fontSize:"var(--hc-text-micro)"}}>MD</span></button>
                 <button role="menuitem" onClick={()=>{setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();exportChatJSON();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",textAlign:"left"}}><span>JSON</span><span style={{color:t.mut,fontSize:"var(--hc-text-micro)"}}>JSON</span></button>
@@ -5338,7 +5350,7 @@ function HyprChat(){
             </div>
           </>}
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
-          {!isMobile&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" className="hc-chip" style={{"--chip-c":t.mut,background:"transparent",fontFamily:font}}><IC.Download/> import</button>}
+          {!isMobile&&panel==="chat"&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" className="hc-chip" style={{"--chip-c":t.mut,background:"transparent",fontFamily:font}}><IC.Download/> Import</button>}
           {panel==="chat"&&act&&(()=>{
             // Context meter: prompt + generated tokens against the active num_ctx.
             const promptToks=ctxTokens||0;
@@ -5373,7 +5385,7 @@ function HyprChat(){
           this column and replays the entry fade; key is stable while chatting. */}
       <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
       {activeWs&&(wsPanel||workspaceSearchReturn)&&<div className="hc-safe-panel" style={{flex:1,minWidth:0,minHeight:0,display:wsPanel?'flex':'none',flexDirection:'column'}}>
-<WorkspaceDetail key={activeWs} ws={wsDetail?.id===activeWs?wsDetail:null} wsLoading={wsLoading} t={t} API={API}
+<WorkspaceDetail key={activeWs} ws={wsDetail?.id===activeWs?wsDetail:null} wsLoading={wsLoading} t={t} API={API} btnS={btnS}
             onNewChat={()=>startWorkspaceChat(activeWs)} initialTab={workspaceInitialTab} personas={mcs} tools={[...builtinTools,...tools,...connectorTools].filter((x,i,a)=>x.id&&a.findIndex(y=>y.id===x.id)===i)}
             onHome={()=>{setWorkspaceSearchReturn(false);setWsPanel(false);setActiveWs(null);setWsDetail(null);setPanel('workspaces');}}
             onSearchResult={result=>{searchNavigation.current=true;setWorkspaceSearchReturn(true);setWsPanel(false);try{if(result.kind==='chat'){setMessageFocus({conversation:result.parent_id,id:result.source_id});loadConversation(result.parent_id);}else navigateWorkspaceContent(({artifact:'artifacts',research:'research',note:'notes'})[result.kind],result.source_id);}finally{searchNavigation.current=false;}}}
@@ -5416,7 +5428,7 @@ function HyprChat(){
             {f.source_url&&<a href={f.source_url} target="_blank" rel="noreferrer" title={f.source_url} style={{fontSize:"var(--hc-text-secondary)",color:t.f1,flexShrink:0,textDecoration:"none"}}>↗</a>}
             <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
             {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isPdf:true,pdfFullView:false,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/pdf-text?pages=10`);const d=await r.json();setKbPreview(p=>({...p,content:d.content,total_pages:d.total_pages,previewed_pages:d.previewed_pages,truncated:d.truncated,loading:false}));}catch(e){setKbPreview(p=>({...p,content:"Failed to extract PDF text: "+e.message,loading:false}));}}else if(["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isImage:true,loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0}}>Preview</button>}
-            <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:"var(--hc-text-control)",opacity:.6,flexShrink:0}} title="Delete file">✕</button>
+            <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:"var(--hc-text-control)",opacity:.6,flexShrink:0,display:"flex"}} title="Delete file" aria-label="Delete file"><IC.X/></button>
           </div>)}
           {!(kb.files||[]).length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
         </div>
@@ -5424,7 +5436,7 @@ function HyprChat(){
         {/* Add web page by URL */}
         <div style={{display:"flex",gap:6,marginBottom:8}}>
           <input value={kbUrlInputs[kb.id]||""} onChange={e=>setKbUrlInputs(p=>({...p,[kb.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addKbUrl(kb.id);}}} placeholder="https://…  add a web page or PDF by URL" style={{flex:1,fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius)",fontFamily:font,boxSizing:"border-box"}}/>
-          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()?1:.5,whiteSpace:"nowrap"}}>🌐 Add URL</button>
+          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()?1:.5,whiteSpace:"nowrap"}}><IC.Globe/> Add URL</button>
         </div>
         {/* Upload progress bars */}
         {Object.keys(uploadProgress).some(k=>k.startsWith(kb.id+":"))&&<div style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"8px 10px",marginBottom:8,display:"flex",flexDirection:"column",gap:6}}>
@@ -5513,7 +5525,7 @@ function HyprChat(){
       :panel==="tools"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {panelHeader(<IC.Tool/>,"Tools",<>
         <button onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(pasteMode?t.warm:t.mut)}>
-          {pasteMode?"✕ Cancel":"✦ Paste Code"}
+          {pasteMode?<><IC.X/> Cancel</>:<><IC.Code/> Paste Code</>}
         </button>
         <label style={btnS(t.warm)}><IC.Upload/> Upload .py<input type="file" accept=".py" multiple style={{display:"none"}} onChange={async e=>{
           for(const f of e.target.files){const fd=new FormData();fd.append("file",f);
@@ -5708,7 +5720,7 @@ function HyprChat(){
           {connectorTools.length>40&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"3px 8px"}}>+{connectorTools.length-40} more</span>}
         </div>}
       </div>
-      {!tools.length&&!pasteMode&&<EmptyState t={t} font={font} icon="⚙️" title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(t.warm)}><IC.Plus/> Paste Code</button>}/>}
+      {!tools.length&&!pasteMode&&<EmptyState icon={<IC.Tool/>} title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(t.warm)}><IC.Plus/> Paste Code</button>}/>}
       {tools.map(tl=>{
         const snippet=(tl.code||"").split("\n").slice(0,2).join("\n");
         return <div key={tl.id} style={{...cardS,borderColor:editTool===tl.id?`${t.warm}55`:`${t.brd}44`}}>
@@ -5992,7 +6004,7 @@ function HyprChat(){
           </button>)}
         </div>
       </div>}
-      {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No councils yet. Create one to debate with multiple AIs.</div>}
+      {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:"var(--hc-text-secondary)"}}><div style={{display:"flex",justifyContent:"center",marginBottom:8,color:t.pink}}><IC.Council/></div>No councils yet. Create one to debate with multiple AIs.</div>}
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
       {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:"var(--hc-radius)",overflow:"hidden",boxShadow:"none",transition:"background .15s ease,border-color .15s ease"}}>
           <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"center",padding:"12px 14px",background:isActive?`${t.pink}08`:`${t.bgDeep}38`,borderBottom:isActive?"1px solid var(--hc-line-subtle)":"none"}}>
@@ -6350,7 +6362,7 @@ function HyprChat(){
         <span style={{display:"flex",color:activeColor}}>{profileTab==="personas"?<IC.User/>:<IC.Cube/>}</span>
         <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,textTransform:"none",letterSpacing:0,color:activeColor}}>{activeLabel}</span>
       </div>
-      {!activeProfiles.length&&<EmptyState t={t} font={font} icon={profileTab==="personas"?"🎭":"🤖"} title={`No ${activeLabel.toLowerCase()} yet`} hint={activeEmpty} action={<button onClick={profileTab==="personas"?createPersona:createAgent} style={btnS(activeColor)}><IC.Plus/> New {profileTab==="personas"?"Persona":"Agent"}</button>}/>}
+      {!activeProfiles.length&&<EmptyState icon={profileTab==="personas"?<IC.User/>:<IC.Bot/>} title={`No ${activeLabel.toLowerCase()} yet`} hint={activeEmpty} action={<button onClick={profileTab==="personas"?createPersona:createAgent} style={btnS(activeColor)}><IC.Plus/> New {profileTab==="personas"?"Persona":"Agent"}</button>}/>}
       {activeProfiles.map(mc=>profileTab==="personas"?renderPersona(mc):renderAgent(mc))}
     </div>
   </div>;})()
@@ -6889,35 +6901,38 @@ function HyprChat(){
             </div>
           </div>
           {hfModelInfo&&(()=>{
-            const compat=hfCompatibilityReport(hfSelected,hfModelInfo,hfReadme,hfSelectedFiles);
+            const compat=hfReport;
             const c=compat.level==="bad"?t.err:compat.level==="warn"?(t.warm||"#eab308"):t.ok;
-            const icon=compat.level==="bad"?"⚠":compat.level==="warn"?"△":"✓";
-            const title=compat.level==="ok"?"No obvious Ollama compatibility flags":compat.level==="bad"?"Likely compatibility issue":"Possible compatibility issue";
+            const title=compat.level==="ok"?(hfSelectedFiles.length?"Looks good for this Ollama":"Pick a file to check it against this Ollama"):compat.level==="bad"?"Likely compatibility issue":"Possible compatibility issue";
             return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:`1px solid ${c}22`,background:`${c}0C`,display:"flex",gap:10,alignItems:"flex-start"}}>
-              <span style={{color:c,fontSize:"var(--hc-text-control)",fontWeight:700,lineHeight:"18px",flexShrink:0}}>{icon}</span>
+              <span style={{color:c,display:"flex",lineHeight:"18px",flexShrink:0,paddingTop:1}}>{compat.level==="ok"?<IC.Check/>:<IC.Alert/>}</span>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:c,letterSpacing:.2}}>Ollama Compatibility · {title}</div>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:5}}>
                   {compat.issues.length?compat.issues.map(issue=>{
                     const ic=issue.level==="bad"?t.err:issue.level==="warn"?(t.warm||"#eab308"):t.f1;
                     return <span key={issue.label} title={issue.detail} style={{fontSize:"var(--hc-text-secondary)",color:ic,border:`1px solid ${ic}44`,background:`${ic}12`,borderRadius:"var(--hc-radius)",padding:"2px 6px",fontWeight:700}}>{issue.label}</span>;
-                  }):<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Metadata and README do not show common Ollama loader risks.</span>}
+                  }):<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{hfCompatLoading?"Checking the file header and this Ollama's architectures…":"Metadata and README do not show common Ollama loader risks."}</span>}
                 </div>
               </div>
             </div>;
           })()}
           {/* Download bar — sticky top */}
           {hfSelectedFiles.length>0&&(()=>{
-            const compat=hfCompatibilityReport(hfSelected,hfModelInfo,hfReadme,hfSelectedFiles);
-            const risky=compat.level!=="ok";
+            const compat=hfReport;
+            const risky=compat.flagged;
             const c=compat.level==="bad"?t.err:compat.level==="warn"?(t.warm||"#eab308"):t.ok;
+            const busyHere=hfDownloadRepo===hfSelected?.id, busyElsewhere=!!hfDownloadRepo&&!busyHere;
             return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)",background:`${c}06`,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="Model name, e.g. llama3-q5" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"7px 10px",width:220,flex:"none",background:t.bgDeep}}/>
               <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</span>
+              {hfCompatLoading?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,display:"inline-flex",alignItems:"center",gap:6}}><Dots/> Resolving pull…</span>
+              :compat.pull?.resolved?<span title={compat.pull.pullName} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,flexShrink:0}}>Pulls {fmtPullBytes(compat.pull.modelBytes)} model{compat.pull.projectorBytes?` + ${fmtPullBytes(compat.pull.projectorBytes)} projector`:""} · tag {compat.pull.tag}</span>
+              :compat.pull?.tag?<span title={compat.pull.pullName} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>Pulls by tag {compat.pull.tag}</span>:null}
               {risky&&<span style={{fontSize:"var(--hc-text-secondary)",color:c,fontWeight:600,flexShrink:0}}>compatibility flagged</span>}
               <div style={{flex:1}}/>
-              <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(hfDownloading?t.mut:c),padding:"6px 14px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:hfDownloading?0.7:1}}>
-                <IC.Download/>{hfDownloading?"Queued":risky?"Download anyway":"Download"}
+              <button onClick={hfDownload} disabled={!!hfDownloadRepo||!hfDownloadName.trim()} style={{...btnS(hfDownloadRepo?t.mut:c),padding:"6px 14px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:hfDownloadRepo?0.7:1}}>
+                {busyHere?<Spinner size={12}/>:<IC.Download/>}{busyHere?"Downloading…":busyElsewhere?"Another download is running":risky?"Download anyway":"Download"}
               </button>
             </div>;
           })()}
@@ -7155,7 +7170,629 @@ function HyprChat(){
 
       :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{let live=cid;try{const ar=await fetch(`${API}/api/assistant`);const ad=await ar.json();live=ad?.profile?.conversation_id||cid;}catch{}if(!live)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(live);loadConversation(live);setPanel("chat");}}/>
 
-      :settingsPresence.mounted?ReactDOM.createPortal(<div className="hc-viewport-overlay hc-scrim" {...settingsPresence.props} style={{position:"fixed",inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
+      :panel==="settings"?null
+
+      :<>
+        {/* CHAT - full width, pills inline */}
+        <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}
+          onDragOver={e=>{e.preventDefault();e.stopPropagation();setDragOver(true);}}
+          onDragLeave={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);}}
+          onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
+          {/* Drag overlay */}
+          {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:"var(--hc-radius-dialog)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
+            <div style={{fontSize:"var(--hc-text-control)",color:t.acc,fontWeight:700,letterSpacing:1}}>{isCoderPersonaName(act?.persona_name)?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
+          </div>}
+          {/* Scroll-to-top / Scroll-to-bottom */}
+          {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
+          {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
+          {/* Messages */}
+          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
+          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
+            {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
+            :<><ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>
+            {!act?.is_council&&!(isMobile&&keyboardOpen)&&<div style={{pointerEvents:"auto",transform:isEmptyChatSurface&&!isMobile?"translateY(-40px)":"none",transition:"transform .35s ease"}}><StarterChips t={t} font={font} items={starterItems} onPick={it=>{if(it.run){it.run();return;}setInp(it.text||"");setTimeout(()=>inpRef.current?.focus(),30);}}/></div>}</>}
+          </div>:act?.is_council?(()=>{
+            const councilCfg=councils.find(c=>c.id===act.council_config_id);
+            const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
+            const members=councilCfg?.members||[];
+            const turns=[];let curTurn=null;
+            for(const msg of(act.messages||[])){
+              const meta=getMeta(msg);
+              if(msg.role==="user"&&!meta.council_member_id&&!meta.council_host){
+                curTurn={user:msg,rounds:{},host:null};turns.push(curTurn);
+              }else if(msg.role==="assistant"){
+                if(!curTurn){curTurn={user:{role:"user",content:""},rounds:{},host:null};turns.push(curTurn);}
+                if(meta.council_host)curTurn.host=msg;
+                else{
+                  const rnd=meta.debate_round||0;
+                  if(!curTurn.rounds[rnd])curTurn.rounds[rnd]=[];
+                  curTurn.rounds[rnd].push(msg);
+                }
+              }
+            }
+            const isLastTurn=ti=>ti===turns.length-1;
+            const memberProfile=m=>m?.model_config_id?mcs.find(mc=>mc.id===m.model_config_id):null;
+            const memberById=id=>members.find(m=>m.id===id)||{};
+            const memberView=(id,meta={},live={})=>{
+              const member=memberById(id);
+              const mc=memberProfile(member);
+              const model=meta.council_model||live.model||mc?.base_model||member.model||"";
+              const name=meta.council_persona||live.member_name||mc?.name||member.persona_name||model.split(":")[0]||"Council member";
+              const avatar=mc?profileAvatar(mc):"";
+              const pts=member.points||0;
+              return {member,mc,model,name,avatar,pts};
+            };
+            const chip=(color,children,extra={})=><span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 7px",borderRadius:"var(--hc-radius)",background:`${color}12`,border:`1px solid ${color}30`,color,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap",...extra}}>{children}</span>;
+            const avatarNode=(view,size=34,color=t.acc)=><div style={{width:size,height:size,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${color}10`,border:`1px solid ${color}38`,color,overflow:"hidden",flexShrink:0}}>
+              {view.avatar?<img src={avatarSrc(view.avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+            </div>;
+            const tallyFromVotes=votes=>votes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
+            const sortedTally=tally=>Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([id,votes])=>({id,votes,view:memberView(id)}));
+            const livePhase=councilRunning?(councilVoting?"Peer vote":councilRound?.label||"Deliberating"):"Session history";
+            const responseCard=(resp,ri,roundKey,tally,live=false)=>{
+              const meta=live?resp.metadata:getMeta(resp);
+              const memberId=meta.council_member_id;
+              const view=memberView(memberId,meta,live?resp.live:{});
+              const votes=tally[memberId]||0;
+              const ptsColor=view.pts>0?t.ok:view.pts<0?t.err:t.mut;
+              const ckey=`council-card-${roundKey}-${ri}`;
+              const expanded=expandedRounds[ckey]===true;
+              const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
+              const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
+              return <div id={resp.id?`saved-message-${resp.id}`:undefined} key={ckey} style={{scrollMarginTop:80,background:`${t.surface}F5`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:"var(--hc-radius-card)",overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
+                <div style={{padding:11,borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",gap:9,alignItems:"center"}}>
+                  {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                      {view.mc&&chip(t.pink,"Persona",{fontSize:"var(--hc-text-secondary)",padding:"2px 6px"})}
+                    </div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{view.model||"model unavailable"}</div>
+                  </div>
+                  <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+                    {votes>0&&chip(t.ok,<><IC.Trophy/>{votes}</>,{fontSize:"var(--hc-text-secondary)"})}
+                    {chip(ptsColor,`${view.pts>0?"+":""}${view.pts} pt`,{fontSize:"var(--hc-text-secondary)"})}
+                  </div>
+                </div>
+                {respondingTo.length>0&&<div style={{padding:"8px 11px 0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                  <span style={{fontSize:"var(--hc-text-secondary)",textTransform:"none",letterSpacing:0,color:t.mut,fontWeight:700}}>Responding to</span>
+                  {respondingTo.slice(0,4).map(r=>chip(t.acc,r.name||r.id,{fontSize:"var(--hc-text-secondary)",padding:"2px 6px"}))}
+                </div>}
+                <div ref={el=>{if(live&&!resp.live.done&&el)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.7,color:t.dim,maxHeight:expanded?760:300,overflowY:"auto"}}>
+                  <MDWrap>{md(resp.content||"")}</MDWrap>
+                  {live&&!resp.live.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                </div>
+                <div style={{padding:"7px 10px",borderTop:"1px solid var(--hc-line-subtle)",display:"flex",gap:6,alignItems:"center"}}>
+                  <button onClick={()=>setExpandedRounds(p=>({...p,[ckey]:!expanded}))} style={{...btnS(t.mut),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}>{expanded?"Compact":"Expand"}</button>
+                  {memberId&&<>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Mark best answer (+5)" style={{...btnS(t.ok),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.Star/> Best</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Add points (+2)" style={{...btnS(t.acc),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.ChevDown style={{transform:"rotate(180deg)"}}/> Good</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Subtract points (-2)" style={{...btnS(t.err),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.ChevDown/> Weak</button>
+                  </>}
+                  <button onClick={()=>cp(resp.content,ckey)} style={{...btnS(t.mut),padding:"5px 7px",fontSize:"var(--hc-text-control)",marginLeft:"auto"}}>{copied===ckey?<IC.Check/>:<IC.Copy/>}</button>
+                </div>
+              </div>;
+            };
+            const ballotPanel=(votes,hostMeta={})=>{
+              if(!votes.length&&!councilVoting)return null;
+              const tally=tallyFromVotes(votes);
+              const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
+              return <div style={{background:`${t.surface}F5`,border:`1px solid ${t.pink}32`,borderRadius:"var(--hc-radius-card)",padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:12}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}><IC.Trophy/> Peer Ballot</div>
+                  {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {leaders.map((l,i)=><div key={l.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 8px",borderRadius:"var(--hc-radius)",background:i===0?`${t.ok}12`:`${t.bgDeep}72`,border:`1px solid ${i===0?t.ok:t.brd}30`}}>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:i===0?t.ok:t.mut,fontWeight:700,width:18}}>{i+1}</span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</span>
+                      {chip(i===0?t.ok:t.mut,`${l.votes} vote${l.votes===1?"":"s"}`,{fontSize:"var(--hc-text-secondary)"})}
+                    </div>)}
+                  </div>:<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.5}}>Waiting for council members to cast their peer votes.</div>}
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                  {votes.length?votes.map((v,vi)=><div key={vi} style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"7px 8px",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)"}}>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:90,maxWidth:150}}>{v.voter_name}</span>
+                    <span style={{height:1,background:`linear-gradient(90deg,${t.acc}55,${t.ok}55)`,width:28,flexShrink:0}}/>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.ok,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:100,maxWidth:170}}>{v.voted_for_name}</span>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45,flex:"1 1 220px",minWidth:0}}>{v.reason||"No reason supplied."}</span>
+                  </div>):<div style={{display:"flex",alignItems:"center",gap:5,color:t.pink,fontSize:"var(--hc-text-secondary)",fontWeight:600}}>
+                    {[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)} Voting in progress
+                  </div>}
+                </div>
+              </div>;
+            };
+            return <div key={actId||"empty"} style={{maxWidth:1540,margin:"0 auto",padding:"0 20px 8px",overflowY:"auto"}}>
+              <div style={{position:"sticky",top:0,zIndex:8,margin:"0 0 16px",padding:"10px 0 8px",background:`linear-gradient(180deg,${t.bg}F8,${t.bg}D8 70%,transparent)`,backdropFilter:"blur(8px)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"10px 12px"}}>
+                  <div style={{width:34,height:34,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,color:t.pink}}><IC.Council/></div>
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,letterSpacing:.4}}>{councilCfg?.name||"Council Session"}</span>
+                      {chip(t.pink,`${members.length} members`)}
+                      {chip(councilRunning?t.ok:t.mut,livePhase)}
+                      {councilRound?.total_rounds>1&&chip(t.acc,`Round ${(councilRound.round||0)+1}/${councilRound.total_rounds}`)}
+                    </div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{members.map(m=>memberView(m.id).name).join(" / ")||"No council members configured"}</div>
+                  </div>
+                  {councilCfg?.host_model&&chip(t.warm,<><IC.Crown/>{councilCfg.host_model}</>)}
+                </div>
+              </div>
+              {turns.map((turn,ti)=>{
+                const hostMeta=turn.host?getMeta(turn.host):{};
+                const isLive=councilRunning&&isLastTurn(ti);
+                const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
+                const turnTally=tallyFromVotes(turnVotes);
+                const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
+                return <div id={turn.user.id?`saved-message-${turn.user.id}`:undefined} key={ti} style={{scrollMarginTop:80,display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+                    <div style={{width:26,height:26,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
+                    <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
+                  </div>
+                  <div>
+                    <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:"12px 14px",marginBottom:14}}>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.f4,fontWeight:700,textTransform:"none",letterSpacing:0,marginBottom:6}}>Address to the council</div>
+                      <div style={{fontSize:fontSize,lineHeight:1.65,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+                    </div>
+                    {roundNums.map(rnd=>{
+                      const rKey=`${ti}-${rnd}`;
+                      const resps=turn.rounds[rnd]||[];
+                      const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
+                      const isExpanded=resps.some(m=>String(m.id)===String(messageFocus?.id))|| (expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true);
+                      return <div key={rnd} style={{marginBottom:14}}>
+                        <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:"var(--hc-radius)",padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
+                          <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
+                          {rnd===0?<IC.Council/>:<IC.GitBranch/>}
+                          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}>{label}</span>
+                          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
+                        </button>
+                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
+                          {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
+                        </div>}
+                      </div>;
+                    })}
+                    {isLive&&councilRound&&<div style={{marginBottom:14}}>
+                      <div style={{border:`1px solid ${t.pink}28`,background:`${t.pink}08`,borderRadius:"var(--hc-radius)",padding:"8px 10px",display:"flex",alignItems:"center",gap:8,color:t.pink}}>
+                        <IC.GitBranch/><span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}>{councilRound.label}</span>
+                        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                      </div>
+                      {councilKbStatus&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
+                        {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
+                      </div>
+                    </div>}
+                    {ballotPanel(turnVotes,hostMeta)}
+                    {(turn.host||(isLive&&councilHostContent))&&<div id={turn.host?.id?`saved-message-${turn.host.id}`:undefined} style={{scrollMarginTop:80,background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:"var(--hc-radius-card)",padding:14,marginTop:12,animation:"fadeIn .3s"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                        <div style={{width:28,height:28,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
+                        <div style={{minWidth:0,flex:1}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,textTransform:"none",letterSpacing:0}}>Moderator Verdict</div>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{councilCfg?.host_model||act.model||"host model"}</div>
+                        </div>
+                        {(hostMeta.winner||hostMeta.winners?.[0])&&chip(t.ok,<><IC.Trophy/>{(hostMeta.winner||hostMeta.winners[0]).name}</>)}
+                        {isLive&&!turn.host&&<div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                      </div>
+                      <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
+                        <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
+                        {(()=>{const usage=turn.host?.metadata?.usage||(isLive?councilUsage:null);return usage?<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:8}}>{usage.prompt_tokens||0} input · {usage.gen_tokens||0} output tokens{usage.estimated_cost_usd!=null?` · estimated $${usage.estimated_cost_usd.toFixed(4)}`:''}{usage.usage_uncertain?' · incomplete provider usage; further paid calls withheld':''}</div>:null;})()}
+                        {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                      </div>
+                    </div>}
+                    {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
+                  </div>
+                </div>;
+              })}
+              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12}}>
+                {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
+              </div>}
+              <div ref={chatEnd}/>
+            </div>;
+          })():<div key={actId||"empty"} className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
+            {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
+              const totalMessages=messageRows.length;
+              const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
+              const hiddenCount=Math.max(0,totalMessages-visibleCount);
+              const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
+              // Find the last assistant message once so live search/tool events attach to the active answer.
+              let lastAssistantMsgIdx=-1;
+              messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
+              return <>
+              {hiddenCount>0&&<div style={{display:"flex",justifyContent:"center",margin:"0 0 14px"}}>
+                <button onClick={()=>revealOlderMessages(actId,totalMessages)} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.surface}F5`,color:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>
+                  <span style={{display:"inline-flex",transform:"rotate(180deg)"}}><IC.ChevDown/></span>
+                  Show older ({hiddenCount})
+                </button>
+              </div>}
+              {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+              // Consecutive same-role messages group: repeated avatar+name collapse, tighter spacing.
+              const grouped=visibleRows[visibleIdx-1]?.msg.role===msg.role;
+              const nextGrouped=visibleRows[visibleIdx+1]?.msg.role===msg.role;
+              const activeProfile=!isU?getProfileForConversation(act):null;
+              const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
+              const personaName=!isU&&act?.persona_name;
+              const msgProfileType=personaName?getConversationProfileType(act):null;
+              const personaColor=!isU&&personaName?(msgProfileType==="persona"?t.pink:t.acc):t.acc;
+              const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
+              const meta=_metaObj(msg.metadata);
+              const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
+              const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
+              const liveEventsForMsg=isLastAssistant?evts:[];
+              const activityLive=!!msg.isS&&streaming&&streamingCidRef.current===actId;
+              const activityEvents=activityLive&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:liveEventsForMsg;
+              const activityStatus=msg._activityStatus||meta.delivery_status||"";
+              const messageWorkflowIds=!isU?[...new Set([...workflowIds(meta,liveEventsForMsg),...coderWorkflows.filter(w=>w.origin_message_id&&String(w.origin_message_id)===String(msg.id)).map(w=>w.id)])]:[];
+              const messageWorkflows=messageWorkflowIds.map(id=>coderWorkflows.find(w=>w.id===id)||{id,workflow_version:3,state:'queued'});
+              // For the message that is ACTIVELY streaming, derive run ids from
+              // the UNCAPPED stream buffer (same source the finalize PATCH
+              // uses): the live `evts` state keeps only the last 200 events, so
+              // on long Daedalus turns the early plan/build run ids scroll out
+              // and the stepper's earlier checkmarks regress until the turn
+              // finishes. Gate on msg.isS — the ref deliberately survives chat
+              // switches, so a non-streaming message must never read it.
+              // Reading the ref at render time is safe — evts updates already
+              // trigger these renders (same pattern as the finalize _rawEvts).
+              const runIdEvts=!isU&&msg.isS&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:evts;
+              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,runIdEvts):[];
+              const docRunIds=!isU?documentRunIds(meta,runIdEvts===evts?liveEventsForMsg:runIdEvts):[];
+              const documentEvents=[...savedEvents,...liveEventsForMsg];
+              const hasDocumentActivity=docRunIds.length>0||documentEvents.some(isDocumentEvent);
+              if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
+              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
+              const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
+              const quickSearchPayload=renderOpts?.quickSearch;
+              const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
+              return <React.Fragment key={`${actId}:${msg._activityKey||msg.id||i}`}>
+              <div id={`saved-message-${msg.id}`} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
+                {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
+                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
+                  {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+                </div>}
+                <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
+                  {(!grouped||refinedN>0)&&<div style={{fontSize:"var(--hc-text-secondary)",marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
+                    {isU?<span style={{color:t.mut}}>you</span>:personaName
+                      ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:"var(--hc-radius-card)",color:t.pink}}>
+                        {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:"var(--hc-radius-sm)",objectFit:"cover"}} alt=""/>}
+                        {personaName}
+                      </span>
+                      :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
+                    {msg.created_at&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+                    {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius)",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
+                  </div>}
+                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t}/>}
+                  {!isU&&activityLive&&<WaitingQuote active={streaming&&tokC===0&&!renderedContent} quotes={customQuotes} t={t}/>}
+                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":isDaedalusOutput?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
+                    {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
+                        onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
+                      <div style={{display:"flex",gap:4}}>
+                        {isU
+                          ?<button onClick={()=>editMessage(i,editingMsg.content)} style={btnS(t.ok)}>Save & Send</button>
+                          :<button onClick={()=>saveAssistantEdit(i,editingMsg.content)} style={btnS(t.ok)}>Save</button>}
+                        <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
+                      </div>
+                    </div>
+                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
+                    {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
+                      {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
+                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
+                        <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
+                      </div>)}
+                    </div>}
+                    {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
+                      {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:500,color:t.text}}>
+                        <span style={{fontSize:"var(--hc-text-reading)"}}>📄</span>
+                        <span>{p.name}</span>
+                        {p.pages>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:400}}>{p.pages} pages</span>}
+                      </span>)}
+                    </div>}
+                    {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                  </div>
+                  {!isU&&!isDaedalusOutput&&<ToolStatus evts={isLastAssistant&&evts.length?evts:savedEvents} savedEvts={savedEvents} historical={!msg.isS} showActivity={false} msgContent={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>}
+                  {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
+                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
+                  {(()=>{if(isU||isDaedalusOutput||hasDocumentActivity)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
+                      Sources, in priority: explicit metadata.run_ids (written server-side at
+                      each round boundary — survives mid-stream reload), then live events
+                      (current message), then saved_events (history). */}
+                  {(()=>{
+                    if(isU||isDaedalusOutput) return null;
+                    const isLast = isLastAssistant;
+                    // Merge run_ids from all three sources, dedup, preserve first-seen order.
+                    const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
+                    const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
+                    const seen = new Set();
+                    const runIds = [];
+                    for(const r of [...ridsFromMeta, ...ridsFromEvts]){
+                      if(r && !docRunIds.includes(r) && !seen.has(r)){seen.add(r); runIds.push(r);}
+                    }
+                    if(!runIds.length) return null;
+                    return runIds.map(rid =>
+                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md} onOpenArtifact={openArtifact}/>
+                    );
+                  })()}
+                  {/* Inline code execution output */}
+                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
+                    <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
+                      <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{"\u25BE"}</span>
+                      <span>{d.success?"\u2705":"\u274C"}</span>
+                      <span style={{fontWeight:600,color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{d.language||"code"} output</span>
+                      {d.exec_time&&<span style={{color:t.mut,marginLeft:"auto",fontSize:"var(--hc-text-secondary)"}}>{parseFloat(d.exec_time).toFixed(1)}s</span>}
+                    </div>
+                    {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,borderBottom:d.stderr?"1px solid var(--hc-line-subtle)":"none",fontFamily:codeFont}}>{d.stdout}</pre>}
+                    {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,background:`${t.err}08`,fontFamily:codeFont}}>{d.stderr}</pre>}
+                  </div>;});})()}
+                  {/* KB sources strip — numbered citation sources for this reply */}
+                  {(()=>{
+                    if(isU||msg.isS||isDaedalusOutput)return null;
+                    const co=renderOpts;
+                    if(!co?.citations?.length)return null;
+                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
+                    return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)"}}>
+                          <span style={{fontWeight:700,color:t.acc,fontSize:"var(--hc-text-secondary)",flexShrink:0}}>[{s2.n}]</span>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>📄 {s2.filename} <span style={{color:t.mut,fontWeight:400,fontSize:"var(--hc-text-secondary)"}}>chunk {s2.chunk_index}{typeof s2.score==="number"?` · ${Math.round(s2.score*100)}% relevance`:""}</span></div>
+                            {s2.snippet&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:2,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{s2.snippet}</div>}
+                          </div>
+                        </div>)}
+                      </div>
+                    </Collapsible>;
+                  })()}
+                  {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
+                  {!msg.isS&&!isEditing&&<div className="msg-toolbar" style={{...msgToolbarS,flexWrap:"wrap",maxWidth:"100%",rowGap:4}}>
+                    {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} className="hc-icon-btn" data-tip={copied===mid?"Copied":"Copy"} aria-label="Copy message" style={{color:copied===mid?t.ok:t.mut}}>{copied===mid?<IC.Check/>:<IC.Copy/>}</button>}
+                    {!isU&&msg.id!=null&&<button onClick={()=>setInspectorMessage(msg.id)} className="hc-icon-btn" data-tip="Response context" aria-label="Response context" style={{color:t.mut}}><IC.Layers/></button>}
+                    {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} className={generating?undefined:"hc-icon-btn"} data-tip={generating?undefined:playing?"Stop playback":"Read aloud"} aria-label={(playing||generating)?"Stop playback":"Read aloud"} style={generating?msgActionS(t.warm):{color:playing?t.acc:t.mut}}>
+                      {generating?<><Spinner size={10} style={{color:t.warm}}/> {ttsPhase||"generating"}</>:playing?<IC.Stop/>:<IC.Volume/>}
+                    </button>;})()}
+                    {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
+                      <button onClick={()=>regenerate(i)} className="hc-icon-btn" data-tip="Regenerate" aria-label="Regenerate response" style={{color:t.mut,borderRadius:"var(--hc-radius-sm) 0 0 var(--hc-radius-sm)"}}><IC.Refresh/></button>
+                      <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} aria-label="Regenerate with a different model, temperature or profile" aria-expanded={regenPopover?.index===i} className="hc-icon-btn" style={{color:regenPopover?.index===i?t.acc:t.mut,width:22,minWidth:22,borderRadius:"0 var(--hc-radius-sm) var(--hc-radius-sm) 0"}}><IC.ChevDown/></button>
+                      {regenPopover?.index===i&&<div className="hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 4px)",left:0,padding:10,zIndex:20,minWidth:240}}>
+                        <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:8,fontWeight:700}}>Regenerate with</div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Model</div>
+                          <select value={regenPopover.model} onChange={e=>setRegenPopover(p=>({...p,model:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}>
+                            <option value="">(default: {act?.model||"current"})</option>
+                            {models.map(m=><option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Temperature</div>
+                          <input type="number" min="0" max="2" step="0.05" placeholder={`default: ${defaultTemp}`} value={regenPopover.temperature} onChange={e=>setRegenPopover(p=>({...p,temperature:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}/>
+                        </div>
+                        <div style={{marginBottom:8}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Profile</div>
+                          <select value={regenPopover.personaId} onChange={e=>setRegenPopover(p=>({...p,personaId:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}>
+                            <option value="">(default: current)</option>
+                            <option value="none">-- No profile --</option>
+                            <optgroup label="Agents">
+                              {mcs.filter(isAgentProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
+                            </optgroup>
+                            <optgroup label="Personas">
+                              {mcs.filter(isPersonaProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
+                            </optgroup>
+                          </select>
+                        </div>
+                        <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+                          <button onClick={()=>setRegenPopover(null)} style={{background:"none",border:"1px solid var(--hc-line)",color:t.mut,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button>
+                          <button onClick={()=>{
+                            const ov={};
+                            if(regenPopover.model)ov.model=regenPopover.model;
+                            if(regenPopover.temperature!==""){const n=parseFloat(regenPopover.temperature);if(!isNaN(n))ov.temperature=n;}
+                            if(regenPopover.personaId)ov.persona_id=regenPopover.personaId==="none"?null:regenPopover.personaId;
+                            setRegenPopover(null);
+                            regenerate(i, Object.keys(ov).length?ov:undefined);
+                          }} style={{background:`${t.acc}22`,border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Regenerate</button>
+                        </div>
+                      </div>}
+                    </div>}
+                    {!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} className="hc-icon-btn" data-tip={isU?"Edit and resend":"Edit response"} aria-label={isU?"Edit and resend":"Edit response (raw)"} style={{color:t.mut}}><IC.Pencil/></button>}
+                    {!streaming&&!ghostActive&&<button onClick={()=>forkAt(i)} className="hc-icon-btn" data-tip="Fork from here" aria-label="Fork conversation from this point" style={{color:t.mut}}><IC.GitBranch/></button>}
+                    {!streaming&&<button onClick={()=>delMsg(i)} className="hc-icon-btn" data-tip="Delete" aria-label="Delete this message" style={{color:t.mut}}><IC.Trash/></button>}
+                    {!isU&&msg.content&&!streaming&&msg.metadata?.truncated&&i===(act.messages||[]).length-1&&<button onClick={()=>continueMessage(i)} title="Response was cut off by the output-token limit — continue it" style={msgActionS(t.warm)}><IC.Play/> continue</button>}
+                    {!isU&&msg.content&&!streaming&&<>
+                      <button onClick={()=>rateMessage(i,1)} className={`hc-icon-btn${msg.rating===1?" is-rated":""}`} data-tip="Good response" aria-label="Good response" aria-pressed={msg.rating===1} style={{color:msg.rating===1?t.ok:t.mut}}><IC.ThumbUp/></button>
+                      <button onClick={()=>rateMessage(i,-1)} className={`hc-icon-btn${msg.rating===-1?" is-rated":""}`} data-tip="Poor response" aria-label="Poor response" aria-pressed={msg.rating===-1} style={{color:msg.rating===-1?t.err:t.mut}}><IC.ThumbDown/></button>
+                    </>}
+                    {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
+                  </div>}
+                </div>
+              </div></React.Fragment>;
+            })}</>;})()}
+            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
+            {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
+            <div ref={chatEnd}/>
+          </div>}
+        </div>
+        </div>
+        <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
+          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
+          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
+        {/* INPUT */}
+        <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
+          <div className="hc-composer-extras">
+          {runPill.mounted&&(()=>{const currentRun=runPill.value;
+            const phaseLabel={searching:"searching",thinking:"thinking",tool:"tool running",streaming:"streaming",voting:"council voting",council:"council",stopped:"stopped",failed:"failed",complete:"complete"}[currentRun.phase]||currentRun.phase||"running";
+            const pct=currentRun.pct!=null?Math.max(0,Math.min(100,Number(currentRun.pct)||0)):null;
+            const active=streaming||councilRunning||searchLoading;
+            return <div className="hc-run-pill hc-live-head is-active hc-pop" data-placement="top" {...runPill.props} style={{maxWidth:chatWidth,margin:"0 auto 7px",display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:`${currentRun.color}0d`,boxShadow:`0 0 0 1px ${currentRun.color}2f`,color:currentRun.color,fontSize:"var(--hc-text-secondary)",minHeight:31,boxSizing:"border-box"}}>
+              <span className={`hc-activity-dot${active?" is-running":""}`} aria-hidden="true" style={{width:7,height:7,color:currentRun.color}}/>
+              <span key={phaseLabel} className="hc-activity-label" style={{fontSize:"var(--hc-text-secondary)"}}>{phaseLabel}</span>
+              <span style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
+              {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
+              {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
+              {streaming&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Stop</button>}
+            </div>;
+          })()}
+          {/* Attachment chips */}
+          {quickSearchError&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",justifyContent:"flex-start"}}>
+            <span style={{display:"inline-flex",alignItems:"center",gap:7,padding:"4px 9px",borderRadius:"var(--hc-radius)",background:`${t.warm}10`,border:`1px solid ${t.warm}30`,color:t.warm,fontSize:"var(--hc-text-secondary)",fontWeight:700,maxWidth:"100%"}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:t.warm,flexShrink:0}}/>
+              Quick Search
+              <span style={{color:t.mut,fontWeight:500,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{quickSearchError}</span>
+              <button aria-label="Close" onClick={()=>setQuickSearchError(null)} style={{background:"none",border:"none",color:t.warm,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,lineHeight:1}}>×</button>
+            </span>
+          </div>}
+          {/* Council suggested prompts */}
+          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
+                <Dots style={{color:t.pink}}/>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Generating suggestions…</span>
+              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
+                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:"var(--hc-radius-dialog)",padding:"5px 12px",fontSize:"var(--hc-text-control)",color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
+                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
+                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
+                {s}
+              </button>)}
+              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:"1px solid var(--hc-line)",borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",flexShrink:0}}>↻</button>}
+            </div>}
+          {preparingSend&&<div role="status" aria-live="polite" style={{maxWidth:chatWidth,margin:"0 auto",padding:"6px 0",fontSize:"var(--hc-text-secondary)",color:t.warm}}>{preparingSend}</div>}
+          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0",pointerEvents:preparingSend?"none":undefined,opacity:preparingSend?0.65:1}}>
+            {attachments.map((a,i)=>a.type==="image"?
+              <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 6px 3px 3px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
+                <img src={a.dataUrl} alt={a.name} style={{height:26,width:26,objectFit:"cover",borderRadius:"var(--hc-radius-sm)",border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer",flexShrink:0}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
+                <span style={{color:t.mut,fontWeight:400,fontSize:"var(--hc-text-secondary)"}}>{(a.size/1024).toFixed(0)}KB</span>
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.acc,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",opacity:.78,lineHeight:1}}>&times;</button>
+              </span>
+            :a.type==="pdf"?
+              <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:a.error?`${t.err}10`:`${t.acc}10`,border:`1px solid ${a.loading?t.warm:a.error?t.err:t.acc}30`,color:a.loading?t.warm:a.error?t.err:t.acc,padding:"4px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,transition:"all .2s",maxWidth:"100%",minHeight:30,boxSizing:"border-box"}}>
+                <span style={{fontSize:"var(--hc-text-control)"}}>{a.loading?"⏳":"📄"}</span>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{a.name}</span>
+                {!a.loading&&!a.error&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
+                {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
+                {a.error&&<span style={{color:t.err,fontWeight:500,fontSize:"var(--hc-text-secondary)",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.error}</span>}
+                {a.error&&a.file&&<button disabled={!!preparingSend} onClick={()=>{const f=a.file;setAttachments(p=>p.filter((_,j)=>j!==i));handleFileUpload([f]);}} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Retry</button>}
+                <button aria-label="Close" disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:a.error?t.err:t.mut,cursor:"pointer",padding:"1px 4px",fontSize:"var(--hc-text-control)",opacity:.8}}>&times;</button>
+              </span>
+            :<span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.f1}10`,border:`1px solid ${t.f1}30`,color:t.f1,padding:"4px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
+                <IC.Paperclip/>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:190}}>{a.name}</span>
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",opacity:.78,lineHeight:1}}>&times;</button>
+              </span>)}
+          </div>}
+          </div>
+          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",...floatS,borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
+            {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:"inherit",pointerEvents:"none",overflow:"hidden",zIndex:0}}>
+              {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
+            </div>}
+            {/* Slash command menu — type "/" to insert a prompt-library prompt */}
+            {slashMenuActive()&&(()=>{
+              const matches=slashMatchesFor(inp);
+              const hi=Math.min(slashIdx,Math.max(matches.length-1,0));
+              return <div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,padding:8}}>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,padding:"2px 6px 6px"}}>Prompts — ↑↓ select · Enter insert · Esc dismiss</div>
+                <div style={{maxHeight:230,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {matches.map((p,ix)=><div key={p.id||ix} onMouseDown={e=>{e.preventDefault();insertPrompt(p);}} onMouseEnter={()=>setSlashIdx(ix)}
+                    style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:ix===hi?`${t.f1}18`:`${t.surface}44`,border:`1px solid ${ix===hi?`${t.f1}44`:`${t.brd}22`}`}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:ix===hi?t.f1:t.text}}>{p.title}</span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.f1}}>{p.category||"General"}</span>
+                      {/\{\{\s*[\w][\w .\-]*?\s*\}\}/.test(p.content||"")&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"0 4px",borderRadius:"var(--hc-radius-sm)",background:`${t.warm}18`,color:t.warm,fontWeight:700}}>vars</span>}
+                    </div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(p.content||"").slice(0,90)}</div>
+                  </div>)}
+                  {!matches.length&&<div style={{textAlign:"center",padding:12,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No matching prompts — Esc to dismiss</div>}
+                </div>
+              </div>;
+            })()}
+            {/* {{variable}} fill-in card for prompt insertion */}
+            {slashVarFill&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,borderColor:`${t.warm}44`,padding:12}}>
+              <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm,marginBottom:8}}>Fill in “{slashVarFill.title}”</div>
+              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</span>
+                <input autoFocus={ix===0} value={v.value} onChange={e=>setSlashVarFill(s=>({...s,vars:s.vars.map((x,j)=>j===ix?{...x,value:e.target.value}:x)}))}
+                  onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();applyVarFill();}if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashVarFill(null);}}}
+                  style={{fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bg,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius)",fontFamily:font,boxSizing:"border-box"}}/>
+              </label>)}
+              <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
+                <button onClick={()=>setSlashVarFill(null)} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)"}}>Cancel</button>
+                <button onClick={applyVarFill} style={{...btnS(t.warm),fontSize:"var(--hc-text-control)",fontWeight:700}}>Insert</button>
+              </div>
+            </div>}
+            {!act?.is_council&&<><div className="hc-composer-anchor hc-quick-anchor" ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" aria-label="Quick actions" aria-expanded={showQuickMenu} className={`hc-icon-btn is-lg${showQuickMenu?" is-open":""}`} style={{color:showQuickMenu?t.acc:t.mut,opacity:showQuickMenu?1:.75,fontSize:"var(--hc-text-title)"}}><IC.Plus/></button>
+              {showQuickMenu&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"115%",left:0,zIndex:300,minWidth:220,padding:6,display:"flex",flexDirection:"column",gap:2}}>
+                <button disabled={!!preparingSend} onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:`${t.surface}F5`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}><IC.Paperclip/> Attach files</button>
+                {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>⚡ Prompt Library</button>}
+                {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
+              </div>}
+            </div>
+            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS}/>
+            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
+            {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
+              {showPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,minWidth:280,maxWidth:360,padding:8}}>
+                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:"var(--hc-text-control)"}} autoFocus/>
+                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                    <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>{p.title}</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.f1,marginTop:1}}>{p.category||"General"}</div>
+                  </div>)}
+                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No matches</div>}
+                </div>
+                <div style={{borderTop:"1px solid var(--hc-line-subtle)",marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{setShowPromptPicker(false);setShowQuickMenu(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:"var(--hc-text-control)"}}>Manage Prompts →</button>
+                </div>
+              </div>}
+            </div>}
+            </>}
+            <textarea className="hc-composer-input" ref={inpRef} value={inp} onChange={e=>{const v=e.target.value;setInp(v);if(!v.startsWith("/"))setSlashDismissed(false);setSlashIdx(0);}} onKeyDown={e=>{
+              if(slashMenuActive()){
+                const matches=slashMatchesFor(inp);
+                if(matches.length){
+                  if(e.key==="ArrowDown"){e.preventDefault();setSlashIdx(i=>(i+1)%matches.length);return;}
+                  if(e.key==="ArrowUp"){e.preventDefault();setSlashIdx(i=>(i-1+matches.length)%matches.length);return;}
+                  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
+                  if(e.key==="Tab"){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
+                }
+                if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
+              }
+              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
+              disabled={streaming||councilRunning||loadingConv||!!preparingSend}
+              style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
+              onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
+              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
+            {!act?.is_council&&(()=>{
+              const cap=effortCaps[effortModel],native=cap?.mode==='native',choices=effortChoices(cap);
+              const saved=actId?nativeEffort[actId]?.[effortModel]:pendingNativeEffort[effortModel];
+              const selected=native?nativeChoice(cap,saved):REVIEW_LEVELS[reviewLevel(resolveEffort(actId))];
+              return <div className="hc-composer-anchor" ref={effortPickerRef} style={{position:'relative',flexShrink:0}}>
+                <button aria-label="Response effort" onClick={()=>setShowEffortPicker(p=>!p)} title={`${selected.name} — ${selected.desc}`} style={{background:'none',border:'none',color:t.pink,cursor:'pointer',padding:'3px 8px',borderRadius:'var(--hc-radius)',display:'flex',alignItems:'center',gap:4,fontWeight:600}}>
+                  <span>{selected.emoji}</span><span className="hc-effort-label" style={{fontSize:"var(--hc-text-secondary)"}}>{selected.name}</span>
+                </button>
+                {showEffortPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" data-align="end" style={{position:'absolute',bottom:'110%',right:0,zIndex:300,borderColor:`${t.pink}33`,minWidth:230,padding:6}}>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:'3px 6px 5px',fontWeight:700}}>EFFORT — {native?'NATIVE REASONING':'SELF-REVIEW'}</div>
+                  {choices.map(choice=><button key={JSON.stringify(choice.value)} onClick={()=>{
+                    if(native){if(actId)setNativeEffort(p=>({...p,[actId]:{...(p[actId]||{}),[effortModel]:choice.value}}));else setPendingNativeEffort(p=>({...p,[effortModel]:choice.value}));}
+                    else if(actId)setEffortPerChat(p=>({...p,[actId]:choice.value}));else setPendingEffort(choice.value);
+                    setShowEffortPicker(false);
+                  }} style={{display:'flex',alignItems:'center',gap:6,width:'100%',textAlign:'left',padding:'6px 8px',borderRadius:"var(--hc-radius)",background:selected.value===choice.value?`${t.pink}18`:'transparent',border:'none',color:selected.value===choice.value?t.pink:t.dim,cursor:'pointer',fontSize:"var(--hc-text-control)",fontFamily:font,marginBottom:2}}>
+                    <span style={{fontSize:"var(--hc-text-control)"}}>{choice.emoji}</span><div><div style={{fontWeight:600}}>{choice.name}{(native?choice.isDefault:globalEffort===choice.value)&&<small style={{color:t.mut,marginLeft:5}}>{native?'model default':'default'}</small>}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{choice.desc}</div></div>
+                  </button>)}
+                  {cap?.source==='metadata unavailable'&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:6}}>Model controls unavailable; using self-review.</div>}
+                  {effortModel==='auto'&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:6}}>Native controls are resolved after routing. A routed native model uses its own default.</div>}
+                  {!native&&<button onClick={()=>{if(actId)setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});else setPendingEffort(null);setShowEffortPicker(false);}} style={{width:'100%',background:'none',border:'none',color:t.mut,cursor:'pointer',fontSize:"var(--hc-text-control)",padding:6}}>Use global review default</button>}
+                </div>}
+              </div>;
+            })()}
+            {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:"var(--hc-radius)",cursor:"pointer"}}>Retry transcription</button>}
+            {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} className="hc-icon-btn is-lg" style={{color:recording?t.err:transcribing?t.warm:t.mut,background:recording?`${t.err}22`:undefined,cursor:transcribing?"default":"pointer",animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
+              {transcribing?<Spinner size={13} style={{color:t.warm}}/>:<IC.Mic/>}
+            </button>}
+            {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+          </div>
+        </div>
+        </div>
+      </>}
+      {/* Settings dialog: a body portal, rendered beside the panel chain so it opens from any view, including a workspace detail. */}
+      {settingsPresence.mounted&&ReactDOM.createPortal(<div className="hc-viewport-overlay hc-scrim" {...settingsPresence.props} style={{position:"fixed",inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
     <div ref={settingsFocus} role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1} className="hc-dialog hc-dialog-card hc-elev-3" style={{zoom:_uiScale,width:isMobile?"calc(100vw / var(--hc-ui-scale))":"min(1100px,calc(95vw / var(--hc-ui-scale)))",maxHeight:"calc(var(--hc-viewport-height) / var(--hc-ui-scale))",height:isMobile?"calc(var(--hc-viewport-height) / var(--hc-ui-scale))":"calc(85vh / var(--hc-ui-scale))",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",overflow:"hidden",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
       <div style={{borderRight:"none",background:"var(--hc-sunken)",padding:isMobile?"calc(8px + env(safe-area-inset-top)) 12px 8px":"18px 14px",display:"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:"1px solid var(--hc-line-subtle)",alignItems:"center"}:{})}}>
         <div style={{display:isMobile?"none":"flex",alignItems:"center",gap:9,marginBottom:10}}>
@@ -7174,24 +7811,28 @@ function HyprChat(){
           </button>;})}
         </div>
         {(()=>{const active=settingsTab==="changelog";return <button onClick={async()=>{setSettingsTab("changelog");setShowHealthMonitor(false);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}}} aria-current={active?"page":undefined} className={`hc-settings-nav-item${active?" is-active":""}${isMobile?" is-row":""}`} style={{width:isMobile?"auto":"100%",fontFamily:font,marginTop:isMobile?0:8,...(isMobile?{flexShrink:0}:{})}}>
-          <span className="hc-settings-nav-icon" aria-hidden="true">📋</span>
+          <span className="hc-settings-nav-icon" aria-hidden="true"><IC.File/></span>
           <span className="hc-settings-nav-text">
             <span className="hc-settings-nav-label">Changelog</span>
             <span className="hc-settings-nav-hint">Release notes and updates</span>
           </span>
         </button>;})()}
+        {isMobile&&<button aria-label="Close" className="hc-icon-btn is-lg" onClick={closeSettings} style={{flexShrink:0,marginLeft:4,color:t.mut}}><IC.X/></button>}
       </div>
       <div style={{display:"flex",overflow:"hidden",minWidth:0,...(isMobile?{flexDirection:"column"}:{})}}>
-    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",overflowY:"auto",padding:isMobile?"16px 14px":"22px 30px",transition:"flex .3s ease",minWidth:0}}>
-    <div style={{maxWidth:980}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden",transition:"flex .3s ease"}}>
+    <div style={{flexShrink:0,padding:isMobile?"12px 14px 10px":"18px 30px 12px",borderBottom:"1px solid var(--hc-line-subtle)"}}>
+      <div style={{maxWidth:980,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
         <h3 style={{fontSize:"var(--hc-text-title)",fontWeight:600,color:t.text,margin:0}}>{activeSettingsTitle}</h3>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          {settingsPulse&&<span role="status" aria-live="polite" style={{fontSize:"var(--hc-text-secondary)",color:settingsPulse.type==="error"?t.err:t.ok,border:`1px solid ${settingsPulse.type==="error"?t.err:t.ok}33`,background:`${settingsPulse.type==="error"?t.err:t.ok}12`,borderRadius:"var(--hc-radius-pill)",padding:"3px 8px",fontWeight:700,animation:"fadeIn .15s"}}>{settingsPulse.text}</span>}
-          {settingsTab==="changelog"&&<button onClick={async()=>{setChangelogContent(null);try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"5px 10px"}}>Refresh</button>}
-          <button aria-label="Close" onClick={closeSettings} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"6px 10px"}}>✕</button>
+          {settingsPulse&&<span role="status" aria-live="polite" style={{fontSize:"var(--hc-text-secondary)",color:settingsPulse.type==="error"?t.err:t.ok,border:`1px solid ${settingsPulse.type==="error"?t.err:t.ok}33`,background:`${settingsPulse.type==="error"?t.err:t.ok}12`,borderRadius:"var(--hc-radius-pill)",padding:"3px 8px",fontWeight:600,animation:"fadeIn .15s"}}>{settingsPulse.text}</span>}
+          {settingsTab==="changelog"&&<button aria-label="Refresh changelog" data-tip="Refresh" className="hc-icon-btn is-lg tip-below" onClick={async()=>{setChangelogContent(null);try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}} style={{color:t.mut}}><IC.Refresh/></button>}
+          {!isMobile&&<button aria-label="Close" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={closeSettings} style={{color:t.mut}}><IC.X/></button>}
         </div>
       </div>
+    </div>
+    <div style={{flex:1,minHeight:0,overflowY:"auto",padding:isMobile?"14px 14px 16px":"18px 30px 22px"}}>
+    <div style={{maxWidth:980}}>
 
       {/* TILE: Users */}
       <div className="hc-tab-pane" style={{display:settingsTab==="users"?"block":"none"}}>
@@ -7757,7 +8398,7 @@ function HyprChat(){
                 notify({type:"success",text:"Reindex complete",detail:`${d.kbs?.length||0} knowledge bases reindexed.`});
               }catch(e){updateActivity(activityId,{status:"error",error:e.message,message:"Reindex failed"});notify({type:"error",text:"Reindex failed",detail:e.message});}
               fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
-            }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"5px 12px"}}>🔄 Reindex</button>
+            }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"5px 12px"}}><IC.Refresh/> Reindex</button>
           </div>
         </div>
         {ragSaveState&&<div style={{fontSize:"var(--hc-text-secondary)",color:ragSaveState==="failed"?t.err:ragSaveState==="saved"?t.ok:t.mut,marginTop:-8,marginBottom:10,textAlign:"right"}}>{ragSaveState==="saving"?"Saving...":ragSaveState==="saved"?"Saved":"Failed"}</div>}
@@ -7955,25 +8596,27 @@ function HyprChat(){
 
       {/* TILE: Changelog */}
       <div className="hc-tab-pane" style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0}}>
-        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"6px 4px 20px",lineHeight:1.7,fontSize:"var(--hc-text-control)",color:t.text}}>
+        <div style={{padding:"6px 4px 20px",lineHeight:1.7,fontSize:"var(--hc-text-control)",color:t.text}}>
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-            <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-            Loading changelog...
+            <Dots style={{color:t.acc}}/>
+            Loading changelog…
           </div>:<div className="changelog-markdown"><MDWrap>{md(changelogContent,{changelog:true})}</MDWrap></div>}
         </div>
       </div>
 
     </div>
+    </div>
   </div>
 
     {/* ── HEALTH MONITOR PANEL (slides in from right) ── */}
-    {showHealthMonitor&&<div style={{flex:isMobile?"0 0 48%":"0 0 50%",overflowY:"auto",padding:isMobile?"16px 14px":"20px 24px",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:`${t.bg}`,animation:"fadeIn .3s ease",...(isMobile?{borderTop:"1px solid var(--hc-line-subtle)"}:{})}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+    {showHealthMonitor&&<div style={{flex:isMobile?"0 0 48%":"0 0 50%",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:`${t.bg}`,animation:"fadeIn .3s ease",...(isMobile?{borderTop:"1px solid var(--hc-line-subtle)"}:{})}}>
+      <div style={{flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,padding:isMobile?"12px 14px 10px":"18px 24px 12px",borderBottom:"1px solid var(--hc-line-subtle)"}}>
         <h3 style={{fontSize:"var(--hc-text-title)",fontWeight:600,color:t.text,margin:0}}>Service Monitor</h3>
-        <button onClick={()=>setShowHealthMonitor(false)} style={{background:"none",border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",color:t.dim,cursor:"pointer",padding:"4px 10px",fontSize:"var(--hc-text-control)"}}>✕ Close</button>
+        <button aria-label="Close service monitor" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={()=>setShowHealthMonitor(false)} style={{color:t.mut}}><IC.X/></button>
       </div>
+      <div style={{flex:1,minHeight:0,overflowY:"auto",padding:isMobile?"14px":"16px 24px 20px"}}>
       {!healthHistory?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading uptime data...</div>
-      :Object.keys(healthHistory.services||{}).length===0?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No health data yet. Checks run every 5 minutes — data will appear shortly.</div>
+      :Object.keys(healthHistory.services||{}).length===0?<EmptyState compact icon={<IC.Activity/>} title="No health data yet" hint="Checks run every 5 minutes — data will appear shortly."/>
       :Object.entries(healthHistory.services).map(([svc,data])=>{
         const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?STATUS_DEGRADED:t.err;
         const statusLabel=data.current_status==="ok"?"Operational":data.current_status==="degraded"?"Degraded":"Down";
@@ -8025,629 +8668,12 @@ function HyprChat(){
       {/* Refresh button */}
       <button onClick={async()=>{try{const r=await fetch(`${API}/api/health/history?days=90`);const d=await r.json();setHealthHistory(d);}catch{}
         try{const r2=await fetch(`${API}/api/health`);const d2=await r2.json();setHealth(d2.services||{});}catch{}
-      }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"6px 14px",marginTop:4}}>🔄 Refresh</button>
+      }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"6px 14px",marginTop:4}}><IC.Refresh/> Refresh</button>
+      </div>
     </div>}
   </div>
     </div>
-  </div>,document.body)
-
-      :<>
-        {/* CHAT - full width, pills inline */}
-        <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}
-          onDragOver={e=>{e.preventDefault();e.stopPropagation();setDragOver(true);}}
-          onDragLeave={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);}}
-          onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
-          {/* Drag overlay */}
-          {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:"var(--hc-radius-dialog)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
-            <div style={{fontSize:"var(--hc-text-control)",color:t.acc,fontWeight:700,letterSpacing:1}}>{isCoderPersonaName(act?.persona_name)?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
-          </div>}
-          {/* Scroll-to-top / Scroll-to-bottom */}
-          {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
-          {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
-          {/* Messages */}
-          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
-          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
-            {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
-            :<ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>}
-          </div>:act?.is_council?(()=>{
-            const councilCfg=councils.find(c=>c.id===act.council_config_id);
-            const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-            const members=councilCfg?.members||[];
-            const turns=[];let curTurn=null;
-            for(const msg of(act.messages||[])){
-              const meta=getMeta(msg);
-              if(msg.role==="user"&&!meta.council_member_id&&!meta.council_host){
-                curTurn={user:msg,rounds:{},host:null};turns.push(curTurn);
-              }else if(msg.role==="assistant"){
-                if(!curTurn){curTurn={user:{role:"user",content:""},rounds:{},host:null};turns.push(curTurn);}
-                if(meta.council_host)curTurn.host=msg;
-                else{
-                  const rnd=meta.debate_round||0;
-                  if(!curTurn.rounds[rnd])curTurn.rounds[rnd]=[];
-                  curTurn.rounds[rnd].push(msg);
-                }
-              }
-            }
-            const isLastTurn=ti=>ti===turns.length-1;
-            const memberProfile=m=>m?.model_config_id?mcs.find(mc=>mc.id===m.model_config_id):null;
-            const memberById=id=>members.find(m=>m.id===id)||{};
-            const memberView=(id,meta={},live={})=>{
-              const member=memberById(id);
-              const mc=memberProfile(member);
-              const model=meta.council_model||live.model||mc?.base_model||member.model||"";
-              const name=meta.council_persona||live.member_name||mc?.name||member.persona_name||model.split(":")[0]||"Council member";
-              const avatar=mc?profileAvatar(mc):"";
-              const pts=member.points||0;
-              return {member,mc,model,name,avatar,pts};
-            };
-            const chip=(color,children,extra={})=><span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 7px",borderRadius:"var(--hc-radius)",background:`${color}12`,border:`1px solid ${color}30`,color,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap",...extra}}>{children}</span>;
-            const avatarNode=(view,size=34,color=t.acc)=><div style={{width:size,height:size,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${color}10`,border:`1px solid ${color}38`,color,overflow:"hidden",flexShrink:0}}>
-              {view.avatar?<img src={avatarSrc(view.avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
-            </div>;
-            const tallyFromVotes=votes=>votes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
-            const sortedTally=tally=>Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([id,votes])=>({id,votes,view:memberView(id)}));
-            const livePhase=councilRunning?(councilVoting?"Peer vote":councilRound?.label||"Deliberating"):"Session history";
-            const responseCard=(resp,ri,roundKey,tally,live=false)=>{
-              const meta=live?resp.metadata:getMeta(resp);
-              const memberId=meta.council_member_id;
-              const view=memberView(memberId,meta,live?resp.live:{});
-              const votes=tally[memberId]||0;
-              const ptsColor=view.pts>0?t.ok:view.pts<0?t.err:t.mut;
-              const ckey=`council-card-${roundKey}-${ri}`;
-              const expanded=expandedRounds[ckey]===true;
-              const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
-              const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
-              return <div id={resp.id?`saved-message-${resp.id}`:undefined} key={ckey} style={{scrollMarginTop:80,background:`${t.surface}F5`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:"var(--hc-radius-card)",overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
-                <div style={{padding:11,borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",gap:9,alignItems:"center"}}>
-                  {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
-                  <div style={{minWidth:0,flex:1}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
-                      {view.mc&&chip(t.pink,"Persona",{fontSize:"var(--hc-text-secondary)",padding:"2px 6px"})}
-                    </div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{view.model||"model unavailable"}</div>
-                  </div>
-                  <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
-                    {votes>0&&chip(t.ok,<><IC.Trophy/>{votes}</>,{fontSize:"var(--hc-text-secondary)"})}
-                    {chip(ptsColor,`${view.pts>0?"+":""}${view.pts} pt`,{fontSize:"var(--hc-text-secondary)"})}
-                  </div>
-                </div>
-                {respondingTo.length>0&&<div style={{padding:"8px 11px 0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                  <span style={{fontSize:"var(--hc-text-secondary)",textTransform:"none",letterSpacing:0,color:t.mut,fontWeight:700}}>Responding to</span>
-                  {respondingTo.slice(0,4).map(r=>chip(t.acc,r.name||r.id,{fontSize:"var(--hc-text-secondary)",padding:"2px 6px"}))}
-                </div>}
-                <div ref={el=>{if(live&&!resp.live.done&&el)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.7,color:t.dim,maxHeight:expanded?760:300,overflowY:"auto"}}>
-                  <MDWrap>{md(resp.content||"")}</MDWrap>
-                  {live&&!resp.live.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                </div>
-                <div style={{padding:"7px 10px",borderTop:"1px solid var(--hc-line-subtle)",display:"flex",gap:6,alignItems:"center"}}>
-                  <button onClick={()=>setExpandedRounds(p=>({...p,[ckey]:!expanded}))} style={{...btnS(t.mut),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}>{expanded?"Compact":"Expand"}</button>
-                  {memberId&&<>
-                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Mark best answer (+5)" style={{...btnS(t.ok),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.Star/> Best</button>
-                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Add points (+2)" style={{...btnS(t.acc),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.ChevDown style={{transform:"rotate(180deg)"}}/> Good</button>
-                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Subtract points (-2)" style={{...btnS(t.err),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.ChevDown/> Weak</button>
-                  </>}
-                  <button onClick={()=>cp(resp.content,ckey)} style={{...btnS(t.mut),padding:"5px 7px",fontSize:"var(--hc-text-control)",marginLeft:"auto"}}>{copied===ckey?<IC.Check/>:<IC.Copy/>}</button>
-                </div>
-              </div>;
-            };
-            const ballotPanel=(votes,hostMeta={})=>{
-              if(!votes.length&&!councilVoting)return null;
-              const tally=tallyFromVotes(votes);
-              const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
-              return <div style={{background:`${t.surface}F5`,border:`1px solid ${t.pink}32`,borderRadius:"var(--hc-radius-card)",padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:12}}>
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}><IC.Trophy/> Peer Ballot</div>
-                  {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {leaders.map((l,i)=><div key={l.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 8px",borderRadius:"var(--hc-radius)",background:i===0?`${t.ok}12`:`${t.bgDeep}72`,border:`1px solid ${i===0?t.ok:t.brd}30`}}>
-                      <span style={{fontSize:"var(--hc-text-secondary)",color:i===0?t.ok:t.mut,fontWeight:700,width:18}}>{i+1}</span>
-                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</span>
-                      {chip(i===0?t.ok:t.mut,`${l.votes} vote${l.votes===1?"":"s"}`,{fontSize:"var(--hc-text-secondary)"})}
-                    </div>)}
-                  </div>:<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.5}}>Waiting for council members to cast their peer votes.</div>}
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:7}}>
-                  {votes.length?votes.map((v,vi)=><div key={vi} style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"7px 8px",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)"}}>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:90,maxWidth:150}}>{v.voter_name}</span>
-                    <span style={{height:1,background:`linear-gradient(90deg,${t.acc}55,${t.ok}55)`,width:28,flexShrink:0}}/>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.ok,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:100,maxWidth:170}}>{v.voted_for_name}</span>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45,flex:"1 1 220px",minWidth:0}}>{v.reason||"No reason supplied."}</span>
-                  </div>):<div style={{display:"flex",alignItems:"center",gap:5,color:t.pink,fontSize:"var(--hc-text-secondary)",fontWeight:600}}>
-                    {[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)} Voting in progress
-                  </div>}
-                </div>
-              </div>;
-            };
-            return <div key={actId||"empty"} style={{maxWidth:1540,margin:"0 auto",padding:"0 20px 8px",overflowY:"auto"}}>
-              <div style={{position:"sticky",top:0,zIndex:8,margin:"0 0 16px",padding:"10px 0 8px",background:`linear-gradient(180deg,${t.bg}F8,${t.bg}D8 70%,transparent)`,backdropFilter:"blur(8px)"}}>
-                <div style={{display:"flex",alignItems:"center",gap:10,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"10px 12px"}}>
-                  <div style={{width:34,height:34,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,color:t.pink}}><IC.Council/></div>
-                  <div style={{minWidth:0,flex:1}}>
-                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,letterSpacing:.4}}>{councilCfg?.name||"Council Session"}</span>
-                      {chip(t.pink,`${members.length} members`)}
-                      {chip(councilRunning?t.ok:t.mut,livePhase)}
-                      {councilRound?.total_rounds>1&&chip(t.acc,`Round ${(councilRound.round||0)+1}/${councilRound.total_rounds}`)}
-                    </div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{members.map(m=>memberView(m.id).name).join(" / ")||"No council members configured"}</div>
-                  </div>
-                  {councilCfg?.host_model&&chip(t.warm,<><IC.Crown/>{councilCfg.host_model}</>)}
-                </div>
-              </div>
-              {turns.map((turn,ti)=>{
-                const hostMeta=turn.host?getMeta(turn.host):{};
-                const isLive=councilRunning&&isLastTurn(ti);
-                const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
-                const turnTally=tallyFromVotes(turnVotes);
-                const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
-                return <div id={turn.user.id?`saved-message-${turn.user.id}`:undefined} key={ti} style={{scrollMarginTop:80,display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
-                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                    <div style={{width:26,height:26,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
-                    <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
-                  </div>
-                  <div>
-                    <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:"12px 14px",marginBottom:14}}>
-                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.f4,fontWeight:700,textTransform:"none",letterSpacing:0,marginBottom:6}}>Address to the council</div>
-                      <div style={{fontSize:fontSize,lineHeight:1.65,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
-                    </div>
-                    {roundNums.map(rnd=>{
-                      const rKey=`${ti}-${rnd}`;
-                      const resps=turn.rounds[rnd]||[];
-                      const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
-                      const isExpanded=resps.some(m=>String(m.id)===String(messageFocus?.id))|| (expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true);
-                      return <div key={rnd} style={{marginBottom:14}}>
-                        <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:"var(--hc-radius)",padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
-                          <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
-                          {rnd===0?<IC.Council/>:<IC.GitBranch/>}
-                          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}>{label}</span>
-                          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
-                        </button>
-                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
-                          {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
-                        </div>}
-                      </div>;
-                    })}
-                    {isLive&&councilRound&&<div style={{marginBottom:14}}>
-                      <div style={{border:`1px solid ${t.pink}28`,background:`${t.pink}08`,borderRadius:"var(--hc-radius)",padding:"8px 10px",display:"flex",alignItems:"center",gap:8,color:t.pink}}>
-                        <IC.GitBranch/><span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}>{councilRound.label}</span>
-                        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                      </div>
-                      {councilKbStatus&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
-                        {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
-                      </div>
-                    </div>}
-                    {ballotPanel(turnVotes,hostMeta)}
-                    {(turn.host||(isLive&&councilHostContent))&&<div id={turn.host?.id?`saved-message-${turn.host.id}`:undefined} style={{scrollMarginTop:80,background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:"var(--hc-radius-card)",padding:14,marginTop:12,animation:"fadeIn .3s"}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                        <div style={{width:28,height:28,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
-                        <div style={{minWidth:0,flex:1}}>
-                          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,textTransform:"none",letterSpacing:0}}>Moderator Verdict</div>
-                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{councilCfg?.host_model||act.model||"host model"}</div>
-                        </div>
-                        {(hostMeta.winner||hostMeta.winners?.[0])&&chip(t.ok,<><IC.Trophy/>{(hostMeta.winner||hostMeta.winners[0]).name}</>)}
-                        {isLive&&!turn.host&&<div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
-                      </div>
-                      <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
-                        <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
-                        {(()=>{const usage=turn.host?.metadata?.usage||(isLive?councilUsage:null);return usage?<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:8}}>{usage.prompt_tokens||0} input · {usage.gen_tokens||0} output tokens{usage.estimated_cost_usd!=null?` · estimated $${usage.estimated_cost_usd.toFixed(4)}`:''}{usage.usage_uncertain?' · incomplete provider usage; further paid calls withheld':''}</div>:null;})()}
-                        {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                      </div>
-                    </div>}
-                    {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
-                  </div>
-                </div>;
-              })}
-              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12}}>
-                {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
-              </div>}
-              <div ref={chatEnd}/>
-            </div>;
-          })():<div key={actId||"empty"} className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
-            {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
-              const totalMessages=messageRows.length;
-              const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
-              const hiddenCount=Math.max(0,totalMessages-visibleCount);
-              const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
-              // Find the last assistant message once so live search/tool events attach to the active answer.
-              let lastAssistantMsgIdx=-1;
-              messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
-              return <>
-              {hiddenCount>0&&<div style={{display:"flex",justifyContent:"center",margin:"0 0 14px"}}>
-                <button onClick={()=>revealOlderMessages(actId,totalMessages)} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.surface}F5`,color:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>
-                  <span style={{display:"inline-flex",transform:"rotate(180deg)"}}><IC.ChevDown/></span>
-                  Show older ({hiddenCount})
-                </button>
-              </div>}
-              {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
-              // Consecutive same-role messages group: repeated avatar+name collapse, tighter spacing.
-              const grouped=visibleRows[visibleIdx-1]?.msg.role===msg.role;
-              const nextGrouped=visibleRows[visibleIdx+1]?.msg.role===msg.role;
-              const activeProfile=!isU?getProfileForConversation(act):null;
-              const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
-              const personaName=!isU&&act?.persona_name;
-              const msgProfileType=personaName?getConversationProfileType(act):null;
-              const personaColor=!isU&&personaName?(msgProfileType==="persona"?t.pink:t.acc):t.acc;
-              const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
-              const meta=_metaObj(msg.metadata);
-              const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
-              const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
-              const liveEventsForMsg=isLastAssistant?evts:[];
-              const activityLive=!!msg.isS&&streaming&&streamingCidRef.current===actId;
-              const activityEvents=activityLive&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:liveEventsForMsg;
-              const activityStatus=msg._activityStatus||meta.delivery_status||"";
-              const messageWorkflowIds=!isU?[...new Set([...workflowIds(meta,liveEventsForMsg),...coderWorkflows.filter(w=>w.origin_message_id&&String(w.origin_message_id)===String(msg.id)).map(w=>w.id)])]:[];
-              const messageWorkflows=messageWorkflowIds.map(id=>coderWorkflows.find(w=>w.id===id)||{id,workflow_version:3,state:'queued'});
-              // For the message that is ACTIVELY streaming, derive run ids from
-              // the UNCAPPED stream buffer (same source the finalize PATCH
-              // uses): the live `evts` state keeps only the last 200 events, so
-              // on long Daedalus turns the early plan/build run ids scroll out
-              // and the stepper's earlier checkmarks regress until the turn
-              // finishes. Gate on msg.isS — the ref deliberately survives chat
-              // switches, so a non-streaming message must never read it.
-              // Reading the ref at render time is safe — evts updates already
-              // trigger these renders (same pattern as the finalize _rawEvts).
-              const runIdEvts=!isU&&msg.isS&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:evts;
-              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,runIdEvts):[];
-              const docRunIds=!isU?documentRunIds(meta,runIdEvts===evts?liveEventsForMsg:runIdEvts):[];
-              const documentEvents=[...savedEvents,...liveEventsForMsg];
-              const hasDocumentActivity=docRunIds.length>0||documentEvents.some(isDocumentEvent);
-              if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
-              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
-              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
-              const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
-              const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
-              const quickSearchPayload=renderOpts?.quickSearch;
-              const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
-              return <React.Fragment key={`${actId}:${msg._activityKey||msg.id||i}`}>
-              <div id={`saved-message-${msg.id}`} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
-                {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
-                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
-                  {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
-                </div>}
-                <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
-                  {(!grouped||refinedN>0)&&<div style={{fontSize:"var(--hc-text-secondary)",marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
-                    {isU?<span style={{color:t.mut}}>you</span>:personaName
-                      ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:"var(--hc-radius-card)",color:t.pink}}>
-                        {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:"var(--hc-radius-sm)",objectFit:"cover"}} alt=""/>}
-                        {personaName}
-                      </span>
-                      :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
-                    {msg.created_at&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
-                    {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius)",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
-                  </div>}
-                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t}/>}
-                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":isDaedalusOutput?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
-                    {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
-                      <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
-                        onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
-                      <div style={{display:"flex",gap:4}}>
-                        {isU
-                          ?<button onClick={()=>editMessage(i,editingMsg.content)} style={btnS(t.ok)}>Save & Send</button>
-                          :<button onClick={()=>saveAssistantEdit(i,editingMsg.content)} style={btnS(t.ok)}>Save</button>}
-                        <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
-                      </div>
-                    </div>
-                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
-                    {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
-                      {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
-                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
-                        <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
-                      </div>)}
-                    </div>}
-                    {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
-                      {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:500,color:t.text}}>
-                        <span style={{fontSize:"var(--hc-text-reading)"}}>📄</span>
-                        <span>{p.name}</span>
-                        {p.pages>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:400}}>{p.pages} pages</span>}
-                      </span>)}
-                    </div>}
-                    {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                  </div>
-                  {!isU&&!isDaedalusOutput&&<ToolStatus evts={isLastAssistant&&evts.length?evts:savedEvents} savedEvts={savedEvents} historical={!msg.isS} showActivity={false} msgContent={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>}
-                  {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
-                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
-                  {(()=>{if(isU||isDaedalusOutput||hasDocumentActivity)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
-                  {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
-                      Sources, in priority: explicit metadata.run_ids (written server-side at
-                      each round boundary — survives mid-stream reload), then live events
-                      (current message), then saved_events (history). */}
-                  {(()=>{
-                    if(isU||isDaedalusOutput) return null;
-                    const isLast = isLastAssistant;
-                    // Merge run_ids from all three sources, dedup, preserve first-seen order.
-                    const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
-                    const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
-                    const seen = new Set();
-                    const runIds = [];
-                    for(const r of [...ridsFromMeta, ...ridsFromEvts]){
-                      if(r && !docRunIds.includes(r) && !seen.has(r)){seen.add(r); runIds.push(r);}
-                    }
-                    if(!runIds.length) return null;
-                    return runIds.map(rid =>
-                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md} onOpenArtifact={openArtifact}/>
-                    );
-                  })()}
-                  {/* Inline code execution output */}
-                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
-                    <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
-                      <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{"\u25BE"}</span>
-                      <span>{d.success?"\u2705":"\u274C"}</span>
-                      <span style={{fontWeight:600,color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{d.language||"code"} output</span>
-                      {d.exec_time&&<span style={{color:t.mut,marginLeft:"auto",fontSize:"var(--hc-text-secondary)"}}>{parseFloat(d.exec_time).toFixed(1)}s</span>}
-                    </div>
-                    {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,borderBottom:d.stderr?"1px solid var(--hc-line-subtle)":"none",fontFamily:codeFont}}>{d.stdout}</pre>}
-                    {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,background:`${t.err}08`,fontFamily:codeFont}}>{d.stderr}</pre>}
-                  </div>;});})()}
-                  {/* KB sources strip — numbered citation sources for this reply */}
-                  {(()=>{
-                    if(isU||msg.isS||isDaedalusOutput)return null;
-                    const co=renderOpts;
-                    if(!co?.citations?.length)return null;
-                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
-                    return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
-                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                        {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)"}}>
-                          <span style={{fontWeight:700,color:t.acc,fontSize:"var(--hc-text-secondary)",flexShrink:0}}>[{s2.n}]</span>
-                          <div style={{minWidth:0}}>
-                            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>📄 {s2.filename} <span style={{color:t.mut,fontWeight:400,fontSize:"var(--hc-text-secondary)"}}>chunk {s2.chunk_index}{typeof s2.score==="number"?` · ${Math.round(s2.score*100)}% relevance`:""}</span></div>
-                            {s2.snippet&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:2,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{s2.snippet}</div>}
-                          </div>
-                        </div>)}
-                      </div>
-                    </Collapsible>;
-                  })()}
-                  {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
-                  {!msg.isS&&!isEditing&&<div className="msg-toolbar" style={{...msgToolbarS,flexWrap:"wrap",maxWidth:"100%",rowGap:4}}>
-                    {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} className="hc-icon-btn" data-tip={copied===mid?"Copied":"Copy"} aria-label="Copy message" style={{color:copied===mid?t.ok:t.mut}}>{copied===mid?<IC.Check/>:<IC.Copy/>}</button>}
-                    {!isU&&msg.id!=null&&<button onClick={()=>setInspectorMessage(msg.id)} className="hc-icon-btn" data-tip="Response context" aria-label="Response context" style={{color:t.mut}}><IC.Layers/></button>}
-                    {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} className={generating?undefined:"hc-icon-btn"} data-tip={generating?undefined:playing?"Stop playback":"Read aloud"} aria-label={(playing||generating)?"Stop playback":"Read aloud"} style={generating?msgActionS(t.warm):{color:playing?t.acc:t.mut}}>
-                      {generating?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> {ttsPhase||"generating"}</>:playing?<IC.Stop/>:<IC.Volume/>}
-                    </button>;})()}
-                    {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
-                      <button onClick={()=>regenerate(i)} className="hc-icon-btn" data-tip="Regenerate" aria-label="Regenerate response" style={{color:t.mut,borderRadius:"var(--hc-radius-sm) 0 0 var(--hc-radius-sm)"}}><IC.Refresh/></button>
-                      <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} aria-label="Regenerate with a different model, temperature or profile" aria-expanded={regenPopover?.index===i} className="hc-icon-btn" style={{color:regenPopover?.index===i?t.acc:t.mut,width:22,minWidth:22,borderRadius:"0 var(--hc-radius-sm) var(--hc-radius-sm) 0"}}><IC.ChevDown/></button>
-                      {regenPopover?.index===i&&<div className="hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 4px)",left:0,padding:10,zIndex:20,minWidth:240}}>
-                        <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:8,fontWeight:700}}>Regenerate with</div>
-                        <div style={{marginBottom:6}}>
-                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Model</div>
-                          <select value={regenPopover.model} onChange={e=>setRegenPopover(p=>({...p,model:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}>
-                            <option value="">(default: {act?.model||"current"})</option>
-                            {models.map(m=><option key={m} value={m}>{m}</option>)}
-                          </select>
-                        </div>
-                        <div style={{marginBottom:6}}>
-                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Temperature</div>
-                          <input type="number" min="0" max="2" step="0.05" placeholder={`default: ${defaultTemp}`} value={regenPopover.temperature} onChange={e=>setRegenPopover(p=>({...p,temperature:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}/>
-                        </div>
-                        <div style={{marginBottom:8}}>
-                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Profile</div>
-                          <select value={regenPopover.personaId} onChange={e=>setRegenPopover(p=>({...p,personaId:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}>
-                            <option value="">(default: current)</option>
-                            <option value="none">-- No profile --</option>
-                            <optgroup label="Agents">
-                              {mcs.filter(isAgentProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
-                            </optgroup>
-                            <optgroup label="Personas">
-                              {mcs.filter(isPersonaProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
-                            </optgroup>
-                          </select>
-                        </div>
-                        <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
-                          <button onClick={()=>setRegenPopover(null)} style={{background:"none",border:"1px solid var(--hc-line)",color:t.mut,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button>
-                          <button onClick={()=>{
-                            const ov={};
-                            if(regenPopover.model)ov.model=regenPopover.model;
-                            if(regenPopover.temperature!==""){const n=parseFloat(regenPopover.temperature);if(!isNaN(n))ov.temperature=n;}
-                            if(regenPopover.personaId)ov.persona_id=regenPopover.personaId==="none"?null:regenPopover.personaId;
-                            setRegenPopover(null);
-                            regenerate(i, Object.keys(ov).length?ov:undefined);
-                          }} style={{background:`${t.acc}22`,border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Regenerate</button>
-                        </div>
-                      </div>}
-                    </div>}
-                    {!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} className="hc-icon-btn" data-tip={isU?"Edit and resend":"Edit response"} aria-label={isU?"Edit and resend":"Edit response (raw)"} style={{color:t.mut}}><IC.Pencil/></button>}
-                    {!streaming&&!ghostActive&&<button onClick={()=>forkAt(i)} className="hc-icon-btn" data-tip="Fork from here" aria-label="Fork conversation from this point" style={{color:t.mut}}><IC.GitBranch/></button>}
-                    {!streaming&&<button onClick={()=>delMsg(i)} className="hc-icon-btn" data-tip="Delete" aria-label="Delete this message" style={{color:t.mut}}><IC.Trash/></button>}
-                    {!isU&&msg.content&&!streaming&&msg.metadata?.truncated&&i===(act.messages||[]).length-1&&<button onClick={()=>continueMessage(i)} title="Response was cut off by the output-token limit — continue it" style={msgActionS(t.warm)}><IC.Play/> continue</button>}
-                    {!isU&&msg.content&&!streaming&&<>
-                      <button onClick={()=>rateMessage(i,1)} className="hc-icon-btn" data-tip="Good response" aria-label="Good response" aria-pressed={msg.rating===1} style={{color:msg.rating===1?t.ok:t.mut}}><IC.ThumbUp/></button>
-                      <button onClick={()=>rateMessage(i,-1)} className="hc-icon-btn" data-tip="Poor response" aria-label="Poor response" aria-pressed={msg.rating===-1} style={{color:msg.rating===-1?t.err:t.mut}}><IC.ThumbDown/></button>
-                    </>}
-                    {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
-                  </div>}
-                </div>
-              </div></React.Fragment>;
-            })}</>;})()}
-            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
-            {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
-            <div ref={chatEnd}/>
-          </div>}
-        </div>
-        </div>
-        <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
-          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
-          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
-        {/* INPUT */}
-        <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
-          <div className="hc-composer-extras">
-          {runPill.mounted&&(()=>{const currentRun=runPill.value;
-            const phaseLabel={searching:"searching",thinking:"thinking",tool:"tool running",streaming:"streaming",voting:"council voting",council:"council",stopped:"stopped",failed:"failed",complete:"complete"}[currentRun.phase]||currentRun.phase||"running";
-            const pct=currentRun.pct!=null?Math.max(0,Math.min(100,Number(currentRun.pct)||0)):null;
-            const active=streaming||councilRunning||searchLoading;
-            return <div className="hc-run-pill hc-live-head is-active hc-pop" data-placement="top" {...runPill.props} style={{maxWidth:chatWidth,margin:"0 auto 7px",display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:`${currentRun.color}0d`,boxShadow:`0 0 0 1px ${currentRun.color}2f`,color:currentRun.color,fontSize:"var(--hc-text-secondary)",minHeight:31,boxSizing:"border-box"}}>
-              <span className={`hc-activity-dot${active?" is-running":""}`} aria-hidden="true" style={{width:7,height:7,color:currentRun.color}}/>
-              <span key={phaseLabel} className="hc-activity-label" style={{fontSize:"var(--hc-text-secondary)"}}>{phaseLabel}</span>
-              <span style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
-              {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
-              {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
-              {streaming&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Stop</button>}
-            </div>;
-          })()}
-          {/* Attachment chips */}
-          {quickSearchError&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",justifyContent:"flex-start"}}>
-            <span style={{display:"inline-flex",alignItems:"center",gap:7,padding:"4px 9px",borderRadius:"var(--hc-radius)",background:`${t.warm}10`,border:`1px solid ${t.warm}30`,color:t.warm,fontSize:"var(--hc-text-secondary)",fontWeight:700,maxWidth:"100%"}}>
-              <span style={{width:6,height:6,borderRadius:"50%",background:t.warm,flexShrink:0}}/>
-              Quick Search
-              <span style={{color:t.mut,fontWeight:500,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{quickSearchError}</span>
-              <button aria-label="Close" onClick={()=>setQuickSearchError(null)} style={{background:"none",border:"none",color:t.warm,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,lineHeight:1}}>×</button>
-            </span>
-          </div>}
-          {/* Council suggested prompts */}
-          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
-                <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Generating suggestions...</span>
-              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
-                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:"var(--hc-radius-dialog)",padding:"5px 12px",fontSize:"var(--hc-text-control)",color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
-                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
-                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
-                {s}
-              </button>)}
-              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:"1px solid var(--hc-line)",borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",flexShrink:0}}>↻</button>}
-            </div>}
-          {preparingSend&&<div role="status" aria-live="polite" style={{maxWidth:chatWidth,margin:"0 auto",padding:"6px 0",fontSize:"var(--hc-text-secondary)",color:t.warm}}>{preparingSend}</div>}
-          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0",pointerEvents:preparingSend?"none":undefined,opacity:preparingSend?0.65:1}}>
-            {attachments.map((a,i)=>a.type==="image"?
-              <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 6px 3px 3px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
-                <img src={a.dataUrl} alt={a.name} style={{height:26,width:26,objectFit:"cover",borderRadius:"var(--hc-radius-sm)",border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer",flexShrink:0}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
-                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
-                <span style={{color:t.mut,fontWeight:400,fontSize:"var(--hc-text-secondary)"}}>{(a.size/1024).toFixed(0)}KB</span>
-                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.acc,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",opacity:.78,lineHeight:1}}>&times;</button>
-              </span>
-            :a.type==="pdf"?
-              <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:a.error?`${t.err}10`:`${t.acc}10`,border:`1px solid ${a.loading?t.warm:a.error?t.err:t.acc}30`,color:a.loading?t.warm:a.error?t.err:t.acc,padding:"4px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,transition:"all .2s",maxWidth:"100%",minHeight:30,boxSizing:"border-box"}}>
-                <span style={{fontSize:"var(--hc-text-control)"}}>{a.loading?"⏳":"📄"}</span>
-                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{a.name}</span>
-                {!a.loading&&!a.error&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
-                {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
-                {a.error&&<span style={{color:t.err,fontWeight:500,fontSize:"var(--hc-text-secondary)",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.error}</span>}
-                {a.error&&a.file&&<button disabled={!!preparingSend} onClick={()=>{const f=a.file;setAttachments(p=>p.filter((_,j)=>j!==i));handleFileUpload([f]);}} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Retry</button>}
-                <button aria-label="Close" disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:a.error?t.err:t.mut,cursor:"pointer",padding:"1px 4px",fontSize:"var(--hc-text-control)",opacity:.8}}>&times;</button>
-              </span>
-            :<span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.f1}10`,border:`1px solid ${t.f1}30`,color:t.f1,padding:"4px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
-                <IC.Paperclip/>
-                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:190}}>{a.name}</span>
-                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",opacity:.78,lineHeight:1}}>&times;</button>
-              </span>)}
-          </div>}
-          </div>
-          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",...floatS,borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
-            {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:"inherit",pointerEvents:"none",overflow:"hidden",zIndex:0}}>
-              {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
-            </div>}
-            {/* Slash command menu — type "/" to insert a prompt-library prompt */}
-            {slashMenuActive()&&(()=>{
-              const matches=slashMatchesFor(inp);
-              const hi=Math.min(slashIdx,Math.max(matches.length-1,0));
-              return <div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,padding:8}}>
-                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,padding:"2px 6px 6px"}}>Prompts — ↑↓ select · Enter insert · Esc dismiss</div>
-                <div style={{maxHeight:230,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {matches.map((p,ix)=><div key={p.id||ix} onMouseDown={e=>{e.preventDefault();insertPrompt(p);}} onMouseEnter={()=>setSlashIdx(ix)}
-                    style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:ix===hi?`${t.f1}18`:`${t.surface}44`,border:`1px solid ${ix===hi?`${t.f1}44`:`${t.brd}22`}`}}>
-                    <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:ix===hi?t.f1:t.text}}>{p.title}</span>
-                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.f1}}>{p.category||"General"}</span>
-                      {/\{\{\s*[\w][\w .\-]*?\s*\}\}/.test(p.content||"")&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"0 4px",borderRadius:"var(--hc-radius-sm)",background:`${t.warm}18`,color:t.warm,fontWeight:700}}>vars</span>}
-                    </div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(p.content||"").slice(0,90)}</div>
-                  </div>)}
-                  {!matches.length&&<div style={{textAlign:"center",padding:12,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No matching prompts — Esc to dismiss</div>}
-                </div>
-              </div>;
-            })()}
-            {/* {{variable}} fill-in card for prompt insertion */}
-            {slashVarFill&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,borderColor:`${t.warm}44`,padding:12}}>
-              <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm,marginBottom:8}}>Fill in “{slashVarFill.title}”</div>
-              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
-                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</span>
-                <input autoFocus={ix===0} value={v.value} onChange={e=>setSlashVarFill(s=>({...s,vars:s.vars.map((x,j)=>j===ix?{...x,value:e.target.value}:x)}))}
-                  onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();applyVarFill();}if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashVarFill(null);}}}
-                  style={{fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bg,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius)",fontFamily:font,boxSizing:"border-box"}}/>
-              </label>)}
-              <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
-                <button onClick={()=>setSlashVarFill(null)} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)"}}>Cancel</button>
-                <button onClick={applyVarFill} style={{...btnS(t.warm),fontSize:"var(--hc-text-control)",fontWeight:700}}>Insert</button>
-              </div>
-            </div>}
-            {!act?.is_council&&<><div className="hc-composer-anchor hc-quick-anchor" ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
-              <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" aria-label="Quick actions" aria-expanded={showQuickMenu} className={`hc-icon-btn is-lg${showQuickMenu?" is-open":""}`} style={{color:showQuickMenu?t.acc:t.mut,opacity:showQuickMenu?1:.75,fontSize:"var(--hc-text-title)"}}><IC.Plus/></button>
-              {showQuickMenu&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"115%",left:0,zIndex:300,minWidth:220,padding:6,display:"flex",flexDirection:"column",gap:2}}>
-                <button disabled={!!preparingSend} onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:`${t.surface}F5`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}><IC.Paperclip/> Attach files</button>
-                {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>⚡ Prompt Library</button>}
-                {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
-              </div>}
-            </div>
-            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS}/>
-            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
-              {showPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,minWidth:280,maxWidth:360,padding:8}}>
-                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:"var(--hc-text-control)"}} autoFocus/>
-                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
-                    <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>{p.title}</div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.f1,marginTop:1}}>{p.category||"General"}</div>
-                  </div>)}
-                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No matches</div>}
-                </div>
-                <div style={{borderTop:"1px solid var(--hc-line-subtle)",marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{setShowPromptPicker(false);setShowQuickMenu(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:"var(--hc-text-control)"}}>Manage Prompts →</button>
-                </div>
-              </div>}
-            </div>}
-            </>}
-            <textarea className="hc-composer-input" ref={inpRef} value={inp} onChange={e=>{const v=e.target.value;setInp(v);if(!v.startsWith("/"))setSlashDismissed(false);setSlashIdx(0);}} onKeyDown={e=>{
-              if(slashMenuActive()){
-                const matches=slashMatchesFor(inp);
-                if(matches.length){
-                  if(e.key==="ArrowDown"){e.preventDefault();setSlashIdx(i=>(i+1)%matches.length);return;}
-                  if(e.key==="ArrowUp"){e.preventDefault();setSlashIdx(i=>(i-1+matches.length)%matches.length);return;}
-                  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
-                  if(e.key==="Tab"){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
-                }
-                if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
-              }
-              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
-              disabled={streaming||councilRunning||loadingConv||!!preparingSend}
-              style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
-              onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
-              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
-            {!act?.is_council&&(()=>{
-              const cap=effortCaps[effortModel],native=cap?.mode==='native',choices=effortChoices(cap);
-              const saved=actId?nativeEffort[actId]?.[effortModel]:pendingNativeEffort[effortModel];
-              const selected=native?nativeChoice(cap,saved):REVIEW_LEVELS[reviewLevel(resolveEffort(actId))];
-              return <div className="hc-composer-anchor" ref={effortPickerRef} style={{position:'relative',flexShrink:0}}>
-                <button aria-label="Response effort" onClick={()=>setShowEffortPicker(p=>!p)} title={`${selected.name} — ${selected.desc}`} style={{background:'none',border:'none',color:t.pink,cursor:'pointer',padding:'3px 8px',borderRadius:'var(--hc-radius)',display:'flex',alignItems:'center',gap:4,fontWeight:600}}>
-                  <span>{selected.emoji}</span><span className="hc-effort-label" style={{fontSize:"var(--hc-text-secondary)"}}>{selected.name}</span>
-                </button>
-                {showEffortPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" data-align="end" style={{position:'absolute',bottom:'110%',right:0,zIndex:300,borderColor:`${t.pink}33`,minWidth:230,padding:6}}>
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:'3px 6px 5px',fontWeight:700}}>EFFORT — {native?'NATIVE REASONING':'SELF-REVIEW'}</div>
-                  {choices.map(choice=><button key={JSON.stringify(choice.value)} onClick={()=>{
-                    if(native){if(actId)setNativeEffort(p=>({...p,[actId]:{...(p[actId]||{}),[effortModel]:choice.value}}));else setPendingNativeEffort(p=>({...p,[effortModel]:choice.value}));}
-                    else if(actId)setEffortPerChat(p=>({...p,[actId]:choice.value}));else setPendingEffort(choice.value);
-                    setShowEffortPicker(false);
-                  }} style={{display:'flex',alignItems:'center',gap:6,width:'100%',textAlign:'left',padding:'6px 8px',borderRadius:"var(--hc-radius)",background:selected.value===choice.value?`${t.pink}18`:'transparent',border:'none',color:selected.value===choice.value?t.pink:t.dim,cursor:'pointer',fontSize:"var(--hc-text-control)",fontFamily:font,marginBottom:2}}>
-                    <span style={{fontSize:"var(--hc-text-control)"}}>{choice.emoji}</span><div><div style={{fontWeight:600}}>{choice.name}{(native?choice.isDefault:globalEffort===choice.value)&&<small style={{color:t.mut,marginLeft:5}}>{native?'model default':'default'}</small>}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{choice.desc}</div></div>
-                  </button>)}
-                  {cap?.source==='metadata unavailable'&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:6}}>Model controls unavailable; using self-review.</div>}
-                  {effortModel==='auto'&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:6}}>Native controls are resolved after routing. A routed native model uses its own default.</div>}
-                  {!native&&<button onClick={()=>{if(actId)setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});else setPendingEffort(null);setShowEffortPicker(false);}} style={{width:'100%',background:'none',border:'none',color:t.mut,cursor:'pointer',fontSize:"var(--hc-text-control)",padding:6}}>Use global review default</button>}
-                </div>}
-              </div>;
-            })()}
-            {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:"var(--hc-radius)",cursor:"pointer"}}>Retry transcription</button>}
-            {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} className="hc-icon-btn is-lg" style={{color:recording?t.err:transcribing?t.warm:t.mut,background:recording?`${t.err}22`:undefined,cursor:transcribing?"default":"pointer",animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
-              {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
-            </button>}
-            {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
-            :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
-          </div>
-        </div>
-        </div>
-      </>}
+  </div>,document.body)}
       </div>{/* end inner panel column */}
       {/* Preview panel — outside panel ternary so it renders alongside any panel */}
       {previewFile&&<div ref={previewFocus} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label="Preview panel" style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":"1px solid var(--hc-line)",background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
@@ -8660,7 +8686,7 @@ function HyprChat(){
               {previewFile.isExternal
                 ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
                 :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}
-              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
+              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1,display:"flex"}}><IC.X/></button>
             </div>
             {/* Content */}
             <div style={{flex:1,overflowY:"auto",padding:14}}>
@@ -8732,7 +8758,7 @@ function HyprChat(){
           {kbPreview.truncated&&!kbPreview.isPdf&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
           {kbPreview.isPdf&&kbPreview.rawUrl&&<button onClick={()=>setKbPreview(p=>({...p,pdfFullView:!p.pdfFullView}))} style={{background:kbPreview.pdfFullView?`${t.acc}25`:`${t.acc}12`,border:`1px solid ${t.acc}44`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>{kbPreview.pdfFullView?"Text View":"Full PDF"}</button>}
           {kbPreview.rawUrl&&<a href={kbPreview.rawUrl} target="_blank" rel="noopener noreferrer" style={{color:t.acc,fontSize:"var(--hc-text-secondary)"}}>Download original</a>}
-          <button aria-label="Close" onClick={()=>setKbPreview(null)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-title)",padding:"0 4px",lineHeight:1}}>✕</button>
+          <button aria-label="Close" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={()=>setKbPreview(null)} style={{color:t.mut}}><IC.X/></button>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
           {kbPreview.loading?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading preview...</div>
@@ -8743,6 +8769,7 @@ function HyprChat(){
       </div>
     </div>}
 
+    <ShortcutSheet open={showShortcuts} onClose={()=>setShowShortcuts(false)} t={t} font={font}/>
     {confirmPresence.mounted&&ReactDOM.createPortal((()=>{const confirmDialog=confirmPresence.value;const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const isPrompt=!!confirmDialog.prompt;const phraseOk=isPrompt?!!confirmPhrase.trim():(!requiredText||confirmPhrase===requiredText);const close=v=>{const dlg=confirmDialog;const phrase=confirmPhrase;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(dlg.prompt?(v?phrase.trim():null):v);};return <div className="hc-viewport-overlay hc-scrim" {...confirmPresence.props} style={{position:"fixed",inset:0,zIndex:12000,display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
       <div ref={confirmFocus} role="dialog" aria-modal="true" aria-label={confirmDialog.title} tabIndex={-1} className="hc-dialog-card hc-dialog hc-elev-3" style={{zoom:'var(--hc-ui-scale,1)',width:'min(420px,calc((100vw - 24px) / var(--hc-ui-scale,1)))',maxHeight:'calc((var(--hc-viewport-height) - 36px) / var(--hc-ui-scale,1))',overflowY:'auto',borderColor:`${c}44`,padding:18}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
@@ -8798,7 +8825,6 @@ function HyprChat(){
       @keyframes bop{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
       @keyframes writing{0%{transform:rotate(-8deg) translateY(0)}25%{transform:rotate(4deg) translateY(-1px)}50%{transform:rotate(-6deg) translateY(0)}75%{transform:rotate(5deg) translateY(-1px)}100%{transform:rotate(-8deg) translateY(0)}}
 	      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
-	      @keyframes convTitleMarquee{0%,12%{transform:translateX(0)}88%,100%{transform:translateX(calc(-1 * var(--conv-title-marquee,0px)))}}
     `}</style>
   </div></div>;
 }

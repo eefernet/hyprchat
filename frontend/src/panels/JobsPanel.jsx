@@ -5,6 +5,10 @@ import React,{useState,useEffect,useRef} from 'react';
 import OperationsSummary from '../components/OperationsSummary.jsx';
 import { API, userScopedUrl } from '../session.js';
 import { apiJson } from '../api.js';
+import EmptyState from '../components/EmptyState.jsx';
+import Pager from '../components/Pager.jsx';
+import {StatusChip} from '../components/workspaceRows.jsx';
+import {JOB_KIND,JOB_STATUS,humanize} from '../workspaceLabels.js';
 
 const kinds=['research','coding','coding_run','document','image','indexing','scheduled'];
 export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],workspaceId="",embedded=false,onAddContent,focusId=null}){
@@ -49,18 +53,18 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
     <PanelHeader embedded={embedded} t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/>
     <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
       {!embedded&&<select aria-label="Jobs workspace" value={workspace} disabled={!!workspaceId} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
-      <SelectionControl label="Job type" value={kind} onChange={v=>{setKind(v);setOffset(0);}} options={[{value:'',label:'All types'},...kinds.map(value=>({value,label:value}))]}/>
-      <SelectionControl label="Job status" value={status} onChange={v=>{setStatus(v);setOffset(0);}} options={[{value:'',label:'All states'},...['active','queued','running','cancelling','succeeded','partial','failed','cancelled','interrupted'].map(value=>({value,label:value}))]}/>
+      <SelectionControl label="Job type" value={kind} onChange={v=>{setKind(v);setOffset(0);}} options={[{value:'',label:'All types'},...kinds.map(value=>({value,label:JOB_KIND[value]||humanize(value)}))]}/>
+      <SelectionControl label="Job status" value={status} onChange={v=>{setStatus(v);setOffset(0);}} options={[{value:'',label:'All states'},...['active','queued','running','cancelling','succeeded','partial','failed','cancelled','interrupted'].map(value=>({value,label:JOB_STATUS[value]?.[0]||humanize(value)}))]}/>
       <button style={btnS(t.acc)} onClick={()=>setRefresh(n=>n+1)}>Refresh</button>
     </div>
     {!embedded&&<OperationsSummary t={t}/>}
     {error&&<p role="alert" style={{color:t.err}}>{error}</p>}
     {runResult&&<article style={{padding:14,border:`1px solid ${t.brd}`,whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}><button style={btnS(t.acc)} onClick={()=>setRunResult(null)}>Close result</button><p>{runResult.result_text||runResult.error||'No output saved yet.'}</p></article>}
-    {!jobs.length&&<p style={{color:t.dim}}>No jobs match these filters.</p>}
+    {!jobs.length&&<EmptyState compact icon={<IC.Activity/>} title={kind||status?'No jobs match these filters':'No jobs yet'} hint={kind||status?'Try widening the filters.':'Research, coding and indexing work shows up here as it runs.'} action={(kind||status)?<button className="hc-button" onClick={()=>{setKind('');setStatus('');setOffset(0);}}>Clear filters</button>:null}/>}
     <div style={{display:'grid',gap:12}}>{jobs.map(job=><article id={`job-${job.id}`} key={job.id} style={{padding:16,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius-card)",overflowWrap:'anywhere'}}>
-      <div style={{fontWeight:700}}>{job.title||job.kind}</div>
-      <p style={{color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{job.kind} · {job.status} · {job.phase}
-        {job.elapsed_seconds!=null&&` · ${Math.floor(job.elapsed_seconds/60)}m ${job.elapsed_seconds%60}s`}</p>
+      <div style={{fontWeight:600}}>{job.title||JOB_KIND[job.kind]||humanize(job.kind)}</div>
+      <div className="hc-ws-meta" style={{marginTop:6}}><StatusChip t={t} kind="job-kind" value={job.kind}/><StatusChip t={t} kind="job-status" value={job.status}/>{job.phase&&<span>{humanize(job.phase)}</span>}
+        {job.elapsed_seconds!=null&&<span>{`${Math.floor(job.elapsed_seconds/60)}m ${job.elapsed_seconds%60}s`}</span>}</div>
       {job.progress!=null&&<progress value={job.progress} max="100" aria-label="Job progress"/>}
       {job.error&&<p role="status" style={{color:t.err}}>{job.error}</p>}
       {job.status==='interrupted'&&<p style={{fontSize:"var(--hc-text-secondary)"}}>Review saved outputs and possible external effects before starting again.</p>}
@@ -75,9 +79,6 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
         {job.actions.map(action=><button key={action} disabled={busy===job.id} style={btnS(action==='cancel'?t.warm:t.acc)} onClick={()=>act(job,action)}>{action==='rerun'?'Run again':action==='retry'?(job.kind==='image'?'Retry transfer':'Retry indexing'):action==='resume'?'Resume':'Cancel'}</button>)}
       </div>
     </article>)}</div>
-    <div style={{display:'flex',gap:12,marginTop:16}}>
-      <button disabled={!offset} style={btnS(t.acc)} onClick={()=>setOffset(n=>Math.max(0,n-50))}>Previous</button>
-      <button disabled={jobs.length<50} style={btnS(t.acc)} onClick={()=>setOffset(n=>n+50)}>Next</button>
-    </div>
+    <Pager page={Math.floor(offset/50)} pageSize={50} count={jobs.length} hasMore={jobs.length>=50} onPage={p=>setOffset(p*50)} label="Job pages"/>
   </section>;
 }

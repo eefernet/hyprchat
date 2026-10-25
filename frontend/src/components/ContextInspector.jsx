@@ -1,6 +1,8 @@
 import useFocusScope from '../useFocusScope.js';
 import React,{useEffect,useState} from 'react';
 import {apiJson} from '../api.js';
+import {IC} from './icons.jsx';
+import {SkeletonText} from './Skeleton.jsx';
 export default function ContextInspector({messageId,t,onClose,onRestore}){
   const focus=useFocusScope(true,onClose);
   const [data,setData]=useState(null),[error,setError]=useState('');
@@ -15,9 +17,10 @@ export default function ContextInspector({messageId,t,onClose,onRestore}){
     onRestore?.(messageId,saved);onClose();
   }catch(e){if(e.name!=='AbortError')setError(e.message);}finally{setRestoring(false);}};
   return <div ref={focus} role="dialog" aria-modal="true" aria-label="Response context" className="hc-scrim" style={{position:'fixed',inset:0,zIndex:500}} onClick={onClose}>
-    <section onClick={e=>e.stopPropagation()} className="hc-side-sheet hc-elev-3" style={{position:'absolute',right:0,top:0,bottom:0,width:'min(620px,100%)',overflowY:'auto',color:t.text,padding:20,boxSizing:'border-box',borderRadius:'var(--hc-radius-dialog) 0 0 var(--hc-radius-dialog)',borderRight:0}}>
-      <button aria-label="Close context" onClick={onClose} style={{float:'right'}}>Close</button><h2>Response context</h2>
-      {error&&<p role="alert">{error}</p>}{!data&&!error&&<p>Loading…</p>}
+    <section onClick={e=>e.stopPropagation()} className="hc-side-sheet hc-elev-3" style={{position:'absolute',right:0,top:0,bottom:0,width:'min(620px,100%)',display:'flex',flexDirection:'column',overflow:'hidden',color:t.text,padding:0,boxSizing:'border-box',borderRadius:'var(--hc-radius-dialog) 0 0 var(--hc-radius-dialog)',borderRight:0}}>
+      <div className="hc-dialog-head"><h2>Response context</h2><button aria-label="Close context" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={onClose}><IC.X/></button></div>
+      <div className="hc-dialog-body">
+      {error&&<p role="alert">{error}</p>}{!data&&!error&&<SkeletonText t={t} lines={4}/>}
       {data&&!data.available&&<p>Context was not recorded for this response.</p>}
       {!!reviews?.revisions?.length&&<details><summary>Answer review history ({reviews.revisions.length})</summary>
         {reviews.revisions.map((revision,index)=><details key={index}><summary>{index===0?'Initial answer':`Review ${index}`}</summary>
@@ -40,6 +43,7 @@ export default function ContextInspector({messageId,t,onClose,onRestore}){
         <p>Tool calls: {(round.executed_tools||[]).join(', ')||'None recorded'}</p>
         <p style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>{round.limits_note}</p>
       </article>)}
+      </div>
     </section>
   </div>;
 }

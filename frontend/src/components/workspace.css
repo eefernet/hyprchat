@@ -1,0 +1,66 @@
+/* Workspace screens: one content column, aligned edges, list rows, chips,
+   pagers and pinned dialog headers. Tokens come from elevation.js (--hc-*
+   colours/lines/radii), ui.css (--hc-text-*) and motion.css (durations,
+   easings, hc-reveal / hc-breathe keyframes). */
+
+/* Width system: header, chips, tabs and body share one gutter that grows to
+   centre a 1180px column on wide shells and shrinks to 24px (12px mobile). */
+.hc-workspace-shell, .hc-workspace-home { --hc-ws-max: 1180px; --hc-ws-gutter: max(24px, calc((100% - var(--hc-ws-max)) / 2)); }
+.hc-workspace-shell > .hc-panel-header, .hc-workspace-home > .hc-panel-header { padding: 16px var(--hc-ws-gutter); }
+.hc-workspace-secondary { padding: 0 var(--hc-ws-gutter) 12px; display: flex; flex-direction: column; gap: 8px; }
+.hc-workspace-tabs { padding: 0 calc(var(--hc-ws-gutter) - 12px); }
+.hc-workspace-body { padding: 20px var(--hc-ws-gutter) 32px; }
+@media (max-width: 768px) {
+  .hc-workspace-shell, .hc-workspace-home { --hc-ws-gutter: 12px; }
+  .hc-workspace-shell > .hc-panel-header, .hc-workspace-home > .hc-panel-header { padding: 12px var(--hc-ws-gutter); }
+}
+
+/* Breadcrumb eyebrow above the panel title. */
+.hc-crumbs { display: flex; align-items: center; gap: 4px; font-size: var(--hc-text-secondary); color: var(--hc-secondary); min-width: 0; }
+.hc-crumb { font: inherit; color: inherit; background: transparent; border: 0; padding: 0; min-height: 0; cursor: pointer; white-space: nowrap; }
+.hc-crumb:hover { color: var(--hc-accent); text-decoration: underline; filter: none; }
+
+/* Chip rows (defaults, topics) and the compact status chip variant. */
+.hc-chip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.hc-chip-row-label { font-size: var(--hc-text-secondary); color: var(--hc-secondary); margin-right: 2px; white-space: nowrap; }
+.hc-chip.is-status { --hc-chip-height: 22px; padding: 0 8px; font-size: var(--hc-text-micro); }
+
+/* List rows. */
+.hc-ws-list { padding: 4px; }
+.hc-ws-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: var(--hc-radius); min-width: 0; flex-wrap: wrap; animation: hc-reveal var(--hc-dur-2) var(--hc-ease-out) both; animation-delay: min(calc(var(--i, 0) * 18ms), 120ms); }
+.hc-ws-row + .hc-ws-row { border-top: 1px solid var(--hc-line-subtle); border-radius: 0; }
+.hc-ws-row:hover { background: var(--hc-hover); }
+.hc-ws-row-icon { display: flex; flex-shrink: 0; color: var(--hc-secondary); width: 20px; justify-content: center; }
+.hc-ws-row-main { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.hc-ws-row-title { font: inherit; font-size: var(--hc-text-control); font-weight: 600; color: var(--hc-text); text-align: left; border: 0; background: transparent; padding: 0; min-height: 0; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; max-width: 100%; }
+.hc-ws-row-title:hover { color: var(--hc-accent); filter: none; }
+.hc-ws-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; font-size: var(--hc-text-secondary); color: var(--hc-secondary); min-width: 0; }
+.hc-ws-meta > * + *::before { content: "·"; margin: 0 6px; color: var(--hc-muted); }
+.hc-ws-meta > .hc-chip + .hc-chip::before { content: none; margin: 0 2px; }
+.hc-ws-meta > span > svg { vertical-align: -2px; margin-right: 4px; }
+.hc-ws-row-actions { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto; }
+.hc-ws-row-footer { flex-basis: 100%; font-size: var(--hc-text-secondary); color: var(--hc-secondary); padding-left: 32px; }
+.hc-switch-text { font-size: var(--hc-text-secondary); color: var(--hc-secondary); }
+@media (max-width: 640px) {
+  .hc-ws-row-actions { margin-left: 32px; flex-basis: 100%; justify-content: flex-start; }
+}
+
+/* Sections, toolbars, pager, counts, all-clear. */
+.hc-ws-section { display: flex; flex-direction: column; gap: 12px; }
+.hc-ws-toolbar { margin-bottom: 4px; }
+.hc-pager { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; font-size: var(--hc-text-secondary); color: var(--hc-secondary); }
+.hc-count { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; margin-left: 6px; border-radius: var(--hc-radius-pill); background: var(--hc-sunken); color: var(--hc-secondary); font-size: var(--hc-text-micro); font-weight: 600; vertical-align: middle; }
+.hc-ws-allclear { display: flex; align-items: center; gap: 8px; color: var(--hc-ok); font-size: var(--hc-text-secondary); padding: 6px 0; }
+.is-placeholder { font-style: italic; opacity: .8; }
+
+/* Pinned dialog header + scrolling body (Settings, content picker, sheets). */
+.hc-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px 12px; border-bottom: 1px solid var(--hc-line-subtle); flex-shrink: 0; }
+.hc-dialog-head h2, .hc-dialog-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.hc-dialog-body { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px 20px; }
+@media (max-width: 700px) {
+  .hc-dialog-head, .hc-dialog-body { padding-left: 14px; padding-right: 14px; }
+}
+
+/* Sidebar conversation groups and the streaming marker. */
+.hc-conv-group-head { padding: 8px 8px 2px; font-size: var(--hc-text-secondary); font-weight: 600; color: var(--hc-secondary); display: flex; gap: 6px; align-items: center; }
+.hc-stream-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hc-accent); flex-shrink: 0; animation: hc-breathe 1.4s ease-in-out infinite; }

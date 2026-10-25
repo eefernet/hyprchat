@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import config
+import hf_compat
 
 
 def parse_ollama_progress(line: str, final_name: str = "") -> tuple[str | None, str | None]:
@@ -154,13 +155,20 @@ async def hf_download(http, request: Request):
     if not model_name:
         raise HTTPException(400, "Invalid model name")
 
-    base_fn = re.sub(r'\.gguf$', '', filenames[0], flags=re.IGNORECASE)
-    base_fn = re.sub(r'-\d{5}-of-\d{5}$', '', base_fn)
-    quant_m = re.search(r'[.\-_]((?:IQ|Q)\d+[_A-Za-z0-9]*|F\d+|BF16)$', base_fn, re.IGNORECASE)
-    quant = quant_m.group(1).upper() if quant_m else None
-
-    hf_pull_name = f"hf.co/{repo_id}" + (f":{quant}" if quant else "")
-    hf_url = f"https://huggingface.co/{repo_id}/resolve/main/{filenames[0]}"
+    # Pull by the exact filename (the HF Ollama registry resolves it), not by the
+    # bare quant: `:Q4_K_M` is ambiguous when a repo ships fused-MTP, noMTP and
+    # draft files for the same quant and the registry would pick one for us.
+    main_files = [fn for fn in filenames if hf_compat.classify_file(fn)["kind"] != "mmproj"]
+    primary = main_files[0] if main_files else filenames[0]
+    primary_class = hf_compat.classify_file(primary, filenames)
+    if primary_class["kind"] == "draft" and not body.get("force"):
+        raise HTTPException(400, "That file is a speculative-decoding draft head, not a standalone chat model. Pick a main GGUF, or choose Download anyway.")
+    try:
+        tag, _manifest = await asyncio.wait_for(hf_compat.resolve_tag(http, repo_id, primary), 20)
+    except Exception:
+        tag = hf_compat.pull_tag(primary)
+    hf_pull_name = f"hf.co/{repo_id}:{tag}" if tag else f"hf.co/{repo_id}"
+    hf_url = f"https://huggingface.co/{repo_id}/resolve/main/{primary}"
 
     async def generate():
         try:

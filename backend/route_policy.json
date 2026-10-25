@@ -92,6 +92,7 @@
   "GET /api/health": "profile",
   "GET /api/health/history": "profile",
   "GET /api/health/live": "public",
+  "GET /api/hf/compat": "profile",
   "GET /api/hf/model": "profile",
   "GET /api/hf/readme": "profile",
   "GET /api/hf/search": "profile",

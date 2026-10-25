@@ -235,7 +235,7 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
 
   const emptyList=!loaded?<SkeletonList t={t} rows={6} avatar/>
     :accounts.length===0?<EmptyState t={t} icon={<IC.Send/>} title="No email account yet" hint="Add your IMAP/SMTP account (use an app password for Gmail/iCloud). The assistant can then triage, summarize, and draft replies."/>
-    :messages.length===0?<EmptyState t={t} icon={<IC.Send/>} title="Inbox cache is empty" hint='Press "Check now" — the background poller also runs every ~5 minutes.'/>:null;
+    :messages.length===0?<EmptyState t={t} icon={<IC.Send/>} title="Inbox cache is empty" hint='The background poller runs every ~5 minutes; check now to fetch immediately.' action={<button onClick={pollNow} disabled={polling} className="hc-button"><IC.Refresh/> {polling?"Checking…":"Check now"}</button>}/>:null;
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <PanelHeader t={t} icon={<IC.Send/>} title="Email"

@@ -4,7 +4,7 @@
 // and the "Saved" pulse. Reordering works via native HTML5 drag-and-drop
 // (desktop) AND the arrow buttons (touch fallback — touch never fires DnD).
 import React, { useState } from "react";
-import { NAV_ITEM_MAP, resolveNavLayout } from "../navItems.js";
+import { NAV_ITEM_MAP, NAV_LAYOUT_VERSION, resolveNavLayout } from "../navItems.js";
 
 const ZONES = [
   ["bar", "Main bar"],
@@ -15,7 +15,7 @@ const ZONE_ORDER = ["bar", "more", "hidden"];
 const ZONE_LABEL = Object.fromEntries(ZONES);
 
 function moveItem(layout, id, from, to, toIndex) {
-  const next = { v: 1, bar: [...layout.bar], more: [...layout.more], hidden: [...layout.hidden] };
+  const next = { v: NAV_LAYOUT_VERSION, bar: [...layout.bar], more: [...layout.more], hidden: [...layout.hidden] };
   const fromIdx = next[from].indexOf(id);
   if (fromIdx < 0) return layout;
   next[from].splice(fromIdx, 1);

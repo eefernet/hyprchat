@@ -1,7 +1,7 @@
 // Theme and welcome-message constants.
 import {channels, luminance, elevationTokens} from './elevation.js';
 export const THEMES = {
-  hyprflat:{name:"HyprFlat",bg:"#282C34",bgDeep:"#111418",surface:"#171B21",sfHov:"#20262E",sfBri:"#2B343D",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#E06C75",ok:"#50FA7B",err:"#E06C75",pink:"#B48EAD",f1:"#88C0D0",f4:"#81A1C1"},
+  hyprflat:{name:"HyprFlat",bg:"#282C34",bgDeep:"#111418",surface:"#171B21",sfHov:"#20262E",sfBri:"#2B343D",brd:"#355A66",text:"#CDEFF7",dim:"#9CDEF2",mut:"#6B8A94",acc:"#9CDEF2",acc2:"#74CFE7",warm:"#D19A66",ok:"#50FA7B",err:"#E06C75",pink:"#B48EAD",f1:"#88C0D0",f4:"#81A1C1"},
   nord:{name:"Nord",bg:"#2E3440",bgDeep:"#242933",surface:"#3B4252",sfHov:"#434C5E",sfBri:"#4C566A",brd:"#4C566A",text:"#ECEFF4",dim:"#D8DEE9",mut:"#81A1C1",acc:"#88C0D0",acc2:"#81A1C1",warm:"#EBCB8B",ok:"#A3BE8C",err:"#BF616A",pink:"#B48EAD",f1:"#8FBCBB",f4:"#5E81AC"},
   catppuccin:{name:"Catppuccin",bg:"#1E1E2E",bgDeep:"#181825",surface:"#313244",sfHov:"#45475A",sfBri:"#585B70",brd:"#45475A",text:"#CDD6F4",dim:"#BAC2DE",mut:"#89B4FA",acc:"#89B4FA",acc2:"#74C7EC",warm:"#F9E2AF",ok:"#A6E3A1",err:"#F38BA8",pink:"#CBA6F7",f1:"#94E2D5",f4:"#7287FD"},
   gruvbox:{name:"Gruvbox",bg:"#282828",bgDeep:"#1D2021",surface:"#3C3836",sfHov:"#504945",sfBri:"#665C54",brd:"#504945",text:"#EBDBB2",dim:"#D5C4A1",mut:"#a89984",acc:"#83A598",acc2:"#8EC07C",warm:"#FABD2F",ok:"#B8BB26",err:"#FB4934",pink:"#D3869B",f1:"#8EC07C",f4:"#83a598"},

@@ -7,6 +7,7 @@ import { fmtLocalMinute } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
+import Pager from '../components/Pager.jsx';
 import { SkeletonCard } from '../components/Skeleton.jsx';
 import useIsMobile from '../useIsMobile.js';
 
@@ -100,7 +101,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
           </div>
         </div>}
         {!loaded&&!form?Array.from({length:3},(_,i)=><SkeletonCard key={i} t={t} h={72} lines={1} style={{marginBottom:8}}/>)
-        :shown.length===0&&!form?<EmptyState t={t} icon={<IC.Pencil/>} title={`No ${tab==="todo"?"todos":"notes"} yet`} hint='Add one here, or tell the assistant: "add buy milk to my todo list".'/>
+        :shown.length===0&&!form?<EmptyState t={t} icon={<IC.Pencil/>} title={`No ${tab==="todo"?"todos":"notes"} yet`} hint='Add one here, or tell the assistant: "add buy milk to my todo list".' action={<button onClick={()=>setForm({...EMPTY,kind:tab,workspace_ids:workspace?[workspace]:[]})} className="hc-button is-primary"><IC.Plus/> New {tab==="todo"?"todo":"note"}</button>}/>
         :shown.map(n=><div key={n.id} style={{...cardS,marginBottom:8,display:"flex",gap:10,alignItems:"flex-start",opacity:n.done?.55:1}}>
           {n.kind==="todo"&&<input type="checkbox" checked={n.done} onChange={()=>toggleDone(n)} style={{marginTop:3,cursor:"pointer"}}/>}
           <div style={{flex:1,minWidth:0,overflowWrap:"anywhere"}}>
@@ -115,7 +116,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
           {workspace&&<button style={btnS(t.mut)} onClick={async()=>{try{await apiJson(`/api/workspaces/${workspace}/links/notes/${n.id}`,{method:'DELETE'});loadLatest.current();}catch(error){setErr(error.message);}}}>Unlink</button>}
           <button aria-label="Delete" onClick={()=>remove(n.id)} style={{...btnS(t.err),padding:"3px 8px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
         </div>)}
-        <div style={{display:"flex",gap:8}}><button disabled={!offset} style={btnS(t.acc)} onClick={()=>setOffset(n=>Math.max(0,n-200))}>Previous</button><button disabled={notes.length<200} style={btnS(t.acc)} onClick={()=>setOffset(n=>n+200)}>Next</button></div>
+        <Pager page={Math.floor(offset/200)} pageSize={200} count={notes.length} hasMore={notes.length>=200} onPage={p=>setOffset(p*200)} label="Note pages"/>
       </div>
     </div>
   </div>;

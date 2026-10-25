@@ -36,9 +36,11 @@ async def migrate(conn):
         for action in ('insert','update'):
             trigger=f'library_{table}_{action}'
             await conn.execute(f'DROP TRIGGER IF EXISTS {trigger}')
-            await conn.execute(f'CREATE TRIGGER {trigger} AFTER {action.upper()} ON {table} BEGIN {insert} WHERE source_id=new.id {upsert}; END')
+            # Rows whose owner no longer exists in `users` are skipped: library_entries.user_id is a
+            # foreign key, and orphaned notes once aborted startup with "FOREIGN KEY constraint failed".
+            await conn.execute(f'CREATE TRIGGER {trigger} AFTER {action.upper()} ON {table} BEGIN {insert} WHERE source_id=new.id AND user_id IN (SELECT id FROM users) {upsert}; END')
         await conn.execute(f"CREATE TRIGGER IF NOT EXISTS library_{table}_delete AFTER DELETE ON {table} BEGIN DELETE FROM library_entries WHERE key='{kind}:'||old.id; END")
-        await conn.execute(f'{insert} WHERE true {upsert}')
+        await conn.execute(f'{insert} WHERE user_id IN (SELECT id FROM users) {upsert}')
     await conn.execute('''CREATE TRIGGER IF NOT EXISTS library_conversation_title AFTER UPDATE OF title ON conversations BEGIN
         UPDATE library_entries SET title=new.title,updated_at=new.updated_at WHERE kind='chat' AND parent_id=new.id; END''')
     await conn.commit()

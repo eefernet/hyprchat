@@ -190,7 +190,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
           </div>}
 
           {!loaded&&!form?Array.from({length:3},(_,i)=><SkeletonCard key={i} t={t} h={84} lines={2} style={{marginBottom:10}}/>)
-          :tasks.length===0&&!form?<EmptyState t={t} icon={<IC.Clock/>} title="No scheduled tasks yet" hint='Create one above, or just ask in chat: "remind me every morning at 8 to stretch".'/>
+          :tasks.length===0&&!form?<EmptyState t={t} icon={<IC.Clock/>} title="No scheduled tasks yet" hint='Create one here, or just ask in chat: "remind me every morning at 8 to stretch".' action={<button onClick={()=>setForm({...EMPTY_FORM,workspace_id:workspace})} className="hc-button is-primary"><IC.Plus/> New task</button>}/>
           :tasks.map(task=><div key={task.id} style={{...cardS,marginBottom:10,opacity:task.enabled?1:.55}}>
             <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
               <div style={{flex:1,minWidth:200}}>
@@ -215,7 +215,7 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
             </div>}
             {task.prompt&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:6,whiteSpace:"pre-wrap"}}>{task.prompt.slice(0,300)}{task.prompt.length>300?"…":""}</div>}
             {runsFor===task.id&&<div style={{marginTop:10,borderTop:"1px solid var(--hc-line)",paddingTop:8}}>
-              {runs.length===0?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>No runs yet.</div>
+              {runs.length===0?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"4px 0"}}>No runs yet — this task has not fired.</div>
               :runs.map(r=><div key={r.id} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,padding:"3px 0",display:"flex",gap:8,alignItems:"baseline"}}>
                 <span style={{color:statusColor(r.status),fontWeight:700,minWidth:70}}>{r.status}</span>
                 <span style={{color:t.mut}}>{fmtTs(r.started_at)}</span>

@@ -25,6 +25,10 @@ import {
 import { ArtifactCard } from './artifactComponents.jsx';
 import DaedalusJobCard from './DaedalusJobCard.jsx';
 import EmptyState from './EmptyState.jsx';
+import {WorkspaceListRow,StatusChip} from './workspaceRows.jsx';
+import {SkeletonList} from './Skeleton.jsx';
+import {Spinner} from './Spinner.jsx';
+import {humanize} from '../workspaceLabels.js';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
 
@@ -1378,7 +1382,7 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
   </div>;
 }
 
-function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearchResult,onHome,onNavigate,personas,tools,initialTab}){
+function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveWs,setWsDetail,convs,onOpenConv,onOpenReport,onRemoveReport,onPreview,models,wsModel,onPersonaCreated,notify,confirmAction,onNewChat,onSearchResult,onHome,onNavigate,personas,tools,initialTab,btnS}){
   const isMobile=useIsMobile();
   const identity=ws?.id, alive=React.useRef(identity);alive.current=identity;
   React.useEffect(()=>()=>{alive.current=null;},[]);
@@ -1430,11 +1434,10 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setMemLoading(false);
   },[API,ws?.id,notify]);
   React.useEffect(()=>{if(ws?.id&&tab==="memory")refreshMemory();},[ws?.id,tab,refreshMemory]);
-  if(wsLoading)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:24,marginBottom:8}}>⏳</div>Loading workspace...</div></div>;
-  if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",color:t.mut}}><div style={{textAlign:"center"}}><div style={{fontSize:36,marginBottom:8}}>🗂</div>Select a workspace</div></div>;
+  if(wsLoading)return<div style={{flex:1,padding:"28px 24px",maxWidth:720}} role="status" aria-label="Loading workspace"><SkeletonList t={t} rows={4}/></div>;
+  if(!ws)return<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}><EmptyState icon={<IC.Folder/>} title="Select a workspace" hint="Pick a project from the list to see its chats, sources and notes."/></div>;
   const font="inherit";
   const inputS={width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-secondary)",outline:undefined,boxSizing:"border-box"};
-  const btnS=(c,bg)=>({background:bg||`${c}22`,border:`1px solid ${c}44`,color:c,padding:"5px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"flex",alignItems:"center",gap:5});
   const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
   const saveEdit=()=>run(async()=>{
     await fetch(`${API}/api/workspaces/${ws.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:wsName,description:wsDesc})});
@@ -1558,14 +1561,14 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
   };
   const refreshLinked=async()=>{const [next,list]=await Promise.all([apiJson(`/api/workspaces/${ws.id}`),apiJson('/api/workspaces')]);if(alive.current===identity){setWsDetail(next);setWorkspaces(list);setContentRevision(v=>v+1);}};
   return<div className={`hc-workspace-shell${searchOpen?" is-searching":""}`}>
-    <PanelHeader t={t} icon={<IC.Layers/>} title={<><button className="hc-workspace-link" onClick={onHome}>Workspaces</button><span className="hc-secondary"> → </span><span className="hc-workspace-name" title={ws.name}>{ws.name}</span></>} subtitle={ws.description}>
+    <PanelHeader t={t} icon={<IC.Folder/>} eyebrow={<nav aria-label="Breadcrumb" className="hc-crumbs"><button className="hc-crumb" onClick={onHome}>Workspaces</button><IC.ChevRight/></nav>} title={<span className="hc-workspace-name" title={ws.name}>{ws.name}</span>} subtitle={ws.description}>
       <button disabled={actionBusy} className="hc-button is-primary" onClick={()=>run(onNewChat)}><IC.Plus/> New chat in this workspace</button>
       <button ref={searchTrigger} className="hc-button" onClick={onSearch}><IC.Search/> Search</button>
       <ActionMenu compact label="Workspace actions" items={[{label:'Edit',onClick:()=>{setWsName(ws.name);setWsDesc(ws.description||'');setEditMode(true);}},{label:analyzing?'Analyzing…':'Analyze',disabled:analyzing,onClick:analyzeTopics},{label:'Delete workspace',destructive:true,disabled:actionBusy,onClick:deleteWs}]}/>
     </PanelHeader>
-    <div className="hc-workspace-secondary"><WorkspaceDefaultSummary ws={ws} t={t}/>{analyzeMsg&&<p role="status" style={{color:analyzeMsg.ok?t.ok:t.err}}>{analyzeMsg.text}</p>}
-      {!!topics.length&&<div className="hc-toolbar">{topics.map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{tp.label}</span>)}</div>}
-      {editMode&&<form className="hc-toolbar" onSubmit={e=>{e.preventDefault();saveEdit();}}><input aria-label="Workspace title" value={wsName} onChange={e=>setWsName(e.target.value)} style={inputS}/><input aria-label="Workspace description" value={wsDesc} onChange={e=>setWsDesc(e.target.value)} style={inputS}/><button disabled={actionBusy||!wsName.trim()} style={btnS(t.ok)}>Save</button><button type="button" onClick={()=>setEditMode(false)} style={btnS(t.mut)}>Cancel</button></form>}
+    <div className="hc-workspace-secondary"><WorkspaceDefaultSummary ws={ws} t={t} tools={tools}/>{analyzeMsg&&<p role="status" style={{margin:0,color:analyzeMsg.ok?t.ok:t.err}}>{analyzeMsg.text}</p>}
+      {!!topics.length&&<div className="hc-chip-row" aria-label="Topics">{topics.map((tp,i)=><span key={i} className="hc-chip" style={{'--chip-c':t.mut}}><IC.Tag/>{tp.label}</span>)}</div>}
+      {editMode&&<form className="hc-toolbar" onSubmit={e=>{e.preventDefault();saveEdit();}}><input aria-label="Workspace title" value={wsName} onChange={e=>setWsName(e.target.value)} style={inputS}/><input aria-label="Workspace description" value={wsDesc} onChange={e=>setWsDesc(e.target.value)} style={inputS}/><button disabled={actionBusy||!wsName.trim()} className="hc-button is-primary">Save</button><button type="button" onClick={()=>setEditMode(false)} className="hc-button">Cancel</button></form>}
     </div>
     <nav aria-label="Workspace sections" className="hc-workspace-nav">
       <div className="hc-workspace-tabs">{workspaceSections.map(([id,label])=><button key={id} aria-current={workspaceSection(tab)===id?'page':undefined} onClick={()=>chooseTab(id)}>{label}</button>)}</div>
@@ -1580,17 +1583,9 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
       {tab==='settings'&&<WorkspaceDefaults key={ws.id} {...{ws,t,btnS,inputS,models,personas,tools}} onSaved={saved=>{setWsDetail(saved);setWorkspaces(p=>p.map(w=>w.id===saved.id?{...w,...saved}:w));}}/>}
       {['notes','tasks','jobs'].includes(tab)&&<WorkspaceDaily {...{tab,ws,t,btnS,inputS,confirmAction,notify,models,workspaces,convs,onNavigate,initialCreate}} refreshKey={contentRevision} onAddContent={openContent}/>}
 
-      {tab==="convs"&&<div style={{display:"flex",flexDirection:"column",gap:8}}><div className="hc-toolbar"><button style={btnS(t.acc)} onClick={openContent}>Add existing content</button></div>
-        {!(ws.conversations||[]).length&&<EmptyState t={t} font={font} icon={<IC.Chat/>} title="No conversations yet" hint="Start a project chat or add existing content."/>}
-        {(ws.conversations||[]).map(c=><div key={c.id} style={{padding:"10px 14px",borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
-          <span style={{fontSize:"var(--hc-text-title)"}}>💬</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.title||"New Chat"}</div>
-            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{c.model||""} {c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():""}</div>
-          </div>
-          <button onClick={()=>onOpenConv(c.id)} style={btnS(t.acc)}>Open →</button>
-          <ActionMenu compact label={`Actions for ${c.title||"chat"}`} items={[{label:"Unlink chat",disabled:actionBusy,onClick:()=>removeConv(c.id)}]}/>
-        </div>)}
+      {tab==="convs"&&<div className="hc-ws-section"><div className="hc-toolbar hc-ws-toolbar"><button className="hc-button" onClick={openContent}><IC.Paperclip/> Add existing content</button></div>
+        {!(ws.conversations||[]).length?<EmptyState icon={<IC.Chat/>} title="No conversations yet" hint="Start a project chat or add existing content." action={<div className="hc-toolbar" style={{justifyContent:"center"}}><button className="hc-button is-primary" disabled={actionBusy} onClick={()=>run(onNewChat)}><IC.Plus/> New chat</button><button className="hc-button" onClick={openContent}>Add existing content</button></div>}/>
+        :<div className="hc-ws-list hc-elev-1">{(ws.conversations||[]).map((c,i)=><WorkspaceListRow key={c.id} index={i} icon={<IC.Chat/>} title={c.title||"New chat"} onOpen={()=>onOpenConv(c.id)} meta={[c.model,c.updated_at?new Date(_parseUtcishMs(c.updated_at)).toLocaleDateString():null]} actions={<ActionMenu compact label={`Actions for ${c.title||"chat"}`} items={[{label:"Open",onClick:()=>onOpenConv(c.id)},{label:"Unlink chat",disabled:actionBusy,onClick:()=>removeConv(c.id)}]}/>}/>)}</div>}
       </div>}
       {tab==="memory"&&(()=>{const enabled=ws.memory_enabled==="1"||ws.memory_enabled===1||ws.memory_enabled===true;const byStatus=s=>memories.filter(m=>m.status===s);const accepted=byStatus("accepted").filter(m=>!m.valid_until);const suggested=byStatus("suggested");const hidden=memories.filter(m=>["rejected","archived"].includes(m.status)||m.valid_until);const typeMeta={semantic:["Facts & Preferences",t.acc],episodic:["Decisions & Events",t.warm],procedural:["Procedures",t.pink]};const card=(m,mode)=>{const meta=typeMeta[m.type]||typeMeta.semantic;const editing=memEdit===m.id;return <div key={m.id} style={{padding:"10px 12px",borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:`1px solid ${meta[1]}33`,display:"flex",flexDirection:"column",gap:7}}>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
@@ -1605,7 +1600,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
             {editing?<><button onClick={()=>saveMemEdit(m,mode==="suggested")} style={btnS(t.ok)}>{mode==="suggested"?"Save + Accept":"Save"}</button><button onClick={()=>{setMemEdit(null);setMemEditText("");}} style={btnS(t.mut)}>Cancel</button></>
             :mode==="suggested"?<><button onClick={()=>acceptMemory(m)} style={btnS(t.ok)}>Accept</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>rejectMemory(m)} style={btnS(t.err)}>Reject</button></>
             :<><button onClick={()=>patchMemory(m,{pinned:m.pinned?0:1})} style={btnS(m.pinned?t.warm:t.mut)}>{m.pinned?"Unpin":"Pin"}</button><button onClick={()=>startMemEdit(m)} style={btnS(t.acc)}>Edit</button><button onClick={()=>patchMemory(m,{status:"archived"})} style={btnS(t.mut)}>Archive</button><button onClick={()=>deleteMemory(m)} style={btnS(t.err)}>Delete</button></>}
-            {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}>Source →</button>}
+            {m.source_conversation_id&&<button onClick={()=>onOpenConv&&onOpenConv(m.source_conversation_id)} style={{...btnS(t.f1),marginLeft:"auto"}}><IC.External/> Source</button>}
           </div>
         </div>;};return <div style={{display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:"var(--hc-radius-card)",background:`${enabled?t.ok:t.surface}10`,border:`1px solid ${enabled?t.ok:t.brd}33`}}>
@@ -1648,20 +1643,12 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
           <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>{hidden.map(m=>card(m,"hidden"))}</div>
         </details>}
       </div>;})()}
-      {tab==="reports"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
-        {!(ws.reports||[]).length&&<EmptyState t={t} font={font} icon={<IC.Research/>} title="No reports yet" hint="Add reports from Deep Research."/>}
-        {(ws.reports||[]).map(r=>{const sm={complete:[t.ok,"Complete"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],cancelled:[t.mut,"Cancelled"]}[String(r.status||"queued").toLowerCase()]||[t.warm,"Queued"];return <div key={r.id} style={{padding:"10px 14px",borderRadius:"var(--hc-radius-card)",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",display:"flex",alignItems:"center",gap:10,animation:"fadeIn .3s"}}>
-          <span style={{fontSize:"var(--hc-text-title)"}}>📊</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.title||r.query||"Research Report"}</div>
-            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{sm[1]} · {r.report_type||"report"} · {r.source_count||0} sources</div>
-          </div>
-          <button onClick={()=>onOpenReport&&onOpenReport(r.id)} style={btnS(t.acc)}>Open →</button>
-          <ActionMenu compact label={`Actions for ${r.title||r.query||"report"}`} items={[{label:"Unlink report",onClick:()=>onRemoveReport?.(ws.id,r.id)}]}/>
-        </div>;})}
+      {tab==="reports"&&<div className="hc-ws-section">
+        {!(ws.reports||[]).length?<EmptyState icon={<IC.Research/>} title="No reports yet" hint="Link reports from Deep Research to keep them with this project." action={<button className="hc-button" onClick={openContent}>Add existing content</button>}/>
+        :<div className="hc-ws-list hc-elev-1">{(ws.reports||[]).map((r,i)=><WorkspaceListRow key={r.id} index={i} icon={<IC.Research/>} title={r.title||r.query||"Research report"} onOpen={()=>onOpenReport&&onOpenReport(r.id)} chips={<StatusChip t={t} kind="report-status" value={String(r.status||"queued").toLowerCase()}/>} meta={[humanize(r.report_type||"report"),`${r.source_count||0} sources`]} actions={<ActionMenu compact label={`Actions for ${r.title||r.query||"report"}`} items={[{label:"Open",onClick:()=>onOpenReport&&onOpenReport(r.id)},{label:"Unlink report",onClick:()=>onRemoveReport?.(ws.id,r.id)}]}/>}/>)}</div>}
       </div>}
       {tab==="files"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(220px,100%),1fr))",gap:10}}>
-        {!(ws.files||[]).length&&<div style={{gridColumn:"1/-1"}}><EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Artifacts are tracked automatically when the AI downloads them in workspace chats."/></div>}
+        {!(ws.files||[]).length&&<div style={{gridColumn:"1/-1"}}><EmptyState icon={<IC.File/>} title="No artifacts yet" hint="Artifacts are tracked automatically when the AI downloads them in workspace chats."/></div>}
         {(ws.files||[]).map(f=><ArtifactCard key={f.id||`${f.filename}-${f.created_at}`} artifact={f} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} confirmAction={confirmAction} compact/>)}
       </div>}
     </div>
@@ -1764,7 +1751,7 @@ function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
       <button onClick={previewCleanup} style={btnS(t.acc)}>Preview sandbox cleanup</button>
       <button onClick={cleanNow} disabled={cleaning} style={btnS(t.warm)}>Clean released temporary files</button>
       <button onClick={cleanAll} disabled={cleaning||cbCleaning} style={{...btnS(t.err),opacity:(cleaning||cbCleaning)?0.6:1}}>
-        {(cleaning||cbCleaning)?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span> Cleaning...</>:"🗑 Clean All"}
+        {(cleaning||cbCleaning)?<><Spinner size={12}/> Cleaning…</>:<><IC.Trash/> Clean All</>}
       </button>
       {previewError&&<p role="alert">{previewError}</p>}
       {cleanupPreview&&<div style={{width:'100%',fontSize:"var(--hc-text-secondary)"}}>

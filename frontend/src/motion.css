@@ -76,6 +76,23 @@ button { transition: background-color var(--hc-dur-1) var(--hc-ease-out), border
 :where(button:not(:disabled)):active { transform: scale(var(--hc-press-scale)); }
 .hc-popover button:active, .conv-row:active, .hc-tool-row:active, .hc-settings-nav-item:active, .hc-activity-header:active, .hc-workspace-tabs button:active, .hc-switch-btn:active, .hc-search-result:active { transform: none; }
 
+/* Loading indicators, empty-state float, theme-toggle swap, Send→Stop morph,
+   rating pop. Consumed by Spinner.jsx, EmptyState.jsx and the chat composer. */
+@keyframes hc-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+@keyframes hc-spin { to { transform: rotate(360deg); } }
+@keyframes hc-rotate-in { from { opacity: 0; transform: rotate(-90deg) scale(.6); } }
+.hc-spinner { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; border-radius: 50%; display: inline-block; animation: hc-spin .9s linear infinite; flex-shrink: 0; }
+.hc-dots { display: inline-flex; gap: 4px; align-items: center; }
+.hc-dots > i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: hc-breathe 1.2s ease-in-out infinite; }
+.hc-dots > i:nth-child(2) { animation-delay: .16s; }
+.hc-dots > i:nth-child(3) { animation-delay: .32s; }
+.hc-theme-icon { display: inline-flex; animation: hc-rotate-in var(--hc-dur-3) var(--hc-ease-spring) both; }
+.hc-send-btn { transition: background-color var(--hc-dur-2) var(--hc-ease-out), border-radius var(--hc-dur-2) var(--hc-ease-spring), transform var(--hc-dur-1) var(--hc-ease-out); }
+.hc-send-btn[data-state="stop"] { border-radius: 30%; }
+.hc-send-btn > svg { animation: hc-icon-pop var(--hc-dur-2) var(--hc-ease-spring) both; }
+.hc-icon-btn.is-rated > svg { animation: hc-check-pop var(--hc-dur-3) var(--hc-ease-spring) both; }
+.hc-empty-icon { animation: hc-float 4s ease-in-out infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   :root { --hc-dur-1: 0ms; --hc-dur-2: 0ms; --hc-dur-3: 0ms; --hc-press-scale: 1; --hc-pop-scale: 1; --hc-pop-dy: 0px; --hc-drawer-dx: 0px; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0ms !important; scroll-behavior: auto !important; }

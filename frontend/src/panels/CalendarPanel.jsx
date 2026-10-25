@@ -2,6 +2,7 @@ import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
+import EmptyState from '../components/EmptyState.jsx';
 import { fmtLocalMinute, fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
@@ -208,7 +209,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const slotCreate=(k,hour)=>setForm({...EMPTY_EVENT,start_local:`${k}T${pad(hour)}:00`});
 
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <PanelHeader t={t} color={t.f1||t.acc} icon={<IC.Clock/>} title="Calendar"
+    <PanelHeader t={t} color={t.f1||t.acc} icon={<IC.Calendar/>} title="Calendar"
       subtitle="Times shown in your assistant timezone. CalDAV keeps your phone in sync."
       nav={<>
         <button aria-label="Previous" onClick={()=>step(-1)} style={{...btnS(t.mut),padding:"5px 10px"}}><IC.ChevLeft/></button>
@@ -322,7 +323,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
 
         <div style={{...cardS}}>
           <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.mut,marginBottom:8}}>Upcoming</div>
-          {upcoming.length===0?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Nothing scheduled. Try: "dentist appointment Tuesday at 3pm" in chat.</div>
+          {upcoming.length===0?<EmptyState compact icon={<IC.Calendar/>} title="Nothing scheduled" hint='Try: "dentist appointment Tuesday at 3pm" in chat.'/>
           :upcoming.map(e=><div key={e.occurrence_id||e.id} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 0",fontSize:"var(--hc-text-secondary)",color:t.dim,borderBottom:"1px solid var(--hc-line-subtle)"}}>
             <span style={{width:9,height:9,borderRadius:"var(--hc-radius-sm)",background:evColor(e),flexShrink:0}}/>
             <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:"var(--hc-text-secondary)"}}>{fmtLocalMinute(e.start_local)}</span>

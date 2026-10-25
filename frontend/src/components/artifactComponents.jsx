@@ -679,8 +679,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
           ?(galleryLoading
             ?<Skeleton t={t} h="100%" r={12} style={{flex:1,minHeight:0}}/>
             :<div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:t.mut}}>
-              <span style={{fontSize:40,opacity:.4}}>🖼️</span>
-              <div style={{fontSize:"var(--hc-text-secondary)"}}>No generations yet — describe an image on the left and hit Generate.</div>
+              <EmptyState compact icon={<IC.Image/>} title="No generations yet" hint="Describe an image on the left and hit Generate."/>
             </div>)
           :<>
             <div onClick={()=>cur&&cur.exists_status!=="missing"&&setLightbox(true)} title="Click to open the full-screen viewer" style={{flex:1,minHeight:0,position:"relative",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",overflow:"hidden",cursor:cur&&cur.exists_status!=="missing"?"zoom-in":"default"}}>
@@ -1014,7 +1013,7 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {loading&&<SkeletonGrid t={t} cards={6} minW={250} cardH={120}/>}
-      {!loading&&!items.length&&<EmptyState t={t} font={font} icon={<IC.Layers/>} title="No artifacts yet" hint="Files the assistant delivers with download_file or download_project are collected here."/>}
+      {!loading&&!items.length&&<EmptyState icon={<IC.Package/>} title="No artifacts yet" hint="Files the assistant delivers with download_file or download_project are collected here."/>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,250px),1fr))",gap:12}}>
         {items.map(a=><ArtifactCard key={a.id} artifact={a} t={t} font={font} workspaces={workspaces} onPreview={onPreview} onOpenConv={onOpenConv} onPatch={patchArtifact} onDelete={deleteArtifact} onDetails={openDetail} onSelect={toggleSelected} selected={selected.has(a.id)} confirmAction={confirmAction}/>)}
       </div>

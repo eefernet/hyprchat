@@ -109,3 +109,23 @@ a[download]:active { transform: translateY(0); }
 ::selection { background: color-mix(in srgb, var(--hc-accent) 27%, transparent); }
 textarea::placeholder, input::placeholder { color: var(--hc-muted); opacity: 1; }
 select option { background: var(--hc-bg-deep); color: var(--hc-text); }
+
+/* Starter chips on the empty chat surface. */
+.hc-starter-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 580px; margin: 16px auto 0; pointer-events: auto; }
+.hc-starter-chip { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: var(--hc-radius-dialog); border: 1px solid color-mix(in srgb, var(--chip-c, var(--hc-accent)) 26%, transparent); background: color-mix(in srgb, var(--chip-c, var(--hc-accent)) 9%, transparent); color: var(--hc-secondary); font: inherit; font-size: var(--hc-text-control); line-height: 1.4; text-align: left; max-width: 100%; cursor: pointer; animation: hc-reveal var(--hc-dur-3) var(--hc-ease-out) both; animation-delay: calc(.35s + var(--i, 0) * 60ms); transition: background-color var(--hc-dur-1) var(--hc-ease-out), border-color var(--hc-dur-1) var(--hc-ease-out), color var(--hc-dur-1) var(--hc-ease-out); }
+.hc-starter-chip:hover, .hc-starter-chip:focus-visible { background: color-mix(in srgb, var(--chip-c, var(--hc-accent)) 18%, transparent); border-color: color-mix(in srgb, var(--chip-c, var(--hc-accent)) 50%, transparent); color: var(--hc-text); filter: none; }
+.hc-starter-chip-icon { display: inline-flex; color: var(--chip-c, var(--hc-accent)); flex-shrink: 0; }
+.hc-starter-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Loading quote shown while a reply is still waiting for its first token. */
+.hc-waiting-quote { display: flex; flex-direction: column; gap: 2px; padding: 8px 2px 2px; font-size: var(--hc-text-secondary); line-height: 1.5; max-width: 56ch; }
+.hc-waiting-quote-text { font-style: italic; }
+.hc-waiting-quote-author { font-size: var(--hc-text-micro); opacity: .8; }
+
+/* Keyboard shortcut sheet. */
+.hc-kbd { display: inline-block; padding: 1px 6px; min-width: 18px; text-align: center; border: 1px solid var(--hc-line-strong); border-bottom-width: 2px; border-radius: var(--hc-radius-sm); background: var(--hc-sunken); color: var(--hc-text); font: inherit; font-size: var(--hc-text-micro); line-height: 1.5; margin: 0 2px 0 0; }
+.hc-shortcut-list { margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.hc-shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 7px 4px; border-radius: var(--hc-radius-sm); }
+.hc-shortcut-row + .hc-shortcut-row { border-top: 1px solid var(--hc-line-subtle); }
+.hc-shortcut-row dt { margin: 0; display: flex; gap: 2px; flex-shrink: 0; }
+.hc-shortcut-row dd { margin: 0; color: var(--hc-secondary); font-size: var(--hc-text-secondary); text-align: right; }

@@ -1,7 +1,9 @@
 import React, { useEffect, useRef } from 'react';
 
-export default function BackgroundCanvas({effect,t}){
+export default function BackgroundCanvas({effect,t,energy=0}){
   const ref=useRef(null);
+  // Activity energy (0..1) read by the frame loop: streaming makes every effect run a touch faster.
+  const energyRef=useRef(0);energyRef.current=energy;
   useEffect(()=>{
     const canvasEffects=["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"];
     if(!canvasEffects.includes(effect))return;
@@ -391,14 +393,17 @@ export default function BackgroundCanvas({effect,t}){
     const drawBlueprint=(time,w,h)=>{
       ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.3),oy(.3));ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let i=0;i<16;i++){const x=(particles[i]?.x||0),y=(particles[i]?.y||0),ww=60+(i%5)*26,hh=30+(i%4)*18;ctx.globalAlpha=.045+(i%3)*.02;ctx.strokeRect(snap(x,16),snap(y,16),ww,hh);ctx.beginPath();ctx.moveTo(snap(x,16)-16,snap(y,16)+hh/2);ctx.lineTo(snap(x,16)+ww+16,snap(y,16)+hh/2);ctx.moveTo(snap(x,16)+ww/2,snap(y,16)-16);ctx.lineTo(snap(x,16)+ww/2,snap(y,16)+hh+16);ctx.stroke();}ctx.restore();ctx.globalAlpha=1;
     };
-    let lastDraw=0, lastTime=0;
-    const step=(time)=>{
+    let lastDraw=0, lastTime=0, vt=0, speed=1;
+    const step=(now)=>{
       if(stopped)return;
       if(!reduced)raf=requestAnimationFrame(step);
-      if(time-lastDraw<15)return;                       // ~66fps cap; skips frames on 120Hz+
-      const dt=Math.min(time-(lastTime||time-16.7),100); // clamp giant deltas (tab resume)
-      lastTime=time;lastDraw=time;
-      const dtf=Math.min(dt/16.667,3);                  // frame factor: 1.0 at 60fps
+      if(now-lastDraw<15)return;                        // ~66fps cap; skips frames on 120Hz+
+      const dt=Math.min(now-(lastTime||now-16.7),100);   // clamp giant deltas (tab resume)
+      lastTime=now;lastDraw=now;
+      speed+=((1+(energyRef.current||0)*.5)-speed)*.04;  // ease toward 1.5x while the app is busy
+      vt+=dt*speed;
+      const time=vt;                                    // effects see a virtual clock that runs faster under load
+      const dtf=Math.min(dt/16.667,3)*speed;            // frame factor: 1.0 at 60fps
       ctx.globalCompositeOperation="source-over";
       par.x+=(par.tx-par.x)*Math.min(1,.06*dtf);
       par.y+=(par.ty-par.y)*Math.min(1,.06*dtf);
