@@ -22,9 +22,12 @@ export default function useIsMobile() {
 
 // One observer owns the app AND body portals. Follow iOS's visual viewport
 // instead of fighting its focus pan with repeated window.scrollTo calls.
+// Installed apps use the measured height even at rest: their usable viewport
+// can be smaller than 100vh. Browser tabs keep CSS dynamic viewport sizing.
 // The closed height also detects Android's resizes-content keyboard behavior.
 export function observeMobileViewport(win, onChange) {
   const vv = win.visualViewport;
+  const standaloneQuery = win.matchMedia?.("(display-mode: standalone)");
   let closedHeight = win.innerHeight, width = win.innerWidth;
   let keyboardOpen = false, raf = 0, disposed = false;
   const measure = () => {
@@ -40,7 +43,8 @@ export function observeMobileViewport(win, onChange) {
     closedHeight = Math.max(closedHeight, win.innerHeight);
     keyboardOpen = (editable || keyboardOpen) && closedHeight - height > 80;
     if (!keyboardOpen) closedHeight = win.innerHeight;
-    onChange({height: keyboardOpen ? height : null, offsetTop: keyboardOpen ? Math.max(0, vv?.offsetTop || 0) : 0, keyboardOpen});
+    const standalone = standaloneQuery?.matches || win.navigator?.standalone === true;
+    onChange({height: keyboardOpen || standalone ? height : null, offsetTop: keyboardOpen ? Math.max(0, vv?.offsetTop || 0) : 0, keyboardOpen});
   };
   const schedule = () => {
     win.cancelAnimationFrame(raf);
@@ -49,6 +53,7 @@ export function observeMobileViewport(win, onChange) {
   const events = [[win,"resize"],[win,"orientationchange"],[win,"pageshow"],
     [win.document,"focusin"],[win.document,"focusout"],[win.document,"visibilitychange"]];
   if (vv) events.push([vv,"resize"],[vv,"scroll"]);
+  if (standaloneQuery) events.push([standaloneQuery,"change"]);
   events.forEach(([target,event]) => target.addEventListener(event,schedule));
   measure();
   return () => {
