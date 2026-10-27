@@ -1,5 +1,5 @@
 <details open>
-<summary>Alpha v18.2 — Oct 20, 2026</summary>
+<summary>Alpha v18.2 — Oct 26, 2026</summary>
 
 > Workspace project hubs, effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.
 
