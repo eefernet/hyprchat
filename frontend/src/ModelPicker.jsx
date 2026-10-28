@@ -9,11 +9,13 @@ import {
   modelContextLength,
 } from './modelHelpers.js';
 import { IC } from './components/icons.jsx';
+import usePresence from './usePresence.js';
 
 // ============================================================
 // ModelPicker — custom dropdown replacing plain <select> for model selection
-export default function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh}){
+export default function ModelPicker({value,onChange,models,modelDetails,t,font,style={},compact=false,onRefresh,label="Model",placeholder="Select model"}){
   const [open,setOpen]=useState(false);
+  const presence=usePresence(open);
   const [dropPos,setDropPos]=useState({top:0,left:0,width:220,up:false,bottom:0,maxH:360});
   const [hi,setHi]=useState(-1); // keyboard-highlighted index into the flat model list
   const triggerRef=useRef(null);
@@ -143,26 +145,26 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
   const isMissing=value&&models.length>0&&!models.includes(value);
   return <div ref={triggerRef} style={{position:"relative",...style}}>
     <div onClick={openDropdown} onKeyDown={onTriggerKeyDown} tabIndex={0} role="combobox"
-      aria-expanded={open} aria-haspopup="listbox" aria-label="Model"
-      style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 8px":"5px 10px",background:isMissing?`${t.err}15`:open?`${t.acc}15`:t.bgDeep,border:`1px solid ${isMissing?t.err:open?t.acc:t.brd}${open||isMissing?"55":"33"}`,borderRadius:8,cursor:"pointer",minWidth:compact?100:150,transition:"all .15s",userSelect:"none",outline:"none"}}>
+      aria-expanded={open} aria-haspopup="listbox" aria-label={label}
+      style={{display:"flex",alignItems:"center",gap:6,padding:compact?"3px 10px":"5px 10px",background:isMissing?`${t.err}15`:open?"var(--hc-accent-tint)":"var(--hc-sunken)",border:`1px solid ${isMissing?`${t.err}55`:open?"var(--hc-accent-ring)":"var(--hc-line-subtle)"}`,borderRadius:compact?"var(--hc-radius-pill)":"var(--hc-radius)",cursor:"pointer",minWidth:compact?100:150,transition:"background-color var(--hc-dur-1) var(--hc-ease-out),border-color var(--hc-dur-1) var(--hc-ease-out)",userSelect:"none",outline:undefined}}>
       <span style={{fontSize:compact?12:14,flexShrink:0}}>{isMissing?"⚠️":famIcon(name)}</span>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||"Select model"))}</div>
+        <div style={{fontSize:compact?10:11,fontWeight:600,color:isMissing?t.err:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isMissing?`${curProvider?tag:name} (deleted)`:(curProvider?tag:(name||placeholder))}</div>
         {!compact&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:1}}>
-          <span style={{fontSize:8,color:sc,fontWeight:700}}>{tag}</span>
-          {paramSz&&<span style={{fontSize:8,color:t.mut}}>{paramSz}</span>}
-          {ctxLen>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
-          {caps.map(c=><span key={c.label} style={{fontSize:7,padding:"0px 3px",borderRadius:3,background:`${c.color}20`,color:c.color,fontWeight:700,border:`1px solid ${c.color}33`}}>{c.emoji}</span>)}
+          <span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:700}}>{tag}</span>
+          {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{paramSz}</span>}
+          {ctxLen>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
+          {caps.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"0px 4px",borderRadius:"var(--hc-radius-sm)",background:`${c.color}20`,color:c.color,fontWeight:600}}>{c.emoji}</span>)}
         </div>}
       </div>
-      {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:12,color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><IC.Refresh/></span>}
-      <span style={{color:t.mut,flexShrink:0,transition:"transform .2s",transform:open?"rotate(180deg)":"none",display:"flex",alignItems:"center"}}><IC.ChevDown/></span>
+      {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><IC.Refresh/></span>}
+      <span className="hc-chevron" data-open={open?"true":"false"} style={{color:t.mut,flexShrink:0}}><IC.ChevDown/></span>
     </div>
-    {open&&(()=>{
+    {presence.mounted&&(()=>{
       const {grouped,sortedMakers,flatIdx}=grouping;
-      return createPortal(<div ref={dropRef} role="listbox" style={{position:"fixed",...(dropPos.up?{bottom:dropPos.bottom}:{top:dropPos.top}),left:dropPos.left,minWidth:dropPos.width,maxWidth:"min(380px, calc(100vw - 16px))",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:10,boxShadow:`0 8px 32px #00000077`,zIndex:99999,maxHeight:dropPos.maxH,overflowY:"auto",padding:"4px",fontFamily:font}}>
+      return createPortal(<div ref={dropRef} role="listbox" className="hc-pop hc-elev-2" data-placement={dropPos.up?"top":"bottom"} {...presence.props} style={{position:"fixed",...(dropPos.up?{bottom:dropPos.bottom}:{top:dropPos.top}),left:dropPos.left,minWidth:dropPos.width,maxWidth:"min(380px, calc(100vw - 16px))",zIndex:99999,maxHeight:dropPos.maxH,overflowY:"auto",padding:6,fontFamily:font}}>
         {sortedMakers.map(maker=><div key={maker}>
-          <div style={{padding:"5px 10px 3px",fontSize:8,fontWeight:700,color:t.mut,textTransform:"uppercase",letterSpacing:.8,borderTop:maker===sortedMakers[0]?"none":`1px solid ${t.brd}22`,marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
+          <div style={{padding:"5px 10px 3px",fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.mut,borderTop:maker===sortedMakers[0]?"none":"1px solid var(--hc-line-subtle)",marginTop:maker===sortedMakers[0]?0:4,paddingTop:maker===sortedMakers[0]?5:7}}>{maker}</div>
           {grouped[maker].map(m=>{
             const isHF=m.startsWith("hf.co/");
             const provider=cloudModelProvider(m);
@@ -174,24 +176,24 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
             const ctx2=modelContextLength(modelDetails,m);
             return <div key={m} role="option" aria-selected={sel} onClick={()=>{onChange(m);setOpen(false);}}
               ref={isHi?(el=>{el&&el.scrollIntoView({block:"nearest"});}):null}
-              style={{display:"flex",alignItems:"center",gap:8,padding:"6px 9px",borderRadius:7,cursor:"pointer",background:sel?`${t.acc}18`:isHi?`${t.surface}88`:isHF?`#ff660008`:"transparent",border:`1px solid ${sel?t.acc:isHi?`${t.brd}66`:isHF?"#ff660033":"transparent"}`,marginBottom:1,transition:"background .1s"}}
-              onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660015`:`${t.surface}88`;}}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:"var(--hc-radius-sm)",cursor:"pointer",background:sel?"var(--hc-accent-tint)":isHi?"var(--hc-hover)":isHF?`#ff660008`:"transparent",border:"1px solid transparent",marginBottom:1,transition:"background-color var(--hc-dur-1) var(--hc-ease-out)"}}
+              onMouseEnter={e=>{if(!sel)e.currentTarget.style.background=isHF?`#ff660015`:"var(--hc-hover)";}}
               onMouseLeave={e=>{if(!sel&&!isHi)e.currentTarget.style.background=isHF?`#ff660008`:"transparent";}}>
-              <span style={{fontSize:15,flexShrink:0}}>{isHF?"🤗":famIcon(provider||mn)}</span>
+              <span style={{fontSize:"var(--hc-text-control)",flexShrink:0}}>{isHF?"🤗":famIcon(provider||mn)}</span>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",alignItems:"center",gap:4}}>
-                  <div style={{fontSize:11,fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
-                  {isHF&&<span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:"#ff660022",color:"#ff6600",fontWeight:700,flexShrink:0,border:"1px solid #ff660033"}}>HF</span>}
-                  {provider&&(()=>{const pc=provider==="openai"?t.ok:provider==="anthropic"?t.pink:"#4aa3ff";const pl=provider==="openai"?"OpenAI":provider==="anthropic"?"Claude":(mdi.details?.provider_label||"Custom");return <span style={{fontSize:7,padding:"1px 4px",borderRadius:3,background:`${pc}22`,color:pc,fontWeight:700,flexShrink:0,border:`1px solid ${pc}33`,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>;})()}
+                  <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
+                  {isHF&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:"#ff660022",color:"#ff6600",fontWeight:600,flexShrink:0}}>HF</span>}
+                  {provider&&(()=>{const pc=provider==="openai"?t.ok:provider==="anthropic"?t.pink:"#4aa3ff";const pl=provider==="openai"?"OpenAI":provider==="anthropic"?"Claude":(mdi.details?.provider_label||"Custom");return <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${pc}22`,color:pc,fontWeight:600,flexShrink:0,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>;})()}
                 </div>
                 <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
-                  <span style={{fontSize:8,color:sc2,fontWeight:700}}>{mt}</span>
-                  {ps&&<span style={{fontSize:8,color:t.mut}}>{ps}</span>}
-                  {ctx2>0&&<span style={{fontSize:8,color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
-                  {mc.map(c=><span key={c.label} style={{fontSize:8,padding:"1px 4px",borderRadius:4,background:`${c.color}20`,color:c.color,fontWeight:600,border:`1px solid ${c.color}33`}}>{c.emoji} {c.label}</span>)}
+                  <span style={{fontSize:"var(--hc-text-secondary)",color:sc2,fontWeight:700}}>{mt}</span>
+                  {ps&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{ps}</span>}
+                  {ctx2>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
+                  {mc.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${c.color}20`,color:c.color,fontWeight:600}}>{c.emoji} {c.label}</span>)}
                 </div>
               </div>
-              {sel&&<span style={{fontSize:10,color:t.acc,flexShrink:0}}>✓</span>}
+              {sel&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,flexShrink:0}}>✓</span>}
             </div>;
           })}
         </div>)}

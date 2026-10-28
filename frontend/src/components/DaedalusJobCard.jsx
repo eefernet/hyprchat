@@ -15,8 +15,8 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const active=!terminalJobStates.has(job.state),status=jobStatusLabel(job);
   useEffect(()=>{if(!active)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[active]);
   useEffect(()=>{if(details){opener.current=document.activeElement;dialog.current?.showModal();}else if(dialog.current?.open){dialog.current.close();opener.current?.focus();}},[details]);
-  const button={background:t.bgDeep,border:`1px solid ${t.brd}`,borderRadius:8,padding:'8px 12px',color:t.text,fontFamily:font,fontSize:13,cursor:'pointer',textDecoration:'none',display:'inline-block'};
-  const vars={'--dj-surface':t.surface,'--dj-bg':t.bgDeep,'--dj-text':t.text,'--dj-muted':t.dim||t.mut,'--dj-border':t.brd,'--dj-accent':t.acc,'--dj-good':t.ok,fontFamily:font};
+  const button={background:t.bgDeep,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:'8px 12px',color:t.text,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:'pointer',textDecoration:'none',display:'inline-block'};
+  const vars={'--dj-surface':`var(--hc-elev-1, ${t.surface})`,'--dj-bg':t.bgDeep,'--dj-text':t.text,'--dj-muted':t.dim||t.mut,'--dj-border':`var(--hc-line, ${t.brd})`,'--dj-accent':t.acc,'--dj-good':t.ok,fontFamily:font};
   const name=job.presentation?.project_name||job.project_name||'Daedalus project';
   const elapsed=(job.seconds_used||0)+(active?Math.max(job.operation_seconds||0,job.worker_contact_at?(now-timestamp(job.worker_contact_at))/1000+(job.operation_seconds||0):0):0);
   const updated=timestamp(job.meaningful_update_at||job.updated_at||job.created_at);
@@ -104,7 +104,7 @@ export function DaedalusStatusStrip(props){return <DaedalusJobCard {...props} co
 function BrowserEvidence({jobId,check,button}){
   return <div>{(check.screenshots||[]).map(shot=><details key={shot.evidence.id}><summary>{shot.viewport} screenshot</summary><img loading="lazy" src={userScopedUrl(`/api/coder/workflows/${jobId}/evidence/${shot.evidence.id}`)} alt={`${shot.viewport} browser check`} style={{maxWidth:'100%'}}/></details>)}
     {(check.traces||[]).map(trace=><a key={trace.evidence.id} style={button} href={userScopedUrl(`/api/coder/workflows/${jobId}/evidence/${trace.evidence.id}`)} download={`${trace.viewport}-trace.zip`}>Download {trace.viewport} test trace</a>)}
-    {!!check.traces?.length&&<p style={{fontSize:10}}>Replay locally with Playwright Trace Viewer: npx playwright show-trace &lt;trace.zip&gt;</p>}
+    {!!check.traces?.length&&<p style={{fontSize:"var(--hc-text-secondary)"}}>Replay locally with Playwright Trace Viewer: npx playwright show-trace &lt;trace.zip&gt;</p>}
   </div>;
 }
 
@@ -112,7 +112,7 @@ function ProjectHistory({projectId,refreshKey,button}){
   const [rows,setRows]=useState(null),[error,setError]=useState('');
   useEffect(()=>{setRows(null);setError('');},[projectId,refreshKey]);
   const load=async()=>{try{const r=await fetch(`${API}/api/coder/projects/${projectId}/history`);if(!r.ok)throw new Error('Unable to load project history');setRows(await r.json());}catch(e){setError(e.message);}};
-  return <details style={{fontSize:11,marginTop:8}} onToggle={e=>{if(e.currentTarget.open&&!rows)load();}}><summary>Project revisions</summary>
+  return <details style={{fontSize:"var(--hc-text-secondary)",marginTop:8}} onToggle={e=>{if(e.currentTarget.open&&!rows)load();}}><summary>Project revisions</summary>
     {rows?.map(row=><p key={row.id} title={row.user_task}>{String(row.user_task||'').replace(/\s+/g,' ').slice(0,110)}{(row.user_task||'').length>110?'…':''} · {row.state} · {row.revision_id?.slice(0,10)} {row.artifact&&<a style={button} href={userScopedUrl(`/api/artifacts/${row.artifact.id}/download`)}>Download revision</a>}</p>)}{error&&<p role="alert">{error}</p>}
   </details>;
 }
@@ -130,13 +130,13 @@ function ProjectEvidence({jobId,t,font}){
       setResult(data);setRequest(body);
     }catch(e){if(version===generation.current)setError(e.message);}finally{if(version===generation.current)setBusy(false);}
   };
-  const control={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:5,padding:'5px 8px',fontFamily:font,fontSize:11};
+  const control={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius-sm)",padding:'5px 8px',fontFamily:font,fontSize:"var(--hc-text-secondary)"};
   const next=()=>{
     if(result.next_offset!=null)load({...request,offset:result.next_offset,sha256:result.sha256});
     else if(result.next_line!=null)load({...request,start:result.next_line,sha256:result.sha256});
     else if(result.next_cursor!=null)load({...request,cursor:result.next_cursor});
   };
-  return <details style={{marginTop:10,fontSize:11}} onToggle={e=>{if(e.currentTarget.open&&!result&&!busy)load({operation:'files'});}}>
+  return <details style={{marginTop:10,fontSize:"var(--hc-text-secondary)"}} onToggle={e=>{if(e.currentTarget.open&&!result&&!busy)load({operation:'files'});}}>
     <summary style={{cursor:'pointer'}}>Browse project evidence</summary>
     <form onSubmit={e=>{e.preventDefault();load({operation:kind,query});}} style={{display:'flex',gap:6,flexWrap:'wrap',margin:'10px 0'}}>
       <select aria-label="Evidence type" value={kind} onChange={e=>setKind(e.target.value)} style={control}><option value="files">Files</option><option value="symbols">Symbols</option><option value="search">Text search</option><option value="dependencies">Imports</option></select>

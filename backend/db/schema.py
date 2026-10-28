@@ -1,6 +1,12 @@
 """SQLite schema bootstrap SQL for HyprChat."""
 
 DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS temporary_outputs (
+    name TEXT PRIMARY KEY, user_id TEXT NOT NULL, job_id TEXT NOT NULL,
+    state TEXT NOT NULL, created REAL NOT NULL, released REAL,
+    sha256 TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

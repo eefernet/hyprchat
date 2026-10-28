@@ -24,16 +24,16 @@ export default function DaedalusRequestOptions({conversationId,currentProjectId,
       daedalus_visual_review:nextVisual==='inherit'?null:nextVisual==='on'});
   };
   if(!enabled)return null;
-  const style={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:6,padding:6,fontFamily:font,fontSize:11};
+  const style={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:6,fontFamily:font,fontSize:"var(--hc-text-secondary)"};
   return <div style={{display:'flex',gap:8,flexWrap:'wrap',margin:'6px 0',alignItems:'center'}}>
-    <label style={{fontSize:11,color:t.mut}}>Project <select aria-label="Daedalus project" style={style} value={target} onChange={e=>update(e.target.value,visual)}>
+    <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Project <select aria-label="Daedalus project" style={style} value={target} onChange={e=>update(e.target.value,visual)}>
       <option value="">{currentProjectId?'Continue current project':'Start a new project'}</option>{currentProjectId&&<option value="new">Start a new project</option>}
       {projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
     </select></label>
-    <label style={{fontSize:11,color:t.mut}}>AI visual review <select aria-label="AI visual review for this request" style={style} value={visual} onChange={e=>update(target,e.target.value)}>
+    <label style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>AI visual review <select aria-label="AI visual review for this request" style={style} value={visual} onChange={e=>update(target,e.target.value)}>
       <option value="inherit">Use Settings</option><option value="off">Off</option><option value="on">On if supported</option>
     </select></label>
-    <span style={{fontSize:10,color:t.mut}}>Browser behavior checks apply to web UI tasks. AI visual review requires a local vision model.</span>
+    <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Browser behavior checks apply to web UI tasks. AI visual review requires a local vision model.</span>
     {error&&<span role="alert">{error}</span>}
   </div>;
 }

@@ -1121,6 +1121,8 @@ async def init_db():
         await db.commit()
         from db.coder_jobs import migrate as migrate_coder_jobs
         await migrate_coder_jobs(db)
+        from workspace_service import migrate as migrate_workspaces
+        await migrate_workspaces(db)
         from job_registry import migrate as migrate_jobs
         await migrate_jobs(db)
         from research_checkpoints import migrate as migrate_research_checkpoints
@@ -1143,7 +1145,13 @@ async def create_conversation(
     system_prompt: str = "",
     model_config_id: str = None,
     use_memories: str = "0",
+    workspace_context: dict | None = None,
+    tool_ids: list | None = None,
+    persona_name: str = "",
+    persona_avatar: str = "",
 ):
+    import workspace_service
+    chosen = await workspace_service.validate_selection(workspace_context)
     user_id = _scope_user()
     db = await get_db()
     try:
@@ -1159,6 +1167,9 @@ async def create_conversation(
                 "1" if str(use_memories).lower() in {"1", "true", "yes", "on"} else "0",
             ),
         )
+        await db.execute('UPDATE conversations SET workspace_context=?,tool_ids=?,persona_name=?,persona_avatar=? WHERE id=?', (json.dumps(chosen), json.dumps(tool_ids or []), persona_name, persona_avatar, id))
+        if chosen['mode'] == 'selected':
+            await db.execute('INSERT INTO workspace_conversations(workspace_id,conversation_id) VALUES(?,?)', (chosen['workspace_id'], id))
         await db.commit()
     finally:
         await db.close()
@@ -1185,7 +1196,8 @@ async def get_conversations(limit: int = 50, offset: int = 0):
                 c["tool_ids"] = json.loads(c.get("tool_ids", "[]"))
             except (json.JSONDecodeError, TypeError):
                 c["tool_ids"] = []
-            convs.append(c)
+            import workspace_service
+            convs.append(await workspace_service.context_info(c))
         return convs
     finally:
         await db.close()
@@ -1220,7 +1232,8 @@ async def get_conversation(id: str):
                 msg["metadata"] = {}
             parsed_msgs.append(msg)
         conv["messages"] = parsed_msgs
-        return conv
+        import workspace_service
+        return await workspace_service.context_info(conv)
     finally:
         await db.close()
 
@@ -1355,6 +1368,9 @@ def _scrub_surrogates(v):
 async def update_conversation(id: str, **kwargs):
     if not kwargs:
         return
+    if "workspace_context" in kwargs:
+        import workspace_service
+        kwargs["workspace_context"] = json.dumps(await workspace_service.validate_selection(kwargs["workspace_context"], id))
     user_id = _scope_user()
     db = await get_db()
     try:
@@ -1447,6 +1463,46 @@ async def update_message(message_id: int, *, content: str = None, metadata: dict
         await db.commit()
     finally:
         await db.close()
+
+
+async def save_chat_delivery(message_id, content, metadata):
+    """Merge server-owned delivery state atomically without losing run metadata."""
+    conn = await get_db()
+    try:
+        await conn.execute('''UPDATE messages SET content=?, metadata=json_patch(COALESCE(metadata,'{}'),?)
+            WHERE id=? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)''',
+            (content, json.dumps({**metadata, 'server_persists': True}), message_id, _scope_user()))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def patch_message_presentation(conversation_id, message_id, *, content=None, metadata=None):
+    conn = await get_db()
+    try:
+        await conn.execute('BEGIN IMMEDIATE')
+        rows = await conn.execute_fetchall('''SELECT m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            WHERE m.id=? AND c.id=? AND c.user_id=?''', (message_id, conversation_id, _scope_user()))
+        if not rows:
+            raise LookupError('Message not found')
+        previous = json.loads(rows[0]['metadata'] or '{}')
+        if metadata is not None:
+            metadata = {**previous, **metadata}
+            if previous.get('server_persists'):
+                for key in ('server_persists','in_progress','delivery_status','review_history','effort',
+                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens',
+                            'run_ids','run_roles','run_types','has_full_product_build'):
+                    if key in previous:
+                        metadata[key] = previous[key]
+                # Stream-completion PATCHes cannot replace the server's final answer.
+                content = None
+        if content is not None:
+            await conn.execute('UPDATE messages SET content=? WHERE id=?', (content, message_id))
+        if metadata is not None:
+            await conn.execute('UPDATE messages SET metadata=? WHERE id=?', (json.dumps(metadata), message_id))
+        await conn.commit()
+    finally:
+        await conn.close()
 
 
 async def delete_messages_from(conversation_id: str, from_id: int) -> list[int] | None:
@@ -2261,7 +2317,11 @@ async def delete_model_config(id: str):
 # ============================================================
 # WORKSPACE CRUD
 # ============================================================
-async def create_workspace(id: str, name: str, description: str = ""):
+async def create_workspace(id: str, name: str, description: str = "", **settings):
+    import workspace_service
+    defaults = workspace_service.chat_defaults(settings.get("chat_defaults", {}))
+    if settings.get("source_context_enabled", True) not in (0,1,False,True):
+        raise ValueError("source_context_enabled must be a boolean")
     user_id = _scope_user()
     db = await get_db()
     try:
@@ -2270,12 +2330,13 @@ async def create_workspace(id: str, name: str, description: str = ""):
             "INSERT INTO workspaces(id,user_id,name,description,topics,memory_enabled,instructions,created_at,updated_at) VALUES(?,?,?,?, '[]',0,'',?,?)",
             (id, user_id, name, description, now, now)
         )
+        await db.execute("UPDATE workspaces SET chat_defaults=?,source_context_enabled=?,instructions=? WHERE id=?", (json.dumps(defaults), int(settings.get("source_context_enabled", True)), settings.get("instructions", ""), id))
         await db.commit()
     finally:
         await db.close()
     return {
         "id": id, "name": name, "description": description, "topics": [],
-        "memory_enabled": 0, "instructions": "",
+        "memory_enabled": 0, "instructions": settings.get("instructions", ""), "chat_defaults": defaults, "source_context_enabled": bool(settings.get("source_context_enabled", True)),
         "conv_count": 0, "file_count": 0, "report_count": 0,
     }
 
@@ -2301,7 +2362,8 @@ async def get_workspaces():
                 d["topics"] = json.loads(d.get("topics", "[]"))
             except Exception:
                 d["topics"] = []
-            result.append(d)
+            import workspace_service
+            result.append(workspace_service.normalize_workspace(d))
         return result
     finally:
         await db.close()
@@ -2314,7 +2376,8 @@ async def get_workspace(ws_id: str):
         row = await db.execute_fetchall("SELECT * FROM workspaces WHERE id=? AND user_id=?", (ws_id, user_id))
         if not row:
             return None
-        ws = dict(row[0])
+        import workspace_service
+        ws = workspace_service.normalize_workspace(dict(row[0]))
         try:
             ws["topics"] = json.loads(ws.get("topics", "[]"))
         except Exception:
@@ -2322,7 +2385,7 @@ async def get_workspace(ws_id: str):
         conv_rows = await db.execute_fetchall(
             """SELECT c.id,c.title,c.model,c.updated_at FROM conversations c
                JOIN workspace_conversations wc ON c.id=wc.conversation_id
-               WHERE wc.workspace_id=? AND c.user_id=? ORDER BY wc.added_at DESC""",
+               WHERE wc.workspace_id=? AND c.user_id=? ORDER BY c.updated_at DESC,c.id""",
             (ws_id, user_id)
         )
         ws["conversations"] = [dict(r) for r in conv_rows]
@@ -2372,10 +2435,17 @@ async def get_workspace(ws_id: str):
 
 
 async def update_workspace(ws_id: str, **kwargs):
-    allowed = {"name", "description", "topics", "memory_enabled", "instructions"}
+    allowed = {"name", "description", "topics", "memory_enabled", "instructions", "chat_defaults", "source_context_enabled"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return
+    if "chat_defaults" in fields:
+        import workspace_service
+        fields["chat_defaults"] = json.dumps(workspace_service.chat_defaults(fields["chat_defaults"]))
+    if "source_context_enabled" in fields:
+        if fields["source_context_enabled"] not in (0, 1, False, True):
+            raise ValueError("source_context_enabled must be a boolean")
+        fields["source_context_enabled"] = int(fields["source_context_enabled"])
     if "topics" in fields and isinstance(fields["topics"], list):
         fields["topics"] = json.dumps(fields["topics"])
     if "memory_enabled" in fields:
@@ -2395,6 +2465,13 @@ async def delete_workspace(ws_id: str):
     user_id = _scope_user()
     db = await get_db()
     try:
+        owned = await db.execute_fetchall('SELECT id FROM workspaces WHERE id=? AND user_id=?', (ws_id,user_id))
+        if not owned:
+            return
+        await db.execute("UPDATE scheduled_tasks SET enabled=0,workspace_id='',next_run=NULL WHERE workspace_id=? AND user_id=?", (ws_id,user_id))
+        await db.execute("UPDATE task_runs SET status='cancelled',error='Workspace deleted before execution' WHERE status='queued' AND user_id=? AND id IN (SELECT run_id FROM task_run_inputs WHERE json_extract(task_json,'$.workspace_id')=?)", (user_id,ws_id))
+        await db.execute("UPDATE conversations SET workspace_context=? WHERE user_id=? AND json_extract(workspace_context,'$.workspace_id')=?", (json.dumps({'mode':'off'}),user_id,ws_id))
+        await db.execute('DELETE FROM memories WHERE workspace_id=? AND user_id=?', (ws_id,user_id))
         await db.execute(
             "DELETE FROM artifact_workspaces WHERE workspace_id IN (SELECT id FROM workspaces WHERE id=? AND user_id=?)",
             (ws_id, user_id),
@@ -3589,7 +3666,8 @@ async def get_workspace_basic(ws_id: str) -> dict | None:
     db = await get_db()
     try:
         rows = await db.execute_fetchall("SELECT * FROM workspaces WHERE id=? AND user_id=?", (ws_id, user_id))
-        return dict(rows[0]) if rows else None
+        import workspace_service
+        return workspace_service.normalize_workspace(dict(rows[0])) if rows else None
     finally:
         await db.close()
 
@@ -3613,7 +3691,8 @@ async def get_workspace_for_conversation(conv_id: str) -> dict | None:
                ORDER BY wc.added_at DESC""",
             (conv_id, user_id, user_id),
         )
-        return dict(rows[0]) if len(rows) == 1 else None
+        import workspace_service
+        return workspace_service.normalize_workspace(dict(rows[0])) if len(rows) == 1 else None
     finally:
         await db.close()
 
@@ -4181,10 +4260,10 @@ async def build_workspace_memory_context(
     query: str = "",
     max_chars: int = 5200,
 ) -> dict:
-    ws = await get_workspace_basic(workspace_id) if workspace_id else None
-    if not ws and conversation_id:
-        ws = await get_workspace_for_conversation(conversation_id)
-    if not ws or not int(ws.get("memory_enabled") or 0):
+    import workspace_service
+    ws = (await workspace_service.resolve(conversation_id, workspace_id) if conversation_id
+          else await get_workspace_basic(workspace_id) if workspace_id else None)
+    if not ws:
         return {"workspace": ws, "context": "", "memory_ids": [], "block_ids": []}
 
     user_id = _scope_user()
@@ -4200,6 +4279,9 @@ async def build_workspace_memory_context(
         lines.append("\n[Instructions]\n" + chunk)
         has_memory_content = True
         remaining -= len(chunk)
+
+    if not int(ws.get("memory_enabled") or 0):
+        return {"workspace": ws, "context": "\n".join(lines) if has_memory_content else "", "memory_ids": [], "block_ids": []}
 
     for block in await get_workspace_memory_blocks(ws_id):
         if remaining <= 400:
@@ -5469,7 +5551,7 @@ _TASK_UPDATE_FIELDS = {
     "title", "prompt", "task_type", "schedule_kind", "schedule_json",
     "timezone", "next_run", "last_run", "last_status", "enabled",
     "model", "tool_ids", "delivery_json", "conversation_id",
-    "event_trigger_json", "webhook_token",
+    "event_trigger_json", "webhook_token", "workspace_id",
 }
 _TASK_JSON_FIELDS = {"schedule_json", "tool_ids", "delivery_json", "event_trigger_json"}
 
@@ -5496,6 +5578,7 @@ async def create_scheduled_task(task_id: str, *, title: str, prompt: str = "",
                                 event_trigger_json: dict | None = None,
                                 webhook_token: str = "",
                                 enabled: bool = True,
+                                workspace_id: str = "",
                                 user_id: str | None = None) -> dict | None:
     uid = _scope_user(user_id)
     now = datetime.utcnow().isoformat()
@@ -5513,6 +5596,12 @@ async def create_scheduled_task(task_id: str, *, title: str, prompt: str = "",
              json.dumps(delivery_json or {}), conversation_id or "",
              json.dumps(event_trigger_json or {}), webhook_token or "", now, now),
         )
+        if workspace_id:
+            owned = await db.execute_fetchall("SELECT id FROM workspaces WHERE id=? AND user_id=?", (workspace_id,uid))
+            if not owned: raise ValueError("Workspace not found")
+            await db.execute("UPDATE scheduled_tasks SET workspace_id=? WHERE id=?", (workspace_id,task_id))
+        from workspace_service import attach_task_context
+        await attach_task_context(db, task_id, uid)
         await db.commit()
     finally:
         await db.close()
@@ -5530,13 +5619,13 @@ async def get_scheduled_task(task_id: str, user_id: str | None = None) -> dict |
         await db.close()
 
 
-async def list_scheduled_tasks(user_id: str | None = None, limit: int = 200) -> list[dict]:
+async def list_scheduled_tasks(user_id: str | None = None, limit: int = 200, workspace_id: str = "") -> list[dict]:
     uid = _scope_user(user_id)
     db = await get_db()
     try:
         rows = await db.execute_fetchall(
-            "SELECT * FROM scheduled_tasks WHERE user_id=? ORDER BY updated_at DESC LIMIT ?",
-            (uid, limit))
+            "SELECT * FROM scheduled_tasks WHERE user_id=? AND (?='' OR workspace_id=?) ORDER BY updated_at DESC LIMIT ?",
+            (uid, workspace_id, workspace_id, limit))
         return [_row_to_scheduled_task(r) for r in rows]
     finally:
         await db.close()
@@ -5566,6 +5655,8 @@ async def update_scheduled_task(task_id: str, fields: dict,
         await db.execute(
             f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE id=? AND user_id=?",
             tuple(vals))
+        from workspace_service import attach_task_context
+        await attach_task_context(db, task_id, uid)
         await db.commit()
     finally:
         await db.close()
@@ -5638,7 +5729,7 @@ async def finish_task_run(run_id: str, status: str, *, result_text: str = "",
         await db.execute(
             """UPDATE task_runs SET status=?, result_text=?, error=?, finished_at=?
                WHERE id=? AND user_id=?""",
-            (status, result_text[:20000], error[:4000],
+            (status, result_text, error[:4000],
              datetime.utcnow().isoformat(), run_id, uid))
         await db.commit()
     finally:
@@ -5651,8 +5742,9 @@ async def list_task_runs(task_id: str, limit: int = 20,
     db = await get_db()
     try:
         rows = await db.execute_fetchall(
-            "SELECT * FROM task_runs WHERE task_id=? AND user_id=? "
-            "ORDER BY started_at DESC LIMIT ?",
+            "SELECT r.*, i.child_report_id AS report_id, COALESCE(json_extract(i.task_json,'$.conversation_id'),t.conversation_id) AS conversation_id FROM task_runs r "
+            "JOIN scheduled_tasks t ON t.id=r.task_id LEFT JOIN task_run_inputs i ON i.run_id=r.id "
+            "WHERE r.task_id=? AND r.user_id=? ORDER BY r.started_at DESC LIMIT ?",
             (task_id, uid, limit))
         return [dict(r) for r in rows]
     finally:
@@ -5916,7 +6008,7 @@ async def get_note(note_id: str, user_id: str | None = None) -> dict | None:
 
 
 async def list_notes(kind: str = "", include_done: bool = True, limit: int = 200,
-                     user_id: str | None = None) -> list[dict]:
+                     user_id: str | None = None, workspace_id: str = "", tag: str = "", offset: int = 0) -> list[dict]:
     uid = _scope_user(user_id)
     db = await get_db()
     try:
@@ -5927,8 +6019,14 @@ async def list_notes(kind: str = "", include_done: bool = True, limit: int = 200
             params.append(kind)
         if not include_done:
             query += " AND done=0"
-        query += " ORDER BY done ASC, COALESCE(due_at,'9999') ASC, updated_at DESC LIMIT ?"
-        params.append(limit)
+        if workspace_id:
+            query += " AND EXISTS(SELECT 1 FROM workspace_notes l WHERE l.note_id=notes.id AND l.workspace_id=?)"
+            params.append(workspace_id)
+        if tag:
+            query += " AND EXISTS(SELECT 1 FROM json_each(notes.tags) WHERE value=?)"
+            params.append(tag)
+        query += " ORDER BY done ASC, COALESCE(due_at,'9999') ASC, updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([max(1,min(limit,200)),max(0,offset)])
         rows = await db.execute_fetchall(query, tuple(params))
         return [_row_to_note(r) for r in rows]
     finally:

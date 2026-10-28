@@ -25,7 +25,7 @@ export function SkeletonText({t,lines=3,style}){
 }
 
 export function SkeletonCard({t,h=90,lines=2,style}){
-  return <div style={{background:`${t.surface}55`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:14,minHeight:h,display:"flex",flexDirection:"column",gap:10,...style}}>
+  return <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:14,minHeight:h,display:"flex",flexDirection:"column",gap:10,...style}}>
     <Skeleton t={t} h={14} w="40%"/>
     <SkeletonText t={t} lines={lines}/>
   </div>;

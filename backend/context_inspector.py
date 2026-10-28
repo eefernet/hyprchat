@@ -13,14 +13,16 @@ def redact(value):
 
 
 async def capture(message_id, *, model, provider, options, memories, retrieved, sources,
-                  tools, messages, original_chars, thinking=None):
+                  tools, messages, original_chars, thinking=None, effort=None, knowledge_ids=None, retrieved_sources=None):
     if message_id is None: return
     payload={'version':1,'model':model,'provider':provider,
         'settings':{k:v for k,v in options.items() if k in {'num_ctx','num_predict','temperature','top_p','top_k','repeat_penalty','seed'}},
-        'thinking_enabled':thinking,
+        'thinking_enabled':thinking, 'effort':effort, 'knowledge_base_ids':knowledge_ids or [],
         'memories':{name:{'ids':list(info.get('memory_ids') or []),'block_ids':list(info.get('block_ids') or []),
+            'workspace': ({'id':info['workspace']['id'],'name':info['workspace']['name']} if info.get('workspace') else None),
             'selected_context':redact(info.get('context'))[:20000]} for name,info in memories.items()},
         'retrieved_context':redact(retrieved)[:60000],
+        'retrieved_sources':[{k:v for k,v in s.items() if k in {'n','kind','source_id','parent_id','revision','filename','location','url','truncated','partial'}} for s in (retrieved_sources or [])],
         'search_sources':[{'title':redact(s.get('title'))[:300],'url':redact(s.get('url'))[:2000]} for s in sources[:50] if isinstance(s,dict)],
         'available_tools':sorted(tools),
         'message_count':len(messages),
@@ -58,3 +60,16 @@ async def record_tool(message_id, name):
             (name[:200],message_id,message_id,message_id,db.current_user_id()))
         await conn.commit()
     finally: await conn.close()
+
+
+async def record_usage(message_id, prompt_tokens, gen_tokens, elapsed):
+    conn = await db.get_db()
+    try:
+        await conn.execute('''UPDATE message_context SET payload=json_set(payload,
+            '$.usage',json(?)) WHERE message_id=? AND sequence=(SELECT MAX(sequence) FROM message_context WHERE message_id=?)
+            AND EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=? AND c.user_id=?)''',
+            (json.dumps({'prompt_tokens':prompt_tokens,'gen_tokens':gen_tokens,'elapsed_seconds':round(elapsed,3)}),
+             message_id,message_id,message_id,db.current_user_id()))
+        await conn.commit()
+    finally:
+        await conn.close()

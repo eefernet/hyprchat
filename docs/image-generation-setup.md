@@ -106,19 +106,21 @@ Environment=HYPRCHAT_COMFY_WATCH_INTERVAL_SECONDS=10
 Environment="HYPRCHAT_COMFY_RESTART_COMMAND=systemctl restart comfyui"
 ```
 
-## Journal Scrub Helper
+## Retiring the Journal Scrub Helper
 
-HyprChat's Image Studio "Delete all" purge removes HyprChat image files and
-database references. With the optional ComfyUI control node it can also remove
-ComfyUI output/history copies. It cannot directly vacuum systemd journals while
-the app runs as the unprivileged `hyprchat` user.
+Image Studio deletion removes image files and database references. With the
+optional ComfyUI control node it also removes ComfyUI output/history copies.
+It no longer requests system-wide journal rotation or vacuuming. Chat logs omit
+raw prompts, generated text, reasoning text and tool arguments.
 
-Install the root-owned journal scrub helper on the HyprChat server if you want
-the purge endpoint to trigger journald rotation/vacuum:
+If the older root-owned helper is installed, retire it during deployment:
 
 ```bash
 sudo bash scripts/install-journal-scrub.sh
 ```
+
+The script now disables and removes only the old HyprChat scrub units and their
+trigger. Existing system journals are preserved.
 
 ## Verification Checklist
 

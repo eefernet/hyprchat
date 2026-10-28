@@ -1,3 +1,16 @@
+import {WorkspaceHome,KnowledgeReadiness} from './components/workspaceComponents.jsx';
+import useFocusScope from './useFocusScope.js';
+import usePresence from './usePresence.js';
+import useNewKeys from './useNewKeys.js';
+import Switch from './components/Switch.jsx';
+import './ui.css';
+import './surfaces.css';
+import './motion.css';
+import './components/workspace.css';
+import {UI_THEMES, presentationTokens} from './theme.js';
+import ActionMenu from './components/ActionMenu.jsx';
+import ResponsiveDrawer from './components/ResponsiveDrawer.jsx';
+import {REVIEW_LEVELS,reviewLevel,effortChoices,nativeChoice,effortRequest} from "./effort.js";
 import DocumentActivity from "./components/DocumentActivity.jsx";
 import DocumentPreviewPanel from "./components/DocumentPreviewPanel.jsx";
 import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles.js";
@@ -43,6 +56,7 @@ import { apiJson } from './api.js';
 import {
   BACKGROUND_EFFECTS,
   FONTS,
+  UI_FONTS,
   THEMES,
   WELCOME_VERSION,
   fallbackWelcome,
@@ -76,6 +90,13 @@ import CalendarPanel from './panels/CalendarPanel.jsx';
 import EmailPanel from './panels/EmailPanel.jsx';
 import BackgroundCanvas from './components/BackgroundCanvas.jsx';
 import ChatHero, { daypartOf, greetableName } from './components/ChatHero.jsx';
+import StarterChips from './components/StarterChips.jsx';
+import WaitingQuote from './components/WaitingQuote.jsx';
+import ShortcutSheet, { MOD_KEY } from './components/ShortcutSheet.jsx';
+import { Spinner, Dots } from './components/Spinner.jsx';
+import { groupByRecency } from './convGroups.js';
+import { formatDocumentTitle } from './documentTitle.js';
+import { hfCompatibilityReport, isMmproj as hfIsMmproj, fmtBytes as fmtPullBytes } from './hfCompat.js';
 import { IC, TIC } from './components/icons.jsx';
 import { SkeletonList } from './components/Skeleton.jsx';
 import {
@@ -94,6 +115,7 @@ import {
   ImageStudioPanel,
 } from './components/artifactComponents.jsx';
 import {
+  ChatActivity,
   Chip,
   DaedalusSummary,
   EmptyState,
@@ -119,7 +141,6 @@ import {
   _isDaedalusOutput,
   _metaObj,
   _parseUtcishMs,
-  _phaseFromEvent,
   _quickSearchPayloadFromEvents,
   _quickSourceForUrl,
   _qsFaviconUrl,
@@ -166,6 +187,8 @@ const normalizePrompts = (value) => {
 function HyprChat(){
   const [tm,setTm]=useState(()=>{try{const saved=localStorage.getItem("hc-theme");return Object.hasOwn(THEMES,saved)?saved:"hyprflat";}catch{return "hyprflat";}});
   const [fi,setFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-font")||"0");return Number.isInteger(saved)&&FONTS[saved]?saved:0;}catch{return 0;}});
+  // Interface font: -1 matches the code font (default); otherwise an index into UI_FONTS (sans faces).
+  const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
   const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
   const [defaultTemp,setDefaultTemp]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-temp")||"0.7");}catch{return 0.7;}});
@@ -183,16 +206,14 @@ function HyprChat(){
   // Per-chat override map: { [convId]: 0|1|2|3 }. Absent entry = inherit globalEffort.
   const [effortPerChat,setEffortPerChat]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-effort-per-chat")||"{}");}catch{return {};}});
   // Creative level names with emoji — index == rounds count
-  const EFFORT_LEVELS=[
-    {emoji:"💭",name:"Blurt",desc:"Raw answer, no review"},
-    {emoji:"🧠",name:"Ponder",desc:"One self-review pass"},
-    {emoji:"🔥",name:"Forge",desc:"Two refinement passes"},
-    {emoji:"🌌",name:"Galaxy Brain",desc:"Max effort — three passes"},
-  ];
+  const EFFORT_LEVELS=REVIEW_LEVELS;
+  const [nativeEffort,setNativeEffort]=useState({});
+  const [pendingNativeEffort,setPendingNativeEffort]=useState({});
+  const [effortCaps,setEffortCaps]=useState({});
   // Resolve effort for a given conv id (per-chat override, else global)
   const resolveEffort=(cid,overrides={})=>overrides.effort!==undefined?overrides.effort:(cid&&effortPerChat[cid]!==undefined?effortPerChat[cid]:(!cid&&pendingEffort!==null?pendingEffort:globalEffort));
   const [lastPersonaId,setLastPersonaId]=useState(()=>{try{return localStorage.getItem("hc-last-persona")||null;}catch{return null;}});
-  const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"14");}catch{return 14;}});
+  const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"16");}catch{return 16;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
@@ -325,6 +346,7 @@ function HyprChat(){
   const [modelSearch,setModelSearch]=useState("");
   const [prompts,setPrompts]=useState(()=>{try{return normalizePrompts(JSON.parse(localStorage.getItem("hc-prompts")||"[]"));}catch{return [];}});
   const [showPromptPicker,setShowPromptPicker]=useState(false);
+  const [showShortcuts,setShowShortcuts]=useState(false);
   const [slashIdx,setSlashIdx]=useState(0);            // highlighted row in the "/" slash menu
   const [slashVarFill,setSlashVarFill]=useState(null); // {title, content, vars:[{name,value}]} — {{var}} fill-in card
   const [slashDismissed,setSlashDismissed]=useState(false); // Esc closes the slash menu until inp stops starting with "/"
@@ -359,7 +381,8 @@ function HyprChat(){
   const [hfModelInfo,setHfModelInfo]=useState(null); // detailed info + files
   const [hfReadme,setHfReadme]=useState(null);
   const [hfReadmeLoading,setHfReadmeLoading]=useState(false);
-  const [hfDownloading,setHfDownloading]=useState(false);
+  const [hfDownloadRepo,setHfDownloadRepo]=useState(null); // repo id whose download is streaming (one at a time)
+  const [hfCompat,setHfCompat]=useState(null); // {key,data,loading} from /api/hf/compat for the selected main file
   const [hfDownloadName,setHfDownloadName]=useState("");
   const [downloads,setDownloads]=useState([]); // [{id,name,status,pct,message,error,completedBytes,totalBytes,startTime,speed,eta}]
   const [downloadsExpanded,setDownloadsExpanded]=useState(false);
@@ -373,7 +396,11 @@ function HyprChat(){
   const [hyprfitRescanStatus,setHyprfitRescanStatus]=useState(null);
   const [hyprfitProfile,setHyprfitProfile]=useState(null);
   const [hyprfitCategory,setHyprfitCategory]=useState("for_you");
-  const t=THEMES[tm], font=FONTS[fi].v;
+  const t=UI_THEMES[tm], codeFont=FONTS[fi].v, uiFont=uiFi>=0?UI_FONTS[uiFi]:null, font=uiFont?uiFont.v:codeFont;
+  useEffect(()=>{
+    for(const [key,value] of Object.entries(presentationTokens(t,font,codeFont,uiFontSize/14)))document.documentElement.style.setProperty(key,String(value));
+    try{localStorage.removeItem('hc-ui-font');}catch{}
+  },[t,font,codeFont,uiFontSize]);
   const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
   const settingsLoadedRef=useRef(false);
@@ -412,6 +439,7 @@ function HyprChat(){
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content",t.bg);
   },[tm,t.bg,isLightTheme]);
   useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
+  useEffect(()=>{try{localStorage.setItem("hc-ui-font",String(uiFi));}catch{}},[uiFi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
   useEffect(()=>{persistServerSetting("hc-num-ctx","default_num_ctx",numCtx,String(numCtx));},[numCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}},[defaultTemp]);
@@ -420,8 +448,9 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
   useEffect(()=>{try{localStorage.setItem("hc-bg-effect",bgEffect);localStorage.setItem("hc-scanline",bgEffect==="scanlines"?"1":"0");}catch{}},[bgEffect]);
   useEffect(()=>{try{localStorage.setItem("hc-nav-labels",showNavLabels?"1":"0");}catch{}},[showNavLabels]);
-  useEffect(()=>{try{localStorage.setItem("hc-think-mode",thinkMode);}catch{}},[thinkMode]);
-  useEffect(()=>{try{localStorage.setItem("hc-effort-level",String(globalEffort));}catch{}},[globalEffort]);
+  useEffect(()=>{persistPref("think-mode",thinkMode);},[thinkMode]);
+  useEffect(()=>{persistPref("effort-level",globalEffort);},[globalEffort]);
+  useEffect(()=>{persistPref("native-effort",nativeEffort);},[nativeEffort]);
   useEffect(()=>{persistPref("effort-per-chat",effortPerChat);},[effortPerChat]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
@@ -521,9 +550,30 @@ function HyprChat(){
   const [tokC,setTokC]=useState(0);
   const [tokS,setTokS]=useState(0);
   const [sessionTokens,setSessionTokens]=useState(0);
-  const [panel,setPanel]=useState("chat");
+  const [panel,setPanelState]=useState("chat");
+  const [workspaceSearchReturn,setWorkspaceSearchReturn]=useState(false);
+  const searchNavigation=useRef(false);
+  const setPanel=value=>{if(!searchNavigation.current)setWorkspaceSearchReturn(false);setPanelState(value);};
   const [artifactFocusId,setArtifactFocusId]=useState(null);
   const previousPanelRef=useRef("chat");
+  const sidebarPanelRef=useRef('chat'),chatSidebarRef=useRef(sidebar);
+  useEffect(()=>{
+    const previous=sidebarPanelRef.current;
+    if(previous===panel){if(panel==='chat')chatSidebarRef.current=sidebar;return;}
+    if(previous==='chat')chatSidebarRef.current=sidebar;
+    if(panel==='chat')setSidebar(isMobile?false:chatSidebarRef.current);
+    else if(panel!=='settings')setSidebar(false);
+    sidebarPanelRef.current=panel;
+  },[panel,sidebar,isMobile]);
+  const contentRef=useRef(null);
+  const [contentWidth,setContentWidth]=useState(0);
+  const [researchListOpen,setResearchListOpen]=useState(false),[researchDetailsOpen,setResearchDetailsOpen]=useState(false);
+  useEffect(()=>{
+    const node=contentRef.current;if(!node)return;
+    const observer=new ResizeObserver(([entry])=>setContentWidth(entry.contentRect.width));
+    observer.observe(node);return()=>observer.disconnect();
+  },[]);
+  useEffect(()=>{setResearchListOpen(false);setResearchDetailsOpen(false);},[panel]);
   const [settingsTab,setSettingsTab]=useState("connections");
   useEffect(()=>{if(settingsTab==="danger"){fetch(`${API}/api/backup/status`).then(r=>r.ok?r.json():null).then(d=>{if(d)setBackupStatus(d);}).catch(()=>{});}},[settingsTab]);
   // Lazy-load the checkpoint/VAE dropdown data and refresh saved workflow names
@@ -623,7 +673,6 @@ function HyprChat(){
   const [mcpDraft,setMcpDraft]=useState(()=>({name:"",transport:"stdio",command:"",url:"",args:"[]",env:"{}",headers:"{}",allow_private:false}));
   const [openapiDraft,setOpenapiDraft]=useState(()=>({name:"",spec_url:"",base_url:"",auth:"{}",headers:"{}",allow_private:false}));
   const [connectorBusy,setConnectorBusy]=useState("");
-  const [expandedPill,setExpandedPill]=useState(null);
   const [loadingConv,setLoadingConv]=useState(false);
   const [visibleMessageCounts,setVisibleMessageCounts]=useState({});
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
@@ -637,12 +686,14 @@ function HyprChat(){
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
   const [coderWorkflows,setCoderWorkflows]=useState([]);
   const [codingOptions,setCodingOptions]=useState({});
+  const TOAST_EXIT_MS=160;
+  const dismissToast=useCallback(id=>{setToasts(ts=>ts.map(x=>x.id===id?{...x,leaving:true}:x));setTimeout(()=>setToasts(ts=>ts.filter(x=>x.id!==id)),TOAST_EXIT_MS);},[]);
   const notify=useCallback(({type="info",text,detail,action,duration}={})=>{
     if(!text)return null;
     const id=`toast-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
     const ttl=duration===undefined?(type==="error"?8000:type==="warning"?6500:4200):duration;
     setToasts(ts=>[...ts.slice(-4),{id,type,text,detail,action}]);
-    if(ttl>0)setTimeout(()=>setToasts(ts=>ts.filter(x=>x.id!==id)),ttl);
+    if(ttl>0)setTimeout(()=>dismissToast(id),ttl);
     return id;
   },[]);
   // Persistence writes that must not fail silently (message/conversation saves):
@@ -723,6 +774,17 @@ function HyprChat(){
     }
   };
   const [workspaces,setWorkspaces]=useState([]);
+  const workspaceLoadEpoch=useRef(0);
+  const workspaceContextRequests=useRef(new Set());
+  const [workspaceContextPending,setWorkspaceContextPending]=useState(new Set());
+  const [libraryState,setLibraryState]=useState({query:'',kind:'',workspace:'',start:'',end:'',offset:0});
+  const [messageFocus,setMessageFocus]=useState(null);
+  const [workspaceInitialTab,setWorkspaceInitialTab]=useState('overview');
+  const [workspaceJobFocus,setWorkspaceJobFocus]=useState(null);
+  const chatCreationBusy=useRef(false),chatNavigation=useRef('');
+  const openWorkspace=async(id,tab='overview')=>{setWorkspaceSearchReturn(false);chatNavigation.current='workspace:'+id;setWorkspaceInitialTab(tab);const epoch=++workspaceLoadEpoch.current;setWsPanel(true);setPanel('workspaces');setActiveWs(id);setWsLoading(true);try{const d=await apiJson(`/api/workspaces/${id}`);if(epoch===workspaceLoadEpoch.current)setWsDetail(d);}catch(e){if(e.name!=='AbortError'&&epoch===workspaceLoadEpoch.current){notify({type:'error',text:'Workspace could not load',detail:e.message});setWsDetail(null);}}finally{if(epoch===workspaceLoadEpoch.current)setWsLoading(false);}};
+  const navigateWorkspaceContent=(panel,id)=>{setWsPanel(false);setPanel(panel);if(panel==='chat')loadConversation(id);if(panel==='research'){setResearchView('reports');loadResearchReport(id);}if(panel==='artifacts')openArtifact(id);if(panel==='notes')setSelectedLibraryNote(id);if(panel==='jobs')setWorkspaceJobFocus(id);if(panel==='kb')setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:'center'}),150);};
+
   const [wsPanel,setWsPanel]=useState(false);
   const [activeWs,setActiveWs]=useState(null);
   const [wsDetail,setWsDetail]=useState(null);
@@ -1167,8 +1229,33 @@ function HyprChat(){
   // Quick search — derived from active conversation tool_ids, or pending empty-chat selections.
   const activeToolIds=act?(act.tool_ids||[]):pendingToolIds;
   const quickSearch = activeToolIds.includes("quick_search");
-  const activeMemoryWs=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&actId&&wsDetail.conversations.some(wc=>wc.id===actId))?wsDetail:null;
+  const activeMemoryWs=act?.effective_workspace||null;
   const workspaceMemoryActive=!ghostActive&&activeMemoryWs&&(activeMemoryWs.memory_enabled==="1"||activeMemoryWs.memory_enabled===1||activeMemoryWs.memory_enabled===true);
+  const workspaceContextMode=act?.workspace_context?.mode||'auto';
+  const workspaceContextLabel=workspaceContextMode==='off'?'Workspace off':activeMemoryWs?.name||'Workspace';
+  const workspaceContextKey=`${hcCaptureUserContext().epoch}:${actId}`;
+  const workspaceContextSaving=workspaceContextPending.has(workspaceContextKey);
+  const changeWorkspaceContext=async value=>{
+    if(!actId||!act||ghostActive||workspaceContextRequests.current.has(workspaceContextKey))return;
+    const conversationId=actId,requestKey=workspaceContextKey,origin=hcCaptureUserContext();
+    const currentUser=()=>origin.epoch===hcCaptureUserContext().epoch;
+    workspaceContextRequests.current.add(requestKey);
+    setWorkspaceContextPending(new Set(workspaceContextRequests.current));
+    try{
+      if(!['auto','off'].includes(value)){
+        await apiJson(`/api/workspaces/${encodeURIComponent(value)}/conversations`,{method:'POST',body:{conversation_id:conversationId}});
+        if(!currentUser())return;
+      }
+      const saved=await apiJson(`/api/conversations/${encodeURIComponent(conversationId)}`,{method:'PATCH',body:{workspace_context:['auto','off'].includes(value)?{mode:value}:{mode:'selected',workspace_id:value}}});
+      // A save may finish after navigation; only its originating chat can change.
+      if(currentUser())setConvs(prev=>currentUser()?prev.map(c=>c.id===conversationId?{...c,workspace_context:saved.workspace_context,effective_workspace:saved.effective_workspace}:c):prev);
+    }catch(error){
+      if(currentUser()&&error.name!=='AbortError')notify({type:'error',text:'Context not changed',detail:error.message});
+    }finally{
+      workspaceContextRequests.current.delete(requestKey);
+      setWorkspaceContextPending(new Set(workspaceContextRequests.current));
+    }
+  };
   const globalMemoryActive=!ghostActive&&(act?(act.use_memories==="1"||act.use_memories===1||act.use_memories===true):pendingUseMemories);
   const toggleGlobalMemory=()=>{
     if(ghostActive)return;
@@ -1188,6 +1275,15 @@ function HyprChat(){
     return chosen;
   };
   const pendingChatModel=normalizeAvailableModel(pendingPersona?.model||pendingModel||storedLastModel()||models[0]||"");
+  const effortModel=act?.model||pendingChatModel;
+  useEffect(()=>{
+    if(!authReady||!effortModel)return;
+    const controller=new AbortController();
+    apiJson(`/api/model-capabilities?model=${encodeURIComponent(effortModel)}`,{signal:controller.signal})
+      .then(cap=>setEffortCaps(p=>({...p,[effortModel]:cap})))
+      .catch(e=>{if(e.name!=='AbortError')setEffortCaps(p=>({...p,[effortModel]:{mode:'review',source:'metadata unavailable'}}));});
+    return()=>controller.abort();
+  },[authReady,currentUserId,effortModel,modelDetails[effortModel]?.digest]);
   const setPendingChatModel=(modelName)=>{
     const chosen=normalizeAvailableModel(modelName)||modelName||"";
     modelChoiceRef.current.pending=chosen;
@@ -1208,7 +1304,7 @@ function HyprChat(){
   const saveProfile=async(mc)=>{
     const parameters=normalizeProfileParams(mc);
     setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));
-    return fetch(`${API}/api/model-configs/${mc.id}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:mc.name,base_model:mc.base_model,system_prompt:mc.system_prompt,tool_ids:mc.tool_ids||[],kb_ids:mc.kb_ids||[],parameters})}).catch(()=>{});
+    try{return await apiJson(`/api/model-configs/${mc.id}`,{method:"PUT",body:{name:mc.name,base_model:mc.base_model,system_prompt:mc.system_prompt,tool_ids:mc.tool_ids||[],kb_ids:mc.kb_ids||[],parameters}});}catch(e){notify({type:"error",text:"Profile not saved; your draft is retained",detail:e.message});return null;}
   };
   const profileFirstMessage=(payload)=>{
     const mc=payload?.model_config_id?mcs.find(x=>x.id===payload.model_config_id):null;
@@ -1278,6 +1374,7 @@ function HyprChat(){
     if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
   };
   const addKbUrl=async(kbId)=>{
+    const origin=hcCaptureUserContext();
     const url=(kbUrlInputs[kbId]||"").trim();
     if(!url)return;
     const pKey=`${kbId}:url:${Date.now()}`;
@@ -1292,15 +1389,18 @@ function HyprChat(){
       if(!d.replaced)setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename,file_size:d.file_size,source_url:d.source_url}]}:k));
       for(let i=0;i<60;i++){
         await new Promise(res=>setTimeout(res,2000));
+        if(origin.epoch!==hcCaptureUserContext().epoch)return;
         try{
           const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename)}/status`);
           const st=await sr.json();
           if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));clearLater(3000);return;}
+          if(st.status==="partial"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"partial",error:(st.warnings||[]).join("; ")||"Some passages could not be indexed. Review knowledge readiness."}}));return;}
           if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));notify({type:"error",text:"KB indexing failed",detail:st.error||d.filename});clearLater(6000);return;}
         }catch{}
       }
-      setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));clearLater(3000);
+      setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"pending"}}));
     }catch(e){
+      if(e.name==="AbortError"||origin.epoch!==hcCaptureUserContext().epoch)return;
       setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:e.message}}));
       notify({type:"error",text:"URL ingest failed",detail:e.message||String(e)});
       clearLater(6000);
@@ -1364,7 +1464,8 @@ function HyprChat(){
     recChunksRef.current=[];setRecording(false);setTranscribing(false);
     cancelSendPreparation();
     setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];
-    setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
+    workspaceLoadEpoch.current++;setLibraryState({query:'',kind:'',workspace:'',start:'',end:'',offset:0});setMessageFocus(null);
+    setWorkspaceSearchReturn(false);searchNavigation.current=false;setKbs([]);setTools([]);setMcs([]);setWorkspaces([]);setActiveWs(null);setWsDetail(null);setWsPanel(false);
     setConnectorTools([]);setMcpServers([]);setOpenapiConnectors([]);
     researchSelectedRef.current=null;researchAppliedRef.current=null;researchEvidenceRequestRef.current++;researchRequestRef.current++;researchRevisionRef.current=0;setResearchEvidence(null);
     setSelectedLibraryNote(null);setResearchReports([]);setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown("");setResearchRunning(false);
@@ -1373,7 +1474,7 @@ function HyprChat(){
     // Server-backed prefs are per-profile: clear them and re-gate persistence
     // until the next boot hydration fetches the new profile's values.
     prefsReadyRef.current=false;prefsSkipRef.current={};
-    setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});
+    setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});setGlobalEffort(0);setThinkMode("auto");setNativeEffort({});setPendingNativeEffort({});setEffortCaps({});setPendingEffort(null);
   };
 
   // Boot hydration for server-backed prefs. Server value wins; otherwise the
@@ -1392,6 +1493,9 @@ function HyprChat(){
         {key:"custom-quotes",legacy:"hc-custom-quotes",set:setCustomQuotes,fallback:DEFAULT_LOADING_QUOTES},
         {key:"conv-tags",legacy:"hc-conv-tags",set:setConvTags,fallback:{},convMap:true},
         {key:"effort-per-chat",legacy:"hc-effort-per-chat",set:setEffortPerChat,fallback:{},convMap:true},
+        {key:"effort-level",legacy:"hc-effort-level",set:setGlobalEffort,fallback:0},
+        {key:"think-mode",legacy:"hc-think-mode",set:setThinkMode,fallback:"auto"},
+        {key:"native-effort",legacy:"hc-native-effort",set:setNativeEffort,fallback:{},convMap:true},
         {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
       let server={};
@@ -1403,13 +1507,16 @@ function HyprChat(){
         if(val===undefined){
           let stored=null;
           try{stored=JSON.parse(localStorage.getItem(`hc-${d.key}::${uid}`)||"null");}catch{}
-          if(stored===null){try{stored=JSON.parse(localStorage.getItem(d.legacy)||"null");}catch{}}
+          if(stored===null){try{const raw=localStorage.getItem(d.legacy);stored=d.key==="think-mode"?raw:JSON.parse(raw||"null");}catch{}}
           if(stored!==null&&stored!==undefined){val=stored;shouldPutPref=true;}
         }
         if(val===null||val===undefined)val=d.fallback;
         if(d.convMap&&val&&typeof val==="object"&&!Array.isArray(val)){
           val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
         }
+        if(d.key==='effort-level')val=reviewLevel(val);
+        if(d.key==='think-mode'&&!['auto','on','off'].includes(val))val='auto';
+        if(d.key==='native-effort'&&(!val||typeof val!=='object'||Array.isArray(val)))val={};
         if(d.key==="prompts"){
           const raw=val;
           val=normalizePrompts(val);
@@ -1717,10 +1824,6 @@ function HyprChat(){
     return()=>clearTimeout(id);
   },[evts,actId,refreshCoderWorkflows]);
 
-  // Auto-expand thinking pill when enabled
-  useEffect(()=>{
-    if(autoExpandThink&&evts.some(e=>e.type==="thinking")){setExpandedPill("thinking");}
-  },[evts,autoExpandThink]);
   useEffect(()=>{evtsRef.current=evts;},[evts]);
 
   const refreshResearchReports=useCallback(async(q=researchReportFilter)=>{
@@ -1760,7 +1863,7 @@ function HyprChat(){
       const d=await r.json();
       if(request!==researchRequestRef.current||researchSelectedRef.current!==id)return;
       applyResearchReport(d);
-      if(openPanel)setPanel("research");
+      if(openPanel){setPanel("research");setResearchListOpen(false);}
     }catch(e){if(request===researchRequestRef.current)notify({type:"error",text:"Research report failed to load",detail:e.message||String(e)});}
     finally{if(request===researchRequestRef.current)setResearchLoading(false);}
   },[notify,applyResearchReport]);
@@ -1825,7 +1928,7 @@ function HyprChat(){
       if(!r.ok)throw new Error(`HTTP ${r.status}`);
       const d=await r.json();
       if(researchSelectedRef.current===id&&request===researchEvidenceRequestRef.current){
-        setResearchEvidence({...d,source_id:sourceId,offset});
+        setResearchEvidence({...d,source_id:sourceId,offset});setResearchDetailsOpen(true);
         requestAnimationFrame(()=>document.getElementById('research-evidence-inspector')?.scrollIntoView({behavior:'smooth',block:'start'}));
       }
     }catch(e){notify({type:"error",text:"Evidence unavailable",detail:e.message});}
@@ -1913,7 +2016,7 @@ function HyprChat(){
   const removeResearchReportFromWorkspace=async(wsId,reportId)=>{
     if(!wsId||!reportId)return;
     try{
-      await fetch(`${API}/api/workspaces/${wsId}/research-reports/${reportId}`,{method:"DELETE"});
+      await apiJson(`/api/workspaces/${wsId}/research-reports/${reportId}`,{method:"DELETE"});
       setWsDetail(d=>d&&d.id===wsId?{...d,reports:(d.reports||[]).filter(r=>r.id!==reportId)}:d);
       const wl=await fetch(`${API}/api/workspaces`).then(r=>r.json()).catch(()=>null);
       if(wl)setWorkspaces(wl);
@@ -2260,7 +2363,7 @@ function HyprChat(){
     const reqId = ++loadReqRef.current;
     setConvs(prev=>prev.filter(c=>!isGhostConv(c)));
     setGhostMode(false);
-    setActId(id);setPanel("chat");setEvts([]);setExpandedPill(null);setQuickResults([]);
+    setActId(id);setPanel("chat");setEvts([]);setQuickResults([]);
     setVisibleMessageCounts(p=>({...p,[id]:CHAT_HISTORY_RENDER_CHUNK}));
     // Check if we're navigating back to an active council stream
     const activeStream=councilStreamRef.current;
@@ -2288,7 +2391,7 @@ function HyprChat(){
         // If this conversation is being streamed right now, local state is authoritative for messages —
         // skip the overwrite so the stream's m[m.length-1] assistant update doesn't clobber the user message.
         const skipMessages = streamingCidRef.current === id;
-        setConvs(prev=>prev.map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),rating:m.rating||0,created_at:m.created_at}))}), model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+        setConvs(prev=>(prev.some(c=>c.id===id)?prev:[{...full,messages:[]},...prev]).map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),rating:m.rating||0,created_at:m.created_at}))}), workspace_context:full.workspace_context,effective_workspace:full.effective_workspace,model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
         // Fetch suggestions for council chats with no messages yet
         if(isCouncil(full.is_council)&&full.council_config_id&&!(full.messages||[]).length){
           fetchCouncilSuggestions(full.council_config_id);
@@ -2379,6 +2482,7 @@ function HyprChat(){
   },[showQuickMenu]);
   useEffect(()=>{
     if(!showExportMenu)return;
+    exportMenuRef.current?.querySelector('[role="menuitem"]')?.focus();
     const handler=(e)=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setShowExportMenu(false);};
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
@@ -2454,7 +2558,14 @@ function HyprChat(){
     }
   };
 
+  chatNavigation.current=JSON.stringify([panel,wsPanel,activeWs,actId,hcCaptureUserContext().epoch]);
   const newChat=async(forceBlank=false,opts={})=>{
+    if(chatCreationBusy.current)return null;
+    chatCreationBusy.current=true;
+    try{return await createNewChat(forceBlank,{...opts,navigation:chatNavigation.current});}
+    finally{chatCreationBusy.current=false;}
+  };
+  const createNewChat=async(forceBlank=false,opts={})=>{
     if(!opts.sendPreparation)cancelSendPreparation();
     const curConv=convs.find(c=>c.id===actId);
 
@@ -2473,7 +2584,7 @@ function HyprChat(){
       persona={...opts.personaOverride,tool_ids:opts.personaOverride.tool_ids||[]};
     }else if(forceBlank&&opts.carryCurrent&&curConv?.persona_name){
       persona={model:curConv.model,system_prompt:curConv.system_prompt||"",tool_ids:curConv.tool_ids||[],model_config_id:curConv.model_config_id,persona_name:curConv.persona_name,persona_avatar:curConv.persona_avatar};
-    }else if(forceBlank&&pendingPersona){
+    }else if(forceBlank&&pendingPersona&&!opts.workspaceId){
       persona={...pendingPersona,tool_ids:pendingToolIds};
     }else if(!forceBlank){
       if(curConv?.persona_name){
@@ -2487,7 +2598,8 @@ function HyprChat(){
     if(defaultModel&&models.length>0&&!models.includes(defaultModel))defaultModel=models[0]||"";
     const pendingTools=forceBlank?(persona?.tool_ids||(opts.carryCurrent?(curConv?.tool_ids||[]):pendingToolIds)):[];
     const pendingEffortValue=forceBlank&&pendingEffort!==null?pendingEffort:null;
-    const useGhost=ghostMode||opts.ephemeral;
+    const useGhost=!opts.workspaceId&&(ghostMode||opts.ephemeral);
+    if(opts.workspaceId)setGhostMode(false);
     const pendingMemoryValue=(!useGhost&&forceBlank&&pendingUseMemories)?"1":"0";
     if(useGhost){
       const newId=`ghost-${Date.now()}-${Math.random().toString(16).slice(2,8)}`;
@@ -2499,35 +2611,32 @@ function HyprChat(){
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[newId]:pendingEffortValue}));
       setPendingUseMemories(false);
       setConvs(p=>[c,...p]);setActId(newId);setGhostMode(true);
-      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:newId;
     }
     try{
-      const r=await fetch(`${API}/api/conversations`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({title:"New Chat",model:defaultModel,use_memories:pendingMemoryValue}),signal:opts.sendPreparation?.controller.signal});
-      if(!r.ok)throw new Error(`Could not create conversation (HTTP ${r.status})`);
-      const c=await r.json();c.messages=[];c.use_memories=c.use_memories??pendingMemoryValue;
-      if(opts.sendPreparation?.controller.signal.aborted)return null;
+      const body={title:"New Chat",use_memories:pendingMemoryValue,
+        ...(opts.workspaceId?{workspace_context:{mode:"selected",workspace_id:opts.workspaceId},...(opts.personaOverride||{})}:{model:defaultModel,tool_ids:pendingTools,...(persona||{})})};
+      const c=await apiJson('/api/conversations',{method:'POST',body,signal:opts.sendPreparation?.controller.signal});
+      c.messages=[];c.is_council=false;c.council_config_id=null;
+      if(opts.workspaceId){
+        try{const refreshed=await apiJson('/api/workspaces');if(opts.navigation===chatNavigation.current)setWorkspaces(refreshed);}
+        catch(error){if(opts.navigation===chatNavigation.current)notify({type:'warning',text:'Chat created; workspace counts could not refresh',detail:error.message});}
+      }
+      if(opts.sendPreparation?.controller.signal.aborted||opts.navigation!==chatNavigation.current)return null;
       modelChoiceRef.current.byConv[c.id]=c.model||defaultModel;
-      // Apply persona directly to the conv object before adding to state
-      if(persona){
-        Object.assign(c,persona);
-        fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(persona)}).catch(()=>{});
-      }
-      const firstMsg=persona?await persistProfileFirstMessage(c.id,persona):null;
-      if(opts.sendPreparation?.controller.signal.aborted)return null;
+      const resolvedPersona=persona||(c.model_config_id?{...c}:null);
+      const firstMsg=resolvedPersona?await persistProfileFirstMessage(c.id,resolvedPersona):null;
+      if(opts.sendPreparation?.controller.signal.aborted||opts.navigation!==chatNavigation.current)return null;
       if(firstMsg)c.messages=[firstMsg];
-      if(pendingTools.length){
-        c.tool_ids=pendingTools;
-        fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({tool_ids:pendingTools})}).catch(()=>{});
-      }
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[c.id]:pendingEffortValue}));
       if(opts.sendPreparation)opts.sendPreparation.conversationId=c.id;
       setPendingUseMemories(false);
-      setConvs(p=>[c,...p]);setActId(c.id);
-      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      setConvs(p=>[c,...p]);setActId(c.id);setWsPanel(false);
+      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:c.id;
     }catch(e){
-      if(opts.sendPreparation)throw e;
+      if(opts.sendPreparation||opts.workspaceId)throw e;
       const newId=`l-${Date.now()}`;
       const c={id:newId,title:"New Chat",messages:[],model:defaultModel,system_prompt:persona?.system_prompt||"",...(persona||{}),tool_ids:pendingTools,use_memories:pendingMemoryValue};
       modelChoiceRef.current.byConv[newId]=c.model||defaultModel;
@@ -2536,12 +2645,43 @@ function HyprChat(){
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[newId]:pendingEffortValue}));
       setPendingUseMemories(false);
       setConvs(p=>[c,...p]);setActId(newId);
-      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:newId;
     }
   };
 
-  const startBlankChat=()=>{
+  useEffect(()=>{if(!messageFocus||messageFocus.conversation!==actId||loadingConv)return;
+    const rows=(act?.messages||[]).filter(m=>['user','assistant'].includes(m.role));const index=rows.findIndex(m=>String(m.id)===String(messageFocus.id));
+    if(index<0)return;const needed=rows.length-index;
+    if(act?.is_council){setExpandedRounds({});}
+    if((visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK)<needed){setVisibleMessageCounts(p=>({...p,[actId]:needed}));return;}
+    const timer=setTimeout(()=>{const el=document.getElementById(`saved-message-${messageFocus.id}`);if(el){el.scrollIntoView({block:'center',behavior:'smooth'});el.animate([{backgroundColor:'transparent'},{backgroundColor:t.acc+'44'},{backgroundColor:'transparent'}],{duration:2200});setMessageFocus(null);}},150);return()=>clearTimeout(timer);
+  },[messageFocus,actId,loadingConv,act?.messages?.length,visibleMessageCounts[actId]]);
+
+  useEffect(()=>{const navigate=()=>{
+    if(!window.location.hash.startsWith('#source?'))return;
+    const params=new URLSearchParams(window.location.hash.slice(8));const kind=params.get('kind'),id=params.get('id'),parent=params.get('parent');
+    if(!id)return;if(kind!=='document')setWsPanel(false);
+    if(kind==='chat'){if(parent)setMessageFocus({conversation:parent,id});loadConversation(parent||id);}
+    else if(kind==='note'){setSelectedLibraryNote(id);setPanel('notes');}
+    else if(kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(id);}
+    else if(kind==='artifact')openArtifact(id);
+    else if(kind==='knowledge')navigateWorkspaceContent('kb',id);
+    else if(kind==='document'&&parent){
+      const base=`/api/knowledge-bases/${encodeURIComponent(parent)}/files/${encodeURIComponent(id)}`;
+      const rawUrl=userScopedUrl(base+'/raw');const key=parent+':'+id;
+      setKbPreview({key,filename:'Source document',rawUrl,content:null,loading:true});
+      apiJson(base+'/preview'+(params.has('chunk')?'?chunk='+encodeURIComponent(params.get('chunk')):'')).then(d=>setKbPreview(p=>p?.key===key?{...p,...d,loading:false}:p)).catch(e=>setKbPreview(p=>p?.key===key?{...p,content:e.message,loading:false}:p));
+    }
+    window.history.replaceState(null,'',window.location.pathname+window.location.search);
+  };window.addEventListener('hashchange',navigate);navigate();return()=>window.removeEventListener('hashchange',navigate);},[]);
+
+  const startWorkspaceChat=async id=>{try{return await newChat(true,{workspaceId:id});}catch(e){notify({type:'error',text:'Chat not created',detail:e.message});return null;}};
+  const startBlankChat=(general=false)=>{
+    const workspaceId=wsPanel&&activeWs?activeWs:panel==='chat'&&!ghostActive?act?.effective_workspace?.id:null;
+    if(general!==true&&workspaceId){startWorkspaceChat(workspaceId);return;}
+    chatNavigation.current='general:'+Date.now();
+    setWsPanel(false);
     cancelSendPreparation();
     setGhostMode(false);
     setPendingUseMemories(false);
@@ -2556,7 +2696,6 @@ function HyprChat(){
     setSessionTokens(0);
     setCtxTokens(0);
     setGenTokens(0);
-    setExpandedPill(null);
     setCouncilRunning(false);
     setCouncilResponses({});
     setCouncilHostContent("");
@@ -2574,7 +2713,7 @@ function HyprChat(){
       if(isGhostConv(act)){
         setConvs(p=>p.filter(c=>!isGhostConv(c)));
         setActId(null);
-        setEvts([]);setQuickResults([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setExpandedPill(null);
+        setEvts([]);setQuickResults([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);
       }
       notify({type:"info",text:"Ghost mode off",detail:"Saved chats will work normally again.",duration:2600});
       return;
@@ -2595,6 +2734,7 @@ function HyprChat(){
     setFtsResults([]);
   };
   const openSidebarSearch=(focus="titles")=>{
+    setWorkspaceSearchReturn(false);
     setSidebar(true);
     setWsPanel(false);
     setShowMessageSearch(true);
@@ -2607,6 +2747,7 @@ function HyprChat(){
       if((e.ctrlKey||e.metaKey)&&e.key==="k"){e.preventDefault();openSidebarSearch("messages");}
       if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();startBlankChat();}
       if((e.ctrlKey||e.metaKey)&&e.key==="/"){e.preventDefault();setSidebar(p=>!p);}
+      if(e.key==="?"&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||"")&&!e.target?.isContentEditable){e.preventDefault();setShowShortcuts(v=>!v);}
       if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile){setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
     };
     document.addEventListener("keydown",handler);
@@ -2960,10 +3101,12 @@ function HyprChat(){
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
     overrides = overrides || {};
-    setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setExpandedPill(null);setCtxTokens(0);setGenTokens(0);
+    setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setCtxTokens(0);setGenTokens(0);
     setCurrentRunNotice(null);
     streamSaveEvtsRef.current=[];
     streamingCidRef.current=cid;
+    const activityKey=`${cid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    uConv(cid,c=>{const messages=[...(c.messages||[])];const last=messages.length-1;if(messages[last]?.role==="assistant")messages[last]={...messages[last],_activityKey:activityKey,_activityStatus:"running"};return{...c,messages};});
     // Cancellation can happen before init arrives; only persist a known server row.
     let _streamMsgId=null;
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
@@ -3028,8 +3171,7 @@ function HyprChat(){
       if(overrides.documents&&!body.tool_ids.includes("documents"))body.tool_ids=[...body.tool_ids,"documents"];
       Object.assign(body,codingRequestFields(codingOptions,cv));
       if(isGhostSend)body.ephemeral=true;
-      const _wsForChat=(wsDetail&&wsDetail.id&&Array.isArray(wsDetail.conversations)&&wsDetail.conversations.some(wc=>wc.id===cid))?wsDetail:null;
-      if(_wsForChat?.id&&!isGhostSend)body.workspace_id=_wsForChat.id;
+
       // Send the user's typed text + attachment metadata separately so the backend's
       // defensive save persists the clean content + image previews (not the bloated
       // `[Attached N image: ...]` model-facing string).
@@ -3054,7 +3196,9 @@ function HyprChat(){
       if(_personaThinkMode!=="auto")body.think_budget=_personaThinkMode==="off"?0:1;
       else if(thinkMode!=="auto")body.think_budget=thinkMode==="off"?0:1;
       const _effort=resolveEffort(cid,overrides);
-      if(_effort>0)body.effort_rounds=_effort;
+      const _nativeSaved=nativeEffort[cid]?.[modelName]??((cv?.messages||[]).length<=1?pendingNativeEffort[modelName]:undefined);
+      Object.assign(body,effortRequest(modelName,effortCaps[modelName],_nativeSaved,_effort));
+      if(effortCaps[modelName]?.mode==='native'&&!isGhostSend)setNativeEffort(p=>({...p,[cid]:{...(p[cid]||{}),[modelName]:body.reasoning_level}}));
       // Continue mode: resume a length-truncated assistant message on its
       // existing row; `full` starts from the partial so tokens append.
       if(overrides.continueMessageId)body.continue_message_id=overrides.continueMessageId;
@@ -3066,7 +3210,12 @@ function HyprChat(){
       let _doneStats=null;
       let _doneTruncated=false;
       let _routedModel=null;
-      let wasStopped=false;
+      let wasStopped=false,serverPersists=false,reviewingAnswer=false,streamFailed=false;
+      const recordActivity=event=>{
+        const update={...event,timestamp:Date.now()/1000};
+        streamSaveEvtsRef.current.push(update);
+        if(actIdRef.current===cid)setEvts(p=>[...p.slice(-200),update]);
+      };
       try{
         const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
         if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
@@ -3078,14 +3227,22 @@ function HyprChat(){
           for(const ln of lines){
             if(!ln.startsWith("data: "))continue;
             try{const d=JSON.parse(ln.slice(6));
-              if(d.type==="init"){_streamMsgId=d.message_id;}
-              else if(d.type==="token"){full+=d.content;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
+              if(d.type==="init"){_streamMsgId=d.message_id;serverPersists=!!d.server_persists;}
+              else if(d.type==="token"){
+                const last=streamSaveEvtsRef.current.at(-1);
+                if(d.content&&last?.type!=="answer_token"&&last?.data?.tool!=="generating"){
+                  recordActivity({type:"answer_token",data:{}});
+                }
+                full+=d.content;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
+              else if(d.type==="replace"){full=d.content||"";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],content:full,isS:true};return{...c,messages:m};});}
+              else if(d.type==="effort"){if(d.notice)notify({type:"info",text:"Effort adjusted",detail:d.notice});}
+              else if(d.type==="review_status"){recordActivity({type:"tool_done",data:{tool:"refinement",status:d.notice,outcome:"retained"}});notify({type:"info",text:"Answer retained",detail:d.notice});}
               else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
-              else if(d.type==="refinement_start"){full="";refinementsCount=d.round||refinementsCount;uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});const _refEv={type:"tool_start",data:{tool:"refinement",status:`Refining answer (${d.round}/${d.total})...`,icon:"sparkles",round:d.round,total:d.total},timestamp:Date.now()/1000};streamSaveEvtsRef.current.push(_refEv);setEvts(p=>[...p.slice(-200),_refEv]);}
-              else if(d.type==="done"){if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.gen_tokens||d.tokens)setSessionTokens(p=>p+((d.gen_tokens||d.tokens)||0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
+              else if(d.type==="refinement_start"){reviewingAnswer=true;refinementsCount=d.round||refinementsCount;recordActivity({type:"tool_start",data:{tool:"refinement",status:`Reviewing answer (${d.round}/${d.total})`,round:d.round,total:d.total}});}
+              else if(d.type==="done"){if(d.review_notice)recordActivity({type:"tool_done",data:{tool:"refinement",status:d.review_notice,outcome:"retained"}});if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.total_gen_tokens||d.gen_tokens||d.tokens)setSessionTokens(p=>p+(d.total_gen_tokens??d.gen_tokens??d.tokens??0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
               else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
               else if(d.type==="model_routed"){_routedModel=d.model;}
-              else if(d.type==="error"){const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
+              else if(d.type==="error"){if(reviewingAnswer){streamFailed=true;recordActivity({type:"tool_error",data:{tool:"refinement",status:d.error||"Review failed; answer retained"}});notify({type:"error",text:"Review failed; answer retained",detail:d.error});continue;}streamFailed=true;const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
             }catch{}}
         }
       }catch(e){
@@ -3130,7 +3287,7 @@ function HyprChat(){
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
       // Auto-play the reply when the Voice "Auto-play replies" toggle is on
       if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend&&!wasStopped){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?String(_streamMsgId):`auto-${Date.now()}`);}catch{}},80);}
-      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,metadata:_msgMeta,...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,_activityStatus:wasStopped?"stopped":streamFailed?"failed":"completed",metadata:_msgMeta,...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
       // POST for older backends or if init/done didn't include a message_id.
@@ -3138,13 +3295,17 @@ function HyprChat(){
         // Ghost chats are intentionally local-only: no assistant PATCH/POST,
         // no title generation, no workspace memory suggestion source row.
       }else if(_streamMsgId){
-        persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:finalFull,metadata:_msgMeta})},{label:"Message save"});
+        persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({...(serverPersists?{}:{content:finalFull}),metadata:_msgMeta})},{label:"Message save"});
       }else if(!wasStopped){
         persistFetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:finalFull,metadata:_msgMeta})},{label:"Message save"});
       }
+      if(serverPersists&&!isGhostSend&&!wasStopped){
+        const completedMessageId=_streamMsgId;
+        apiJson(`/api/conversations/${cid}`).then(saved=>{if(streamingCidRef.current)return;const message=(saved.messages||[]).find(m=>m.id===completedMessageId);if(message)uConv(cid,c=>({...c,messages:(c.messages||[]).map(m=>m.id===completedMessageId?{...message,_activityKey:m._activityKey,_activityStatus:message.metadata?.delivery_status||m._activityStatus}:m)}));}).catch(e=>{if(e.name!=='AbortError')notify({type:'warning',text:'Reload saved response to see final status',detail:e.message});});
+      }
       // Auto-generate title after first exchange
       if(!wasStopped&&!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
-    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false};return{...c,messages:m};});}}
+    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false,_activityStatus:"failed"};return{...c,messages:m};});}}
     setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
 
@@ -3398,11 +3559,11 @@ function HyprChat(){
     const onUndo=()=>{
       undone=true;
       uConv(cid,c=>{const m=[...(c.messages||[])];m.splice(msgIndex,0,removed);return{...c,messages:m};});
-      setToasts(ts=>ts.filter(x=>x.id!==tid));
+      dismissToast(tid);
     };
     setToasts(ts=>[...ts.slice(-4),{id:tid,type:"info",text:"Message deleted",action:{label:"Undo",onClick:onUndo}}]);
     setTimeout(()=>{
-      setToasts(ts=>ts.filter(x=>x.id!==tid));
+      dismissToast(tid);
       if(!undone&&removed.id){
         fetch(`${API}/api/conversations/${cid}/messages/${removed.id}`,{method:"DELETE"}).catch(()=>{});
       }
@@ -4149,41 +4310,33 @@ function HyprChat(){
     if(readmeR.status==="fulfilled")setHfReadme(hfCleanReadme(readmeR.value?.content||""));
     setHfReadmeLoading(false);
   };
-  const hfCompatibilityReport=(model,info,readme,selectedFiles=[])=>{
-    const files=info?.gguf_files||[];
-    const selected=files.filter(f=>selectedFiles.includes(f.name));
-    const text=[model?.id||"",model?.pipeline_tag||"",(model?.tags||[]).join(" "),readme||"",files.map(f=>f.name).join(" ")].join(" ").toLowerCase();
-    const issues=[];
-    const add=(level,label,detail)=>{if(!issues.some(i=>i.label===label))issues.push({level,label,detail});};
-    const has=rx=>rx.test(text);
-    if(info&&files.length===0)add("bad","No GGUF files","This repo does not expose Ollama-loadable GGUF files.");
-    if(has(/not supported in ollama|ollama[^.\n]{0,80}not supported|requires[^.\n]{0,80}llama\.cpp|llama\.cpp[^.\n]{0,80}only|requires[^.\n]{0,80}pull request|custom architecture/))add("bad","Runtime support warning","The README suggests this may require a specific runtime or newer loader support.");
-    if(has(/gated deltanet|linear attention|state space|hybrid architecture|hybrid[^.\n]{0,50}attention|\bssm\b|\bmamba\b|\brwkv\b|\bjamba\b/))add("warn","Architecture risk","Download may succeed while the local Ollama loader fails to load the blob.");
-    if(files.some(f=>/^mmproj/i.test(f.name))||has(/\bmmproj\b|vision encoder|multimodal|vision support|image\/video|image-to-text|image text/))add("warn","Vision/mmproj package","Multimodal models can need projector files and newer Ollama support; text-only loading may still fail.");
-    if(files.some(f=>/-\d{5}-of-\d{5}\.gguf$/i.test(f.name)))add("info","Split GGUF","Select every part in the set before downloading.");
-    if(selected.length){
-      const selectedSize=selected.reduce((a,f)=>a+(f.size||0),0);
-      if(selected.every(f=>/^mmproj/i.test(f.name)))add("bad","Projector only","A mmproj file is not a standalone chat model; select a main GGUF too.");
-      if(selected.some(f=>/^mmproj/i.test(f.name))&&selected.some(f=>!/^mmproj/i.test(f.name)))add("info","Includes projector","This will register both main GGUF and projector blobs when the runtime supports them.");
-      if(selected.some(f=>/\b(BF16|F16|F32)\b/i.test(f.name)))add("warn","Large full-precision file","BF16/F16/F32 downloads are large and much more likely to exceed VRAM.");
-      if(selectedSize>42*1024*1024*1024)add("warn","Very large selection",`${fmtSize(selectedSize)} selected; this may exceed available VRAM even if it downloads.`);
-      else if(selectedSize>24*1024*1024*1024)add("info","Large selection",`${fmtSize(selectedSize)} selected; load time and VRAM pressure may be high.`);
-    }
-    const level=issues.some(i=>i.level==="bad")?"bad":issues.some(i=>i.level==="warn")?"warn":"ok";
-    return {level,issues};
-  };
+  // Compatibility facts for the selected main file (exact pull tag, GGUF header, registry manifest, local architectures).
+  const hfCompatKey=hfSelected&&hfSelectedFiles.length?`${hfSelected.id}::${hfSelectedFiles.find(f=>!hfIsMmproj(f))||hfSelectedFiles[0]}`:null;
+  const hfCompatData=hfCompat&&hfCompat.key===hfCompatKey?hfCompat.data:null;
+  const hfCompatLoading=!!hfCompatKey&&(!hfCompat||hfCompat.key!==hfCompatKey||hfCompat.loading);
+  useEffect(()=>{
+    if(!hfCompatKey)return;
+    const sep=hfCompatKey.indexOf("::");const repoId=hfCompatKey.slice(0,sep),filename=hfCompatKey.slice(sep+2);
+    const c=new AbortController();
+    setHfCompat({key:hfCompatKey,data:null,loading:true});
+    fetch(`${API}/api/hf/compat?repo_id=${encodeURIComponent(repoId)}&filename=${encodeURIComponent(filename)}`,{signal:c.signal})
+      .then(r=>r.ok?r.json():null).then(d=>{if(!c.signal.aborted)setHfCompat({key:hfCompatKey,data:d,loading:false});})
+      .catch(()=>{if(!c.signal.aborted)setHfCompat({key:hfCompatKey,data:null,loading:false});});
+    return()=>c.abort();
+  },[hfCompatKey]);
+  const hfReport=hfCompatibilityReport({model:hfSelected,info:hfModelInfo,readme:hfReadme,selectedFiles:hfSelectedFiles,compat:hfCompatData});
   const hfDownload=async()=>{
     if(!hfSelected||!hfSelectedFiles.length)return;
     const dlId=`dl-${Date.now()}`;
     const dlName=hfDownloadName.trim();
     const totalSize=(hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0);
-    setHfDownloading(true);
+    setHfDownloadRepo(hfSelected.id);
     setDownloads(p=>[...p,{id:dlId,name:dlName||hfSelectedFiles[0],kind:"model",status:"creating",pct:0,message:"Contacting Ollama...",error:null,completedBytes:0,totalBytes:totalSize,startTime:Date.now(),speed:0,eta:0,retry:()=>{notify({type:"info",text:"Retry from HuggingFace tab",detail:"The same file selection is still available if the model panel has not changed.",duration:5000});}}]);
     setDownloadsExpanded(true);
     const updDl=upd=>setDownloads(p=>p.map(d=>d.id===dlId?{...d,...upd}:d));
     try{
-      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName})});
-      if(!res.ok){const msg=`Server error: ${res.status} ${res.statusText}`;updDl({status:"error",error:msg});notify({type:"error",text:"HuggingFace download failed",detail:msg});setHfDownloading(false);return;}
+      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName,force:hfReport.flagged})});
+      if(!res.ok){const msg=`Server error: ${res.status} ${res.statusText}`;updDl({status:"error",error:msg});notify({type:"error",text:"HuggingFace download failed",detail:msg});setHfDownloadRepo(null);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
       let lastBytes=0,lastTime=Date.now(),lastSpeedUpdate=0,curSpeed=0,curEta=0;
       while(true){
@@ -4218,7 +4371,7 @@ function HyprChat(){
         }
       }
     }catch(e){updDl({status:"error",error:e.message});notify({type:"error",text:"HuggingFace download failed",detail:e.message});}
-    setHfDownloading(false);
+    setHfDownloadRepo(null);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"—";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
   // capTags colors are intentionally fixed (not theme tokens): they mirror ModelPicker.modelCaps as cross-theme capability identity badges.
@@ -4258,15 +4411,15 @@ function HyprChat(){
       if(kbdMatch){
         const kv=decodeInlineHtml(kbdMatch[1]);
         const kbdStyle=printMode
-          ? {display:"inline-block",padding:"0 4px",border:"1px solid #d7dde8",borderRadius:3,background:"#f8fafc",fontFamily:font,fontSize:"0.82em",color:"#364152"}
-          : {display:"inline-block",padding:"1px 6px",background:`linear-gradient(180deg,${t.surface}EE,${t.bgDeep})`,border:`1px solid ${t.brd}AA`,borderBottomWidth:2,borderRadius:4,fontSize:"0.82em",fontFamily:font,color:t.text,boxShadow:`0 1px 0 ${t.brd}88`,verticalAlign:"baseline",margin:"0 1px",minWidth:14,textAlign:"center",lineHeight:1.4};
+          ? {display:"inline-block",padding:"0 4px",border:"1px solid #d7dde8",borderRadius:"var(--hc-radius-sm)",background:"#f8fafc",fontFamily:font,fontSize:"0.82em",color:"#364152"}
+          : {display:"inline-block",padding:"1px 6px",background:`linear-gradient(180deg,${t.surface}EE,${t.bgDeep})`,border:"1px solid var(--hc-line-strong)",borderBottomWidth:2,borderRadius:"var(--hc-radius-sm)",fontSize:"0.82em",fontFamily:font,color:t.text,boxShadow:`0 1px 0 ${t.brd}88`,verticalAlign:"baseline",margin:"0 1px",minWidth:14,textAlign:"center",lineHeight:1.4};
         return <kbd key={k} style={kbdStyle}>{kv}</kbd>;
       }
-      if(codeText&&colorish(codeText))return <InlineColorSwatch key={k} value={codeText} theme={t} font={font} printMode={printMode}/>;
+      if(codeText&&colorish(codeText))return <InlineColorSwatch key={k} value={codeText} theme={t} font={codeFont} printMode={printMode}/>;
       if(printMode){
         const linkStyle={color:"#175cd3",textDecoration:"none",overflowWrap:"anywhere"};
         if(imgMatch){const[,alt,src]=imgMatch;return <span key={k} className="image-note">Image: {alt||src}</span>;}
-        if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)return <code key={k} style={{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:3,padding:"0 3px",fontFamily:font,fontSize:"0.9em",color:"#334155"}}>{s.slice(1,-1)}</code>;
+        if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)return <code key={k} style={{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:"var(--hc-radius-sm)",padding:"0 3px",fontFamily:codeFont,fontSize:"0.9em",color:"#334155"}}>{s.slice(1,-1)}</code>;
         if(s.charCodeAt(0)===0xE010){
           const inner=s.slice(1,-1);const ci=inner.indexOf(":");
           const pref=inner.slice(0,ci),num=inner.slice(ci+1);
@@ -4284,9 +4437,9 @@ function HyprChat(){
           return <span key={k}><a href={lu} target={lu.startsWith("#")?undefined:"_blank"} rel="noopener" style={linkStyle}>{lu}</a>{trail}</span>;
         }
         if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)return <span key={k} style={{color:"#92400e",fontStyle:"italic"}}>{s}</span>;
-        if(s.startsWith("<kbd>")&&s.endsWith("</kbd>"))return <kbd key={k} style={{display:"inline-block",padding:"0 4px",border:"1px solid #d7dde8",borderRadius:3,background:"#f8fafc",fontFamily:font,fontSize:"0.82em",color:"#364152"}}>{s.slice(5,-6)}</kbd>;
+        if(s.startsWith("<kbd>")&&s.endsWith("</kbd>"))return <kbd key={k} style={{display:"inline-block",padding:"0 4px",border:"1px solid #d7dde8",borderRadius:"var(--hc-radius-sm)",background:"#f8fafc",fontFamily:font,fontSize:"0.82em",color:"#364152"}}>{s.slice(5,-6)}</kbd>;
         if(s.match(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/)||s.match(/^(rgba?|hsla?)\(/)){
-          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4}}><span style={{width:9,height:9,borderRadius:2,background:s,border:"1px solid #d7dde8",flexShrink:0}}/><code style={{fontSize:"0.85em",color:"#334155",background:"transparent",border:0,padding:0,fontFamily:font}}>{s}</code></span>;
+          return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:4}}><span style={{width:9,height:9,borderRadius:"var(--hc-radius-sm)",background:s,border:"1px solid #d7dde8",flexShrink:0}}/><code style={{fontSize:"0.85em",color:"#334155",background:"transparent",border:0,padding:0,fontFamily:codeFont}}>{s}</code></span>;
         }
         return s;
       }
@@ -4295,14 +4448,14 @@ function HyprChat(){
         // to NYT/Wikipedia/etc), hotlink bypass (proxy sends domain-matched Referer), and
         // mixed-content fix. /api/img-proxy URLs and same-origin /api/ URLs pass through.
         const finalSrc = proxiedImageUrl(src);
-        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" onClick={()=>{const base=decodeURIComponent(src.split("?")[0].split("/").pop()||"");openPreview(base||alt||"image",src);}} title="Click to preview" style={{maxWidth:"100%",maxHeight:380,borderRadius:8,display:"block",margin:"6px 0",border:`1px solid ${t.brd}22`,cursor:"zoom-in"}} onError={e=>e.target.style.display="none"}/>;}
+        return <img key={k} src={finalSrc} alt={alt||""} referrerPolicy="no-referrer" loading="lazy" onClick={()=>{const base=decodeURIComponent(src.split("?")[0].split("/").pop()||"");openPreview(base||alt||"image",src);}} title="Click to preview" style={{maxWidth:"100%",maxHeight:380,borderRadius:"var(--hc-radius)",display:"block",margin:"6px 0",border:"1px solid var(--hc-line-subtle)",cursor:"zoom-in"}} onError={e=>e.target.style.display="none"}/>;}
       if(s.startsWith("`")&&s.endsWith("`")&&s.length>1)
-        return <code key={k} style={{background:`${t.surface}CC`,padding:"1px 5px",borderRadius:3,fontFamily:font,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
+        return <code key={k} style={{background:`${t.surface}F5`,padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",fontFamily:codeFont,fontSize:"0.88em",color:t.warm}}>{s.slice(1,-1)}</code>;
       if(s.charCodeAt(0)===0xE010){
         const inner=s.slice(1,-1);const ci=inner.indexOf(":");
         const pref=inner.slice(0,ci),num=inner.slice(ci+1);
         if(pref==="cite")return <CitationChip key={k} n={num} src={(opts.citations||[])[parseInt(num,10)-1]} theme={t} font={font}/>;
-        return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} onClick={e=>{e.preventDefault();const el=document.getElementById(`fn-${pref}-${num}`);if(el)el.scrollIntoView({behavior:"smooth",block:"center"});}} style={{color:t.acc,textDecoration:"none",padding:"0 3px",borderRadius:3,background:`${t.acc}18`,fontWeight:700}}>{num}</a></sup>;
+        return <sup key={k} style={{fontSize:"0.75em",lineHeight:0,margin:"0 1px"}}><a href={`#fn-${pref}-${num}`} onClick={e=>{e.preventDefault();const el=document.getElementById(`fn-${pref}-${num}`);if(el)el.scrollIntoView({behavior:"smooth",block:"center"});}} style={{color:t.acc,textDecoration:"none",padding:"0 3px",borderRadius:"var(--hc-radius-sm)",background:`${t.acc}18`,fontWeight:700}}>{num}</a></sup>;
       }
       const boldLinkMatch=s.match(/^\*\*\[([^\]]+)\]\(([^)]+)\)\*\*$/);
       if(boldLinkMatch){
@@ -4310,10 +4463,10 @@ function HyprChat(){
         if((lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))){
           const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):lu.split("/").pop();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
-            <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
-              <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
+            <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
+              <span style={{fontSize:"var(--hc-text-title)"}}>📁</span><span>{fn}</span><span style={{fontSize:"var(--hc-text-secondary)",opacity:.6,marginLeft:4}}>⬇</span>
             </a>
-            <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
+            <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",fontFamily:font}}>👁</button>
           </span>;
         }
         if(lu.startsWith("http://") || lu.startsWith("https://")){
@@ -4321,11 +4474,11 @@ function HyprChat(){
           if(qsSrc)return <QuickSourceInlineChip key={k} href={lu} label={lt} source={qsSrc} t={t} font={font} onPreview={openPreview}/>;
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
-            <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:700,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-              <img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+            <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              <img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:"var(--hc-radius-sm)",flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
               <span>{lt.length>45?lt.slice(0,45)+"...":lt}</span>
             </a>
-            <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center"}}>👁</button>
+            <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",display:"flex",alignItems:"center"}}>👁</button>
           </span>;
         }
         return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`,fontWeight:700}}>{lt}</a>;
@@ -4340,10 +4493,10 @@ function HyprChat(){
         if((lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))){
           const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):lu.split("/").pop();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
-            <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:13,fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
-              <span style={{fontSize:18}}>📁</span><span>{fn}</span><span style={{fontSize:10,opacity:.6,marginLeft:4}}>⬇</span>
+            <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
+              <span style={{fontSize:"var(--hc-text-title)"}}>📁</span><span>{fn}</span><span style={{fontSize:"var(--hc-text-secondary)",opacity:.6,marginLeft:4}}>⬇</span>
             </a>
-            <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:14,fontFamily:font}}>👁</button>
+            <button onClick={()=>openPreview(fn,lu)} style={{padding:"8px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",fontFamily:font}}>👁</button>
           </span>;
         }
         if(lu.startsWith("http://") || lu.startsWith("https://")){
@@ -4351,11 +4504,11 @@ function HyprChat(){
           if(qsSrc)return <QuickSourceInlineChip key={k} href={lu} label={lt} source={qsSrc} t={t} font={font} onPreview={openPreview}/>;
           const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"2px 0",verticalAlign:"middle"}}>
-            <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:11,fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-              <img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+            <a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:5,padding:"4px 10px",background:`${t.warm}10`,border:`1px solid ${t.warm}33`,borderRadius:"8px 0 0 8px",color:t.warm,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              <img src={_qsFaviconUrl(hn,16)} style={{width:12,height:12,borderRadius:"var(--hc-radius-sm)",flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
               <span>{lt.length>45?lt.slice(0,45)+"...":lt}</span>
             </a>
-            <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:11,display:"flex",alignItems:"center"}}>👁</button>
+            <button onClick={()=>openPreview(lt,lu)} title="Preview" style={{padding:"4px 7px",background:`${t.acc}12`,border:`1px solid ${t.acc}33`,borderRadius:"0 8px 8px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",display:"flex",alignItems:"center"}}>👁</button>
           </span>;
         }
         return <a key={k} href={lu} target="_blank" rel="noopener" style={{color:t.acc,textDecoration:"none",borderBottom:`1px solid ${t.acc}40`}}>{lt}</a>;
@@ -4367,18 +4520,18 @@ function HyprChat(){
         if(qsSrc)return <span key={k}><QuickSourceInlineChip href={lu} label={_qsHost(lu)||lu} source={qsSrc} t={t} font={font} onPreview={openPreview}/>{trail}</span>;
         const hn=(()=>{try{return new URL(lu).hostname.replace("www.","");}catch{return "";}})();
         const display=lu.length>60?lu.slice(0,57)+"...":lu;
-        return <span key={k}><a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.warm}10`,border:`1px solid ${t.warm}28`,borderRadius:6,color:t.warm,textDecoration:"none",fontSize:11,maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",verticalAlign:"middle"}}>
-          <img src={_qsFaviconUrl(hn,16)} style={{width:11,height:11,borderRadius:2,flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
+        return <span key={k}><a href={lu} target="_blank" rel="noopener" style={{display:"inline-flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.warm}10`,border:`1px solid ${t.warm}28`,borderRadius:"var(--hc-radius)",color:t.warm,textDecoration:"none",fontSize:"var(--hc-text-secondary)",maxWidth:340,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",verticalAlign:"middle"}}>
+          <img src={_qsFaviconUrl(hn,16)} style={{width:11,height:11,borderRadius:"var(--hc-radius-sm)",flexShrink:0}} alt="" onError={e=>e.target.style.display="none"}/>
           <span>{display}</span>
         </a>{trail}</span>;
       }
       // Inline verbatim quote: "text 10+ chars" — highlight as word-for-word source
       if(s.startsWith('"')&&s.endsWith('"')&&s.length>11)
-        return <span key={k} style={{color:t.warm,background:`${t.warm}15`,padding:"1px 4px",borderRadius:3,fontStyle:"italic",borderBottom:`1px dashed ${t.warm}66`}} title="Verbatim quote">{s}</span>;
+        return <span key={k} style={{color:t.warm,background:`${t.warm}15`,padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",fontStyle:"italic",borderBottom:`1px dashed ${t.warm}66`}} title="Verbatim quote">{s}</span>;
       // Keyboard keys: <kbd>Ctrl</kbd>
       if(s.startsWith("<kbd>")&&s.endsWith("</kbd>")){
         const kv=s.slice(5,-6);
-        return <kbd key={k} style={{display:"inline-block",padding:"1px 6px",background:`linear-gradient(180deg,${t.surface}EE,${t.bgDeep})`,border:`1px solid ${t.brd}AA`,borderBottomWidth:2,borderRadius:4,fontSize:"0.82em",fontFamily:font,color:t.text,boxShadow:`0 1px 0 ${t.brd}88`,verticalAlign:"baseline",margin:"0 1px",minWidth:14,textAlign:"center",lineHeight:1.4}}>{kv}</kbd>;
+        return <kbd key={k} style={{display:"inline-block",padding:"1px 6px",background:`linear-gradient(180deg,${t.surface}EE,${t.bgDeep})`,border:"1px solid var(--hc-line-strong)",borderBottomWidth:2,borderRadius:"var(--hc-radius-sm)",fontSize:"0.82em",fontFamily:font,color:t.text,boxShadow:`0 1px 0 ${t.brd}88`,verticalAlign:"baseline",margin:"0 1px",minWidth:14,textAlign:"center",lineHeight:1.4}}>{kv}</kbd>;
       }
       // Inline color swatch: #rrggbb, #rrggbbaa, rgb(), rgba(), hsl(), hsla()
       if(s.match(/^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/)||s.match(/^(rgba?|hsla?)\(/)){
@@ -4465,15 +4618,15 @@ function HyprChat(){
         if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode} streaming={streaming}/>;
         const isDiff=lang==="diff";
         if(printMode)return <pre key={i} className="print-code-block"><code>{code}</code></pre>;
-        return <div key={i} style={{margin:"10px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${t.brd}55`,background:t.bgDeep}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}BB`,borderBottom:`1px solid ${t.brd}33`}}>
-            <span style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1}}><IC.Terminal/>{lang||"code"}</span>
-            <button onClick={()=>cp(code,bid)} style={{background:"none",border:"none",color:copied===bid?t.ok:t.dim,cursor:"pointer",padding:3,display:"flex",alignItems:"center",gap:4,fontSize:10,fontFamily:font}}>
+        return <div key={i} style={{margin:"10px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:"1px solid var(--hc-line)",background:t.bgDeep}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:"1px solid var(--hc-line)"}}>
+            <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0}}><IC.Terminal/>{lang||"code"}</span>
+            <button onClick={()=>cp(code,bid)} style={{background:"none",border:"none",color:copied===bid?t.ok:t.dim,cursor:"pointer",padding:3,display:"flex",alignItems:"center",gap:4,fontSize:"var(--hc-text-control)",fontFamily:font}}>
               {copied===bid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
             </button>
           </div>
           {isDiff
-            ?<pre style={{margin:0,padding:"8px 0",fontSize:12,lineHeight:1.6,overflowX:"auto",fontFamily:font,color:t.dim}}>{code.split("\n").map((ln,li)=>{
+            ?<pre style={{margin:0,padding:"8px 0",fontSize:"var(--hc-text-secondary)",lineHeight:1.6,overflowX:"auto",fontFamily:codeFont,color:t.dim}}>{code.split("\n").map((ln,li)=>{
                 const c0=ln.charAt(0);
                 const isAdd=c0==="+"&&!ln.startsWith("+++");
                 const isDel=c0==="-"&&!ln.startsWith("---");
@@ -4484,7 +4637,7 @@ function HyprChat(){
                 const fs=isMeta?"italic":"normal";
                 return <div key={li} style={{padding:"0 12px",background:bg,color:col,fontStyle:fs,whiteSpace:"pre"}}>{ln||" "}</div>;
               })}</pre>
-            :<CodeBlock code={code} lang={lang} t={t} font={font}/>}
+            :<CodeBlock code={code} lang={lang} t={t} font={codeFont}/>}
         </div>;
       }
       // Protect $$/$ sequences inside single-line backtick inline code from the display-math split below
@@ -4500,11 +4653,11 @@ function HyprChat(){
         return <React.Fragment key={`s${si}`}>{_lines.map((ln,j)=>{
         if(_consumed.has(j))return null;
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${rt.brd}44`,margin:"10px 0"}}/>;
-        if(ln.match(/^##### /))return <div key={j} style={{fontSize:12,fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
-        if(ln.match(/^#### /))return <div key={j} style={{fontSize:13,fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
-        if(ln.match(/^### /))return <div key={j} style={{fontSize:14,fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
-        if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:15,fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
-        if(ln.match(/^# /))return <div key={j} style={{fontSize:17,fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
+        if(ln.match(/^##### /))return <div key={j} style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
+        if(ln.match(/^#### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
+        if(ln.match(/^### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
+        if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
+        if(ln.match(/^# /))return <div key={j} style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
         /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
         const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
         if(mCallout){
@@ -4526,8 +4679,8 @@ function HyprChat(){
             CAUTION:{color:rt.err,icon:"!",label:"Caution"}
           }[ctype];
           return <div key={j} style={{borderLeft:`3px solid ${cfg.color}`,background:`${cfg.color}12`,padding:"8px 12px 10px",borderRadius:"0 6px 6px 0",margin:"8px 0"}}>
-            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:bodyLines.length?5:0,fontSize:10,fontWeight:700,color:cfg.color,textTransform:"uppercase",letterSpacing:0.8}}>
-              <span style={{fontSize:13,lineHeight:1}}>{cfg.icon}</span>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:bodyLines.length?5:0,fontSize:"var(--hc-text-secondary)",fontWeight:700,color:cfg.color,textTransform:"none",letterSpacing:0}}>
+              <span style={{fontSize:"var(--hc-text-control)",lineHeight:1}}>{cfg.icon}</span>
               <span>{cfg.label}</span>
             </div>
             {bodyLines.length>0 && <div style={{color:rt.text,fontSize:"0.95em",lineHeight:1.55}}>{bodyLines.map((bl,bi)=><div key={bi} style={{minHeight:bl===""?6:"auto"}}>{ip(bl)}</div>)}</div>}
@@ -4550,13 +4703,13 @@ function HyprChat(){
           if(!qLines.length)return null;
           return <div key={j} style={{borderLeft:`3px solid ${rt.warm}`,margin:"6px 0",background:`${rt.warm}0D`,borderRadius:"0 6px 6px 0",padding:"8px 12px"}}>
             <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
-              <span style={{color:rt.warm,fontSize:16,lineHeight:1,flexShrink:0,marginTop:1}}>"</span>
+              <span style={{color:rt.warm,fontSize:"var(--hc-text-reading)",lineHeight:1,flexShrink:0,marginTop:1}}>"</span>
               <div style={{color:rt.text,fontStyle:"italic",fontSize:"0.95em",lineHeight:1.6,flex:1}}>
                 {qLines.map((ql,qi)=><div key={qi} style={{minHeight:ql.trim()===""?6:"auto"}}>{ip(ql)}</div>)}
               </div>
-              <span style={{color:rt.warm,fontSize:16,lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span>
+              <span style={{color:rt.warm,fontSize:"var(--hc-text-reading)",lineHeight:1,flexShrink:0,alignSelf:"flex-end"}}>"</span>
             </div>
-            {attrLabel && <div style={{marginTop:4,fontSize:9,color:rt.warm,opacity:0.7,textTransform:"uppercase",letterSpacing:1}}>{ip(attrLabel)}</div>}
+            {attrLabel && <div style={{marginTop:4,fontSize:"var(--hc-text-secondary)",color:rt.warm,opacity:0.7,textTransform:"none",letterSpacing:0}}>{ip(attrLabel)}</div>}
           </div>;
         }
         if(ln.match(/^>\s?[—–]\s/))return null;
@@ -4591,10 +4744,10 @@ function HyprChat(){
             {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left"}}>{ip(h)}</th>)}</tr></thead>}
             <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left"}}>{ip(c)}</td>)}</tr>)}</tbody>
           </table>;
-          return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.bgDeep}66`}}>
-            <table style={{borderCollapse:"collapse",width:"100%",fontSize:12,fontFamily:font}}>
-              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:`1px solid ${t.brd}66`,background:`${t.surface}AA`,color:t.acc,fontWeight:700,fontSize:10,letterSpacing:0.5,textTransform:"uppercase",whiteSpace:"nowrap"}}>{ip(h)}</th>)}</tr></thead>}
-              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?`1px solid ${t.brd}22`:"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{ip(c)}</td>)}</tr>)}</tbody>
+          return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.bgDeep}F5`}}>
+            <table style={{borderCollapse:"collapse",width:"100%",fontSize:"var(--hc-text-secondary)",fontFamily:font}}>
+              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:"1px solid var(--hc-line-strong)",background:`${t.surface}F5`,color:t.acc,fontWeight:700,fontSize:"var(--hc-text-secondary)",letterSpacing:0,textTransform:"none",whiteSpace:"nowrap"}}>{ip(h)}</th>)}</tr></thead>}
+              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?"1px solid var(--hc-line-subtle)":"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{ip(c)}</td>)}</tr>)}</tbody>
             </table>
           </div>;
         }
@@ -4603,8 +4756,8 @@ function HyprChat(){
       })}</div>;
     });
     if(_fnOrder.length>0){
-      return <React.Fragment>{_rendered}<div style={{marginTop:14,paddingTop:10,borderTop:`1px solid ${rt.brd}33`,fontSize:11,color:rt.mut}}>
-        <div style={{fontSize:9,fontWeight:700,letterSpacing:1,textTransform:"uppercase",color:rt.mut,marginBottom:6,opacity:.7}}>Footnotes</div>
+      return <React.Fragment>{_rendered}<div style={{marginTop:14,paddingTop:10,borderTop:`1px solid ${rt.brd}33`,fontSize:"var(--hc-text-secondary)",color:rt.mut}}>
+        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:0,textTransform:"none",color:rt.mut,marginBottom:6,opacity:.7}}>Footnotes</div>
         {_fnOrder.map((lbl,ix)=>{const num=ix+1;return <div key={lbl} id={`fn-${_fnPrefix}-${num}`} style={{display:"flex",gap:8,margin:"2px 0",lineHeight:1.5}}>
           <span style={{color:rt.acc,fontWeight:700,flexShrink:0,minWidth:16}}>{num}.</span>
           <span style={{flex:1,color:rt.dim}}>{ip(_fnDefs[lbl]||"")}</span>
@@ -4614,17 +4767,19 @@ function HyprChat(){
     return _rendered;
   };
 
-  const glass={background:`${t.surface}F2`,backdropFilter:"none",border:`1px solid ${t.brd}55`,boxShadow:"none"};
+  // Level 0 chrome (rail, header) is tonal; level 2 float (composer, scroll buttons) gets real elevation.
+  const chromeS={background:"var(--hc-sunken)",border:"none",boxShadow:"none"};
+  const floatS={background:"color-mix(in srgb, var(--hc-elev-2) 90%, transparent)",backdropFilter:"blur(var(--hc-blur-float)) saturate(1.25)",WebkitBackdropFilter:"blur(var(--hc-blur-float)) saturate(1.25)",border:"1px solid var(--hc-line)",boxShadow:"var(--hc-shadow-2)"};
+  const glass=floatS;
   const _navShort={...Object.fromEntries(NAV_ITEMS.map(i=>[i.label,i.short])),Settings:"Settings",More:"More",Search:"Search"};
   const openSettings=()=>{setShowNavMore(false);if(panel!=="settings")previousPanelRef.current=panel;setPanel("settings");};
   const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
   const navBtnS=(active=false,extra={})=>({
-    width:52,height:showNavLabels?48:46,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:8,cursor:"pointer",
-    border:`1px solid ${active?`${t.acc}55`:"transparent"}`,background:active?`${t.acc}14`:"transparent",color:active?t.acc:t.mut,position:"relative",transition:"all .15s",flexShrink:0,boxShadow:"none",padding:showNavLabels?"3px 0 1px":0,
-    "--nav-hover-bg":`${t.acc}12`,"--nav-hover-border":`${t.acc}42`,"--nav-hover-color":t.acc,"--nav-hover-ring":`${t.acc}18`,"--nav-hover-shadow":`${t.acc}12`,"--nav-active-hover-bg":`${t.acc}1C`,
+    width:56,height:showNavLabels?54:42,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:"var(--hc-radius)",cursor:"pointer",
+    border:"1px solid transparent",position:"relative",flexShrink:0,padding:showNavLabels?"3px 0 1px":0,fontFamily:font,
     ...extra
   });
-  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{setPanel(p);if(isMobile)setSidebar(false);}} title={lab} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}</button>;};
+  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -4634,27 +4789,27 @@ function HyprChat(){
     const matchTag=!activeTagFilter||tags.includes(activeTagFilter);
     return matchSearch&&matchTag;
   });
-  const inputS={width:"100%",background:`${t.bgDeep}E6`,border:`1px solid ${t.brd}55`,color:t.text,padding:"9px 12px",borderRadius:7,fontFamily:font,fontSize:13,outline:"none",boxSizing:"border-box"};
-  const labelS={fontSize:11,color:t.mut,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.6};
-  const cardS={background:`${t.surface}F0`,border:`1px solid ${t.brd}55`,borderRadius:8,padding:18,marginBottom:14,animation:"fadeIn .3s",boxShadow:"none"};
-  const settingsCardS={background:`${t.surface}40`,border:`1px solid ${t.brd}24`,borderRadius:12,padding:"16px 18px",marginBottom:14};
-  const settingsKickerS={fontSize:10,color:t.mut,lineHeight:1.45};
-  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}4D`,color:c,padding:"6px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,display:"flex",alignItems:"center",gap:5,boxShadow:"none"});
+  const inputS={width:"100%",background:"var(--hc-sunken)",border:"1px solid var(--hc-line)",color:t.text,padding:"9px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",boxSizing:"border-box"};
+  const labelS={fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:5};
+  const cardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:18,marginBottom:14,boxShadow:"var(--hc-shadow-1)"};
+  const settingsCardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:14};
+  const settingsKickerS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};
+  const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}33`,color:c,padding:"6px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:500,minHeight:"var(--hc-control-height)",display:"flex",alignItems:"center",gap:8});
   // ── Settings design system: one titled-card language for every settings tab ──
-  const secS={background:`${t.surface}40`,border:`1px solid ${t.brd}24`,borderRadius:10,padding:"14px 16px",marginBottom:12,display:"flex",flexDirection:"column",gap:12};
-  const subSecS={background:`${t.bgDeep}70`,border:`1px solid ${t.brd}24`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:10};
-  const secHeadRowS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10,borderBottom:`1px solid ${t.brd}18`,paddingBottom:8};
-  const secTitleS={fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.75};
-  const secHintS={fontSize:10,color:t.mut,lineHeight:1.45};
-  const secFieldLabelS={fontSize:10,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.55,display:"flex",flexDirection:"column",gap:5,minWidth:0};
+  const secS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:12,display:"flex",flexDirection:"column",gap:12};
+  const subSecS={background:"var(--hc-sunken)",border:"none",borderRadius:"var(--hc-radius)",padding:12,display:"flex",flexDirection:"column",gap:10};
+  const secHeadRowS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10};
+  const secTitleS={fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text};
+  const secHintS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};
+  const secFieldLabelS={fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:500,display:"flex",flexDirection:"column",gap:5,minWidth:0};
   const secGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,190px),1fr))",gap:10,alignItems:"end"};
-  const secResetBtnS={padding:"6px 10px",background:`${t.err}14`,border:`1px solid ${t.err}33`,borderRadius:7,color:t.err,fontSize:10,cursor:"pointer",fontWeight:700,whiteSpace:"nowrap",fontFamily:font};
-  const secInheritRowS={display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:t.bgDeep,border:`1px dashed ${t.brd}55`,borderRadius:8,cursor:"pointer"};
+  const secResetBtnS={padding:"6px 10px",background:`${t.err}14`,border:`1px solid ${t.err}33`,borderRadius:"var(--hc-radius-sm)",color:t.err,fontSize:"var(--hc-text-secondary)",cursor:"pointer",fontWeight:500,whiteSpace:"nowrap",fontFamily:font};
+  const secInheritRowS={display:"flex",alignItems:"center",gap:6,padding:"6px 10px",background:"var(--hc-sunken)",border:"1px solid transparent",borderRadius:"var(--hc-radius)",cursor:"pointer"};
   // Render helpers below are PLAIN FUNCTIONS called as {fn(...)} — never JSX element
   // types. Defining components here would mint a new type each App render and
   // remount the subtree, dropping input focus mid-keystroke.
   const settingSection=(title,extras,children,hint,color)=>(
-    <section style={color?{...secS,background:`${color}08`,border:`1px solid ${color}26`}:secS}>
+    <section style={color?{...secS,background:`${color}08`,border:`1px solid ${color}1F`}:secS}>
       <div style={secHeadRowS}>
         <div style={color?{...secTitleS,color}:secTitleS}>{title}</div>
         {extras||null}
@@ -4664,45 +4819,43 @@ function HyprChat(){
     </section>
   );
   const modelField=({label,icon,value,set,inheritTitle,inheritDesc,activateValue,hint})=>(<div>
-    {label&&<div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>{label}</div>}
+    {label&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>{label}</div>}
     {value?<div style={{display:"flex",gap:6,alignItems:"center"}}>
       <div style={{flex:1,minWidth:0}}><ModelPicker value={value} onChange={set} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
       <button onClick={()=>set("")} style={secResetBtnS}>Reset</button>
     </div>:<div onClick={()=>set(activateValue!==undefined?activateValue:(models[0]||""))} style={secInheritRowS}>
-      <span style={{fontSize:14}}>{icon}</span>
-      <div style={{flex:1}}><div style={{fontSize:11,fontWeight:600,color:t.mut}}>{inheritTitle}</div><div style={{fontSize:9,color:t.dim}}>{inheritDesc}</div></div>
-      <span style={{fontSize:9,color:t.mut}}>▾</span>
+      <span style={{fontSize:"var(--hc-text-control)"}}>{icon}</span>
+      <div style={{flex:1}}><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.mut}}>{inheritTitle}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>{inheritDesc}</div></div>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>▾</span>
     </div>}
     {hint?<div style={{...secHintS,marginTop:6}}>{hint}</div>:null}
   </div>);
   const toggleField=(label,enabled,onToggle,statusText)=>(
     <div style={{display:"flex",alignItems:"center",gap:10}}>
-      <label style={{fontSize:12,color:t.dim,fontWeight:600,whiteSpace:"nowrap"}}>{label}</label>
-      <div onClick={onToggle} style={{width:36,height:20,borderRadius:10,background:enabled?t.acc:`${t.mut}44`,cursor:"pointer",position:"relative",transition:"all .2s",flexShrink:0}}>
-        <div style={{width:16,height:16,borderRadius:8,background:t.text,position:"absolute",top:2,left:enabled?18:2,transition:"all .2s"}}/>
-      </div>
-      <span style={{fontSize:10,color:t.mut}}>{statusText}</span>
+      <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:500,whiteSpace:"nowrap"}}>{label}</label>
+      <Switch on={!!enabled} onChange={onToggle} label={label}/>
+      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{statusText}</span>
     </div>);
   const sliderField=({label,value,set,min,max,step,display,minLabel,maxLabel,color=t.acc,hint})=>(<div>
-    <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>{label}: <span style={{color,fontFamily:"monospace"}}>{display!==undefined?display:value}</span></label>
+    <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>{label}: <span style={{color,fontFamily:codeFont}}>{display!==undefined?display:value}</span></label>
     <input type="range" min={min} max={max} step={step} value={value} onChange={e=>set(parseFloat(e.target.value))} style={{width:"100%",accentColor:color}}/>
-    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut}}><span>{minLabel??min}</span><span>{maxLabel??max}</span></div>
-    {hint?<div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.5}}>{hint}</div>:null}
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut}}><span>{minLabel??min}</span><span>{maxLabel??max}</span></div>
+    {hint?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4,lineHeight:1.5}}>{hint}</div>:null}
   </div>);
   const chipRow=(options,value,onSelect,{color=t.acc,stretch=false}={})=>(
     <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-      {options.map(o=>{const active=value===o.v;return <button key={String(o.v)} title={o.title} onClick={()=>onSelect(o.v)} style={{...(stretch?{flex:1}:{}),padding:"6px 12px",borderRadius:7,border:`1px solid ${active?color:t.brd}44`,background:active?`${color}22`:t.bgDeep,color:active?color:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?700:400,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5,transition:"background .15s ease,border-color .15s ease,color .15s ease"}}>{o.label}</button>;})}
+      {options.map(o=>{const active=value===o.v;return <button key={String(o.v)} title={o.title} onClick={()=>onSelect(o.v)} style={{...(stretch?{flex:1}:{}),padding:"6px 12px",borderRadius:"var(--hc-radius)",border:`1px solid ${active?color:t.brd}44`,background:active?`${color}22`:t.bgDeep,color:active?color:t.dim,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:active?700:400,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5,transition:"background .15s ease,border-color .15s ease,color .15s ease"}}>{o.label}</button>;})}
     </div>);
-  const msgToolbarS={display:"inline-flex",alignItems:"center",gap:1,marginTop:5,background:`${t.surface}5c`,border:`1px solid ${t.brd}20`,borderRadius:7,padding:2,animation:"fadeIn .18s ease"};
-  const msgActionS=(c=t.mut)=>({background:"transparent",border:"none",color:c,cursor:"pointer",padding:"3px 7px",borderRadius:5,fontFamily:font,fontSize:9,display:"flex",alignItems:"center",gap:3});
+  const msgToolbarS={display:"inline-flex",alignItems:"center",gap:2,marginTop:4};
+  const msgActionS=(c=t.mut)=>({background:"transparent",border:"none",color:c,cursor:"pointer",padding:"0 8px",height:28,minHeight:28,borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5});
   // Shared panel header recipe (Research pattern). Plain function — call as {panelHeader(...)}.
   const panelHeader=(icon,title,extras,{color=t.acc,left,subtitle}={})=>(
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
+    <div style={{padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
         <span style={{display:"flex",color}}>{icon}</span>
         <div style={{minWidth:0}}>
-          <div style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color}}>{title}</div>
-          {subtitle?<div style={{fontSize:10,color:t.mut,marginTop:2}}>{subtitle}</div>:null}
+          <div style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color}}>{title}</div>
+          {subtitle?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{subtitle}</div>:null}
         </div>
         {left||null}
       </div>
@@ -4710,6 +4863,14 @@ function HyprChat(){
     </div>);
   const standaloneCoderJobs=coderWorkflows.filter(w=>w.workflow_version===3&&w.conversation_id===actId);
   const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&!standaloneCoderJobs.length&&(!act||(!(act.messages||[]).length&&!act.is_council));
+  // Starter chips for the empty chat surface: prompt-library picks, the latest workspace, and two generic nudges.
+  const starterItems=isEmptyChatSurface?[
+    ...prompts.filter(p=>p&&!p.is_system&&typeof p.content==="string"&&p.content.trim()).slice(0,2).map(p=>({key:`prompt:${p.id}`,label:p.title,text:p.content,icon:<IC.Zap/>,color:t.pink,hint:"From your prompt library"})),
+    ...(workspaces[0]?[{key:"workspace",label:`Continue in ${workspaces[0].name}`,icon:<IC.Folder/>,color:t.acc,hint:"Start a chat inside this workspace",run:()=>startWorkspaceChat(workspaces[0].id)}]:[]),
+    {key:"todos",label:"Summarise my open todos",text:"Summarise my open todos and suggest what to tackle first.",icon:<IC.Check/>,color:t.ok},
+    {key:"explain",label:"Explain something step by step",text:"Explain step by step how ",icon:<IC.Brain/>,color:t.f1||t.acc},
+  ]:[];
+  useEffect(()=>{try{document.title=formatDocumentTitle({title:panel==="chat"?act?.title:panel==="workspaces"?((wsPanel&&wsDetail?.name)||"Workspaces"):(NAV_ITEM_MAP[panel]?.label||""),streaming});}catch{}},[panel,act?.title,wsPanel,wsDetail?.name,streaming]);
   const emptyComposerLift=isEmptyChatSurface&&!isMobile?"translate3d(0,clamp(-410px,calc(-50vh + 165px),-205px),0)":"translate3d(0,0,0)";
   useEffect(()=>{
     if(!isEmptyChatSurface||isMobile)return;
@@ -4738,23 +4899,9 @@ function HyprChat(){
     observer.observe(el);
     return()=>observer.disconnect();
   },[inp,panel,isEmptyChatSurface,isMobile,keyboardOpen,uiFontSize,attachments]);
-  const latestLivePhase=(()=>{
-    const useful=evts.filter(e=>["thinking","thought_done","tool_start","tool_progress","tool_status","tool_end","tool_done","tool_error","error","search_results"].includes(e.type));
-    for(let i=useful.length-1;i>=0;i--){
-      const phase=_phaseFromEvent(useful[i]);
-      if(phase)return phase;
-    }
-    return null;
-  })();
   const currentRun=(()=>{
     if(councilRunning)return{phase:councilVoting?"voting":"council",label:councilVoting?"Council voting":"Council running",detail:councilRound?.label||"Members are responding",color:t.pink,pct:null};
     if(searchLoading)return{phase:"searching",label:"Searching",detail:"Quick Search is gathering sources",color:t.f1,pct:null};
-    if(streaming){
-      const phase=latestLivePhase&&latestLivePhase.phase!=="complete"?latestLivePhase:{phase:"streaming",label:tokC>0?"Streaming":"Starting",detail:tokC>0?`${tokC} tokens${tokS?` at ${tokS} tok/s`:""}`:"Waiting for first token",pct:null};
-      const c=phase.phase==="thinking"?t.f4:phase.phase==="tool"?t.acc:phase.phase==="failed"?t.err:t.warm;
-      return{...phase,color:c};
-    }
-    if(currentRunNotice)return{phase:currentRunNotice.type,label:currentRunNotice.label,detail:currentRunNotice.detail,color:currentRunNotice.type==="failed"?t.err:t.mut,pct:null};
     return null;
   })();
   const composerState=streaming||councilRunning?"streaming":(currentRunNotice?.type==="failed"||quickSearchError)?"error":currentRunNotice?.type==="stopped"?"stopped":composerFocused?"focused":"idle";
@@ -4794,29 +4941,29 @@ function HyprChat(){
     }
   };
   const settingsTabs=[
-    ["users","👤","Users","Profiles and sign-in"],
-    ["connections","🔌","Connections","Runtime endpoints and status"],
-    ["generation","⚙️","Model & Generation","Global model behavior"],
-    ["daedalus","🏛️","Daedalus","Coder-agent routing"],
-    ["appearance","🎨","Appearance","Theme, font, and density"],
-    ["rag","🧠","RAG Pipeline","Indexing and retrieval"],
-    ["quotes","💬","Loading Quotes","Custom waiting text"],
-    ["cleanup","🗃️","Sandbox & Cleanup","Storage maintenance"],
-    ["danger","⚠️","Danger Zone","Destructive actions"],
-    ["changelog","📋","Changelog","Release notes and updates"],
+    ["users",<IC.User/>,"Users","Profiles and sign-in"],
+    ["connections",<IC.Plug/>,"Connections","Runtime endpoints and status"],
+    ["generation",<IC.Sliders/>,"Model & Generation","Global model behavior"],
+    ["daedalus",<IC.Code/>,"Daedalus","Coder-agent routing"],
+    ["appearance",<IC.Palette/>,"Appearance","Theme, font, and density"],
+    ["rag",<IC.Database/>,"RAG Pipeline","Indexing and retrieval"],
+    ["quotes",<IC.Chat/>,"Loading Quotes","Custom waiting text"],
+    ["cleanup",<IC.HardDrive/>,"Sandbox & Cleanup","Storage maintenance"],
+    ["danger",<IC.Alert/>,"Danger Zone","Destructive actions"],
+    ["changelog",<IC.File/>,"Changelog","Release notes and updates"],
   ];
   const activeSettingsTitle=(settingsTabs.find(([id])=>id===settingsTab)||settingsTabs[0])[2];
   const selectedLoginUser=users.find(u=>u.id===loginUserId)||users[0]||null;
   const localModelCount=models.filter(m=>!m.startsWith("hf.co/")&&!isCloudModelName(m)).length;
   const hfModelCount=models.filter(m=>m.startsWith("hf.co/")).length;
   const installedModelCount=localModelCount+hfModelCount;
-  const mmPanelS={background:`${t.surface}66`,border:`1px solid ${t.brd}24`,borderRadius:8,boxShadow:"none"};
-  const mmPanelStrongS={background:`${t.surface}88`,border:`1px solid ${t.brd}33`,borderRadius:8,boxShadow:"none"};
-  const mmKickerS={fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.7,fontWeight:800};
-  const mmMetaS={fontSize:10,color:t.mut,lineHeight:1.4};
-  const mmChipS=(c=t.acc,bg)=>({fontSize:10,padding:"2px 7px",borderRadius:6,background:bg||`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:800,lineHeight:1.15,whiteSpace:"nowrap"});
-  const mmIconBtnS=(c=t.mut)=>({width:28,height:28,borderRadius:7,border:`1px solid ${c}30`,background:`${c}10`,color:c,cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",padding:0,flexShrink:0});
-  const mmSectionTitleS={fontSize:12,fontWeight:900,color:t.dim,textTransform:"uppercase",letterSpacing:.7,marginBottom:10};
+  const mmPanelS={background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",boxShadow:"none"};
+  const mmPanelStrongS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",boxShadow:"none"};
+  const mmKickerS={fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600};
+  const mmMetaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4};
+  const mmChipS=(c=t.acc,bg)=>({fontSize:"var(--hc-text-secondary)",padding:"2px 7px",borderRadius:"var(--hc-radius)",background:bg||`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:600,lineHeight:1.15,whiteSpace:"nowrap"});
+  const mmIconBtnS=(c=t.mut)=>({width:28,height:28,borderRadius:"var(--hc-radius)",border:`1px solid ${c}30`,background:`${c}10`,color:c,cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",padding:0,flexShrink:0});
+  const mmSectionTitleS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.dim,textTransform:"none",letterSpacing:0,marginBottom:10};
 
   // ============================================================
   // PANELS
@@ -4829,20 +4976,30 @@ function HyprChat(){
   // ============================================================
   // RENDER
   // ============================================================
+  const settingsFocus=useFocusScope(panel==='settings',()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||'chat');});
+  const previewFocus=useFocusScope(!!previewFile&&isMobile,()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);});
+  const kbFocus=useFocusScope(!!kbPreview,()=>setKbPreview(null));
+  const confirmFocus=useFocusScope(!!confirmDialog,()=>{const dialog=confirmDialog;setConfirmDialog(null);setConfirmPhrase('');dialog?.resolve?.(dialog.prompt?null:false);});
+  // Exit animations: surfaces stay mounted briefly while closing (usePresence); focus scopes keep the real open flag.
+  const settingsPresence=usePresence(panel==='settings',{token:'--hc-dur-2',fallback:180});
+  const confirmPresence=usePresence(confirmDialog);
+  const runPill=usePresence(currentRun&&(councilRunning||(searchLoading&&!streaming))?currentRun:null);
+  // Only newly appended rows animate; loads/switches fade the list container instead (useNewKeys).
+  const newMessageKeys=useNewKeys((act?.messages||[]).map((m,idx)=>`${actId}:${m._activityKey||m.id||idx}`),actId);
   const _uiScale=uiFontSize/14;
-  return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
-    {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)}/>}
-    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${t.acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
-    <BackgroundCanvas effect={bgEffect} t={t}/>
-    {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${t.acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
+  return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+    {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>({...c,messages:(c.messages||[]).map(m=>m.id===id?{...m,...saved}:m)})))}/>}
+    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
+    <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0}/>
+    {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
-    {userGateOpen&&<div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:320,background:"rgba(0,0,0,.72)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,backdropFilter:"blur(6px)"}}>
-      <div className="hc-dialog-card" style={{width:"min(520px,94vw)",background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:20,animation:"fadeIn .18s"}}>
+    {userGateOpen&&<div className="hc-viewport-overlay hc-scrim" style={{position:"fixed",inset:0,zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
+      <div className="hc-dialog-card hc-dialog hc-elev-3" style={{width:"min(520px,94vw)",padding:20}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
           <span style={{display:"flex",color:t.acc}}><IC.User/></span>
           <div>
-            <div style={{fontSize:15,fontWeight:900,color:t.text,letterSpacing:.4}}>Sign In</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2}}>HyprChat profiles keep chats, memory, workspaces, agents, and reports separate.</div>
+            <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,letterSpacing:.4}}>Sign In</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>HyprChat profiles keep chats, memory, workspaces, agents, and reports separate.</div>
           </div>
         </div>
         <div style={{display:"grid",gap:10,marginBottom:16}}>
@@ -4850,13 +5007,13 @@ function HyprChat(){
             {users.map(u=><option key={u.id} value={u.id}>{u.name}{u.password_enabled?" (password)":""}</option>)}
           </select>}
           {selectedLoginUser?.password_enabled&&<input type="password" value={loginPassword} onChange={e=>setLoginPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")loginAsUser();}} placeholder="Password" style={inputS} autoFocus/>}
-          {loginError&&<div style={{fontSize:11,color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:7,padding:"7px 9px"}}>{loginError}</div>}
-          {users.length>0&&<button onClick={()=>loginAsUser()} disabled={!selectedLoginUser} style={{...btnS(t.acc),justifyContent:"center",fontSize:12,padding:"9px 14px",opacity:selectedLoginUser?1:.45}}>
+          {loginError&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:"var(--hc-radius)",padding:"7px 9px"}}>{loginError}</div>}
+          {users.length>0&&<button onClick={()=>loginAsUser()} disabled={!selectedLoginUser} style={{...btnS(t.acc),justifyContent:"center",fontSize:"var(--hc-text-control)",padding:"9px 14px",opacity:selectedLoginUser?1:.45}}>
             <IC.Check/> Sign In
           </button>}
         </div>
-        <div style={{borderTop:`1px solid ${t.brd}22`,paddingTop:14}}>
-          <div style={{fontSize:11,fontWeight:800,color:t.dim,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>New Profile</div>
+        <div style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:14}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.dim,textTransform:"none",letterSpacing:0,marginBottom:8}}>New Profile</div>
           <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(0,1fr) auto",gap:8}}>
             <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Name" style={inputS}/>
             <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={inputS}/>
@@ -4867,148 +5024,144 @@ function HyprChat(){
     </div>}
 
     {/* NAV RAIL */}
-    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...glass,borderRight:`1px solid ${t.brd}55`,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
+    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...chromeS,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
-        <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title="Search conversations" style={navBtnS(!!sidebarSearchActive)}>
+        <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title={`Search conversations (${MOD_KEY} K)`} style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
-          {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Search</div>}
-          {sidebarSearchActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
+          {showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>Search</div>}
+          {sidebarSearchActive&&<div className="nav-indicator"/>}
         </button>
         {navLayout.bar.map(id=>{const it=NAV_ITEM_MAP[id];return it?<React.Fragment key={id}>{nb(id,<it.icon/>,it.label)}</React.Fragment>:null;})}
         {navLayout.more.length>0&&<>
         <button className={`nav-panel-button${(showNavMore||moreNavActive)?" is-active":""}`} onClick={()=>setShowNavMore(p=>!p)} title="More" aria-expanded={showNavMore} style={navBtnS(showNavMore||moreNavActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.More/></span>
-          {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>More</div>}
-          {moreNavActive&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
+          {showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>More</div>}
+          {moreNavActive&&<div className="nav-indicator"/>}
         </button>
-        <div aria-hidden={!showNavMore} inert={showNavMore?undefined:""} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?navLayout.more.length*(showNavLabels?52:50)+8:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
+        <div aria-hidden={!showNavMore} inert={showNavMore?undefined:""} style={{width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflow:"hidden",maxHeight:showNavMore?navLayout.more.length*(showNavLabels?60:50)+8:0,opacity:showNavMore?1:0,transform:showNavMore?"translateY(0)":"translateY(-6px)",transition:"max-height .22s ease, opacity .16s ease, transform .18s ease",pointerEvents:showNavMore?"auto":"none",flexShrink:0}}>
           {navLayout.more.map(id=>{const it=NAV_ITEM_MAP[id];return it?<React.Fragment key={id}>{nb(id,<it.icon/>,it.label)}</React.Fragment>:null;})}
         </div>
         </>}
       </div>
       <button className={`nav-panel-button${panel==="notifications"?" is-active":""}`} onClick={()=>{setPanel("notifications");if(typeof Notification!=="undefined"&&Notification.permission==="default"){try{Notification.requestPermission();}catch{}}}} title="Notifications" style={{...navBtnS(panel==="notifications"),position:"relative"}}>
         <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Bell/></span>
-        {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Alerts</div>}
-        {notifUnseen>0&&<div style={{position:"absolute",top:4,right:6,minWidth:14,height:14,padding:"0 3px",borderRadius:8,background:t.err,color:"#fff",fontSize:8,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`0 0 6px ${t.err}88`}}>{notifUnseen>99?"99+":notifUnseen}</div>}
+        {showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>Alerts</div>}
+        {notifUnseen>0&&<div style={{position:"absolute",top:4,right:6,minWidth:14,height:14,padding:"0 3px",borderRadius:"var(--hc-radius)",background:t.err,color:"#fff",fontSize:"var(--hc-text-secondary)",fontWeight:600,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`0 0 6px ${t.err}88`}}>{notifUnseen>99?"99+":notifUnseen}</div>}
       </button>
       <button className={`nav-panel-button${panel==="settings"?" is-active":""}`} onClick={openSettings} title="Settings" style={navBtnS(panel==="settings")}>
         <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Settings/></span>
-        {showNavLabels&&<div style={{fontSize:8,marginTop:2,lineHeight:1,opacity:.78,textAlign:"center"}}>Settings</div>}
-        {panel==="settings"&&<div style={{position:"absolute",left:-1,top:"20%",width:3,height:"60%",borderRadius:"0 2px 2px 0",background:t.warm}}/>}
+        {showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>Settings</div>}
+        {panel==="settings"&&<div className="nav-indicator"/>}
       </button>
-      <button className="nav-panel-button" onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={navBtnS(false,{height:48,flexDirection:"row",borderRadius:12,padding:0,marginTop:4})}>
+      <button className="nav-panel-button" onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide conversations":"Show conversations"} style={navBtnS(false,{height:48,flexDirection:"row",borderRadius:"var(--hc-radius-card)",padding:0,marginTop:4})}>
         <IC.Sidebar/>
       </button>
     </div>
 
     {/* CONVERSATION LIST */}
-    <div inert={!sidebar?"":undefined} style={{...(isMobile
+    <div data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{...(isMobile
       ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,paddingTop:"var(--hc-content-safe-top)",paddingBottom:"var(--hc-content-safe-bottom)",transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
-      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:`1px solid ${t.brd}55`,overflow:"hidden",background:`${t.bgDeep}F2`,backdropFilter:"none"}}>
+      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:"1px solid var(--hc-line-subtle)",overflow:"hidden",background:"var(--hc-sunken)"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
-        <div style={{fontSize:13,fontWeight:800,letterSpacing:1.8,textTransform:"uppercase",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:8,fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:4}}>ALPHA</span></div>
-        <button onClick={()=>{openSettings();setSettingsTab("users");}} style={{width:"100%",display:"flex",alignItems:"center",gap:7,background:`${t.surface}44`,border:`1px solid ${t.brd}22`,color:t.dim,borderRadius:8,padding:"6px 8px",fontFamily:font,fontSize:11,cursor:"pointer",marginBottom:8,textAlign:"left"}}>
+        <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:"var(--hc-radius-sm)"}}>ALPHA</span></div>
+        <button onClick={()=>{openSettings();setSettingsTab("users");}} style={{width:"100%",display:"flex",alignItems:"center",gap:7,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",color:t.dim,borderRadius:"var(--hc-radius)",padding:"6px 8px",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8,textAlign:"left"}}>
           <span style={{display:"flex",color:t.acc}}><IC.User/></span>
           <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:700}}>{currentUser?.name||"Choose user"}</span>
-          <span style={{marginLeft:"auto",fontSize:9,color:t.mut}}>switch</span>
+          <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.mut}}>switch</span>
         </button>
       </div>
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
         <div style={{display:"flex",gap:4}}>
-          <button onClick={startBlankChat} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.warm,border:`1px solid ${t.warm}`,color:"#fff",padding:"10px 12px",borderRadius:8,cursor:"pointer",fontFamily:font,fontSize:13,fontWeight:700,boxShadow:"none"}}><IC.Plus/> New Chat</button>
-          <button onClick={()=>{setWsPanel(p=>!p);setActiveWs(null);setWsDetail(null);}} style={{...btnS(wsPanel?t.acc:t.mut),padding:"5px 8px",fontSize:11}} title="Workspaces">🗂</button>
+          {(wsPanel&&activeWs||panel==='chat'&&act?.effective_workspace)&&<button onClick={()=>startBlankChat(true)} style={btnS(t.mut)}>New general chat</button>}
+          <button onClick={()=>startBlankChat()} title={`New chat (${MOD_KEY} N)`} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.acc,border:`1px solid ${t.acc}`,color:t.bg,padding:"10px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600,boxShadow:"none"}}><IC.Plus/> New Chat</button>
         </div>
         {!wsPanel&&<>
-        {showMessageSearch&&<div style={{display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s both"}}>
+        {showMessageSearch&&<div className="hc-reveal" style={{display:"flex",flexDirection:"column",gap:4}}>
           <button style={btnS(t.acc)} onClick={()=>{setPanel('library');if(isMobile)setSidebar(false);}}>Search all saved content</button>
           <div style={{position:"relative"}}>
-            <input ref={titleSearchRef} value={sq} onChange={e=>setSq(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Filter chat titles..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:11}}/>
+            <input ref={titleSearchRef} value={sq} onChange={e=>setSq(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Filter chat titles..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:"var(--hc-text-control)"}}/>
             <span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",color:t.mut,display:"flex",pointerEvents:"none",opacity:.75}}><IC.Search/></span>
           </div>
           <div style={{position:"relative"}}>
-            <input ref={ftsRef} value={ftsQuery} onChange={e=>setFtsQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Search all messages..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:11}}/>
-            {ftsLoading?<span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",fontSize:9,color:t.mut}}>...</span>:<button onClick={closeSidebarSearch} title="Close search" style={{position:"absolute",right:5,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:14,lineHeight:1,padding:"2px 4px"}}>×</button>}
+            <input ref={ftsRef} value={ftsQuery} onChange={e=>setFtsQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Search all messages..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:"var(--hc-text-control)"}}/>
+            {ftsLoading?<span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",fontSize:"var(--hc-text-secondary)",color:t.mut}}>...</span>:<button onClick={closeSidebarSearch} title="Close search" style={{position:"absolute",right:5,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",lineHeight:1,padding:"2px 4px"}}>×</button>}
           </div>
         </div>}
         {(()=>{
           const convIds=new Set(convs.map(c=>c.id));const allTags=[...new Set(Object.entries(convTags).filter(([k])=>convIds.has(k)).flatMap(([,v])=>v))];
           if(!allTags.length)return null;
           return <div style={{display:"flex",flexWrap:"wrap",gap:3,padding:"2px 0"}}>
-            <button onClick={()=>setActiveTagFilter(null)} style={{fontSize:10,padding:"3px 8px",borderRadius:10,background:!activeTagFilter?`${t.acc}22`:`${t.surface}55`,border:`1px solid ${!activeTagFilter?t.acc:t.brd}33`,color:!activeTagFilter?t.acc:t.mut,cursor:"pointer"}}>All</button>
-            {allTags.map(tag=><button key={tag} onClick={()=>setActiveTagFilter(activeTagFilter===tag?null:tag)} style={{fontSize:10,padding:"3px 8px",borderRadius:10,background:activeTagFilter===tag?`${t.warm}22`:`${t.surface}55`,border:`1px solid ${activeTagFilter===tag?t.warm:t.brd}33`,color:activeTagFilter===tag?t.warm:t.mut,cursor:"pointer"}}>{tag}</button>)}
+            <button onClick={()=>setActiveTagFilter(null)} style={{fontSize:"var(--hc-text-control)",padding:"3px 8px",borderRadius:"var(--hc-radius-card)",background:!activeTagFilter?`${t.acc}22`:`${t.surface}55`,border:`1px solid ${!activeTagFilter?t.acc:t.brd}33`,color:!activeTagFilter?t.acc:t.mut,cursor:"pointer"}}>All</button>
+            {allTags.map(tag=><button key={tag} onClick={()=>setActiveTagFilter(activeTagFilter===tag?null:tag)} style={{fontSize:"var(--hc-text-control)",padding:"3px 8px",borderRadius:"var(--hc-radius-card)",background:activeTagFilter===tag?`${t.warm}22`:`${t.surface}55`,border:`1px solid ${activeTagFilter===tag?t.warm:t.brd}33`,color:activeTagFilter===tag?t.warm:t.mut,cursor:"pointer"}}>{tag}</button>)}
           </div>;
         })()}
       </>}
       </div>
       {!wsPanel?<div style={{flex:1,overflowY:"auto",padding:"2px 5px"}}>
         {ftsResults.length>0?<div>
-          <div style={{padding:"4px 6px",fontSize:9,color:t.mut,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span>{ftsResults.length} results</span><button onClick={()=>{setFtsQuery("");setFtsResults([]);}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0}}>Clear</button></div>
-          {ftsResults.map((r,i)=><div key={i} onClick={()=>{loadConversation(r.conversation_id);closeSidebarSearch();}} style={{padding:"6px 8px",borderRadius:8,cursor:"pointer",marginBottom:2,background:`${t.surface}44`,border:`1px solid ${t.brd}22`}}>
-            <div style={{fontSize:11,fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.conv_title||"Chat"}</div>
-            <div style={{fontSize:10,color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:8,padding:"1px 4px",borderRadius:3,background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
-            <div style={{fontSize:10,color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
+          <div style={{padding:"4px 6px",fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span>{ftsResults.length} results</span><button onClick={()=>{setFtsQuery("");setFtsResults([]);}} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>Clear</button></div>
+          {ftsResults.map((r,i)=><div key={i} onClick={()=>{loadConversation(r.conversation_id);closeSidebarSearch();}} style={{padding:"6px 8px",borderRadius:"var(--hc-radius)",cursor:"pointer",marginBottom:2,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)"}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.conv_title||"Chat"}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${t.brd}22`,color:t.dim}}>{r.role}</span></div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
         </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const tags=convTags[c.id]||[];const isAct=c.id===actId&&panel==="chat";const accentColor=isCouncil?t.pink:profileType==="persona"?t.pink:hasPersona?t.acc:t.acc;const isPinned=c.pinned==="1"||c.pinned===1;const title=c.title||"New Chat";const rowBg=isAct?`${accentColor}14`:"transparent";const effectiveRowBg=rowBg==="transparent"?`${t.bgDeep}F2`:rowBg;const hoverRowBg=isAct?effectiveRowBg:`${t.sfBri}1f`;const measureTitle=e=>{const row=e.currentTarget;const clip=row.querySelector(".conv-title-clip");const text=row.querySelector(".conv-title-text");if(!clip||!text)return;const overflow=Math.max(0,text.scrollWidth-clip.clientWidth);row.style.setProperty("--conv-title-marquee",`${overflow+18}px`);row.setAttribute("data-title-overflow",overflow>3?"1":"0");};const resetTitle=e=>{e.currentTarget.setAttribute("data-title-overflow","0");};return <div key={c.id} style={{marginBottom:2}}>
-        <div className={`conv-row${isAct?" is-act":""}`} data-sticky-actions={isPinned||tags.length?"1":"0"} onClick={()=>loadConversation(c.id)} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle} style={{padding:"0 7px 0 9px",minHeight:36,boxSizing:"border-box",borderRadius:8,cursor:"pointer",background:rowBg,border:isAct?`1px solid ${accentColor}50`:"1px solid transparent",display:"flex",alignItems:"center",gap:0,borderLeft:`3px solid ${isAct?accentColor:(isCouncil||hasPersona)?`${accentColor}55`:"transparent"}`,position:"relative",overflow:"hidden","--conv-row-bg":effectiveRowBg,"--conv-row-hover-bg":hoverRowBg,"--conv-action-bg":effectiveRowBg}}>
-          <div style={{overflow:"hidden",whiteSpace:"nowrap",fontSize:13,color:isAct?t.text:t.dim,flex:1,minWidth:0,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:6}}>
+        <div className={`conv-row${isAct?" is-act":""}`} data-sticky-actions={isPinned||tags.length?"1":"0"} onClick={()=>loadConversation(c.id)} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle} style={{padding:"0 7px 0 12px",minHeight:48,boxSizing:"border-box",borderRadius:"var(--hc-radius)",cursor:"pointer",background:rowBg,border:"1px solid transparent",display:"flex",alignItems:"center",gap:0,position:"relative",overflow:"hidden","--conv-accent":accentColor,"--conv-row-bg":effectiveRowBg,"--conv-row-hover-bg":hoverRowBg,"--conv-action-bg":effectiveRowBg}}>
+          <div style={{overflow:"hidden",whiteSpace:"nowrap",fontSize:"var(--hc-text-control)",color:isAct?t.text:t.dim,flex:1,minWidth:0,fontWeight:isAct?500:400,display:"flex",alignItems:"center",gap:6}}>
+            {streaming&&c.id===actId&&<span className="hc-stream-dot" role="status" aria-label="Generating"/>}
+            {c.effective_workspace?.name&&<span style={{flexShrink:0,color:t.mut,display:"flex",opacity:.7}} title={`Workspace: ${c.effective_workspace.name}`}><IC.Folder/></span>}
             {isCouncil&&<span style={{flexShrink:0,color:t.pink,display:"flex",opacity:isAct?1:.7}}><IC.Council/></span>}
-            {hasPersona&&(convAvatar?<img src={avatarSrc(convAvatar)} style={{width:18,height:18,borderRadius:6,objectFit:"cover",flexShrink:0,opacity:isAct?1:.85}} alt=""/>:<span style={{flexShrink:0,color:accentColor,display:"flex",alignItems:"center",justifyContent:"center",width:18,height:18,opacity:isAct?1:.75}}>{profileType==="persona"?<IC.User/>:<IC.Bot/>}</span>)}
+            {hasPersona&&(convAvatar?<img src={avatarSrc(convAvatar)} style={{width:18,height:18,borderRadius:"var(--hc-radius)",objectFit:"cover",flexShrink:0,opacity:isAct?1:.85}} alt=""/>:<span style={{flexShrink:0,color:accentColor,display:"flex",alignItems:"center",justifyContent:"center",width:18,height:18,opacity:isAct?1:.75}}>{profileType==="persona"?<IC.User/>:<IC.Bot/>}</span>)}
             {c.forked_from&&<span style={{flexShrink:0,color:t.f1||t.acc,display:"flex",opacity:.6}} title="Forked conversation"><IC.GitBranch/></span>}
             <span className="conv-title-clip" title={title} style={{minWidth:0,flex:1,overflow:"hidden",whiteSpace:"nowrap"}}>
               <span className="conv-title-text">{title}</span>
             </span>
           </div>
-          <div className={`conv-actions${isPinned||tags.length?" has-sticky-actions":""}`} style={{display:"flex",gap:1,flexShrink:0,alignItems:"center",position:"absolute",right:4,top:"50%",transform:"translateY(-50%)",paddingLeft:0,pointerEvents:"none"}}>
-            {(() => {const aBtn={background:"none",border:"none",cursor:"pointer",padding:4,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:5,lineHeight:0,pointerEvents:"auto"};return <>
-            <button className={`conv-act${isPinned?" on":""}`} onClick={e=>{e.stopPropagation();const newP=isPinned?"0":"1";uConv(c.id,{pinned:newP});fetch(`${API}/api/conversations/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({pinned:newP})});}} title={isPinned?"Unpin":"Pin to top"} style={{...aBtn,color:isPinned?t.warm:t.mut}}><IC.Pin/></button>
-            <button className={`conv-act${tags.length?" on":""}`} onClick={e=>{e.stopPropagation();setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput("");}} title="Tags" style={{...aBtn,color:tags.length?t.warm:t.mut}}><IC.Tag/></button>
-            <button className="conv-act conv-del" onClick={e=>{e.stopPropagation();delChat(c.id);}} title="Delete" style={{...aBtn,color:t.mut}}><IC.Trash/></button>
-            </>;})()}
+          <div style={{flexShrink:0,marginLeft:8}}>
+            <ActionMenu label={`Actions for ${title}`} compact items={[
+              {label:isPinned?'Unpin':'Pin to top',onClick:()=>{const pinned=isPinned?'0':'1';uConv(c.id,{pinned});fetch(`${API}/api/conversations/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned})});}},
+              {label:'Edit tags',onClick:()=>{setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput('');}},
+              {label:'Delete conversation',destructive:true,onClick:()=>delChat(c.id)},
+            ]}/>
           </div>
         </div>
         {tags.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:2,padding:"1px 8px 4px"}}>
-          {tags.map(tag=><span key={tag} onClick={e=>{e.stopPropagation();setActiveTagFilter(activeTagFilter===tag?null:tag);}} style={{fontSize:8,padding:"1px 5px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,cursor:"pointer"}}>{tag}</span>)}
+          {tags.map(tag=><span key={tag} onClick={e=>{e.stopPropagation();setActiveTagFilter(activeTagFilter===tag?null:tag);}} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius)",background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,cursor:"pointer"}}>{tag}</span>)}
         </div>}
         {showTagEditor===c.id&&<div style={{padding:"4px 8px 6px",animation:"fadeIn .15s"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",gap:4}}>
-            <input value={newTagInput} onChange={e=>setNewTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}if(e.key==="Escape")setShowTagEditor(null);}} placeholder="Add tag..." style={{...inputS,padding:"3px 6px",fontSize:10,flex:1}}/>
-            <button onClick={()=>{if(newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}}} style={{...btnS(t.warm),padding:"3px 7px",fontSize:9}}>+</button>
-            <button onClick={()=>setShowTagEditor(null)} style={{...btnS(t.mut),padding:"3px 7px",fontSize:9}}>×</button>
+            <input value={newTagInput} onChange={e=>setNewTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}if(e.key==="Escape")setShowTagEditor(null);}} placeholder="Add tag..." style={{...inputS,padding:"3px 6px",fontSize:"var(--hc-text-control)",flex:1}}/>
+            <button aria-label="Add" onClick={()=>{if(newTagInput.trim()){const tag=newTagInput.trim();setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");}}} style={{...btnS(t.warm),padding:"3px 7px",fontSize:"var(--hc-text-control)"}}>+</button>
+            <button aria-label="Close" onClick={()=>setShowTagEditor(null)} style={{...btnS(t.mut),padding:"3px 7px",fontSize:"var(--hc-text-control)"}}>×</button>
           </div>
           {tags.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:2,marginTop:3}}>
-            {tags.map(tag=><span key={tag} style={{fontSize:10,padding:"2px 6px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,display:"flex",alignItems:"center",gap:3}}>
-              {tag}<span onClick={()=>setConvTags(p=>({...p,[c.id]:(p[c.id]||[]).filter(x=>x!==tag)}))} style={{cursor:"pointer",opacity:.7,fontSize:12,fontWeight:700,lineHeight:1}}>×</span>
+            {tags.map(tag=><span key={tag} style={{fontSize:"var(--hc-text-secondary)",padding:"2px 6px",borderRadius:"var(--hc-radius)",background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,display:"flex",alignItems:"center",gap:3}}>
+              {tag}<span onClick={()=>setConvTags(p=>({...p,[c.id]:(p[c.id]||[]).filter(x=>x!==tag)}))} style={{cursor:"pointer",opacity:.7,fontSize:"var(--hc-text-secondary)",fontWeight:700,lineHeight:1}}>×</span>
             </span>)}
           </div>}
         </div>}
-      </div>;};return <>{pinnedC.length>0&&<><div style={{fontSize:9,fontWeight:700,color:t.warm,letterSpacing:.5,textTransform:"uppercase",padding:"4px 8px 2px",opacity:.6}}>{"\uD83D\uDCCC"} Pinned</div>{pinnedC.map(renderConv)}{unpinnedC.length>0&&<div style={{borderTop:`1px solid ${t.brd}22`,margin:"4px 0"}}/>}</>}{unpinnedC.map(renderConv)}</>;})()}
+      </div>;};return <>{pinnedC.length>0&&<><div className="hc-conv-group-head" style={{color:t.warm}}><IC.Pin/> Pinned</div>{pinnedC.map(renderConv)}</>}{groupByRecency(unpinnedC,Date.now(),c=>_parseUtcishMs(c.updated_at)).map(g=><React.Fragment key={g.key}><div className="hc-conv-group-head">{g.label}</div>{g.items.map(renderConv)}</React.Fragment>)}</>;})()}
       </div>:<div style={{flex:1,overflowY:"auto",padding:"8px 6px"}}>
         <button onClick={async()=>{
-          const r=await fetch(`${API}/api/workspaces`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Workspace"})});
-          const d=await r.json();setWorkspaces(p=>[...p,d]);
-          setActiveWs(d.id);setWsDetail({...d,conversations:[],files:[],reports:[]});
-        }} style={{...btnS(t.acc),width:"100%",marginBottom:8,justifyContent:"center",fontSize:11}}><IC.Plus/> New Workspace</button>
-        {!workspaces.length&&<div style={{textAlign:"center",padding:30,color:t.mut,fontSize:11}}>No workspaces yet.<br/>Group related chats and reports together.</div>}
+          try{const d=await apiJson("/api/workspaces",{method:"POST",body:{name:"New Workspace"}});setWorkspaces(p=>[...p,d]);openWorkspace(d.id);}catch(e){notify({type:"error",text:"Workspace not created",detail:e.message});}
+        }} style={{...btnS(t.acc),width:"100%",marginBottom:8,justifyContent:"center",fontSize:"var(--hc-text-control)"}}><IC.Plus/> New Workspace</button>
+        {!workspaces.length&&<EmptyState compact icon={<IC.Folder/>} title="No workspaces yet" hint="Group related chats, sources and notes together."/>}
         {workspaces.map(ws=>{
           const topics=Array.isArray(ws.topics)?ws.topics:(typeof ws.topics==="string"?JSON.parse(ws.topics||"[]"):[]);
           const isA=activeWs===ws.id;
-          return <div key={ws.id} onClick={async()=>{
-            setActiveWs(ws.id);setWsLoading(true);
-            const r=await fetch(`${API}/api/workspaces/${ws.id}`);
-            setWsDetail(await r.json());setWsLoading(false);
-          }} style={{padding:"10px 12px",borderRadius:12,border:`1px solid ${isA?t.acc:t.brd}33`,background:isA?`${t.acc}10`:`${t.surface}44`,marginBottom:6,cursor:"pointer",transition:"all .2s",animation:"fadeIn .3s"}}>
-            <div style={{fontWeight:700,fontSize:12,color:isA?t.acc:t.text,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.name}</div>
-            {ws.description&&<div style={{fontSize:10,color:t.mut,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.description}</div>}
+          return <div key={ws.id} onClick={()=>openWorkspace(ws.id)} style={{padding:"10px 12px",borderRadius:"var(--hc-radius-card)",border:`1px solid ${isA?t.acc:t.brd}33`,background:isA?`${t.acc}10`:`${t.surface}44`,marginBottom:6,cursor:"pointer",transition:"all .2s",animation:"fadeIn .3s"}}>
+            <div style={{fontWeight:700,fontSize:"var(--hc-text-secondary)",color:isA?t.acc:t.text,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.name}</div>
+            {ws.description&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ws.description}</div>}
             {topics.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:4}}>
-              {topics.slice(0,3).map((tp,i)=><span key={i} style={{fontSize:9,padding:"2px 6px",borderRadius:10,background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
+              {topics.slice(0,3).map((tp,i)=><span key={i} style={{fontSize:"var(--hc-text-secondary)",padding:"2px 6px",borderRadius:"var(--hc-radius-card)",background:tp.color+"22",color:tp.color,border:`1px solid ${tp.color}44`,fontWeight:600}}>{tp.label}</span>)}
             </div>}
-            <div style={{fontSize:9,color:t.mut,display:"flex",gap:10}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",gap:10}}>
               <span>💬 {ws.conv_count||0}</span><span>📊 {ws.report_count||0}</span><span>📎 {ws.file_count||0}</span>
             </div>
           </div>;
         })}
       </div>}
-      <div style={{padding:"7px 11px",borderTop:`1px solid ${t.brd}22`,fontSize:10,color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+      <div style={{padding:"7px 11px",borderTop:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
         {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n{health.comfyui!==undefined&&<> {svc("comfyui")}SD</>}{health.stt!==undefined&&<> {svc("stt")}STT</>}{health.tts!==undefined&&<> {svc("tts")}TTS</>}
       </div>
     </div>
@@ -5017,54 +5170,54 @@ function HyprChat(){
     {isMobile&&sidebar&&<div onClick={()=>setSidebar(false)} style={{position:"absolute",inset:0,zIndex:55,background:"rgba(0,0,0,.45)"}}/>}
 
     {/* MAIN */}
-    <div style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
-      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",...glass,borderBottom:`1px solid ${t.brd}55`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
+    <div ref={contentRef} className="hc-content" data-panel={panel} style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
+      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",background:"var(--hc-elev-0)",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
         <div style={{display:"flex",alignItems:"center",gap:6,...(isMobile?{flexWrap:"wrap",minWidth:0,maxWidth:"100%"}:{})}}>
-          {isMobile&&<button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide menu":"Show menu"} style={{display:"flex",alignItems:"center",justifyContent:"center",width:34,height:30,flexShrink:0,background:"transparent",border:`1px solid ${t.brd}44`,borderRadius:8,color:t.dim,cursor:"pointer",fontFamily:font}}><IC.Sidebar/></button>}
+          {isMobile&&<button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide menu":"Show menu"} aria-label={sidebar?"Hide menu":"Show menu"} className="hc-icon-btn is-lg" style={{color:t.dim}}><IC.Sidebar/></button>}
           {panel==="chat"&&!act&&<>
             <ModelPicker value={pendingChatModel||models[0]||""} onChange={setPendingChatModel} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>
-            {pendingPersona&&(()=>{const pendingProfile=getProfileForConversation(pendingPersona);const type=pendingProfile?getProfileType(pendingProfile):(isCoderPersonaName(pendingPersona.persona_name)||(pendingPersona.tool_ids||[]).length?"agent":"persona");const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=pendingPersona.persona_avatar||profileAvatar(pendingProfile);return <><div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${c}15`,border:`1px solid ${c}28`,borderRadius:20}}>
+            {pendingPersona&&(()=>{const pendingProfile=getProfileForConversation(pendingPersona);const type=pendingProfile?getProfileType(pendingProfile):(isCoderPersonaName(pendingPersona.persona_name)||(pendingPersona.tool_ids||[]).length?"agent":"persona");const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=pendingPersona.persona_avatar||profileAvatar(pendingProfile);return <><div className="hc-chip" style={{"--chip-c":c}}>
               {avatar?<img src={avatarSrc(avatar)} style={{width:type==="persona"?24:16,height:type==="persona"?24:16,borderRadius:type==="persona"?7:5,objectFit:"cover"}} alt=""/>:<span style={{display:"flex",color:c,alignItems:"center",justifyContent:"center",width:type==="persona"?24:16,height:type==="persona"?24:16}}>{type==="persona"?<IC.User/>:<IC.Bot/>}</span>}
-              <span style={{fontSize:9,fontWeight:800,color:c,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
-              <span style={{fontSize:10,fontWeight:600,color:type==="persona"?t.text:c}}>{pendingPersona.persona_name}</span>
+              <span style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:c,opacity:.85}}>{label}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:500,color:type==="persona"?t.text:c}}>{pendingPersona.persona_name}</span>
             </div>
-            <button onClick={leaveActiveProfile} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
+            <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave {label}</button></>;})()}
           </>}
           {panel==="chat"&&act&&<>
-            {act.forked_from&&<div style={{display:"flex",alignItems:"center",gap:4,padding:"2px 8px",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:16,fontSize:9,color:t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
+            {act.forked_from&&<div className="hc-chip" style={{"--chip-c":t.acc,cursor:"pointer"}} onClick={()=>loadConversation(act.forked_from)}>
               <IC.GitBranch/> Forked — click to view original
             </div>}
             {act.is_council?(()=>{
               const cfg=councils.find(c=>c.id===act.council_config_id);
-              return <><div style={{display:"flex",alignItems:"center",gap:6,padding:"3px 10px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:20}}>
+              return <><div className="hc-chip" style={{"--chip-c":t.pink}}>
                 <IC.Council/>
-                <span style={{fontSize:10,fontWeight:700,color:t.pink}}>{cfg?.name||"Council"}</span>
-                <span style={{fontSize:9,color:t.mut}}>{(cfg?.members||[]).length} members</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.pink}}>{cfg?.name||"Council"}</span>
+                <span style={{fontSize:"var(--hc-text-micro)",color:t.mut}}>{(cfg?.members||[]).length} members</span>
                 {councilRunning&&<div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
               </div>
-              <button onClick={()=>newChat(true)} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave Council</button></>;
+              <button onClick={()=>newChat(true)} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave Council</button></>;
             })():<ModelPicker value={act.model||models[0]||""} onChange={v=>uConv(actId,{model:v})} models={models} modelDetails={modelDetails} t={t} font={font} compact={true} onRefresh={refreshModels}/>}
-            {!act.is_council&&act.persona_name&&(()=>{const type=getConversationProfileType(act);const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=act.persona_avatar||profileAvatar(getProfileForConversation(act));return <><div style={{display:"flex",alignItems:"center",gap:5,padding:"3px 10px",background:`${c}15`,border:`1px solid ${c}28`,borderRadius:20}}>
+            {!act.is_council&&act.persona_name&&(()=>{const type=getConversationProfileType(act);const c=type==="persona"?t.pink:t.acc;const label=type==="persona"?"Persona":"Agent";const avatar=act.persona_avatar||profileAvatar(getProfileForConversation(act));return <><div className="hc-chip" style={{"--chip-c":c}}>
               {avatar?<img src={avatarSrc(avatar)} style={{width:type==="persona"?28:16,height:type==="persona"?28:16,borderRadius:type==="persona"?8:5,objectFit:"cover"}} alt=""/>:<span style={{display:"flex",color:c,alignItems:"center",justifyContent:"center",width:type==="persona"?28:16,height:type==="persona"?28:16}}>{type==="persona"?<IC.User/>:<IC.Bot/>}</span>}
-              <span style={{fontSize:9,fontWeight:800,color:c,textTransform:"uppercase",letterSpacing:.5}}>{label}</span>
-              <span style={{fontSize:10,fontWeight:600,color:type==="persona"?t.text:c}}>{act.persona_name}</span>
+              <span style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:c,opacity:.85}}>{label}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:500,color:type==="persona"?t.text:c}}>{act.persona_name}</span>
             </div>
-            <button onClick={leaveActiveProfile} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 9px",background:`${t.err}12`,border:`1px solid ${t.err}33`,borderRadius:16,cursor:"pointer",fontSize:10,fontWeight:600,color:t.err,fontFamily:font}}>✕ Leave {label}</button></>;})()}
+            <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave {label}</button></>;})()}
             {!act.is_council&&!act.persona_name&&<div className="hc-header-secondary" style={{position:"relative"}}>
-              <button onClick={()=>setShowSysPromptPicker(p=>!p)} style={{fontSize:10,padding:"3px 8px",borderRadius:8,border:`1px solid ${act.system_prompt?`${t.warm}44`:`${t.brd}33`}`,background:act.system_prompt?`${t.warm}12`:"transparent",color:act.system_prompt?t.warm:t.mut,cursor:"pointer",fontFamily:font,display:"flex",alignItems:"center",gap:3}}>
+              <button onClick={()=>setShowSysPromptPicker(p=>!p)} className="hc-chip" style={{"--chip-c":act.system_prompt?t.warm:t.mut,fontFamily:font,...(act.system_prompt?{}:{background:"transparent"})}}>
                 {act.system_prompt?"\u{1F4CB} System Prompt":"\u002B System Prompt"}
               </button>
-              {showSysPromptPicker&&<div className="hc-composer-menu" style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:260,maxWidth:340,padding:8,animation:"fadeIn .15s"}}>
+              {showSysPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,minWidth:260,maxWidth:340,padding:8}}>
                 {(()=>{const sysPrompts=validPrompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
-                    <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
-                    <div style={{fontSize:9,color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
+                  {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:`${t.surface}66`,border:"1px solid var(--hc-line-subtle)",transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                    <div style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:t.text}}>{p.title}</div>
+                    <div style={{fontSize:"var(--hc-text-micro)",color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
                   </div>)}
                 </div>
-                {act.system_prompt&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{uConv(actId,{system_prompt:""});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:9}}>Clear System Prompt</button>
+                {act.system_prompt&&<div style={{borderTop:"1px solid var(--hc-line-subtle)",marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{uConv(actId,{system_prompt:""});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:"var(--hc-text-micro)"}}>Clear System Prompt</button>
                 </div>}</>
-                :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:11}}>No system prompt templates. Check "Available as System Prompt" on any prompt in the Prompt Library.</div>;})()}
+                :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:"var(--hc-text-micro)"}}>No system prompt templates. Check "Available as System Prompt" on any prompt in the Prompt Library.</div>;})()}
               </div>}
             </div>}
           </>}
@@ -5090,25 +5243,25 @@ function HyprChat(){
             const groups=downloads.reduce((acc,d)=>{const k=_activityGroupKey(d);(acc[k]||(acc[k]=[])).push(d);return acc;},{});
             const pillColor=failed.length?t.err:active.length?t.acc:t.mut;
             return <div ref={dlPanelRef} style={{position:"relative"}}>
-              <button onClick={()=>setDownloadsExpanded(p=>!p)} title="Activity" style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",background:`${pillColor}14`,border:`1px solid ${pillColor}44`,borderRadius:9,color:pillColor,cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:font}}>
+              <button onClick={()=>setDownloadsExpanded(p=>!p)} title="Activity" aria-expanded={downloadsExpanded} className="hc-chip" style={{"--chip-c":pillColor,fontFamily:font}}>
                 <IC.Activity/>
                 <span>{active.length?`${active.length} active`:failed.length?`${failed.length} failed`:"Activity"}</span>
-                <span style={{fontSize:8,opacity:.6,display:"inline-block",transform:downloadsExpanded?"rotate(180deg)":"none",transition:"transform .2s"}}>▼</span>
+                <span className="hc-chevron" data-open={downloadsExpanded?"true":"false"} style={{opacity:.6}}><IC.ChevDown/></span>
               </button>
-              {downloadsExpanded&&<div style={{position:"absolute",top:"calc(100% + 8px)",right:0,zIndex:200,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 10px 34px #0009`,width:"min(410px,calc(100vw - 24px))",padding:12,animation:"fadeIn .2s"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${t.brd}22`,gap:10}}>
+              {downloadsExpanded&&<div className="hc-pop hc-elev-2" data-placement="bottom" data-align="end" style={{position:"absolute",top:"calc(100% + 8px)",right:0,zIndex:200,width:"min(410px,calc(100vw - 24px))",padding:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:"1px solid var(--hc-line-subtle)",gap:10}}>
                     <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
                       <span style={{display:"flex",color:t.acc}}><IC.Activity/></span>
-                      <span style={{fontSize:12,fontWeight:800,color:t.text}}>Activity</span>
-                      <span style={{fontSize:9,color:t.mut,whiteSpace:"nowrap"}}>{downloads.length} total</span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>Activity</span>
+                      <span style={{fontSize:"var(--hc-text-micro)",color:t.mut,whiteSpace:"nowrap"}}>{downloads.length} total</span>
                     </div>
-                    <button disabled={!completed.length} onClick={()=>{setDownloads(p=>p.filter(d=>_activityStatusKey(d.status)!=="complete"));}} style={{background:"none",border:`1px solid ${t.brd}24`,color:completed.length?t.mut:`${t.mut}66`,cursor:completed.length?"pointer":"default",fontSize:9,padding:"3px 7px",borderRadius:6,fontFamily:font}}>Clear completed</button>
+                    <button disabled={!completed.length} onClick={()=>{setDownloads(p=>p.filter(d=>_activityStatusKey(d.status)!=="complete"));}} style={{background:"none",border:"1px solid var(--hc-line-subtle)",color:completed.length?t.mut:`${t.mut}66`,cursor:completed.length?"pointer":"default",fontSize:"var(--hc-text-micro)",padding:"3px 7px",borderRadius:"var(--hc-radius)",fontFamily:font}}>Clear completed</button>
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:10,maxHeight:390,overflowY:"auto",paddingRight:2}}>
                     {["Chat","Tools","Models","Knowledge","Cleanup"].filter(g=>groups[g]?.length).map(g=>{
                       const gm=groupMeta[g];
                       return <div key={g} style={{display:"flex",flexDirection:"column",gap:6}}>
-                        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:9,fontWeight:800,color:gm.color,textTransform:"uppercase",letterSpacing:.7}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-micro)",fontWeight:600,color:gm.color,textTransform:"uppercase",letterSpacing:.7}}>
                           <span style={{display:"flex"}}>{gm.icon}</span><span>{g}</span><span style={{color:t.mut,fontWeight:600,letterSpacing:0}}>{groups[g].length}</span>
                         </div>
                         {groups[g].map(dl=>{
@@ -5117,28 +5270,28 @@ function HyprChat(){
                           const activeRow=!terminal;
                           const pct=Math.max(0,Math.min(100,Number(dl.pct||0)));
                           const elapsed=_fmtElapsed(dl.startTime,activityNow);
-                          return <div key={dl.id} style={{background:activeRow?`${gm.color}0d`:`${t.surface}5c`,borderRadius:8,border:`1px solid ${activeRow?gm.color:t.brd}24`,padding:"8px 9px",opacity:(terminal&&sm.label==="complete")?0.72:1}}>
+                          return <div key={dl.id} style={{background:activeRow?`${gm.color}0d`:`${t.surface}5c`,borderRadius:"var(--hc-radius)",border:`1px solid ${activeRow?gm.color:t.brd}24`,padding:"8px 9px",opacity:(terminal&&sm.label==="complete")?0.72:1}}>
                             <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
                               <span style={{width:7,height:7,borderRadius:"50%",background:sm.color,boxShadow:activeRow?`0 0 8px ${sm.color}88`:"none",animation:activeRow?"pulse 1.6s infinite":"none",flexShrink:0}}/>
-                              <span title={dl.name} style={{fontSize:11,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{dl.name}</span>
-                              <span style={{fontSize:8,padding:"2px 6px",borderRadius:6,background:sm.bg,color:sm.color,fontWeight:800,flexShrink:0,textTransform:"uppercase"}}>{sm.label}</span>
+                              <span title={dl.name} style={{fontSize:"var(--hc-text-micro)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{dl.name}</span>
+                              <span style={{fontSize:"var(--hc-text-micro)",padding:"2px 6px",borderRadius:"var(--hc-radius)",background:sm.bg,color:sm.color,fontWeight:600,flexShrink:0,textTransform:"uppercase"}}>{sm.label}</span>
                             </div>
-                            {(pct>0||activeRow)&&<div style={{height:3,background:`${t.surface}AA`,borderRadius:4,overflow:"hidden",margin:"7px 0 6px"}}>
-                              <div style={{height:"100%",width:`${sm.label==="complete"?100:pct}%`,background:`linear-gradient(90deg,${gm.color},${sm.color})`,borderRadius:4,transition:"width .45s ease"}}/>
+                            {(pct>0||activeRow)&&<div style={{height:3,background:`${t.surface}AA`,borderRadius:"var(--hc-radius-sm)",overflow:"hidden",margin:"7px 0 6px"}}>
+                              <div style={{height:"100%",width:`${sm.label==="complete"?100:pct}%`,background:`linear-gradient(90deg,${gm.color},${sm.color})`,borderRadius:"var(--hc-radius-sm)",transition:"width .45s ease"}}/>
                             </div>}
                             <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
-                              <span style={{fontSize:9,color:sm.label==="failed"?t.err:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{sm.label==="failed"?(dl.error||dl.message||"Failed"):(dl.message||"Working...")}</span>
-                              <span title="Started" style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:9,color:t.mut,whiteSpace:"nowrap"}}><IC.Clock/>{dl.startTime?new Date(dl.startTime).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"--"}</span>
-                              {elapsed&&<span style={{fontSize:9,color:t.dim,whiteSpace:"nowrap"}}>{elapsed}</span>}
+                              <span style={{fontSize:"var(--hc-text-micro)",color:sm.label==="failed"?t.err:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{sm.label==="failed"?(dl.error||dl.message||"Failed"):(dl.message||"Working...")}</span>
+                              <span title="Started" style={{display:"inline-flex",alignItems:"center",gap:3,fontSize:"var(--hc-text-micro)",color:t.mut,whiteSpace:"nowrap"}}><IC.Clock/>{dl.startTime?new Date(dl.startTime).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):"--"}</span>
+                              {elapsed&&<span style={{fontSize:"var(--hc-text-micro)",color:t.dim,whiteSpace:"nowrap"}}>{elapsed}</span>}
                             </div>
                             <div style={{display:"flex",alignItems:"center",gap:6,marginTop:dl.totalBytes>0||dl.speed>0||dl.retry||dl.chatId||dl.href?6:0,minHeight:dl.retry||dl.chatId||dl.href?20:0}}>
-                              {dl.totalBytes>0&&<span style={{fontSize:9,color:t.dim,fontFamily:font}}>{fmtSize(dl.completedBytes||0)}<span style={{opacity:.5}}>/{fmtSize(dl.totalBytes)}</span></span>}
-                              {activeRow&&dl.speed>0&&<span style={{fontSize:9,color:t.acc,fontWeight:700,fontFamily:font}}>{fmtSpd(dl.speed)}</span>}
-                              {activeRow&&dl.eta>0&&<span style={{fontSize:9,color:t.warm,fontFamily:font}}>~{fmtEta(dl.eta)}</span>}
+                              {dl.totalBytes>0&&<span style={{fontSize:"var(--hc-text-micro)",color:t.dim,fontFamily:font}}>{fmtSize(dl.completedBytes||0)}<span style={{opacity:.5}}>/{fmtSize(dl.totalBytes)}</span></span>}
+                              {activeRow&&dl.speed>0&&<span style={{fontSize:"var(--hc-text-micro)",color:t.acc,fontWeight:700,fontFamily:font}}>{fmtSpd(dl.speed)}</span>}
+                              {activeRow&&dl.eta>0&&<span style={{fontSize:"var(--hc-text-micro)",color:t.warm,fontFamily:font}}>~{fmtEta(dl.eta)}</span>}
                               <span style={{flex:1}}/>
-                              {dl.retry&&<button onClick={()=>dl.retry()} style={{background:"none",border:`1px solid ${t.acc}35`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Retry</button>}
-                              {dl.chatId&&<button onClick={()=>{loadConversation(dl.chatId,{force:true});setDownloadsExpanded(false);}} style={{background:"none",border:`1px solid ${t.brd}35`,color:t.mut,cursor:"pointer",padding:"2px 7px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Open</button>}
-                              {dl.href&&<a href={dl.href} target="_blank" rel="noreferrer" style={{display:"inline-flex",alignItems:"center",gap:3,textDecoration:"none",border:`1px solid ${t.brd}35`,color:t.mut,padding:"2px 7px",borderRadius:6,fontSize:9,fontWeight:700}}><IC.External/> {dl.actionLabel||"Open"}</a>}
+                              {dl.retry&&<button onClick={()=>dl.retry()} style={{background:"none",border:`1px solid ${t.acc}35`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",fontWeight:700}}>Retry</button>}
+                              {dl.chatId&&<button onClick={()=>{loadConversation(dl.chatId,{force:true});setDownloadsExpanded(false);}} style={{background:"none",border:"1px solid var(--hc-line)",color:t.mut,cursor:"pointer",padding:"2px 7px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",fontWeight:700}}>Open</button>}
+                              {dl.href&&<a href={dl.href} target="_blank" rel="noreferrer" style={{display:"inline-flex",alignItems:"center",gap:3,textDecoration:"none",border:"1px solid var(--hc-line)",color:t.mut,padding:"2px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-micro)",fontWeight:700}}><IC.External/> {dl.actionLabel||"Open"}</a>}
                               <button onClick={()=>setDownloads(p=>p.filter(x=>x.id!==dl.id))} title="Dismiss" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"1px 3px",display:"flex",opacity:.75}}><IC.X/></button>
                             </div>
                           </div>;
@@ -5149,35 +5302,55 @@ function HyprChat(){
                 </div>}
             </div>;
           })()}
-          {panel==="chat"&&globalMemoryActive&&<span title="HyprChat memory active for this chat" style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,color:t.acc,fontSize:10,fontWeight:800,whiteSpace:"nowrap"}}>
+          {panel==="chat"&&globalMemoryActive&&<span title="HyprChat memory active for this chat" style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:"var(--hc-radius)",background:`${t.acc}10`,border:`1px solid ${t.acc}30`,color:t.acc,fontSize:"var(--hc-text-micro)",fontWeight:600,whiteSpace:"nowrap"}}>
             <span style={{width:6,height:6,borderRadius:"50%",background:t.acc,flexShrink:0}}/>
             Memory
             <span style={{color:t.mut,fontWeight:500}}>HyprChat</span>
           </span>}
-          {panel==="chat"&&workspaceMemoryActive&&<span title={`Workspace memory active: ${activeMemoryWs.name}`} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.ok}10`,border:`1px solid ${t.ok}30`,color:t.ok,fontSize:10,fontWeight:800,maxWidth:160,overflow:"hidden",whiteSpace:"nowrap"}}>
-            <span style={{width:6,height:6,borderRadius:"50%",background:t.ok,flexShrink:0}}/>
-            Memory
-            <span style={{color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis"}}>{activeMemoryWs.name}</span>
-          </span>}
-          {panel==="chat"&&ghostActive&&<span title="Ghost mode: this chat stays local and is not saved, indexed, or added to history." style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:8,background:`${t.pink}10`,border:`1px solid ${t.pink}30`,color:t.pink,fontSize:10,fontWeight:800,whiteSpace:"nowrap"}}>
+          {panel==='chat'&&actId&&act&&!ghostActive&&<ActionMenu
+            key={`${currentUserId}:${actId}`}
+            label={`Workspace context: ${workspaceContextLabel}`}
+            triggerText={workspaceContextLabel}
+            className="hc-chat-workspace"
+            disabled={workspaceContextSaving}
+            summary={<>
+              <div>Workspace memory: {workspaceMemoryActive?'On':'Off'}</div>
+              <div>{activeMemoryWs?.kb_ids?.length||0} linked knowledge base{activeMemoryWs?.kb_ids?.length===1?'':'s'}</div>
+            </>}
+            items={[
+              {key:'auto',label:'Automatic',role:'menuitemradio',checked:workspaceContextMode==='auto',onClick:()=>changeWorkspaceContext('auto')},
+              {key:'off',label:'Off',role:'menuitemradio',checked:workspaceContextMode==='off',onClick:()=>changeWorkspaceContext('off')},
+              ...workspaces.map(w=>({key:`workspace:${w.id}`,label:w.name,role:'menuitemradio',checked:workspaceContextMode==='selected'&&act.workspace_context.workspace_id===w.id,onClick:()=>changeWorkspaceContext(w.id)})),
+              activeMemoryWs&&{label:'Open workspace',onClick:()=>openWorkspace(activeMemoryWs.id)},
+              activeMemoryWs&&{label:'Workspace settings',onClick:()=>openWorkspace(activeMemoryWs.id,'settings')},
+              {label:'All workspaces',onClick:()=>{workspaceLoadEpoch.current++;setWsPanel(false);setActiveWs(null);setWsDetail(null);setPanel('workspaces');}},
+            ]}
+          />}
+          {panel==="chat"&&ghostActive&&<span title="Ghost mode: this chat stays local and is not saved, indexed, or added to history." className="hc-chip" style={{"--chip-c":t.pink}}>
             <IC.Ghost/> Ghost
           </span>}
-          {panel==="chat"&&<button onClick={toggleGlobalMemory} aria-pressed={globalMemoryActive} disabled={ghostActive} title={act?(globalMemoryActive?"HyprChat memory on: this chat recalls accepted global memories and queues suggestions":"HyprChat memory: recall accepted global memories and queue suggestions for this chat"):(globalMemoryActive?"HyprChat memory on for the next chat":"HyprChat memory: enable recall for the next chat")} style={{background:globalMemoryActive?`${t.acc}18`:"none",border:`1px solid ${globalMemoryActive?t.acc:t.brd}33`,color:ghostActive?`${t.mut}66`:globalMemoryActive?t.acc:t.mut,cursor:ghostActive?"default":"pointer",padding:"4px 8px",borderRadius:8,fontSize:13,display:"flex",alignItems:"center",boxShadow:globalMemoryActive?`0 0 0 1px ${t.acc}22 inset`:"none",opacity:ghostActive?0.45:1}}><IC.Brain/></button>}
-          {panel==="chat"&&<button onClick={toggleGhostMode} aria-pressed={ghostActive} title={ghostActive?"Ghost mode on: this chat is local only and will not be saved or indexed":"Ghost mode: start a chat that is never saved or indexed"} style={{background:ghostActive?`${t.pink}18`:"none",border:`1px solid ${ghostActive?t.pink:t.brd}33`,color:ghostActive?t.pink:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontSize:13,display:"flex",alignItems:"center",boxShadow:ghostActive?`0 0 0 1px ${t.pink}22 inset`:"none"}}><IC.Ghost/></button>}
+          {panel==="chat"&&<button onClick={toggleGlobalMemory} aria-label="HyprChat memory" aria-pressed={globalMemoryActive} disabled={ghostActive} title={act?(globalMemoryActive?"HyprChat memory on: this chat recalls accepted global memories and queues suggestions":"HyprChat memory: recall accepted global memories and queue suggestions for this chat"):(globalMemoryActive?"HyprChat memory on for the next chat":"HyprChat memory: enable recall for the next chat")} className={`hc-icon-btn is-lg${globalMemoryActive?" is-open":""}`} style={{color:ghostActive?`${t.mut}66`:globalMemoryActive?t.acc:t.mut,cursor:ghostActive?"default":"pointer",opacity:ghostActive?0.45:1}}><IC.Brain/></button>}
+          {panel==="chat"&&<button onClick={toggleGhostMode} aria-label="Ghost mode" aria-pressed={ghostActive} title={ghostActive?"Ghost mode on: this chat is local only and will not be saved or indexed":"Ghost mode: start a chat that is never saved or indexed"} className="hc-icon-btn is-lg" style={{color:ghostActive?t.pink:t.mut,background:ghostActive?`${t.pink}18`:undefined}}><IC.Ghost/></button>}
           {/* Dark/Light mode toggle */}
-          <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontSize:13,display:"flex",alignItems:"center"}}>{isLightTheme?"\u2600\uFE0F":"\uD83C\uDF19"}</button>
+          <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} aria-label={isLightTheme?"Switch to dark mode":"Switch to light mode"} className="hc-icon-btn is-lg" style={{color:t.mut,fontSize:"var(--hc-text-control)"}}><span key={isLightTheme?"sun":"moon"} className="hc-theme-icon">{isLightTheme?<IC.Sun/>:<IC.Moon/>}</span></button>
           {/* Export / Import */}
           {panel==="chat"&&act&&(act.messages||[]).length>0&&<>
-            <div ref={exportMenuRef} style={{position:"relative"}}>
-              <button onClick={()=>setShowExportMenu(p=>!p)} title="Export chat" style={{background:showExportMenu?`${t.acc}12`:"none",border:`1px solid ${showExportMenu?t.acc:t.brd}33`,color:showExportMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:4}}><IC.Upload/> export</button>
-              {showExportMenu&&<div style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:250,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:8,boxShadow:`0 4px 20px #0008`,minWidth:150,padding:5,animation:"fadeIn .15s"}}>
-                <button onClick={()=>{setShowExportMenu(false);exportChat();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:6,fontFamily:font,fontSize:11,textAlign:"left"}}><span>Markdown</span><span style={{color:t.mut,fontSize:9}}>MD</span></button>
-                <button onClick={()=>{setShowExportMenu(false);exportChatJSON();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:6,fontFamily:font,fontSize:11,textAlign:"left"}}><span>JSON</span><span style={{color:t.mut,fontSize:9}}>JSON</span></button>
+            <div ref={exportMenuRef} onBlur={e=>{if(!e.currentTarget.contains(e.relatedTarget))setShowExportMenu(false);}} onKeyDown={e=>{
+              if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();}
+              if(showExportMenu&&['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
+                e.preventDefault();const items=Array.from(exportMenuRef.current.querySelectorAll('[role="menuitem"]'));const i=items.indexOf(document.activeElement);
+                items[e.key==='Home'?0:e.key==='End'?items.length-1:(i+(e.key==='ArrowDown'?1:-1)+items.length)%items.length]?.focus();
+              }
+            }} style={{position:"relative"}}>
+              <button onClick={()=>setShowExportMenu(p=>!p)} aria-label="Export chat" aria-expanded={showExportMenu} aria-haspopup="menu" title="Export chat" className="hc-chip" style={{"--chip-c":showExportMenu?t.acc:t.mut,fontFamily:font,...(showExportMenu?{}:{background:"transparent"})}}><IC.Upload/> Export</button>
+              {showExportMenu&&<div role="menu" aria-label="Export chat" className="hc-pop hc-elev-2" data-placement="bottom" data-align="end" style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:250,minWidth:150,padding:5}}>
+                <button role="menuitem" onClick={()=>{setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();exportChat();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",textAlign:"left"}}><span>Markdown</span><span style={{color:t.mut,fontSize:"var(--hc-text-micro)"}}>MD</span></button>
+                <button role="menuitem" onClick={()=>{setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();exportChatJSON();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",textAlign:"left"}}><span>JSON</span><span style={{color:t.mut,fontSize:"var(--hc-text-micro)"}}>JSON</span></button>
               </div>}
             </div>
           </>}
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
-          {!isMobile&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" style={{background:"none",border:`1px solid ${t.brd}33`,color:t.mut,cursor:"pointer",padding:"4px 8px",borderRadius:8,fontFamily:font,fontSize:10,display:"flex",alignItems:"center",gap:2}}><IC.Download/> import</button>}
+          {!isMobile&&panel==="chat"&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" className="hc-chip" style={{"--chip-c":t.mut,background:"transparent",fontFamily:font}}><IC.Download/> Import</button>}
           {panel==="chat"&&act&&(()=>{
             // Context meter: prompt + generated tokens against the active num_ctx.
             const promptToks=ctxTokens||0;
@@ -5191,12 +5364,12 @@ function HyprChat(){
             const ratio=maxCtx>0?Math.min(1,toks/maxCtx):0;
             const cc=maxCtx>0?(ratio>0.85?t.err:ratio>0.6?t.warm:t.ok):streaming?t.acc:t.warm;
             const fmtK=n=>n>=1000?`${(n/1000).toFixed(1)}k`:String(n);
-            return <div style={{display:"flex",flexDirection:"column",overflow:"hidden",borderRadius:10,border:`1px solid ${cc}45`,background:`${cc}12`,minWidth:90,cursor:"default"}} title={`Context used: prompt + generated tokens = ${toks}${maxCtx>0?` / ${maxCtx}`:""}${liveGen>0?` | Live generation: +${liveGen} tokens`:genTokens>0?` | Generated this turn: ${genTokens} tokens`:""}`}>
+            return <div style={{display:"flex",flexDirection:"column",overflow:"hidden",borderRadius:"var(--hc-radius-card)",border:`1px solid ${cc}45`,background:`${cc}12`,minWidth:90,cursor:"default"}} title={`Context used: prompt + generated tokens = ${toks}${maxCtx>0?` / ${maxCtx}`:""}${liveGen>0?` | Live generation: +${liveGen} tokens`:genTokens>0?` | Generated this turn: ${genTokens} tokens`:""}`}>
               <div style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px"}}>
-                <span style={{fontSize:13,display:"inline-block",animation:streaming?"bop 1.5s ease-in-out infinite":"none"}}>🧠</span>
-                <span style={{fontSize:13,color:cc,fontWeight:700,fontFamily:font,letterSpacing:.2}}>{fmtK(toks)}</span>
-                {maxCtx>0&&<span style={{fontSize:10,color:t.mut,fontFamily:font}}>/{fmtK(maxCtx)}</span>}
-                {streaming&&tokS>0&&<span style={{fontSize:9,color:`${cc}99`,marginLeft:2}}>{tokS}t/s</span>}
+                <span style={{fontSize:"var(--hc-text-control)",display:"inline-block",animation:streaming?"bop 1.5s ease-in-out infinite":"none"}}>🧠</span>
+                <span style={{fontSize:"var(--hc-text-control)",color:cc,fontWeight:700,fontFamily:font,letterSpacing:.2}}>{fmtK(toks)}</span>
+                {maxCtx>0&&<span style={{fontSize:"var(--hc-text-micro)",color:t.mut,fontFamily:font}}>/{fmtK(maxCtx)}</span>}
+                {streaming&&tokS>0&&<span style={{fontSize:"var(--hc-text-micro)",color:`${cc}99`,marginLeft:2}}>{tokS}t/s</span>}
               </div>
               {maxCtx>0&&<div style={{height:3,background:`${t.surface}88`}}>
                 <div style={{height:"100%",background:cc,width:`${ratio*100}%`,transition:"width .3s ease"}}/>
@@ -5211,10 +5384,12 @@ function HyprChat(){
       {/* Panels + Preview wrapper. Keyed on the active panel so a panel switch remounts
           this column and replays the entry fade; key is stable while chatting. */}
       <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
-      <div className={panel!=="chat"||wsPanel&&activeWs?"hc-safe-panel":""} key={wsPanel&&activeWs?"ws":panel} style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0,animation:"fadeIn .18s ease"}}>
-      {/* Panels */}
-      {wsPanel&&activeWs
-        ?<WorkspaceDetail ws={wsDetail} wsLoading={wsLoading} t={t} API={API}
+      {activeWs&&(wsPanel||workspaceSearchReturn)&&<div className="hc-safe-panel" style={{flex:1,minWidth:0,minHeight:0,display:wsPanel?'flex':'none',flexDirection:'column'}}>
+<WorkspaceDetail key={activeWs} ws={wsDetail?.id===activeWs?wsDetail:null} wsLoading={wsLoading} t={t} API={API} btnS={btnS}
+            onNewChat={()=>startWorkspaceChat(activeWs)} initialTab={workspaceInitialTab} personas={mcs} tools={[...builtinTools,...tools,...connectorTools].filter((x,i,a)=>x.id&&a.findIndex(y=>y.id===x.id)===i)}
+            onHome={()=>{setWorkspaceSearchReturn(false);setWsPanel(false);setActiveWs(null);setWsDetail(null);setPanel('workspaces');}}
+            onSearchResult={result=>{searchNavigation.current=true;setWorkspaceSearchReturn(true);setWsPanel(false);try{if(result.kind==='chat'){setMessageFocus({conversation:result.parent_id,id:result.source_id});loadConversation(result.parent_id);}else navigateWorkspaceContent(({artifact:'artifacts',research:'research',note:'notes'})[result.kind],result.source_id);}finally{searchNavigation.current=false;}}}
+            onNavigate={navigateWorkspaceContent}
             workspaces={workspaces} setWorkspaces={setWorkspaces}
             setActiveWs={setActiveWs} setWsDetail={setWsDetail}
             convs={convs} onOpenConv={id=>{setWsPanel(false);loadConversation(id);}}
@@ -5222,7 +5397,13 @@ function HyprChat(){
             onRemoveReport={removeResearchReportFromWorkspace}
             onPreview={openPreview} models={models} wsModel={wsModel}
             notify={notify} confirmAction={confirmAction}
-            onPersonaCreated={mc=>{const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
+            onPersonaCreated={mc=>{setWsPanel(false);apiJson("/api/knowledge-bases").then(setKbs).catch(()=>{});const norm={...mc,parameters:normalizeProfileParams(mc)};setMcs(p=>[...p,norm]);setProfileTab(getProfileType(norm)==="persona"?"personas":"agents");setPanel("personas");setEditMc(mc.id);}}/>
+
+      </div>}
+      <div className={`hc-pane${panel!=="chat"?" hc-safe-panel":""}`} key={panel} style={{flex:1,display:wsPanel&&activeWs?'none':"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
+      {workspaceSearchReturn&&!wsPanel&&<button className="hc-button hc-workspace-back" onClick={()=>{setWsPanel(true);setPanelState('workspaces');}}>← Back to workspace search</button>}
+      {wsPanel&&activeWs?null
+      :panel==='workspaces'?<WorkspaceHome {...{t,btnS,inputS,workspaces,notify}} onNewChat={startWorkspaceChat} onOpen={openWorkspace} onCreated={ws=>{setWorkspaces(p=>[ws,...p]);openWorkspace(ws.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify} confirmAction={confirmAction}/>
       :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
@@ -5232,43 +5413,44 @@ function HyprChat(){
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div style={{flex:1}}>
-            <input value={kb.name} onChange={e=>{const next={...kb,name:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,name:e.target.value})} style={{...inputS,fontSize:14,fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
-            <input value={kb.description||""} onChange={e=>{const next={...kb,description:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,description:e.target.value})} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:11,color:t.mut}}/>
+            <input value={kb.name} onChange={e=>{const next={...kb,name:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,name:e.target.value})} style={{...inputS,fontSize:"var(--hc-text-control)",fontWeight:600,background:"transparent",border:"none",padding:"0 0 4px 0",color:t.text}}/>
+            <input value={kb.description||""} onChange={e=>{const next={...kb,description:e.target.value};setKbs(p=>p.map(k=>k.id===kb.id?next:k));scheduleKbSave(next);}} onBlur={e=>flushKbSave({...kb,description:e.target.value})} placeholder="Description..." style={{...inputS,background:"transparent",border:"none",padding:0,fontSize:"var(--hc-text-control)",color:t.mut}}/>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-            <label htmlFor={`kb-upload-${kb.id}`} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:8,cursor:"pointer",fontSize:11,color:t.f1}}><IC.Upload/> Upload files</label>
-            <button onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
+            <label htmlFor={`kb-upload-${kb.id}`} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:"var(--hc-radius)",cursor:"pointer",fontSize:"var(--hc-text-secondary)",color:t.f1}}><IC.Upload/> Upload files</label>
+            <button aria-label="Delete" onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
           </div>
         </div>
         <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:6}}>
-          {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}44`,borderRadius:8,border:`1px solid ${t.brd}22`,fontSize:11}}>
+          {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)"}}>
             <span style={{color:t.f1,flexShrink:0}}>{(()=>{if(f.source_url)return"🌐";const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
-            {f.source_url&&<a href={f.source_url} target="_blank" rel="noreferrer" title={f.source_url} style={{fontSize:10,color:t.f1,flexShrink:0,textDecoration:"none"}}>↗</a>}
-            <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
-            {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isPdf:true,pdfFullView:false,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/pdf-text?pages=10`);const d=await r.json();setKbPreview(p=>({...p,content:d.content,total_pages:d.total_pages,previewed_pages:d.previewed_pages,truncated:d.truncated,loading:false}));}catch(e){setKbPreview(p=>({...p,content:"Failed to extract PDF text: "+e.message,loading:false}));}}else if(["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isImage:true,loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:5,fontSize:9,fontWeight:600,flexShrink:0}}>Preview</button>}
-            <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:10,opacity:.6,flexShrink:0}} title="Delete file">✕</button>
+            {f.source_url&&<a href={f.source_url} target="_blank" rel="noreferrer" title={f.source_url} style={{fontSize:"var(--hc-text-secondary)",color:t.f1,flexShrink:0,textDecoration:"none"}}>↗</a>}
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
+            {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isPdf:true,pdfFullView:false,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/pdf-text?pages=10`);const d=await r.json();setKbPreview(p=>({...p,content:d.content,total_pages:d.total_pages,previewed_pages:d.previewed_pages,truncated:d.truncated,loading:false}));}catch(e){setKbPreview(p=>({...p,content:"Failed to extract PDF text: "+e.message,loading:false}));}}else if(["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isImage:true,loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0}}>Preview</button>}
+            <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:"var(--hc-text-control)",opacity:.6,flexShrink:0,display:"flex"}} title="Delete file" aria-label="Delete file"><IC.X/></button>
           </div>)}
-          {!(kb.files||[]).length&&<span style={{fontSize:11,color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
+          {!(kb.files||[]).length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
         </div>
+        <div id={`knowledge-${kb.id}`}><KnowledgeReadiness kbId={kb.id} t={t} btnS={btnS} inputS={inputS}/></div>
         {/* Add web page by URL */}
         <div style={{display:"flex",gap:6,marginBottom:8}}>
-          <input value={kbUrlInputs[kb.id]||""} onChange={e=>setKbUrlInputs(p=>({...p,[kb.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addKbUrl(kb.id);}}} placeholder="https://…  add a web page or PDF by URL" style={{flex:1,fontSize:11,padding:"6px 9px",background:t.bgDeep,border:`1px solid ${t.brd}33`,color:t.text,borderRadius:7,fontFamily:font,boxSizing:"border-box"}}/>
-          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()?1:.5,whiteSpace:"nowrap"}}>🌐 Add URL</button>
+          <input value={kbUrlInputs[kb.id]||""} onChange={e=>setKbUrlInputs(p=>({...p,[kb.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addKbUrl(kb.id);}}} placeholder="https://…  add a web page or PDF by URL" style={{flex:1,fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius)",fontFamily:font,boxSizing:"border-box"}}/>
+          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()?1:.5,whiteSpace:"nowrap"}}><IC.Globe/> Add URL</button>
         </div>
         {/* Upload progress bars */}
-        {Object.keys(uploadProgress).some(k=>k.startsWith(kb.id+":"))&&<div style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"8px 10px",marginBottom:8,display:"flex",flexDirection:"column",gap:6}}>
-          <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Uploading</div>
+        {Object.keys(uploadProgress).some(k=>k.startsWith(kb.id+":"))&&<div style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"8px 10px",marginBottom:8,display:"flex",flexDirection:"column",gap:6}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.mut,textTransform:"none",letterSpacing:0}}>Uploading</div>
         {Object.entries(uploadProgress).filter(([k])=>k.startsWith(kb.id+":")).map(([key,info])=>(
-          <div key={key} style={{padding:"6px 10px",background:`${t.surface||t.bg}`,borderRadius:6,border:`1px solid ${t.brd}22`}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:10,marginBottom:4}}>
+          <div key={key} style={{padding:"6px 10px",background:`${t.surface||t.bg}`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:"var(--hc-text-secondary)",marginBottom:4}}>
               <span style={{color:t.text,fontWeight:600}}>{info.filename}</span>
               <span style={{color:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.mut,fontWeight:500}}>
-                {info.status==="uploading"?`Uploading ${info.progress}%`:info.status==="indexing"?"Indexing...":info.status==="done"?"Complete":info.status==="error"?(info.error||"Failed"):""}
+                {info.status==="uploading"?`Uploading ${info.progress}%`:info.status==="indexing"?"Indexing...":info.status==="done"?"Complete":info.status==="error"?(info.error||"Failed"):info.status==="pending"?"Not confirmed — check readiness or Jobs":info.status==="partial"?(info.error||"Partially indexed"):""}
               </span>
             </div>
-            <div style={{height:4,borderRadius:2,background:`${t.mut}22`,overflow:"hidden"}}>
-              <div style={{height:"100%",borderRadius:2,background:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.f1,width:`${info.status==="done"?100:info.status==="indexing"?90:info.progress||0}%`,transition:"width 0.3s ease"}}/>
+            <div style={{height:4,borderRadius:"var(--hc-radius-sm)",background:`${t.mut}22`,overflow:"hidden"}}>
+              <div style={{height:"100%",borderRadius:"var(--hc-radius-sm)",background:info.status==="error"?t.err:info.status==="done"?"#4caf50":t.f1,width:`${info.status==="done"?100:info.status==="indexing"?90:info.progress||0}%`,transition:"width 0.3s ease"}}/>
             </div>
           </div>
         ))}
@@ -5277,6 +5459,7 @@ function HyprChat(){
             const files=[...e.target.files];e.target.value="";if(!files.length)return;
             const kbId=kb.id;
             const uploadOne=f=>{
+              const uploadOrigin=hcCaptureUserContext();
               const stamp=Date.now();
               const pKey=`${kbId}:${f.name}:${stamp}`;
               const activityId=`kb-upload-${stamp}-${Math.random().toString(36).slice(2,6)}`;
@@ -5284,8 +5467,9 @@ function HyprChat(){
               setUploadProgress(p=>({...p,[pKey]:{filename:f.name,progress:0,status:"uploading"}}));
               const fd=new FormData();fd.append("file",f);
               const xhr=new XMLHttpRequest();
-              xhr.upload.onprogress=ev=>{if(ev.lengthComputable){const pct=Math.round(ev.loaded/ev.total*100);setUploadProgress(p=>({...p,[pKey]:{...p[pKey],progress:pct}}));updateActivity(activityId,{status:"uploading",pct:Math.min(85,pct),message:`Uploading ${pct}%`,completedBytes:ev.loaded,totalBytes:ev.total});}};
+              xhr.upload.onprogress=ev=>{if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;if(ev.lengthComputable){const pct=Math.round(ev.loaded/ev.total*100);setUploadProgress(p=>({...p,[pKey]:{...p[pKey],progress:pct}}));updateActivity(activityId,{status:"uploading",pct:Math.min(85,pct),message:`Uploading ${pct}%`,completedBytes:ev.loaded,totalBytes:ev.total});}};
               xhr.onload=()=>{
+                if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;
                 if(xhr.status>=200&&xhr.status<300){
                   let d;try{d=JSON.parse(xhr.responseText);}catch{d={};}
                   setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"indexing",progress:100}}));
@@ -5296,14 +5480,16 @@ function HyprChat(){
                   const poll=async()=>{
                     for(let i=0;i<60;i++){
                       await new Promise(r=>setTimeout(r,2000));
+                      if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;
                       try{
                         const sr=await fetch(`${API}/api/knowledge-bases/${kbId}/files/${encodeURIComponent(d.filename||f.name)}/status`);
                         const st=await sr.json();
                         if(st.status==="done"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));updateActivity(activityId,{status:"done",pct:100,message:"Indexed"});setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);return;}
+                        if(st.status==="partial"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"partial"}}));updateActivity(activityId,{status:"partial",message:"Some passages could not be indexed. Review knowledge readiness."});return;}
                         if(st.status==="error"){setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:st.error||"indexing failed"}}));updateActivity(activityId,{status:"error",error:st.error||"indexing failed",message:"Indexing failed"});notify({type:"error",text:"KB indexing failed",detail:st.error||f.name});setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),6000);return;}
                       }catch{}
                     }
-                    setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"done"}}));updateActivity(activityId,{status:"done",pct:100,message:"Indexed"});setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),3000);
+                    setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"pending"}}));updateActivity(activityId,{status:"pending",message:"Indexing status not confirmed. Check knowledge readiness or Jobs."});
                   };
                   poll();
                 }else{
@@ -5315,6 +5501,7 @@ function HyprChat(){
                 }
               };
               xhr.onerror=()=>{
+                if(uploadOrigin.epoch!==hcCaptureUserContext().epoch)return;
                 setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:"Network error"}}));
                 updateActivity(activityId,{status:"error",error:"Network error",message:"Upload failed"});
                 notify({type:"error",text:"KB upload failed",detail:"Network error"});
@@ -5338,7 +5525,7 @@ function HyprChat(){
       :panel==="tools"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {panelHeader(<IC.Tool/>,"Tools",<>
         <button onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(pasteMode?t.warm:t.mut)}>
-          {pasteMode?"✕ Cancel":"✦ Paste Code"}
+          {pasteMode?<><IC.X/> Cancel</>:<><IC.Code/> Paste Code</>}
         </button>
         <label style={btnS(t.warm)}><IC.Upload/> Upload .py<input type="file" accept=".py" multiple style={{display:"none"}} onChange={async e=>{
           for(const f of e.target.files){const fd=new FormData();fd.append("file",f);
@@ -5356,8 +5543,8 @@ function HyprChat(){
           catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);setEditTool(id);}
         }} style={btnS(t.acc)}><IC.Plus/> New</button>
       </>,{color:t.warm})}
-    {pasteMode&&<div style={{padding:16,borderBottom:`1px solid ${t.brd}22`,background:`${t.warm}07`,animation:"fadeIn .2s"}}>
-      <div style={{fontSize:11,fontWeight:700,color:t.warm,marginBottom:8,letterSpacing:.5,textTransform:"uppercase"}}>Paste Python Tool</div>
+    {pasteMode&&<div style={{padding:16,borderBottom:"1px solid var(--hc-line-subtle)",background:`${t.warm}07`,animation:"fadeIn .2s"}}>
+      <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,marginBottom:8,letterSpacing:0,textTransform:"none"}}>Paste Python Tool</div>
       <textarea value={pasteCode} rows={10} placeholder={"def my_tool(query: str) -> str:\n    \"\"\"Brief description of what this tool does.\"\"\"\n    # your code here\n    return result"}
         onChange={e=>{
           const code=e.target.value;
@@ -5367,19 +5554,19 @@ function HyprChat(){
           if(nameM) setPasteToolName(nameM[1]);
           if(descM) setPasteToolDesc(descM[1].trim().split("\n")[0]);
         }}
-        style={{...inputS,color:t.warm,lineHeight:1.6,resize:"vertical",tabSize:4,height:"auto",fontFamily:"monospace",marginBottom:8}}/>
+        style={{...inputS,color:t.warm,lineHeight:1.6,resize:"vertical",tabSize:4,height:"auto",fontFamily:codeFont,marginBottom:8}}/>
       <div style={{display:"flex",gap:8,marginBottom:10}}>
         <div style={{flex:1}}>
-          <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Function name</div>
-          <input value={pasteToolName} onChange={e=>setPasteToolName(e.target.value)} placeholder="my_tool" style={{...inputS,fontFamily:"monospace"}}/>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Function name</div>
+          <input value={pasteToolName} onChange={e=>setPasteToolName(e.target.value)} placeholder="my_tool" style={{...inputS,fontFamily:codeFont}}/>
         </div>
         <div style={{flex:2}}>
-          <div style={{fontSize:10,color:t.mut,marginBottom:3}}>Description (shown to AI)</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3}}>Description (shown to AI)</div>
           <input value={pasteToolDesc} onChange={e=>setPasteToolDesc(e.target.value)} placeholder="What this tool does..." style={inputS}/>
         </div>
       </div>
       <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
-        {pasteCode&&<div style={{fontSize:10,color:t.mut,alignSelf:"center",flex:1}}>
+        {pasteCode&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,alignSelf:"center",flex:1}}>
           {pasteCode.split("\n").length} lines · {(pasteCode.length/1024).toFixed(1)} KB
         </div>}
         <button disabled={!pasteCode.trim()||!pasteToolName.trim()} onClick={async()=>{
@@ -5397,7 +5584,7 @@ function HyprChat(){
     </div>}
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {builtinTools.length>0&&<div style={{marginBottom:16}}>
-        <div style={{fontSize:9,fontWeight:700,color:t.mut,letterSpacing:1,textTransform:"uppercase",marginBottom:8}}>Built-in</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,letterSpacing:0,textTransform:"none",marginBottom:8}}>Built-in</div>
         {builtinTools.map(bt=>{
           const isExp=expandedBuiltin===bt.id;
           const isCa=bt.id==="codeagent";
@@ -5409,46 +5596,46 @@ function HyprChat(){
           return <div key={bt.id} style={{...cardS,borderColor:`${btCol}33`,marginBottom:8,cursor:"pointer"}} onClick={()=>setExpandedBuiltin(isExp?null:bt.id)}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <div style={{width:32,height:32,borderRadius:8,background:`${btCol}18`,border:`1px solid ${btCol}33`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{btIcon}</div>
+                <div style={{width:32,height:32,borderRadius:"var(--hc-radius)",background:`${btCol}18`,border:`1px solid ${btCol}33`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-reading)",flexShrink:0}}>{btIcon}</div>
                 <div>
-                  <div style={{fontSize:13,fontWeight:600,color:btCol}}>{bt.name}</div>
-                  <div style={{fontSize:10,color:t.mut}}>{bt.description}</div>
+                  <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:btCol}}>{bt.name}</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{bt.description}</div>
                 </div>
               </div>
-              <span style={{fontSize:9,color:t.mut,display:"inline-block",transition:"transform .2s",transform:isExp?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"inline-block",transition:"transform .2s",transform:isExp?"rotate(90deg)":"rotate(0deg)"}}>▶</span>
             </div>
-            {isExp&&<div style={{marginTop:12,animation:"fadeIn .2s"}}>
+            {isExp&&<div className="hc-reveal" style={{marginTop:12}}>
               {isCa&&<>
-                <div style={{fontSize:10,color:t.dim,marginBottom:6}}>All capabilities — available when CodeAgent is selected:</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6}}>All capabilities — available when CodeAgent is selected:</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                  {["execute_code","run_shell","write_file","read_file","list_files","download_file","download_project","delete_file","research","fetch_url"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}33`,fontFamily:"monospace"}}>{s}</span>)}
+                  {["execute_code","run_shell","write_file","read_file","list_files","download_file","download_project","delete_file","research","fetch_url"].map(s=><span key={s} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}33`,fontFamily:codeFont}}>{s}</span>)}
                 </div>
               </>}
               {isDr&&<>
-                <div style={{fontSize:10,color:t.dim,marginBottom:8}}>Agent-focused research for current docs, unfamiliar APIs, repeated build failures, and implementation blockers:</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:8}}>Agent-focused research for current docs, unfamiliar APIs, repeated build failures, and implementation blockers:</div>
                 <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>depth</span> <span style={{color:t.mut}}>1–5</span></div>
+                  <div style={{fontSize:"var(--hc-text-secondary)"}}><span style={{color:t.acc,fontFamily:codeFont,fontWeight:600}}>depth</span> <span style={{color:t.mut}}>1–5</span></div>
                   <div style={{paddingLeft:10,display:"flex",flexDirection:"column",gap:2}}>
-                    {[["1","Quick check"],["2","Focused coding blocker ← recommended"],["3","Broad unfamiliar tech"],["4","Comprehensive, rarely for agents"],["5","Exhaustive, avoid in fix loops"]].map(([d,desc])=><div key={d} style={{fontSize:9,color:t.mut}}><span style={{color:t.f1,fontFamily:"monospace"}}>{d}</span> — {desc}</div>)}
+                    {[["1","Quick check"],["2","Focused coding blocker ← recommended"],["3","Broad unfamiliar tech"],["4","Comprehensive, rarely for agents"],["5","Exhaustive, avoid in fix loops"]].map(([d,desc])=><div key={d} style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}><span style={{color:t.f1,fontFamily:codeFont}}>{d}</span> — {desc}</div>)}
                   </div>
-                  <div style={{fontSize:10,marginTop:2}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>mode</span> <span style={{color:t.mut}}>quick · research · compare</span></div>
-                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>focus</span> <span style={{color:t.mut}}>version, runtime, failing command, target file</span></div>
-                  <div style={{fontSize:10}}><span style={{color:t.acc,fontFamily:"monospace",fontWeight:600}}>topic_b</span> <span style={{color:t.mut}}>second subject for compare mode</span></div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",marginTop:2}}><span style={{color:t.acc,fontFamily:codeFont,fontWeight:600}}>mode</span> <span style={{color:t.mut}}>quick · research · compare</span></div>
+                  <div style={{fontSize:"var(--hc-text-secondary)"}}><span style={{color:t.acc,fontFamily:codeFont,fontWeight:600}}>focus</span> <span style={{color:t.mut}}>version, runtime, failing command, target file</span></div>
+                  <div style={{fontSize:"var(--hc-text-secondary)"}}><span style={{color:t.acc,fontFamily:codeFont,fontWeight:600}}>topic_b</span> <span style={{color:t.mut}}>second subject for compare mode</span></div>
                 </div>
               </>}
               {isCt&&<>
-                <div style={{fontSize:10,color:t.dim,marginBottom:6}}>Uncensored investigative research targeting alternative sources, leaked documents, and whistleblower reports:</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6}}>Uncensored investigative research targeting alternative sources, leaked documents, and whistleblower reports:</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-                  {["Alternative news","Leaked documents","FOIA releases","Whistleblower reports","Reddit conspiracy","Timeline analysis","Key player mapping","No filtering"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.err}18`,color:t.err,border:`1px solid ${t.err}33`}}>{s}</span>)}
+                  {["Alternative news","Leaked documents","FOIA releases","Whistleblower reports","Reddit conspiracy","Timeline analysis","Key player mapping","No filtering"].map(s=><span key={s} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.err}18`,color:t.err,border:`1px solid ${t.err}33`}}>{s}</span>)}
                 </div>
               </>}
               {isQs&&<>
-                <div style={{fontSize:10,color:t.dim,marginBottom:6}}>Runs a SearXNG search on each message and shows results as inline cards above chat. Enabled per-conversation via the tool pill in the input bar, or permanently via an Agent.</div>
-                <div style={{display:"flex",gap:4,margin:"8px 0 4px",padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`,width:"fit-content"}}>
-                  {["speed","balanced","quality"].map(m=><button key={m} onClick={e=>{e.stopPropagation();setQuickSearchMode(m);}} style={{fontSize:10,padding:"5px 10px",borderRadius:6,border:"none",background:quickSearchMode===m?`${t.f1}22`:"transparent",color:quickSearchMode===m?t.f1:t.mut,cursor:"pointer",fontFamily:font,fontWeight:quickSearchMode===m?800:600,textTransform:"capitalize"}}>{m}</button>)}
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6}}>Runs a SearXNG search on each message and shows results as inline cards above chat. Enabled per-conversation via the tool pill in the input bar, or permanently via an Agent.</div>
+                <div style={{display:"flex",gap:4,margin:"8px 0 4px",padding:3,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,width:"fit-content"}}>
+                  {["speed","balanced","quality"].map(m=><button key={m} onClick={e=>{e.stopPropagation();setQuickSearchMode(m);}} style={{fontSize:"var(--hc-text-control)",padding:"5px 10px",borderRadius:"var(--hc-radius)",border:"none",background:quickSearchMode===m?`${t.f1}22`:"transparent",color:quickSearchMode===m?t.f1:t.mut,cursor:"pointer",fontFamily:font,fontWeight:quickSearchMode===m?800:600,textTransform:"capitalize"}}>{m}</button>)}
                 </div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:4}}>
-                  {["YouTube thumbnails","Image previews","Web link cards","Click-to-open"].map(s=><span key={s} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.f1}18`,color:t.f1,border:`1px solid ${t.f1}33`}}>{s}</span>)}
+                  {["YouTube thumbnails","Image previews","Web link cards","Click-to-open"].map(s=><span key={s} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.f1}18`,color:t.f1,border:`1px solid ${t.f1}33`}}>{s}</span>)}
                 </div>
               </>}
             </div>}
@@ -5457,26 +5644,26 @@ function HyprChat(){
       </div>}
       <div style={{marginBottom:16}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-          <div style={{fontSize:9,fontWeight:700,color:t.mut,letterSpacing:1,textTransform:"uppercase"}}>Connectors</div>
-          <button onClick={refreshConnectors} style={{...btnS(t.mut),fontSize:10,padding:"4px 8px"}}>Refresh</button>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,letterSpacing:0,textTransform:"none"}}>Connectors</div>
+          <button onClick={refreshConnectors} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}>Refresh</button>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:10,marginBottom:10}}>
           <div style={{...cardS,borderColor:`${t.acc}33`}}>
-            <div style={{fontSize:12,fontWeight:800,color:t.acc,marginBottom:8}}>MCP Server</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:8}}>MCP Server</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 110px",gap:8,marginBottom:8}}>
               <input value={mcpDraft.name} onChange={e=>setMcpDraft(p=>({...p,name:e.target.value}))} placeholder="GitHub MCP" style={inputS}/>
               <select value={mcpDraft.transport} onChange={e=>setMcpDraft(p=>({...p,transport:e.target.value}))} style={inputS}>
                 <option value="stdio">stdio</option><option value="http">http</option><option value="streamable_http">streamable_http</option><option value="sse">sse</option>
               </select>
             </div>
-            <input value={mcpDraft.command} onChange={e=>setMcpDraft(p=>({...p,command:e.target.value}))} placeholder="Command for stdio, e.g. npx" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
-            <input value={mcpDraft.url} onChange={e=>setMcpDraft(p=>({...p,url:e.target.value}))} placeholder="HTTP endpoint for Streamable HTTP/SSE" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
+            <input value={mcpDraft.command} onChange={e=>setMcpDraft(p=>({...p,command:e.target.value}))} placeholder="Command for stdio, e.g. npx" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
+            <input value={mcpDraft.url} onChange={e=>setMcpDraft(p=>({...p,url:e.target.value}))} placeholder="HTTP endpoint for Streamable HTTP/SSE" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Args JSON array</div><textarea value={mcpDraft.args} onChange={e=>setMcpDraft(p=>({...p,args:e.target.value}))} rows={3} placeholder={'["-y","@modelcontextprotocol/server-github"]'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
-              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Env placeholders</div><textarea value={mcpDraft.env} onChange={e=>setMcpDraft(p=>({...p,env:e.target.value}))} rows={3} placeholder={'{"GITHUB_TOKEN":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
+              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Args JSON array</div><textarea value={mcpDraft.args} onChange={e=>setMcpDraft(p=>({...p,args:e.target.value}))} rows={3} placeholder={'["-y","@modelcontextprotocol/server-github"]'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
+              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Env placeholders</div><textarea value={mcpDraft.env} onChange={e=>setMcpDraft(p=>({...p,env:e.target.value}))} rows={3} placeholder={'{"GITHUB_TOKEN":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
             </div>
-            <div style={{marginBottom:8}}><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>HTTP headers</div><textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={'{"Authorization":"Bearer ${TOKEN}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
-            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:t.mut,marginBottom:8}}><input type="checkbox" checked={mcpDraft.allow_private} onChange={e=>setMcpDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
+            <div style={{marginBottom:8}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>HTTP headers</div><textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={'{"Authorization":"Bearer ${TOKEN}"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
+            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}><input type="checkbox" checked={mcpDraft.allow_private} onChange={e=>setMcpDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
             <button disabled={connectorBusy==="create:mcp"} onClick={async()=>{
               setConnectorBusy("create:mcp");
               try{
@@ -5490,15 +5677,15 @@ function HyprChat(){
             }} style={{...btnS(t.acc),opacity:connectorBusy==="create:mcp"?0.5:1}}>Add MCP</button>
           </div>
           <div style={{...cardS,borderColor:`${t.f1}33`}}>
-            <div style={{fontSize:12,fontWeight:800,color:t.f1,marginBottom:8}}>OpenAPI Connector</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.f1,marginBottom:8}}>OpenAPI Connector</div>
             <input value={openapiDraft.name} onChange={e=>setOpenapiDraft(p=>({...p,name:e.target.value}))} placeholder="Service name" style={{...inputS,marginBottom:8}}/>
-            <input value={openapiDraft.spec_url} onChange={e=>setOpenapiDraft(p=>({...p,spec_url:e.target.value}))} placeholder="OpenAPI JSON/YAML URL" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
-            <input value={openapiDraft.base_url} onChange={e=>setOpenapiDraft(p=>({...p,base_url:e.target.value}))} placeholder="Base URL override (optional)" style={{...inputS,marginBottom:8,fontFamily:"monospace"}}/>
+            <input value={openapiDraft.spec_url} onChange={e=>setOpenapiDraft(p=>({...p,spec_url:e.target.value}))} placeholder="OpenAPI JSON/YAML URL" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
+            <input value={openapiDraft.base_url} onChange={e=>setOpenapiDraft(p=>({...p,base_url:e.target.value}))} placeholder="Base URL override (optional)" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Auth JSON</div><textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
-              <div><div style={{fontSize:9,color:t.mut,fontWeight:800,textTransform:"uppercase",letterSpacing:.5,margin:"0 0 4px 2px"}}>Headers JSON</div><textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={'{"X-Api-Key":"${API_KEY}"}'} style={{...inputS,fontFamily:"monospace",resize:"vertical"}}/></div>
+              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Auth JSON</div><textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
+              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Headers JSON</div><textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={'{"X-Api-Key":"${API_KEY}"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
             </div>
-            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:10,color:t.mut,marginBottom:8}}><input type="checkbox" checked={openapiDraft.allow_private} onChange={e=>setOpenapiDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
+            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}><input type="checkbox" checked={openapiDraft.allow_private} onChange={e=>setOpenapiDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
             <button disabled={connectorBusy==="create:openapi"} onClick={async()=>{
               setConnectorBusy("create:openapi");
               try{
@@ -5516,63 +5703,63 @@ function HyprChat(){
           const col=c.kind==="mcp"?t.acc:t.f1;const busy=connectorBusy===`${c.kind}:${c.id}`;const basePath=c.kind==="mcp"?"mcp-servers":"openapi-connectors";
           return <div key={`${c.kind}:${c.id}`} style={{...cardS,borderColor:`${col}33`,marginBottom:8}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <div style={{width:30,height:30,borderRadius:8,background:`${col}18`,border:`1px solid ${col}33`,display:"flex",alignItems:"center",justifyContent:"center",color:col}}>↔</div>
+              <div style={{width:30,height:30,borderRadius:"var(--hc-radius)",background:`${col}18`,border:`1px solid ${col}33`,display:"flex",alignItems:"center",justifyContent:"center",color:col}}>↔</div>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:12,fontWeight:800,color:col,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
-                <div style={{fontSize:10,color:t.mut}}>{c.kind.toUpperCase()} · {c.health||"unknown"} · {c.tool_count||0} tools</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:col,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.name}</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{c.kind.toUpperCase()} · {c.health||"unknown"} · {c.tool_count||0} tools</div>
               </div>
-              <button disabled={busy} onClick={()=>discoverConnector(c.kind,c.id)} style={{...btnS(col),fontSize:10,padding:"4px 8px",opacity:busy?0.5:1}}>{busy?"Checking":"Discover"}</button>
-              <button onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!c.enabled})});await refreshConnectors();}} style={{...btnS(c.enabled?t.ok:t.mut),fontSize:10,padding:"4px 8px"}}>{c.enabled?"On":"Off"}</button>
-              <button onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"DELETE"}).catch(()=>{});await refreshConnectors();}} style={{...btnS(t.err),fontSize:10,padding:"4px 8px"}}><IC.Trash/></button>
+              <button disabled={busy} onClick={()=>discoverConnector(c.kind,c.id)} style={{...btnS(col),fontSize:"var(--hc-text-control)",padding:"4px 8px",opacity:busy?0.5:1}}>{busy?"Checking":"Discover"}</button>
+              <button onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!c.enabled})});await refreshConnectors();}} style={{...btnS(c.enabled?t.ok:t.mut),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}>{c.enabled?"On":"Off"}</button>
+              <button aria-label="Delete" onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"DELETE"}).catch(()=>{});await refreshConnectors();}} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}><IC.Trash/></button>
             </div>
-            {c.last_error&&<div style={{fontSize:10,color:t.err,marginTop:7,whiteSpace:"pre-wrap"}}>{c.last_error}</div>}
+            {c.last_error&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,marginTop:7,whiteSpace:"pre-wrap"}}>{c.last_error}</div>}
           </div>;
         })}
         {connectorTools.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:8}}>
-          {connectorTools.slice(0,40).map(tl=><span key={tl.id} title={tl.description} style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,color:t.acc}}>{tl.name||tl.display_name}</span>)}
-          {connectorTools.length>40&&<span style={{fontSize:10,color:t.mut,padding:"3px 8px"}}>+{connectorTools.length-40} more</span>}
+          {connectorTools.slice(0,40).map(tl=><span key={tl.id} title={tl.description} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,color:t.acc}}>{tl.name||tl.display_name}</span>)}
+          {connectorTools.length>40&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"3px 8px"}}>+{connectorTools.length-40} more</span>}
         </div>}
       </div>
-      {!tools.length&&!pasteMode&&<EmptyState t={t} font={font} icon="⚙️" title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(t.warm)}><IC.Plus/> Paste Code</button>}/>}
+      {!tools.length&&!pasteMode&&<EmptyState icon={<IC.Tool/>} title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(t.warm)}><IC.Plus/> Paste Code</button>}/>}
       {tools.map(tl=>{
         const snippet=(tl.code||"").split("\n").slice(0,2).join("\n");
         return <div key={tl.id} style={{...cardS,borderColor:editTool===tl.id?`${t.warm}55`:`${t.brd}44`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:editTool===tl.id?8:0}}>
             <div style={{display:"flex",alignItems:"center",gap:8,flex:1,minWidth:0}}>
-              <div style={{width:32,height:32,borderRadius:8,background:`${t.warm}22`,border:`1px solid ${t.warm}44`,display:"flex",alignItems:"center",justifyContent:"center",color:t.warm,flexShrink:0}}><IC.Code/></div>
+              <div style={{width:32,height:32,borderRadius:"var(--hc-radius)",background:`${t.warm}22`,border:`1px solid ${t.warm}44`,display:"flex",alignItems:"center",justifyContent:"center",color:t.warm,flexShrink:0}}><IC.Code/></div>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:13,fontWeight:600,color:t.text}}>{tl.name}</div>
-                {tl.description&&<div style={{fontSize:10,color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tl.description}</div>}
-                {!editTool!==tl.id&&snippet&&<pre style={{margin:"4px 0 0",fontSize:9,color:`${t.warm}88`,fontFamily:"monospace",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",maxWidth:"100%"}}>{snippet}</pre>}
+                <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text}}>{tl.name}</div>
+                {tl.description&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tl.description}</div>}
+                {!editTool!==tl.id&&snippet&&<pre style={{margin:"4px 0 0",fontSize:"var(--hc-text-secondary)",color:`${t.warm}88`,fontFamily:codeFont,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",maxWidth:"100%"}}>{snippet}</pre>}
               </div>
             </div>
             <div style={{display:"flex",gap:4,flexShrink:0,marginLeft:8}}>
               <button onClick={()=>{if(editTool===tl.id){saveTool(tl);}setEditTool(editTool===tl.id?null:tl.id);}} style={btnS(editTool===tl.id?t.ok:t.mut)}>{editTool===tl.id?"Save":"Edit"}</button>
-              <button onClick={()=>{fetch(`${API}/api/tools/${tl.id}`,{method:"DELETE"}).catch(()=>{});setTools(p=>p.filter(x=>x.id!==tl.id));}} style={btnS(t.err)}><IC.Trash/></button>
+              <button aria-label="Delete" onClick={()=>{fetch(`${API}/api/tools/${tl.id}`,{method:"DELETE"}).catch(()=>{});setTools(p=>p.filter(x=>x.id!==tl.id));}} style={btnS(t.err)}><IC.Trash/></button>
             </div>
           </div>
-          {editTool===tl.id&&<div style={{animation:"fadeIn .2s"}}>
+          {editTool===tl.id&&<div className="hc-reveal">
             <div style={{display:"flex",gap:8,marginBottom:8}}>
-              <input value={tl.name} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,name:e.target.value}:x))} placeholder="Name" style={{...inputS,flex:1,fontFamily:"monospace"}}/>
+              <input value={tl.name} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,name:e.target.value}:x))} placeholder="Name" style={{...inputS,flex:1,fontFamily:codeFont}}/>
               <input value={tl.description||""} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,description:e.target.value}:x))} placeholder="Description (shown to AI)" style={{...inputS,flex:2}}/>
             </div>
             <textarea value={tl.code||""} onChange={e=>setTools(p=>p.map(x=>x.id===tl.id?{...x,code:e.target.value}:x))} rows={14}
-              style={{...inputS,color:t.warm,lineHeight:1.6,resize:"vertical",tabSize:4,height:"auto",fontFamily:"monospace"}}/>
+              style={{...inputS,color:t.warm,lineHeight:1.6,resize:"vertical",tabSize:4,height:"auto",fontFamily:codeFont}}/>
           </div>}
         </div>;
       })}
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],interrupted:[t.warm,"Interrupted"],cancelling:[t.warm,"Cancelling"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}80`,border:`1px solid ${t.brd}33`,borderRadius:10,padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:11,fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,...(isMobile?{flexWrap:"wrap",rowGap:6}:{})}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:10,padding:"3px 8px",borderRadius:8,background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:`1px solid ${t.brd}28`,borderRadius:8,background:`${t.bgDeep}88`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:10,padding:"5px 9px",borderRadius:6,border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
-      {researchView==="reports"&&<div style={{display:"flex",gap:6,alignItems:"center"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],interrupted:[t.warm,"Interrupted"],cancelling:[t.warm,"Cancelling"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:"var(--hc-text-control)",padding:"5px 9px",borderRadius:"var(--hc-radius)",border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
+      {researchView==="reports"&&<div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
         {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
         {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
-        {body&&<button onClick={exportResearchMarkdown} style={btnS(t.warm)}><IC.Download/> Markdown</button>}
-        {body&&<button onClick={exportResearchPdf} style={btnS(t.mut)}><IC.Download/> PDF</button>}
-        {body&&<button onClick={printResearchReport} style={btnS(t.mut)}><IC.External/> Print</button>}
+        {contentWidth<900&&<button className="hc-button" onClick={()=>setResearchListOpen(true)}>Report list</button>}
+        {contentWidth<1200&&<button className="hc-button" onClick={()=>setResearchDetailsOpen(true)}>Evidence & audit</button>}
+        {body&&<ActionMenu label="Export report" items={[{label:'Markdown',onClick:exportResearchMarkdown},{label:'PDF',onClick:exportResearchPdf},{label:'Print',onClick:printResearchReport}]}/>}
       </div>}
     </div>
     {researchView==="reports"&&report&&<ResearchRecovery key={report.id} report={report} t={t} btnS={btnS} inputS={inputS} onRefresh={()=>loadResearchReport(report.id)}/>}
@@ -5582,10 +5769,10 @@ function HyprChat(){
         <div style={cardS}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
             <span style={cardHeadS}>New Report</span>
-            <span style={{fontSize:10,color:t.mut}}>{tmpl.label}</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{tmpl.label}</span>
           </div>
-          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={4} style={{...inputS,resize:"vertical",fontSize:14,lineHeight:1.45}}/>
-          <input value={researchDraft.focus||""} onChange={e=>setResearchDraft(p=>({...p,focus:e.target.value}))} placeholder="Optional focus" style={{...inputS,fontSize:12}}/>
+          <textarea value={researchDraft.query} onChange={e=>setResearchDraft(p=>({...p,query:e.target.value}))} placeholder="Research topic or question" rows={4} style={{...inputS,resize:"vertical",fontSize:"var(--hc-text-control)",lineHeight:1.45}}/>
+          <input value={researchDraft.focus||""} onChange={e=>setResearchDraft(p=>({...p,focus:e.target.value}))} placeholder="Optional focus" style={{...inputS,fontSize:"var(--hc-text-control)"}}/>
           <div style={{display:"flex",justifyContent:"flex-end"}}>
             <button onClick={startResearchReport} disabled={researchLoading||researchRunning} style={{...btnS(t.acc),justifyContent:"center",minWidth:160,padding:"9px 18px",opacity:(researchLoading||researchRunning)?0.55:1}}><IC.Zap/> Start</button>
           </div>
@@ -5594,35 +5781,35 @@ function HyprChat(){
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
           <div style={cardS}>
             <span style={cardHeadS}>Report</span>
-            <select value={researchDraft.report_type} onChange={e=>{const nt=researchTemplates.find(x=>x.id===e.target.value);setResearchDraft(p=>({...p,report_type:e.target.value,depth:nt?.default_depth||p.depth||3}));}} style={{...inputS,fontSize:12}}>
+            <select value={researchDraft.report_type} onChange={e=>{const nt=researchTemplates.find(x=>x.id===e.target.value);setResearchDraft(p=>({...p,report_type:e.target.value,depth:nt?.default_depth||p.depth||3}));}} style={{...inputS,fontSize:"var(--hc-text-control)"}}>
               {(researchTemplates.length?researchTemplates:[tmpl]).map(rt=>{const ico={analyst:"📊",academic:"🎓",decision:"⚖️",market:"📈",technical:"🛠️",timeline:"🗓️",digest:"🗂️",investigative:"🕵️"}[rt.id]||"🔬";return <option key={rt.id} value={rt.id}>{ico} {rt.label}</option>;})}
             </select>
-            <select value={researchDraft.depth||3} onChange={e=>setResearchDraft(p=>({...p,depth:parseInt(e.target.value)||3}))} title="Research depth" style={{...inputS,fontSize:11,padding:"8px 7px"}}>
+            <select value={researchDraft.depth||3} onChange={e=>setResearchDraft(p=>({...p,depth:parseInt(e.target.value)||3}))} title="Research depth" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 7px"}}>
               <option value={1}>⚡ Quick</option>
               <option value={2}>🧭 Overview</option>
               <option value={3}>🔎 Standard</option>
               <option value={4}>📚 Comprehensive</option>
               <option value={5}>🧠 Exhaustive</option>
             </select>
-            <div style={{fontSize:10,color:t.mut,gridColumn:'1 / -1'}}>{(()=>{const b=tmpl.depth_budgets?.[researchDraft.depth];return b?`Up to ${b.queries} searches · ${b.page_reads} page reads · ${b.word_target?.join('–')} words when evidence supports it`:"Depth increases search breadth and full-page reading.";})()}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,gridColumn:'1 / -1'}}>{(()=>{const b=tmpl.depth_budgets?.[researchDraft.depth];return b?`Up to ${b.queries} searches · ${b.page_reads} page reads · ${b.word_target?.join('–')} words when evidence supports it`:"Depth increases search breadth and full-page reading.";})()}</div>
           </div>
           <div style={cardS}>
             <span style={cardHeadS}>Sources & Notes</span>
-          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45}}/>
+          <textarea value={researchInputText} onChange={e=>setResearchInputText(e.target.value)} placeholder="Optional pasted notes, constraints, or source excerpts" rows={4} style={{...inputS,resize:"vertical",fontSize:"var(--hc-text-control)",lineHeight:1.45}}/>
           <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
             <label style={{...btnS(t.f1),justifyContent:"center",flex:1}}><IC.Upload/> Add Files<input ref={researchFileRef} type="file" multiple accept=".pdf,.txt,.md,.csv,.json,.html,.py,.js,.ts" style={{display:"none"}} onChange={e=>{handleResearchFiles(e.target.files);e.target.value="";}}/></label>
           </div>
           {(researchDraft.inputs||[]).length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:`1px solid ${t.brd}22`,borderRadius:7,background:`${t.surface}55`}}>
-              <span style={{fontSize:10,color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
-              <span style={{fontSize:9,color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
-              <button onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
+            {(researchDraft.inputs||[]).map((inp,i)=><div key={`${inp.name}-${i}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`}}>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.f1,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inp.name}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{Math.round((inp.content||"").length/1000)}k</span>
+              <button aria-label="Close" onClick={()=>setResearchDraft(p=>({...p,inputs:(p.inputs||[]).filter((_,ix)=>ix!==i)}))} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2}}><IC.X/></button>
             </div>)}
           </div>}
           {kbs.length>0&&<div style={{display:"flex",flexDirection:"column",gap:4}}>
-            <div style={{fontSize:9,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Knowledge Bases</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.mut,textTransform:"none",letterSpacing:0}}>Knowledge Bases</div>
             <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
-              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:9,padding:"4px 7px",borderRadius:7,border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
+              {kbs.slice(0,8).map(kb=>{const on=(researchDraft.kb_ids||[]).includes(kb.id);return <button key={kb.id} onClick={()=>setResearchDraft(p=>({...p,kb_ids:on?(p.kb_ids||[]).filter(x=>x!==kb.id):[...(p.kb_ids||[]),kb.id]}))} style={{fontSize:"var(--hc-text-control)",padding:"4px 7px",borderRadius:"var(--hc-radius)",border:`1px solid ${on?t.acc:t.brd}33`,background:on?`${t.acc}18`:`${t.surface}55`,color:on?t.acc:t.mut,cursor:"pointer",fontFamily:font}}>{kb.name}</button>;})}
             </div>
           </div>}
           </div>
@@ -5632,17 +5819,17 @@ function HyprChat(){
             <span style={cardHeadS}>Model</span>
           <ModelPicker value={researchDraft.model||researchSelectableModels[0]||""} onChange={v=>setResearchDraft(p=>({...p,model:v}))} models={researchSelectableModels} modelDetails={modelDetails} t={t} font={font}/>
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-            {localMoeResearchModels.length>0&&<button onClick={()=>applyResearchPreset("balanced_moe")} style={{...btnS(t.acc),fontSize:9}}>Balanced MoE</button>}
-            {deepMoeResearchModel&&<button onClick={()=>applyResearchPreset("deep_moe")} style={{...btnS(t.f1),fontSize:9}}>Deep MoE</button>}
-            {cloudResearchModels.length>0&&<button onClick={()=>applyResearchPreset("cloud")} style={{...btnS(t.pink),fontSize:9}}>Cloud Research</button>}
-            {smallResearchRoleModel&&<button onClick={()=>applyResearchPreset("fast_planning")} style={{...btnS(t.mut),fontSize:9}}>Fast Planning</button>}
+            {localMoeResearchModels.length>0&&<button onClick={()=>applyResearchPreset("balanced_moe")} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}>Balanced MoE</button>}
+            {deepMoeResearchModel&&<button onClick={()=>applyResearchPreset("deep_moe")} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)"}}>Deep MoE</button>}
+            {cloudResearchModels.length>0&&<button onClick={()=>applyResearchPreset("cloud")} style={{...btnS(t.pink),fontSize:"var(--hc-text-control)"}}>Cloud Research</button>}
+            {smallResearchRoleModel&&<button onClick={()=>applyResearchPreset("fast_planning")} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)"}}>Fast Planning</button>}
           </div>
-          <details style={{border:`1px solid ${t.brd}22`,borderRadius:8,padding:"7px 9px",background:`${t.bgDeep}88`}}>
-            <summary style={{cursor:"pointer",fontSize:10,fontWeight:800,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Role Models</summary>
+          <details style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"7px 9px",background:`${t.bgDeep}F5`}}>
+            <summary style={{cursor:"pointer",fontSize:"var(--hc-text-control)",fontWeight:600,color:t.mut,textTransform:"none",letterSpacing:0}}>Role Models</summary>
             <div style={{display:"flex",flexDirection:"column",gap:7,marginTop:8}}>
-              <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Planner</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0}}>Planner</div>
               <ModelPicker value={researchDraft.planner_model||""} onChange={v=>setResearchDraft(p=>({...p,planner_model:v}))} models={["",...researchSelectableModels]} modelDetails={modelDetails} t={t} font={font}/>
-              <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5}}>Auditor</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0}}>Auditor</div>
               <ModelPicker value={researchDraft.auditor_model||""} onChange={v=>setResearchDraft(p=>({...p,auditor_model:v}))} models={["",...researchSelectableModels]} modelDetails={modelDetails} t={t} font={font}/>
             </div>
           </details>
@@ -5652,12 +5839,12 @@ function HyprChat(){
           <div style={cardS}>
             <label style={{...cardHeadS,color:t.mut,display:"block"}}>Context Window: <span style={{color:t.acc}}>{researchNumCtx.toLocaleString()}</span></label>
             <input type="number" min="1" step="1" value={researchNumCtx} onChange={e=>setResearchNumCtx(parseInt(e.target.value))} style={{width:"100%",accentColor:t.acc}}/>
-            <div style={{fontSize:9,color:t.mut,marginTop:4,lineHeight:1.4}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4,lineHeight:1.4}}>
               Relevant passages are retrieved for each writing step. A larger context fits more evidence per step and uses more memory; collected evidence stays with the report.
             </div>
-            <div style={{fontSize:9,color:selectedResearchIsCloud?t.pink:(selectedResearchCtx&&researchNumCtx>selectedResearchCtx?t.warm:t.mut),marginTop:5,lineHeight:1.4}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:selectedResearchIsCloud?t.pink:(selectedResearchCtx&&researchNumCtx>selectedResearchCtx?t.warm:t.mut),marginTop:5,lineHeight:1.4}}>
               {selectedResearchIsCloud?<>Cloud model selected — local context window only affects Ollama role models.</>
-              :selectedResearchCtx&&researchNumCtx>selectedResearchCtx?<><b>Context exceeds selected model ({formatModelCtx(selectedResearchCtx)} ctx).</b> <button onClick={()=>setResearchNumCtx(clampResearchCtx(selectedResearchCtx))} style={{background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:9,padding:0}}>Clamp</button></>
+              :selectedResearchCtx&&researchNumCtx>selectedResearchCtx?<><b>Context exceeds selected model ({formatModelCtx(selectedResearchCtx)} ctx).</b> <button onClick={()=>setResearchNumCtx(clampResearchCtx(selectedResearchCtx))} style={{background:"none",border:"none",color:t.acc,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",padding:0}}>Clamp</button></>
               :selectedResearchIsMoe?<><b style={{color:t.acc}}>MoE expert model</b> — active experts are lighter than dense parameter size, but long research contexts still use KV cache.</>
               :parseInt(researchDraft.depth||3)>=4?<><b style={{color:t.acc}}>Section-by-section writing</b> — depth {researchDraft.depth} retrieves evidence separately for each section.</>
               :<>Selected model context: {selectedResearchCtx?`${formatModelCtx(selectedResearchCtx)} ctx`:"unknown"}.</>}
@@ -5667,140 +5854,140 @@ function HyprChat(){
         </div>
       </div>
     </div>
-    :<div style={{flex:1,display:isMobile?"flex":"grid",flexDirection:isMobile?"column":undefined,gridTemplateColumns:isMobile?undefined:"290px minmax(0,1fr) 320px",overflow:isMobile?"auto":"hidden",minHeight:0}}>
-      {!(isMobile&&activeResearchId)&&<div style={{borderRight:`1px solid ${t.brd}24`,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:12}}>
+     :<div className={`hc-research-grid${contentWidth>=900?' has-list':''}${contentWidth>=1200?' has-evidence':''}`}>
+
+      <ResponsiveDrawer inline={contentWidth>=900} open={researchListOpen} onClose={()=>setResearchListOpen(false)} title="Research reports"><div className="hc-research-side">
         <div style={{display:"flex",alignItems:"center",gap:6}}>
-          <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:11,padding:"7px 9px"}}/>
-          <button onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
+          <input value={researchReportFilter} onChange={e=>setResearchReportFilter(e.target.value)} placeholder="Filter reports" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"7px 9px"}}/>
+          <button aria-label="Refresh" onClick={()=>refreshResearchReports()} style={btnS(t.mut)}><IC.Refresh/></button>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:7}}>
-          {filteredReports.map(r=>{const sm=statusMeta(r.status);const active=r.id===activeResearchId;return <div key={r.id} onClick={()=>loadResearchReport(r.id)} style={{padding:10,borderRadius:8,border:`1px solid ${active?sm[0]:t.brd}33`,background:active?`${sm[0]}10`:`${t.surface}66`,cursor:"pointer",display:"flex",flexDirection:"column",gap:5,transition:"background .15s ease,border-color .15s ease"}}>
+          {filteredReports.map(r=>{const sm=statusMeta(r.status);const active=r.id===activeResearchId;return <div key={r.id} onClick={()=>loadResearchReport(r.id)} style={{padding:10,borderRadius:"var(--hc-radius)",border:`1px solid ${active?sm[0]:t.brd}33`,background:active?`${sm[0]}10`:`${t.surface}66`,cursor:"pointer",display:"flex",flexDirection:"column",gap:5,transition:"background .15s ease,border-color .15s ease"}}>
             <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:sm[0],boxShadow:r.status==="running"?`0 0 8px ${sm[0]}99`:"none",flexShrink:0}}/>
-              <span style={{fontSize:12,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.title||r.query}</span>
-              {workspaces.length>0&&<select value="" title="Add to workspace" onClick={e=>e.stopPropagation()} onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(r.id,wsId);}} style={{maxWidth:92,fontSize:9,padding:"3px 5px",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
-              <button onClick={e=>{e.stopPropagation();deleteResearchReport(r.id);}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2,opacity:.75}}><IC.Trash/></button>
+              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.title||r.query}</span>
+              {workspaces.length>0&&<select value="" title="Add to workspace" onClick={e=>e.stopPropagation()} onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(r.id,wsId);}} style={{maxWidth:92,fontSize:"var(--hc-text-control)",padding:"3px 5px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
+              <button aria-label="Delete" onClick={e=>{e.stopPropagation();deleteResearchReport(r.id);}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2,opacity:.75}}><IC.Trash/></button>
             </div>
-            <div style={{fontSize:10,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{r.summary||r.query}</div>
-            <div style={{display:"flex",gap:5,alignItems:"center",fontSize:9,color:t.dim}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{r.summary||r.query}</div>
+            <div style={{display:"flex",gap:5,alignItems:"center",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
               <span>{sm[1]}</span><span>·</span><span>{r.report_type}</span><span>·</span><span>{r.source_count||0} sources</span>
             </div>
           </div>;})}
-          {!filteredReports.length&&<EmptyState t={t} font={font} compact icon={<IC.Search/>} title="No research reports yet" hint="Run a deep research report and it will be saved here." action={<button onClick={()=>setResearchView("new")} style={{...btnS(t.acc),fontSize:10}}><IC.Plus/> New Report</button>}/>}
+          {!filteredReports.length&&<EmptyState t={t} font={font} compact icon={<IC.Search/>} title="No research reports yet" hint="Run a deep research report and it will be saved here." action={<button onClick={()=>setResearchView("new")} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}><IC.Plus/> New Report</button>}/>}
         </div>
-      </div>}
-      {(!isMobile||activeResearchId)&&<div style={{overflowY:isMobile?"visible":"auto",flexShrink:isMobile?0:undefined,padding:isMobile?"16px 12px":"18px 26px",minWidth:0}}>
-        {isMobile&&<button onClick={()=>{researchSelectedRef.current=null;researchAppliedRef.current=null;researchRequestRef.current++;setActiveResearchId(null);setActiveResearch(null);setResearchRunning(false);}} style={{...btnS(t.mut),marginBottom:12}}>← All reports</button>}
-        {report?<div style={{maxWidth:960,margin:"0 auto"}}>
-          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${t.brd}22`}}>
+      </div></ResponsiveDrawer>
+      <div className="hc-research-report">
+        {report?<div className="hc-reading-surface" style={{maxWidth:880,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,paddingBottom:12,borderBottom:"1px solid var(--hc-line-subtle)"}}>
             <div style={{minWidth:0}}>
               <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:5}}>
-                <span style={{fontSize:10,fontWeight:900,textTransform:"uppercase",letterSpacing:.7,color:activeStatus[0]}}>{activeStatus[1]}</span>
-                <span style={{fontSize:10,color:t.mut}}>{report.report_type}</span>
-                {metrics.coverage_score!==undefined&&<span title="Model assessment of evidence; not a factual accuracy score" style={{fontSize:10,color:t.acc}}>model assessment {metrics.coverage_score}/100</span>}
-                {activeResearchId&&workspaces.length>0&&<select value="" title="Add report to workspace" onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(activeResearchId,wsId);}} style={{fontSize:9,padding:"2px 5px",borderRadius:6,border:`1px solid ${t.brd}33`,background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Add to workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0,color:activeStatus[0]}}>{activeStatus[1]}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{report.report_type}</span>
+                {metrics.coverage_score!==undefined&&<span title="Model assessment of evidence; not a factual accuracy score" style={{fontSize:"var(--hc-text-secondary)",color:t.acc}}>model assessment {metrics.coverage_score}/100</span>}
+                {activeResearchId&&workspaces.length>0&&<select value="" title="Add report to workspace" onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(activeResearchId,wsId);}} style={{fontSize:"var(--hc-text-control)",padding:"2px 5px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Add to workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
               </div>
               <h1 style={{fontSize:isMobile?20:24,lineHeight:1.15,margin:"0 0 6px",color:t.text,letterSpacing:0}}>{report.title||report.query}</h1>
-              <div style={{fontSize:12,color:t.mut,lineHeight:1.45}}>{report.query}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45}}>{report.query}</div>
             </div>
           </div>
           {sectionHeadings.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:14}}>
-            {sectionHeadings.map((h,i)=><button key={i} onClick={()=>{const el=[...document.querySelectorAll('.research-report-print [data-research-heading]')].find(n=>n.textContent===h);el?.scrollIntoView({behavior:'smooth',block:'start'});}} style={{fontSize:9,padding:"3px 7px",borderRadius:7,background:`${t.acc}10`,border:`1px solid ${t.acc}22`,color:t.acc,cursor:"pointer",fontFamily:font}}>{h}</button>)}
+            {sectionHeadings.map((h,i)=><button key={i} onClick={()=>{const el=[...document.querySelectorAll('.research-report-print [data-research-heading]')].find(n=>n.textContent===h);el?.scrollIntoView({behavior:'smooth',block:'start'});}} style={{fontSize:"var(--hc-text-control)",padding:"3px 7px",borderRadius:"var(--hc-radius)",background:`${t.acc}10`,border:`1px solid ${t.acc}22`,color:t.acc,cursor:"pointer",fontFamily:font}}>{h}</button>)}
           </div>}
-          <div style={{fontSize:11,color:t.mut,marginBottom:12}}>{metrics.word_count||0} words{metrics.word_target?` · target ${metrics.word_target.join('–')}`:''}{metrics.writing_sections?` · sections ${metrics.writing_completed||0}/${metrics.writing_sections}`:''}</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:12}}>{metrics.word_count||0} words{metrics.word_target?` · target ${metrics.word_target.join('–')}`:''}{metrics.writing_sections?` · sections ${metrics.writing_completed||0}/${metrics.writing_sections}`:''}</div>
           {report.error&&<div role="alert" style={{color:t.err,marginBottom:12}}>{report.error}</div>}
-          {(metrics.completion_checks?.issues||[]).map((issue,i)=><div key={i} style={{color:t.warm,fontSize:11,marginBottom:5}}>{issue}</div>)}
-          {metrics.quality==='limited'&&<div style={{color:t.warm,fontSize:11,marginBottom:8}}>Evidence coverage is limited. Review the reported gaps before relying on conclusions.</div>}
-          {metrics.pages_read===0&&<div style={{color:t.warm,fontSize:11,marginBottom:8}}>No full web pages were read. Web evidence may be limited to snippets.</div>}
+          {(metrics.completion_checks?.issues||[]).map((issue,i)=><div key={i} style={{color:t.warm,fontSize:"var(--hc-text-secondary)",marginBottom:5}}>{issue}</div>)}
+          {metrics.quality==='limited'&&<div style={{color:t.warm,fontSize:"var(--hc-text-secondary)",marginBottom:8}}>Evidence coverage is limited. Review the reported gaps before relying on conclusions.</div>}
+          {metrics.pages_read===0&&<div style={{color:t.warm,fontSize:"var(--hc-text-secondary)",marginBottom:8}}>No full web pages were read. Web evidence may be limited to snippets.</div>}
           {body?<div className="research-report-print" style={{fontSize:fontSize,lineHeight:1.72,color:t.text}}>
             <MDWrap>{md(linkResearchCitations(body,sources),{streaming:reportLive})}</MDWrap>
           </div>:<ResearchLiveStatus t={t} font={font} events={researchEvents} metrics={metrics} sources={sources} researchRunning={researchRunning} elapsedLabel={elapsedLabel} eventLabel={eventLabel}/>}
-        </div>:<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:t.mut,fontSize:12}}>Select a report or start a new research run.</div>}
-      </div>}
-      {(!isMobile||activeResearchId)&&<div style={{borderLeft:isMobile?"none":`1px solid ${t.brd}24`,overflowY:isMobile?"visible":"auto",flexShrink:isMobile?0:undefined,padding:14,display:"flex",flexDirection:"column",gap:12,...(isMobile?{borderTop:`1px solid ${t.brd}24`}:{})}}>
+        </div>:<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Select a report or start a new research run.</div>}
+      </div>
+      <ResponsiveDrawer inline={contentWidth>=1200} open={researchDetailsOpen} onClose={()=>setResearchDetailsOpen(false)} title="Research evidence"><div className="hc-research-side">
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
-          {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:8,border:`1px solid ${c}2e`,background:`${c}0d`}}>
-            <div style={{fontSize:18,fontWeight:900,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:8,color:t.mut,textTransform:"uppercase",letterSpacing:.7,marginTop:5}}>{l}</div>
+          {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:"var(--hc-radius)",border:`1px solid ${c}2e`,background:`${c}0d`}}>
+            <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginTop:5}}>{l}</div>
           </div>)}
         </div>
-        {metrics.final_review&&<details style={{border:`1px solid ${t.warm}24`,borderRadius:8,padding:11}}><summary style={{fontSize:11,color:t.warm,cursor:'pointer'}}>Draft review</summary><div style={{fontSize:10,color:t.mut,marginTop:7}}>{metrics.final_review.scope||'Advisory model review'}</div>{['missing_questions','unsupported_claims','contradictions'].flatMap(k=>(metrics.final_review[k]||[]).map((x,i)=><div key={`${k}-${i}`} style={{fontSize:10,color:t.dim,marginTop:6}}>{fmtAudit(x)}</div>))}</details>}
-        {audit&&Object.keys(audit).length>0&&<div style={{border:`1px solid ${t.warm}24`,borderRadius:8,padding:11,background:`${t.warm}08`}}>
-          <div style={{fontSize:10,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Audit</div>
-          {audit.audit_method==="deterministic_fallback"&&<div style={{fontSize:10,color:t.warm,lineHeight:1.4,marginBottom:8}}>Audit generated from deterministic fallback</div>}
+        {metrics.final_review&&<details style={{border:`1px solid ${t.warm}24`,borderRadius:"var(--hc-radius)",padding:11}}><summary style={{fontSize:"var(--hc-text-control)",color:t.warm,cursor:'pointer'}}>Draft review</summary><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:7}}>{metrics.final_review.scope||'Advisory model review'}</div>{['missing_questions','unsupported_claims','contradictions'].flatMap(k=>(metrics.final_review[k]||[]).map((x,i)=><div key={`${k}-${i}`} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:6}}>{fmtAudit(x)}</div>))}</details>}
+        {audit&&Object.keys(audit).length>0&&<div style={{border:`1px solid ${t.warm}24`,borderRadius:"var(--hc-radius)",padding:11,background:`${t.warm}08`}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,textTransform:"none",letterSpacing:0,marginBottom:7}}>Audit</div>
+          {audit.audit_method==="deterministic_fallback"&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,lineHeight:1.4,marginBottom:8}}>Audit generated from deterministic fallback</div>}
           {["finding_issues","weaknesses","contradictions","missing_evidence","source_quality_notes"].map(k=>(audit[k]||[]).length?<div key={k} style={{marginBottom:8}}>
-            <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginBottom:3}}>{k.replaceAll("_"," ")}</div>
-            {(audit[k]||[]).slice(0,3).map((x,i)=><div key={i} style={{fontSize:10,color:t.dim,lineHeight:1.4,marginBottom:3}}>• {fmtAudit(x)}</div>)}
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:3}}>{k.replaceAll("_"," ")}</div>
+            {(audit[k]||[]).slice(0,3).map((x,i)=><div key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.4,marginBottom:3}}>• {fmtAudit(x)}</div>)}
           </div>:null)}
         </div>}
         <div>
-          <div style={{fontSize:10,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Findings</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc,textTransform:"none",letterSpacing:0,marginBottom:7}}>Findings</div>
           <div style={{display:"flex",flexDirection:"column",gap:7}}>
-            {findings.slice(0,10).map((f,i)=>{const fid=f.finding_id||i+1;const strength=f.evidence_strength||"";return <div key={i} style={{padding:9,border:`1px solid ${t.brd}24`,borderRadius:8,background:`${t.surface}66`}}>
+            {findings.slice(0,10).map((f,i)=>{const fid=f.finding_id||i+1;const strength=f.evidence_strength||"";return <div key={i} style={{padding:9,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`}}>
               <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:5}}>
-                <span style={{fontSize:8,fontWeight:900,color:t.acc,textTransform:"uppercase",letterSpacing:.5}}>Finding #{fid}</span>
-                {f.confidence&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${t.f1}10`,border:`1px solid ${t.f1}22`,color:t.f1}}>{f.confidence}</span>}
-                {strength&&<span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${t.warm}10`,border:`1px solid ${t.warm}22`,color:t.warm}}>{strength}</span>}
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc,textTransform:"none",letterSpacing:0}}>Finding #{fid}</span>
+                {f.confidence&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",background:`${t.f1}10`,border:`1px solid ${t.f1}22`,color:t.f1}}>{f.confidence}</span>}
+                {strength&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,color:t.warm}}>{strength}</span>}
               </div>
-              <div style={{fontSize:11,fontWeight:800,color:t.text,lineHeight:1.35,marginBottom:5}}>{f.claim||f.title||"Finding"}</div>
-              <div style={{fontSize:10,color:t.mut,lineHeight:1.4}}>{f.evidence||f.implication||""}</div>
-              {f.caveat&&<div style={{fontSize:9,color:t.warm,lineHeight:1.35,marginTop:5}}>Caveat: {f.caveat}</div>}
-              {(f.source_ids||[]).length>0&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:6}}>{f.source_ids.map(s=><span key={s} style={{fontSize:8,padding:"2px 5px",borderRadius:5,background:`${t.acc}12`,color:t.acc,border:`1px solid ${t.acc}22`}}>{s}</span>)}</div>}
+              <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,lineHeight:1.35,marginBottom:5}}>{f.claim||f.title||"Finding"}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4}}>{f.evidence||f.implication||""}</div>
+              {f.caveat&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,lineHeight:1.35,marginTop:5}}>Caveat: {f.caveat}</div>}
+              {(f.source_ids||[]).length>0&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:6}}>{f.source_ids.map(s=><span key={s} style={{fontSize:"var(--hc-text-secondary)",padding:"2px 5px",borderRadius:"var(--hc-radius-sm)",background:`${t.acc}12`,color:t.acc,border:`1px solid ${t.acc}22`}}>{s}</span>)}</div>}
             </div>;})}
-            {!findings.length&&<div style={{fontSize:11,color:t.mut}}>Findings appear after extraction.</div>}
+            {!findings.length&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Findings appear after extraction.</div>}
           </div>
         </div>
-        {researchEvidence&&<div id="research-evidence-inspector" style={{padding:12,border:`1px solid ${t.acc}44`,borderRadius:8}}>
+        {researchEvidence&&<div id="research-evidence-inspector" style={{padding:12,border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius)"}}>
           <div style={{display:'flex',justifyContent:'space-between'}}><b>{researchEvidence.source_id} evidence</b><button onClick={()=>{researchEvidenceRequestRef.current++;setResearchEvidence(null);}} style={btnS(t.mut)}>Close</button></div>
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>{researchEvidence.metadata?.kind||''}{researchEvidence.metadata?.truncated?' · source text was truncated':''}</div>
-          {!researchEvidence.available&&<p style={{fontSize:11}}>Archived evidence is unavailable for this older report.</p>}
-          {(researchEvidence.chunks||[]).map(c=><div key={c.id} style={{fontSize:11,lineHeight:1.55,whiteSpace:'pre-wrap',marginTop:12}}><b>{c.heading||`Passage ${c.ordinal+1}`}</b><div>{c.text}</div></div>)}
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6}}>{researchEvidence.metadata?.kind||''}{researchEvidence.metadata?.truncated?' · source text was truncated':''}</div>
+          {!researchEvidence.available&&<p style={{fontSize:"var(--hc-text-secondary)"}}>Archived evidence is unavailable for this older report.</p>}
+          {(researchEvidence.chunks||[]).map(c=><div key={c.id} style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.55,whiteSpace:'pre-wrap',marginTop:12}}><b>{c.heading||`Passage ${c.ordinal+1}`}</b><div>{c.text}</div></div>)}
           <div style={{display:'flex',gap:6,marginTop:8}}>
             {researchEvidence.offset>0&&<button style={btnS(t.mut)} onClick={()=>inspectResearchEvidence(researchEvidence.source_id,Math.max(0,researchEvidence.offset-10))}>Previous</button>}
             {researchEvidence.offset+10<researchEvidence.total&&<button style={btnS(t.acc)} onClick={()=>inspectResearchEvidence(researchEvidence.source_id,researchEvidence.offset+10)}>More passages</button>}
           </div>
         </div>}
         <div>
-          <div style={{fontSize:10,fontWeight:900,color:t.f1,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Sources</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.f1,textTransform:"none",letterSpacing:0,marginBottom:7}}>Sources</div>
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {sources.map(src=>{const tm=tierMeta(src.tier);return <div id={`research-source-S${src.index||src.source_index}`} key={`${src.index}-${src.url||src.title}`} onClick={()=>inspectResearchEvidence(`S${src.index||src.source_index}`)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter")inspectResearchEvidence(`S${src.index||src.source_index}`);}} style={{cursor:"pointer",textDecoration:"none",padding:9,border:`1px solid ${t.brd}22`,borderRadius:8,background:`${t.surface}66`,display:"block"}}>
+            {sources.map(src=>{const tm=tierMeta(src.tier);return <div id={`research-source-S${src.index||src.source_index}`} key={`${src.index}-${src.url||src.title}`} onClick={()=>inspectResearchEvidence(`S${src.index||src.source_index}`)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter")inspectResearchEvidence(`S${src.index||src.source_index}`);}} style={{cursor:"pointer",textDecoration:"none",padding:9,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`,display:"block"}}>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                <span style={{fontSize:9,fontWeight:900,color:t.f1,flexShrink:0}}>[S{src.index||src.source_index}]</span>
-                <span style={{fontSize:10,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{src.title||src.url||"Uploaded source"}</span>
-                <span style={{fontSize:8,padding:"1px 5px",borderRadius:5,background:`${tm[1]}10`,border:`1px solid ${tm[1]}22`,color:tm[1],flexShrink:0}}>{tm[0]}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.f1,flexShrink:0}}>[S{src.index||src.source_index}]</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{src.title||src.url||"Uploaded source"}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",background:`${tm[1]}10`,border:`1px solid ${tm[1]}22`,color:tm[1],flexShrink:0}}>{tm[0]}</span>
               </div>
-              <div style={{fontSize:9,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{src.snippet||src.url||""}</div>
-              <div style={{fontSize:9,color:t.acc,marginTop:5}}>Inspect saved evidence</div>
-              {src.url&&<a href={src.url} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:9,color:t.mut}}>Open original source ↗</a>}
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{src.snippet||src.url||""}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,marginTop:5}}>Inspect saved evidence</div>
+              {src.url&&<a href={src.url} target="_blank" rel="noreferrer" onClick={e=>e.stopPropagation()} style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Open original source ↗</a>}
             </div>;})}
-            {!sources.length&&<div style={{fontSize:11,color:t.mut}}>Sources appear during search.</div>}
+            {!sources.length&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Sources appear during search.</div>}
           </div>
         </div>
         <div>
-          <div style={{fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.6,marginBottom:7}}>Run Timeline</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:7}}>Run Timeline</div>
           <div style={{display:"flex",flexDirection:"column",gap:5}}>
-            {(researchEvents||[]).filter(e=>e.type!=="research_token").slice(-40).map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_found"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={i} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:10,color:t.dim,lineHeight:1.35}}>
+            {(researchEvents||[]).filter(e=>e.type!=="research_token").slice(-40).map((ev,i)=>{const c=ev.type==="research_error"?t.err:ev.type==="research_done"?t.ok:ev.type==="research_source_found"?t.f1:ev.type==="research_audit"?t.warm:t.acc;return <div key={i} style={{display:"flex",gap:7,alignItems:"flex-start",fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.35}}>
               <span style={{width:6,height:6,borderRadius:"50%",background:c,marginTop:5,flexShrink:0}}/>
               <span>{eventLabel(ev,i)}</span>
             </div>;})}
           </div>
         </div>
-      </div>}
+      </div></ResponsiveDrawer>
     </div>}
   </div>;})()
 
-      :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={padding:"14px 20px",borderBottom:`1px solid ${t.brd}28`,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}36`};const sectionS={background:`${t.surface}5C`,border:`1px solid ${t.brd}26`,borderRadius:8,padding:12};const kickerS={fontSize:10,fontWeight:900,color:t.mut,textTransform:"uppercase",letterSpacing:.7};const metaS={fontSize:10,color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:6,background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:9,fontWeight:800,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:7,border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:10,fontWeight:800});const nativeSelectS={...inputS,fontSize:11,padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
+      :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={flexWrap:"wrap",padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}F5`};const sectionS={background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:12};const kickerS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,textTransform:"none",letterSpacing:0};const metaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:"var(--hc-radius)",background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:"var(--hc-radius)",border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600});const nativeSelectS={...inputS,fontSize:"var(--hc-text-secondary)",padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
     <div style={headerS}>
       <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
-        <span style={{width:30,height:30,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}14`,border:`1px solid ${t.pink}32`,color:t.pink}}><IC.Council/></span>
+        <span style={{width:30,height:30,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}14`,border:`1px solid ${t.pink}32`,color:t.pink}}><IC.Council/></span>
         <div style={{minWidth:0}}>
-          <div style={{fontSize:14,fontWeight:900,letterSpacing:.8,textTransform:"uppercase",color:t.text}}>Council of AI</div>
-          <div style={{fontSize:10,color:t.mut,marginTop:2}}>Run moderated multi-model discussions with custom or persona-backed members.</div>
+          <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.text}}>Council of AI</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>Run moderated multi-model discussions with custom or persona-backed members.</div>
         </div>
       </div>
       <button onClick={async()=>{
         const r=await fetch(`${API}/api/councils`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Council",host_model:models[0]||"qwen3.5:27b",host_system_prompt:""})});
         const c=await r.json();setCouncils(p=>[c,...p]);setActiveCouncilId(c.id);
-      }} style={{...btnS(t.pink),padding:"8px 12px",fontWeight:900}}><IC.Plus/> New Council</button>
+      }} style={{...btnS(t.pink),padding:"8px 12px",fontWeight:700}}><IC.Plus/> New Council</button>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {councilPresets.length>0&&<div style={{...sectionS,marginBottom:14,padding:12}}>
@@ -5811,22 +5998,22 @@ function HyprChat(){
         <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(min(100%,190px),1fr))",gap:8}}>
           {councilPresets.map(p=><button key={p.id} onClick={async()=>{
             try{const r=await fetch(`${API}/api/seed/council-preset/${p.id}`,{method:"POST"});if(!r.ok)throw new Error(`HTTP ${r.status}`);const c=await r.json();setCouncils(prev=>[c,...prev]);setActiveCouncilId(c.id);notify({type:"success",text:"Council preset added",detail:p.name});}catch(e){console.error("Preset error:",e);notify({type:"error",text:"Preset failed",detail:e.message||String(e)});}
-          }} style={{cursor:"pointer",padding:"10px 12px",border:`1px solid ${t.brd}34`,borderRadius:8,background:`${t.bgDeep}72`,textAlign:"left",display:"flex",flexDirection:"column",gap:4,fontFamily:font}}>
-            <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
-            <span style={{fontSize:10,color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{p.members.join(" · ")}</span>
+          }} style={{cursor:"pointer",padding:"10px 12px",border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,textAlign:"left",display:"flex",flexDirection:"column",gap:4,fontFamily:font}}>
+            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{p.members.join(" · ")}</span>
           </button>)}
         </div>
       </div>}
-      {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:12}}>No councils yet. Create one to debate with multiple AIs.</div>}
+      {!councils.length&&!councilPresets.length&&<div style={{...sectionS,textAlign:"center",padding:34,color:t.mut,fontSize:"var(--hc-text-secondary)"}}><div style={{display:"flex",justifyContent:"center",marginBottom:8,color:t.pink}}><IC.Council/></div>No councils yet. Create one to debate with multiple AIs.</div>}
       <div style={{display:"flex",flexDirection:"column",gap:12}}>
-      {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:8,overflow:"hidden",boxShadow:"none",transition:"background .15s ease,border-color .15s ease"}}>
-          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"center",padding:"12px 14px",background:isActive?`${t.pink}08`:`${t.bgDeep}38`,borderBottom:isActive?`1px solid ${t.brd}24`:"none"}}>
+      {councils.map(council=>{const isActive=activeCouncilId===council.id;const memberCount=(council.members||[]).length;const linkedCount=(council.members||[]).filter(m=>!!memberProfile(m)).length;return <div key={council.id} style={{background:isActive?`${t.pink}0B`:`${t.surface}72`,border:`1px solid ${isActive?t.pink:t.brd}${isActive?"52":"30"}`,borderRadius:"var(--hc-radius)",overflow:"hidden",boxShadow:"none",transition:"background .15s ease,border-color .15s ease"}}>
+          <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"center",padding:"12px 14px",background:isActive?`${t.pink}08`:`${t.bgDeep}38`,borderBottom:isActive?"1px solid var(--hc-line-subtle)":"none"}}>
             <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
               <span style={{display:"flex",color:isActive?t.pink:t.mut}}><IC.Council/></span>
               <div style={{minWidth:0,flex:1}}>
                 <input value={council.name} onChange={e=>setCouncils(p=>p.map(c=>c.id===council.id?{...c,name:e.target.value}:c))}
                   onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:council.name})}).catch(()=>{})}
-                  style={{...inputS,fontSize:14,fontWeight:900,background:"transparent",border:"none",padding:0,color:t.text}}/>
+                  style={{...inputS,fontSize:"var(--hc-text-control)",fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text}}/>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:5}}>
                   <span style={chipS(t.acc)}>{memberCount} member{memberCount===1?"":"s"}</span>
                   {linkedCount>0&&<span style={chipS(t.pink)}>{linkedCount} persona-linked</span>}
@@ -5836,7 +6023,7 @@ function HyprChat(){
             </div>
             <div style={{display:"flex",gap:5,alignItems:"center",justifyContent:"flex-end"}}>
               <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?<><IC.ChevDown/> Collapse</>:<><IC.ChevDown/> Expand</>}</button>
-              <button onClick={async()=>{await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
+              <button aria-label="Delete" onClick={async()=>{await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
             </div>
           </div>
           {isActive&&<div style={{padding:14,display:"flex",flexDirection:"column",gap:12}}>
@@ -5844,12 +6031,12 @@ function HyprChat(){
               <div style={sectionS}>
                 <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:9,color:t.warm}}><IC.Crown/><span style={kickerS}>Host / Moderator</span></div>
                 <ModelPicker value={council.host_model||models[0]||""} onChange={v=>{setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_model:v}:c));fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_model:v})}).catch(()=>{});}} models={models} modelDetails={modelDetails} t={t} font={font} style={{marginBottom:8}}/>
-                <label style={{display:'flex',gap:8,fontSize:12,margin:'8px 0'}}><input type="checkbox" checked={!!council.cloud_enabled} onChange={async e=>{const value=e.target.checked;try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({cloud_enabled:value})});if(!r.ok)throw new Error(`HTTP ${r.status}`);const saved=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?saved:c));}catch(e){if(e.name!=='AbortError')notify({type:'error',text:'Council settings failed',detail:e.message});}}}/>Enable paid cloud calls</label>
-                <label style={{fontSize:12}}>Per-run spending cap (USD)<input aria-label="Council spending cap" type="number" min="0" step="0.01" value={council.cost_limit_usd||0} style={{...inputS,margin:'6px 0'}} onChange={e=>{const v=Number(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,cost_limit_usd:v}:c));}} onBlur={async()=>{try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({cost_limit_usd:council.cost_limit_usd||0})});if(!r.ok)throw new Error(`HTTP ${r.status}`);}catch(e){if(e.name!=='AbortError')notify({type:'error',text:'Council cap save failed',detail:e.message});}}}/></label>
+                <label style={{display:'flex',gap:8,fontSize:"var(--hc-text-secondary)",margin:'8px 0'}}><input type="checkbox" checked={!!council.cloud_enabled} onChange={async e=>{const value=e.target.checked;try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({cloud_enabled:value})});if(!r.ok)throw new Error(`HTTP ${r.status}`);const saved=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?saved:c));}catch(e){if(e.name!=='AbortError')notify({type:'error',text:'Council settings failed',detail:e.message});}}}/>Enable paid cloud calls</label>
+                <label style={{fontSize:"var(--hc-text-secondary)"}}>Per-run spending cap (USD)<input aria-label="Council spending cap" type="number" min="0" step="0.01" value={council.cost_limit_usd||0} style={{...inputS,margin:'6px 0'}} onChange={e=>{const v=Number(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,cost_limit_usd:v}:c));}} onBlur={async()=>{try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({cost_limit_usd:council.cost_limit_usd||0})});if(!r.ok)throw new Error(`HTTP ${r.status}`);}catch(e){if(e.name!=='AbortError')notify({type:'error',text:'Council cap save failed',detail:e.message});}}}/></label>
                 <textarea value={council.host_system_prompt||""} onChange={e=>{const v=e.target.value;setCouncils(p=>p.map(c=>c.id===council.id?{...c,host_system_prompt:v}:c));}}
                   onBlur={()=>fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({host_system_prompt:council.host_system_prompt||""})}).catch(()=>{})}
                   placeholder="Moderator system prompt (optional)" rows={4}
-                  style={{...inputS,resize:"vertical",fontSize:11,color:t.dim,lineHeight:1.45,minHeight:88}}/>
+                  style={{...inputS,resize:"vertical",fontSize:"var(--hc-text-control)",color:t.dim,lineHeight:1.45,minHeight:88}}/>
               </div>
               <div style={{...sectionS,display:"flex",flexDirection:"column",justifyContent:"center",gap:10}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
@@ -5857,7 +6044,7 @@ function HyprChat(){
                     <div style={kickerS}>Debate Rounds</div>
                     <div style={metaS}>{(council.debate_rounds||0)===0?"Members answer once, then the host synthesizes.":(council.debate_rounds||0)===1?"One rebuttal pass before synthesis.":`${council.debate_rounds} rebuttal passes before synthesis.`}</div>
                   </div>
-                  <div style={{fontSize:26,fontWeight:900,color:t.pink,lineHeight:1,minWidth:36,textAlign:"right"}}>{council.debate_rounds||0}</div>
+                  <div style={{fontSize:26,fontWeight:700,color:t.pink,lineHeight:1,minWidth:36,textAlign:"right"}}>{council.debate_rounds||0}</div>
                 </div>
                 <input type="range" min={0} max={5} value={council.debate_rounds||0}
                   onChange={e=>{const v=parseInt(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,debate_rounds:v}:c));}}
@@ -5878,18 +6065,18 @@ function HyprChat(){
                 </div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:9}}>
-                {(council.members||[]).map(member=>{const isEditing=editMember===member.id;const pts=member.points||0;const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;const view=memberView(member);const selectedProfile=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;return <div key={member.id} style={{background:`${t.bgDeep}78`,border:`1px solid ${view.linked?t.pink:t.brd}${view.linked?"40":"30"}`,borderRadius:8,padding:12,display:"flex",flexDirection:"column",gap:8,minHeight:isEditing?260:148}}>
+                {(council.members||[]).map(member=>{const isEditing=editMember===member.id;const pts=member.points||0;const ptsColor=pts>0?t.ok:pts<0?t.err:t.mut;const view=memberView(member);const selectedProfile=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;return <div key={member.id} style={{background:`${t.bgDeep}F5`,border:`1px solid ${view.linked?t.pink:t.brd}${view.linked?"40":"30"}`,borderRadius:"var(--hc-radius)",padding:12,display:"flex",flexDirection:"column",gap:8,minHeight:isEditing?260:148}}>
                   <div style={{display:"flex",alignItems:"flex-start",gap:9,minWidth:0}}>
-                    <div style={{width:34,height:34,borderRadius:8,background:`${view.linked?t.pink:t.acc}12`,border:`1px solid ${view.linked?t.pink:t.acc}35`,color:view.linked?t.pink:t.acc,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+                    <div style={{width:34,height:34,borderRadius:"var(--hc-radius)",background:`${view.linked?t.pink:t.acc}12`,border:`1px solid ${view.linked?t.pink:t.acc}35`,color:view.linked?t.pink:t.acc,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
                       {view.avatar?<img src={avatarSrc(view.avatar)} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:view.linked?<IC.User/>:<IC.Bot/>}
                     </div>
                     <div style={{minWidth:0,flex:1}}>
                       <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-                        <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
                         {view.linked&&<span style={chipS(t.pink)}>Persona</span>}
                         {view.missing&&<span style={chipS(t.err)}>Missing</span>}
                       </div>
-                      <div style={{fontSize:10,color:view.missing?t.err:t.mut,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.missing?"Persona profile not found":view.model||"No model selected"}</div>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:view.missing?t.err:t.mut,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.missing?"Persona profile not found":view.model||"No model selected"}</div>
                     </div>
                     <span style={{...chipS(ptsColor),background:pts>0?`${t.ok}12`:pts<0?`${t.err}12`:`${t.mut}0D`}}>{pts>0?"+":""}{pts} pts</span>
                   </div>
@@ -5902,8 +6089,8 @@ function HyprChat(){
                       <select value={editMemberForm.model_config_id} onChange={e=>{const mc=personaProfiles.find(x=>x.id===e.target.value);setEditMemberForm({model:mc?.base_model||models[0]||"",model_config_id:mc?.id||"",system_prompt:mc?.system_prompt||"",persona_name:mc?.name||""});}} style={nativeSelectS}>
                         {personaProfiles.map(mc=><option key={mc.id} value={mc.id}>{mc.name} · {mc.base_model||"no model"}</option>)}
                       </select>
-                      <div style={{padding:9,borderRadius:8,border:`1px solid ${t.pink}24`,background:`${t.pink}08`,display:"flex",flexDirection:"column",gap:4}}>
-                        <div style={{fontSize:11,fontWeight:900,color:t.text}}>{selectedProfile?.name||"Persona"}</div>
+                      <div style={{padding:9,borderRadius:"var(--hc-radius)",border:`1px solid ${t.pink}24`,background:`${t.pink}08`,display:"flex",flexDirection:"column",gap:4}}>
+                        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text}}>{selectedProfile?.name||"Persona"}</div>
                         <div style={metaS}>Linked to Persona. This member will use the Persona's latest model and prompt each run.</div>
                         <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
                           <button onClick={()=>{if(selectedProfile){setPanel("personas");setProfileTab("personas");setEditMc(selectedProfile.id);}}} style={btnS(t.pink)}><IC.Pencil/> Edit Persona</button>
@@ -5912,54 +6099,54 @@ function HyprChat(){
                       </div>
                     </>:<>
                       <ModelPicker value={editMemberForm.model||member.model||models[0]||""} onChange={v=>setEditMemberForm(p=>({...p,model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
-                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:11}}/>
-                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="Member system prompt" rows={5} style={{...inputS,resize:"vertical",fontSize:11,lineHeight:1.45,minHeight:104}}/>
+                      <input value={editMemberForm.persona_name||""} onChange={e=>setEditMemberForm(p=>({...p,persona_name:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:"var(--hc-text-control)"}}/>
+                      <textarea value={editMemberForm.system_prompt||""} onChange={e=>setEditMemberForm(p=>({...p,system_prompt:e.target.value}))} placeholder="Member system prompt" rows={5} style={{...inputS,resize:"vertical",fontSize:"var(--hc-text-control)",lineHeight:1.45,minHeight:104}}/>
                     </>}
                     <div style={{display:"flex",gap:6,marginTop:"auto"}}>
-                      <button onClick={()=>saveMember(council,member)} style={{...btnS(t.ok),flex:1,justifyContent:"center",fontWeight:900}}>Save</button>
+                      <button onClick={()=>saveMember(council,member)} style={{...btnS(t.ok),flex:1,justifyContent:"center",fontWeight:700}}>Save</button>
                       <button onClick={()=>setEditMember(null)} style={btnS(t.mut)}>Cancel</button>
                     </div>
                   </>:<>
-                    <div style={{fontSize:10,color:t.dim,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden",minHeight:42}}>{view.prompt||"No member prompt set."}</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden",minHeight:42}}>{view.prompt||"No member prompt set."}</div>
                     <div style={{display:"flex",gap:5,marginTop:"auto"}}>
-                      <button onClick={()=>{const v=memberView(member);setEditMember(member.id);setEditMemberForm({model:v.model||member.model||models[0]||"",model_config_id:member.model_config_id||"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:10}}><IC.Pencil/> Edit</button>
-                      <button onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
+                      <button onClick={()=>{const v=memberView(member);setEditMember(member.id);setEditMemberForm({model:v.model||member.model||models[0]||"",model_config_id:member.model_config_id||"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:"var(--hc-text-control)"}}><IC.Pencil/> Edit</button>
+                      <button aria-label="Delete" onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
                     </div>
                   </>}
                 </div>;})}
-                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",border:`1px dashed ${t.brd}45`,borderRadius:8,padding:"24px 12px",textAlign:"center",color:t.mut,fontSize:11}}>Add a custom member or link a Persona to start.</div>}
+                {!(council.members||[]).length&&<div style={{gridColumn:"1/-1",border:"1px dashed var(--hc-line)",borderRadius:"var(--hc-radius)",padding:"24px 12px",textAlign:"center",color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Add a custom member or link a Persona to start.</div>}
               </div>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8}}>
-              <button onClick={async()=>{if(councilReport?.council_id===council.id){setCouncilReport(null);return;}setCouncilReportLoading(true);try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);notify({type:"error",text:"Council analysis failed",detail:e.message||String(e)});}setCouncilReportLoading(false);}} style={{...btnS(t.acc),justifyContent:"center",padding:"10px 14px",fontSize:12,fontWeight:900}}>
+              <button onClick={async()=>{if(councilReport?.council_id===council.id){setCouncilReport(null);return;}setCouncilReportLoading(true);try{const r=await fetch(`${API}/api/councils/${council.id}/analyze`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setCouncilReport(d);}catch(e){console.error(e);notify({type:"error",text:"Council analysis failed",detail:e.message||String(e)});}setCouncilReportLoading(false);}} style={{...btnS(t.acc),justifyContent:"center",padding:"10px 14px",fontSize:"var(--hc-text-control)",fontWeight:700}}>
                 <IC.BarChart/> {councilReportLoading?"Analyzing...":councilReport?.council_id===council.id?"Hide Report":"Analyze Performance"}
               </button>
-              <button onClick={()=>startCouncilChat(council.id)} disabled={!memberCount} style={{...btnS(t.pink),justifyContent:"center",padding:"10px 14px",fontSize:12,fontWeight:900,opacity:memberCount?1:.4}}>
+              <button onClick={()=>startCouncilChat(council.id)} disabled={!memberCount} style={{...btnS(t.pink),justifyContent:"center",padding:"10px 14px",fontSize:"var(--hc-text-control)",fontWeight:700,opacity:memberCount?1:.4}}>
                 <IC.Council/> Start Council Chat
               </button>
             </div>
-            {councilReport?.council_id===council.id&&<div style={{...sectionS,animation:"fadeIn .3s"}}>
+            {councilReport?.council_id===council.id&&<div className="hc-reveal" style={{...sectionS}}>
               <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12,color:t.acc}}><IC.BarChart/><span style={kickerS}>Performance Report</span></div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:8,marginBottom:12}}>
-                <div style={{padding:12,borderRadius:8,border:`1px solid ${t.brd}24`,background:`${t.bgDeep}66`}}><div style={{fontSize:24,fontWeight:900,color:t.pink,lineHeight:1}}>{councilReport.total_debates}</div><div style={metaS}>Debates</div></div>
-                <div style={{padding:12,borderRadius:8,border:`1px solid ${t.brd}24`,background:`${t.bgDeep}66`}}><div style={{fontSize:24,fontWeight:900,color:t.acc,lineHeight:1}}>{councilReport.total_conversations}</div><div style={metaS}>Sessions</div></div>
-                {(councilReport.recommendations||[]).length>0&&<div style={{padding:12,borderRadius:8,border:`1px solid ${t.warm}24`,background:`${t.warm}08`,gridColumn:"span 2"}}>
+                <div style={{padding:12,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",background:`${t.bgDeep}F5`}}><div style={{fontSize:24,fontWeight:700,color:t.pink,lineHeight:1}}>{councilReport.total_debates}</div><div style={metaS}>Debates</div></div>
+                <div style={{padding:12,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",background:`${t.bgDeep}F5`}}><div style={{fontSize:24,fontWeight:700,color:t.acc,lineHeight:1}}>{councilReport.total_conversations}</div><div style={metaS}>Sessions</div></div>
+                {(councilReport.recommendations||[]).length>0&&<div style={{padding:12,borderRadius:"var(--hc-radius)",border:`1px solid ${t.warm}24`,background:`${t.warm}08`,gridColumn:"span 2"}}>
                   <div style={{...kickerS,color:t.warm,marginBottom:6}}>Recommendations</div>
-                  {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:10,color:t.dim,lineHeight:1.45,marginBottom:3}}>{r}</div>)}
+                  {councilReport.recommendations.map((r,ri)=><div key={ri} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45,marginBottom:3}}>{r}</div>)}
                 </div>}
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:7}}>
-                {(councilReport.members||[]).map((m,i)=>{const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;return <div key={m.id} style={{background:`${t.bgDeep}66`,border:`1px solid ${t.brd}28`,borderRadius:8,padding:"9px 10px"}}>
+                {(councilReport.members||[]).map((m,i)=>{const barWidth=councilReport.total_debates>0?Math.max(m.votes_received/councilReport.total_debates*100,4):4;return <div key={m.id} style={{background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"9px 10px"}}>
                   <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
                     <span style={chipS(i===0?t.ok:i===1?t.acc:t.mut)}>#{i+1}</span>
-                    <span style={{fontSize:12,fontWeight:900,color:t.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.persona_name}</span>
-                    <span style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{m.model}</span>
+                    <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.persona_name}</span>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{m.model}</span>
                   </div>
-                  <div style={{background:`${t.brd}22`,borderRadius:6,height:14,overflow:"hidden",position:"relative",marginBottom:6}}>
-                    <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:6,transition:"width .5s",minWidth:20}}/>
-                    <span style={{position:"absolute",left:6,top:0,fontSize:9,fontWeight:900,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
+                  <div style={{background:`${t.brd}22`,borderRadius:"var(--hc-radius)",height:14,overflow:"hidden",position:"relative",marginBottom:6}}>
+                    <div style={{background:i===0?t.ok:i===1?t.acc:t.mut,height:"100%",width:`${barWidth}%`,borderRadius:"var(--hc-radius)",transition:"width .5s",minWidth:20}}/>
+                    <span style={{position:"absolute",left:6,top:0,fontSize:"var(--hc-text-secondary)",fontWeight:700,color:"#fff",lineHeight:"14px"}}>{m.win_rate}% win rate</span>
                   </div>
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:10,color:t.dim}}>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
                     <span>{m.votes_received} votes</span><span>{m.responses} responses</span><span>{m.avg_response_length} avg chars</span><span style={{color:m.points>0?t.ok:m.points<0?t.err:t.mut}}>{m.points>0?"+":""}{m.points} pts</span>
                   </div>
                   {Object.keys(m.vote_sources||{}).length>0&&<div style={{marginTop:6,display:"flex",gap:4,flexWrap:"wrap"}}>{Object.entries(m.vote_sources).map(([name,count],vi)=><span key={vi} style={chipS(t.pink)}>{name} ({count})</span>)}</div>}
@@ -5971,8 +6158,8 @@ function HyprChat(){
       </div>
     </div>
   </div>;})()
-      :panel==="personas"?(()=>{const profiles=mcs.map(mc=>({...mc,parameters:normalizeProfileParams(mc)}));const agentProfiles=profiles.filter(isAgentProfile);const personaProfiles=profiles.filter(isPersonaProfile);const activeProfiles=profileTab==="personas"?personaProfiles:agentProfiles;const activeColor=profileTab==="personas"?t.pink:t.acc;const activeLabel=profileTab==="personas"?"Personas":"Agents";const activeEmpty=profileTab==="personas"?"Create a persona for roleplay, character chat, writing voice, or companion-style conversations.":"Create an agent for coding, research, automation, or specialized work.";const setName=(mc,value)=>updateProfileLocal(mc.id,x=>{const next={...x,name:value};if(getProfileType(x)==="persona"){const params=normalizeProfileParams(next);next.system_prompt=buildPersonaPrompt({name:value,...params.persona});}return next;});const setNumberParam=(id,key,value)=>setProfileParam(id,key,value===""?null:(key==="num_ctx"?parseInt(value)||null:parseFloat(value)));const modelWarning=(mc)=>{const missing=mc.base_model&&models.length&&!models.includes(mc.base_model);if(!mc.base_model||missing)return <div style={{display:"inline-flex",alignItems:"center",gap:5,marginTop:5,padding:"3px 7px",borderRadius:7,background:`${t.warm}12`,border:`1px solid ${t.warm}35`,color:t.warm,fontSize:9,fontWeight:700}}>{!mc.base_model?"No base model selected":`Missing model: ${mc.base_model}`}</div>;return null;};const avatarBox=(mc,isE,color,kind)=>{const avatar=profileAvatar(mc);return <label style={{cursor:isE?"pointer":"default",position:"relative",flexShrink:0}}>
-        <div style={{width:44,height:44,borderRadius:kind==="persona"?12:9,background:`${color}18`,border:`1px solid ${color}40`,display:"flex",alignItems:"center",justifyContent:"center",color,overflow:"hidden",fontSize:20}}>
+      :panel==="personas"?(()=>{const profiles=mcs.map(mc=>({...mc,parameters:normalizeProfileParams(mc)}));const agentProfiles=profiles.filter(isAgentProfile);const personaProfiles=profiles.filter(isPersonaProfile);const activeProfiles=profileTab==="personas"?personaProfiles:agentProfiles;const activeColor=profileTab==="personas"?t.pink:t.acc;const activeLabel=profileTab==="personas"?"Personas":"Agents";const activeEmpty=profileTab==="personas"?"Create a persona for roleplay, character chat, writing voice, or companion-style conversations.":"Create an agent for coding, research, automation, or specialized work.";const setName=(mc,value)=>updateProfileLocal(mc.id,x=>{const next={...x,name:value};if(getProfileType(x)==="persona"){const params=normalizeProfileParams(next);next.system_prompt=buildPersonaPrompt({name:value,...params.persona});}return next;});const setNumberParam=(id,key,value)=>setProfileParam(id,key,value===""?null:(key==="num_ctx"?parseInt(value)||null:parseFloat(value)));const modelWarning=(mc)=>{const missing=mc.base_model&&models.length&&!models.includes(mc.base_model);if(!mc.base_model||missing)return <div style={{display:"inline-flex",alignItems:"center",gap:5,marginTop:5,padding:"3px 7px",borderRadius:"var(--hc-radius)",background:`${t.warm}12`,border:`1px solid ${t.warm}35`,color:t.warm,fontSize:"var(--hc-text-secondary)",fontWeight:700}}>{!mc.base_model?"No base model selected":`Missing model: ${mc.base_model}`}</div>;return null;};const avatarBox=(mc,isE,color,kind)=>{const avatar=profileAvatar(mc);return <label style={{cursor:isE?"pointer":"default",position:"relative",flexShrink:0}}>
+        <div style={{width:44,height:44,borderRadius:kind==="persona"?12:9,background:`${color}18`,border:`1px solid ${color}40`,display:"flex",alignItems:"center",justifyContent:"center",color,overflow:"hidden",fontSize:"var(--hc-text-display)"}}>
           {avatar?<img src={avatarSrc(avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:kind==="persona"?<IC.User/>:<IC.Bot/>}
         </div>
         {isE&&<div style={{position:"absolute",bottom:-2,right:-2,background:color,borderRadius:"50%",width:16,height:16,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff"}}><IC.Image/></div>}
@@ -5982,24 +6169,24 @@ function HyprChat(){
           try{const r=await fetch(`${API}/api/model-configs/${mc.id}/avatar`,{method:"POST",body:fd});const d=await r.json();const parameters={...normalizeProfileParams(mc),avatar:d.avatar_url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
           catch{const url=URL.createObjectURL(f);const parameters={...normalizeProfileParams(mc),avatar:url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
         }}/>}
-      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch{const id=`mc-${Date.now()}`;setMcs(p=>[{id,...mc},...p]);setProfileTab("agents");setEditMc(id);}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch{const id=`mc-${Date.now()}`;setMcs(p=>[{id,...mc},...p]);setProfileTab("personas");setEditMc(id);}};const deleteProfile=(mc)=>{fetch(`${API}/api/model-configs/${mc.id}`,{method:"DELETE"}).catch(()=>{});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
+      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const deleteProfile=async(mc)=>{try{await apiJson(`/api/model-configs/${mc.id}`,{method:"DELETE"});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);}catch(e){notify({type:"error",text:"Profile was not deleted",detail:e.message});}};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
           <div style={{display:"flex",alignItems:"flex-start",gap:10,minWidth:0,flex:1}}>
             {avatarBox(mc,isE,t.acc,"agent")}
             <div style={{minWidth:0,flex:1}}>
-              {isE?<input value={mc.name} onChange={e=>setName(mc,e.target.value)} style={{...inputS,fontSize:14,fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text,width:"min(360px,100%)"}}/>:<div style={{fontSize:14,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{mc.name}</div>}
-              <div style={{fontSize:10,color:t.mut,marginTop:2}}>Base: {mc.base_model||"none"}</div>
+              {isE?<input value={mc.name} onChange={e=>setName(mc,e.target.value)} style={{...inputS,fontSize:"var(--hc-text-control)",fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text,width:"min(360px,100%)"}}/>:<div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{mc.name}</div>}
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>Base: {mc.base_model||"none"}</div>
               {modelWarning(mc)}
-              {!isE&&<div style={{fontSize:11,color:t.dim,marginTop:6,lineHeight:1.45,maxWidth:760}}>{profileDescription(mc)}</div>}
+              {!isE&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:6,lineHeight:1.45,maxWidth:760}}>{profileDescription(mc)}</div>}
             </div>
           </div>
           <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
             <button onClick={()=>applyProfile(mc)} style={btnS(t.ok)}>Use Agent</button>
-            <button onClick={()=>{if(isE)saveProfile(mc);setEditMc(isE?null:mc.id);}} style={btnS(t.mut)}>{isE?"Done":"Edit"}</button>
-            <button onClick={()=>deleteProfile(mc)} style={btnS(t.err)}><IC.Trash/></button>
+            <button onClick={async()=>{if(!isE)setEditMc(mc.id);else if(await saveProfile(mc))setEditMc(null);}} style={btnS(t.mut)}>{isE?"Done":"Edit"}</button>
+            <ActionMenu label="Agent actions" items={[{label:"Delete profile",destructive:true,onClick:()=>deleteProfile(mc)}]}/>
           </div>
         </div>
-        {isE?<div style={{animation:"fadeIn .2s"}}>
+        {isE?<div className="hc-reveal">
           <div style={{marginBottom:12}}>
             <label style={labelS}>Base Model</label>
             <ModelPicker value={mc.base_model} onChange={v=>updateProfileLocal(mc.id,x=>({...x,base_model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
@@ -6008,11 +6195,13 @@ function HyprChat(){
             <label style={labelS}>Agent Description</label>
             <textarea value={params.description||""} onChange={e=>setProfileParam(mc.id,"description",e.target.value)} rows={2} placeholder={profileDescription({...mc,parameters:{...params,description:""}})} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/>
           </div>
+          <details className="hc-advanced"><summary>Advanced model settings</summary>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:12}}>
             <div><label style={labelS}>Temperature</label><input type="number" min="0" max="2" step="0.05" value={params.temperature??""} onChange={e=>setNumberParam(mc.id,"temperature",e.target.value)} placeholder="default" style={inputS}/></div>
             <div><label style={labelS}>Top P</label><input type="number" min="0" max="1" step="0.05" value={params.top_p??""} onChange={e=>setNumberParam(mc.id,"top_p",e.target.value)} placeholder="default" style={inputS}/></div>
             <div><label style={labelS}>Context</label><input type="number" min="0" step="1024" value={params.num_ctx??""} onChange={e=>setNumberParam(mc.id,"num_ctx",e.target.value)} placeholder="default" style={inputS}/></div>
           </div>
+          </details>
           <div style={{marginBottom:12}}>
             <label style={labelS}>System Prompt</label>
             <textarea value={mc.system_prompt||""} onChange={e=>updateProfileLocal(mc.id,x=>({...x,system_prompt:e.target.value}))} rows={12} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:190}}/>
@@ -6021,24 +6210,24 @@ function HyprChat(){
             <label style={labelS}><span style={{display:"flex",alignItems:"center",gap:4}}><IC.Tool/> Tools</span></label>
             <div style={{display:"flex",flexDirection:"column",gap:4}}>
               {allTools.map(tl=>{const on=tools.includes(tl.id);const tlCol=tl.id==="quick_search"?t.f1:t.warm;return <div key={tl.id} onClick={()=>updateProfileLocal(mc.id,x=>({...x,tool_ids:on?(x.tool_ids||[]).filter(y=>y!==tl.id):[...(x.tool_ids||[]),tl.id]}))}
-                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${tlCol}12`:`${t.surface}44`,border:`1px solid ${on?tlCol:t.brd}33`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${tlCol}12`:`${t.surface}44`,border:`1px solid ${on?tlCol:t.brd}33`,borderRadius:"var(--hc-radius)",cursor:"pointer",transition:"all .15s"}}>
                 <span style={{color:on?tlCol:t.mut}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
-                <span style={{fontSize:12,fontWeight:on?600:400,color:on?t.text:t.dim}}>{tl.name}</span>
-                <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{tl.description}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:on?600:400,color:on?t.text:t.dim}}>{tl.name}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:"auto"}}>{tl.description}</span>
               </div>;})}
-              {!allTools.length&&<span style={{fontSize:10,color:t.mut,fontStyle:"italic"}}>Loading tools...</span>}
+              {!allTools.length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic"}}>Loading tools...</span>}
             </div>
           </div>
           <div>
             <label style={labelS}><span style={{display:"flex",alignItems:"center",gap:4}}><IC.Database/> Knowledge Bases</span></label>
             <div style={{display:"flex",flexDirection:"column",gap:4}}>
               {kbs.map(kb=>{const on=kbIds.includes(kb.id);return <div key={kb.id} onClick={()=>updateProfileLocal(mc.id,x=>({...x,kb_ids:on?(x.kb_ids||[]).filter(y=>y!==kb.id):[...(x.kb_ids||[]),kb.id]}))}
-                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${t.f1}12`:`${t.surface}44`,border:`1px solid ${on?t.f1:t.brd}33`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${t.f1}12`:`${t.surface}44`,border:`1px solid ${on?t.f1:t.brd}33`,borderRadius:"var(--hc-radius)",cursor:"pointer",transition:"all .15s"}}>
                 <span style={{color:on?t.f1:t.mut}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
-                <span style={{fontSize:12,fontWeight:on?600:400,color:on?t.text:t.dim}}>{kb.name}</span>
-                <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{(kb.files||[]).length} files</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:on?600:400,color:on?t.text:t.dim}}>{kb.name}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:"auto"}}>{(kb.files||[]).length} files</span>
               </div>;})}
-              {!kbs.length&&<span style={{fontSize:10,color:t.mut,fontStyle:"italic"}}>No KBs — create some in Knowledge Bases</span>}
+              {!kbs.length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic"}}>No KBs — create some in Knowledge Bases</span>}
             </div>
           </div>
         </div>:<div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4}}>
@@ -6053,9 +6242,9 @@ function HyprChat(){
           <div style={{display:"flex",alignItems:"flex-start",gap:11,minWidth:0,flex:1}}>
             {avatarBox(mc,isE,t.pink,"persona")}
             <div style={{minWidth:0,flex:1}}>
-              {isE?<input value={mc.name} onChange={e=>setName(mc,e.target.value)} style={{...inputS,fontSize:14,fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text,width:"min(360px,100%)"}}/>:<div style={{fontSize:15,fontWeight:800,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{mc.name}</div>}
-              {!isE&&<div style={{fontSize:11,color:t.dim,marginTop:4,lineHeight:1.45,maxWidth:680}}>{profileDescription(mc)}</div>}
-              <div style={{fontSize:10,color:t.mut,marginTop:isE?2:6}}>Base: {mc.base_model||"none"}</div>
+              {isE?<input value={mc.name} onChange={e=>setName(mc,e.target.value)} style={{...inputS,fontSize:"var(--hc-text-control)",fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text,width:"min(360px,100%)"}}/>:<div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{mc.name}</div>}
+              {!isE&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:4,lineHeight:1.45,maxWidth:680}}>{profileDescription(mc)}</div>}
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:isE?2:6}}>Base: {mc.base_model||"none"}</div>
               {modelWarning(mc)}
               {!isE&&(tags.length>0||p.rating||kbIds.length>0||normalizePersonaThinkingMode(p.thinking_mode)!=="auto")&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:7}}>
                 {tags.map(tag=><Chip key={tag} l={tag} c={t.pink} bg={`${t.pink}12`}/>)}
@@ -6067,11 +6256,11 @@ function HyprChat(){
           </div>
           <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
             <button onClick={()=>applyProfile(mc)} style={btnS(t.ok)}>Use Persona</button>
-            <button onClick={()=>{if(isE)saveProfile(mc);setEditMc(isE?null:mc.id);}} style={btnS(t.mut)}>{isE?"Done":"Edit"}</button>
-            <button onClick={()=>deleteProfile(mc)} style={btnS(t.err)}><IC.Trash/></button>
+            <button onClick={async()=>{if(!isE)setEditMc(mc.id);else if(await saveProfile(mc))setEditMc(null);}} style={btnS(t.mut)}>{isE?"Done":"Edit"}</button>
+            <ActionMenu label="Agent actions" items={[{label:"Delete profile",destructive:true,onClick:()=>deleteProfile(mc)}]}/>
           </div>
         </div>
-        {isE&&<div style={{animation:"fadeIn .2s"}}>
+        {isE&&<div className="hc-reveal">
           <div style={{marginBottom:12}}>
             <label style={labelS}>Base Model</label>
             <ModelPicker value={mc.base_model} onChange={v=>updateProfileLocal(mc.id,x=>({...x,base_model:v}))} models={models} modelDetails={modelDetails} t={t} font={font}/>
@@ -6080,12 +6269,12 @@ function HyprChat(){
             <label style={labelS}><span style={{display:"flex",alignItems:"center",gap:4}}><IC.Database/> Knowledge Bases</span></label>
             <div style={{display:"flex",flexDirection:"column",gap:4}}>
               {kbs.map(kb=>{const on=kbIds.includes(kb.id);return <div key={kb.id} onClick={()=>updateProfileLocal(mc.id,x=>({...x,kb_ids:on?(x.kb_ids||[]).filter(y=>y!==kb.id):[...(x.kb_ids||[]),kb.id]}))}
-                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${t.f1}12`:`${t.surface}44`,border:`1px solid ${on?t.f1:t.brd}33`,borderRadius:8,cursor:"pointer",transition:"all .15s"}}>
+                style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:on?`${t.f1}12`:`${t.surface}44`,border:`1px solid ${on?t.f1:t.brd}33`,borderRadius:"var(--hc-radius)",cursor:"pointer",transition:"all .15s"}}>
                 <span style={{color:on?t.f1:t.mut}}>{on?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
-                <span style={{fontSize:12,fontWeight:on?600:400,color:on?t.text:t.dim}}>{kb.name}</span>
-                <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{(kb.files||[]).length} files</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:on?600:400,color:on?t.text:t.dim}}>{kb.name}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:"auto"}}>{(kb.files||[]).length} files</span>
               </div>;})}
-              {!kbs.length&&<span style={{fontSize:10,color:t.mut,fontStyle:"italic"}}>No KBs — create some in Knowledge Bases</span>}
+              {!kbs.length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic"}}>No KBs — create some in Knowledge Bases</span>}
             </div>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,marginBottom:12}}>
@@ -6112,7 +6301,7 @@ function HyprChat(){
               <select value={normalizePersonaRating(p.rating)} onChange={e=>setPersonaField(mc.id,"rating",e.target.value)} style={inputS}>
                 {PERSONA_RATINGS.map(([key,label])=><option key={key} value={key}>{label}</option>)}
               </select>
-              <div style={{fontSize:9,color:t.mut,lineHeight:1.35,marginTop:4}}>{personaRatingGuidance(p.rating)}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,marginTop:4}}>{personaRatingGuidance(p.rating)}</div>
             </div>
             <div>
               <label style={labelS}>Thinking</label>
@@ -6121,22 +6310,22 @@ function HyprChat(){
                 <option value="on">💭 On</option>
                 <option value="off">⚡ Off</option>
               </select>
-              <div style={{fontSize:9,color:t.mut,lineHeight:1.35,marginTop:4}}>{personaThinkingGuidance(p.thinking_mode)}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,marginTop:4}}>{personaThinkingGuidance(p.thinking_mode)}</div>
             </div>
             <div><label style={labelS}>Temperature</label><input type="number" min="0" max="2" step="0.05" value={params.temperature??""} onChange={e=>setNumberParam(mc.id,"temperature",e.target.value)} placeholder="default" style={inputS}/></div>
             <div><label style={labelS}>Top P</label><input type="number" min="0" max="1" step="0.05" value={params.top_p??""} onChange={e=>setNumberParam(mc.id,"top_p",e.target.value)} placeholder="default" style={inputS}/></div>
           </div>
           <div>
-            <label style={labelS}>Advanced System Prompt</label>
-            <textarea value={p.advanced_prompt||""} onChange={e=>setPersonaField(mc.id,"advanced_prompt",e.target.value)} rows={9} placeholder="Extra instructions appended after the persona fields." style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:150}}/>
+            <details className="hc-advanced"><summary>Advanced system prompt</summary>
+            <textarea value={p.advanced_prompt||""} onChange={e=>setPersonaField(mc.id,"advanced_prompt",e.target.value)} rows={9} placeholder="Extra instructions appended after the persona fields." style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:150}}/></details>
           </div>
         </div>}
       </div>;};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px 0",borderBottom:`1px solid ${t.brd}28`,display:"flex",alignItems:"flex-end",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+    <div style={{padding:"14px 20px 0",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"flex-end",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"flex-end",gap:4,flexWrap:"wrap",minWidth:0}}>
-        <span style={{fontSize:14,fontWeight:800,letterSpacing:1,textTransform:"uppercase",color:t.acc,marginRight:12,paddingBottom:10}}>Agents</span>
-        {[["agents",<IC.Cube/>,"Agents",agentProfiles.length],["personas",<IC.User/>,"Personas",personaProfiles.length]].map(([key,ico,label,count])=><button key={key} onClick={()=>{setProfileTab(key);setEditMc(null);}} style={{padding:"8px 16px",borderRadius:"8px 8px 0 0",border:`1px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):t.brd}44`,borderBottom:`2px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):"transparent"}`,background:profileTab===key?`${key==="personas"?t.pink:t.acc}12`:"transparent",color:profileTab===key?(key==="personas"?t.pink:t.acc):t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:profileTab===key?800:500,marginBottom:-1,display:"flex",alignItems:"center",gap:6}}>
-          {ico}{label}<span style={{fontSize:9,color:t.mut}}>{count}</span>
+        <span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc,marginRight:12,paddingBottom:10}}>Agents</span>
+        {[["agents",<IC.Cube/>,"Agents",agentProfiles.length],["personas",<IC.User/>,"Personas",personaProfiles.length]].map(([key,ico,label,count])=><button key={key} onClick={()=>{setProfileTab(key);setEditMc(null);}} style={{padding:"8px 16px",borderRadius:"8px 8px 0 0",border:`1px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):t.brd}44`,borderBottom:`2px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):"transparent"}`,background:profileTab===key?`${key==="personas"?t.pink:t.acc}12`:"transparent",color:profileTab===key?(key==="personas"?t.pink:t.acc):t.mut,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:profileTab===key?800:500,marginBottom:-1,display:"flex",alignItems:"center",gap:6}}>
+          {ico}{label}<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{count}</span>
         </button>)}
       </div>
       <div style={{display:"flex",gap:5,flexWrap:"wrap",paddingBottom:9}}>
@@ -6151,29 +6340,29 @@ function HyprChat(){
             const names=(d.restored||[]).filter(x=>x.status==="ok").map(x=>x.name).join(", ");
             notify({type:"success",text:"Defaults restored",detail:names||"No defaults changed."});
           }catch(e){notify({type:"error",text:"Restore failed",detail:e.message});}
-        }} style={{...btnS(t.acc),fontSize:10}}>Restore Defaults</button>
+        }} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}>Restore Defaults</button>
         <button onClick={createAgent} style={btnS(t.acc)}><IC.Plus/> New Agent</button>
         <button onClick={createPersona} style={btnS(t.pink)}><IC.Plus/> New Persona</button>
         {profileTab==="personas"&&<><input ref={charCardImportRef} type="file" accept=".png,.json,application/json,image/png" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importCharacterCard(e.target.files[0]);e.target.value="";}}/>
           <button onClick={()=>charCardImportRef.current?.click()} style={btnS(t.pink)}><IC.Download/> Import Card</button></>}
       </div>
     </div>
-    <div style={{padding:"10px 20px",borderBottom:`1px solid ${t.brd}18`,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:8,background:`${t.surface}22`}}>
-      <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",borderRadius:8,border:`1px solid ${t.acc}24`,background:`${t.acc}08`,minWidth:0}}>
+    <div style={{padding:"10px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:8,background:`${t.surface}F5`}}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}24`,background:`${t.acc}08`,minWidth:0}}>
         <span style={{display:"flex",color:t.acc,marginTop:1,flexShrink:0}}><IC.Cube/></span>
-        <div style={{fontSize:11,lineHeight:1.45,color:t.dim,minWidth:0}}><span style={{fontWeight:800,color:t.acc,textTransform:"uppercase",letterSpacing:.6,fontSize:9}}>Agents</span> are task-driven assistants for coding, research, automation, tools, knowledge bases, and specialized work.</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.45,color:t.dim,minWidth:0}}><span style={{fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0,fontSize:"var(--hc-text-secondary)"}}>Agents</span> are task-driven assistants for coding, research, automation, tools, knowledge bases, and specialized work.</div>
       </div>
-      <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",borderRadius:8,border:`1px solid ${t.pink}24`,background:`${t.pink}08`,minWidth:0}}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.pink}24`,background:`${t.pink}08`,minWidth:0}}>
         <span style={{display:"flex",color:t.pink,marginTop:1,flexShrink:0}}><IC.User/></span>
-        <div style={{fontSize:11,lineHeight:1.45,color:t.dim,minWidth:0}}><span style={{fontWeight:800,color:t.pink,textTransform:"uppercase",letterSpacing:.6,fontSize:9}}>Personas</span> are voice and roleplay profiles focused on identity, tone, scenario, backstory, and conversational style.</div>
+        <div style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.45,color:t.dim,minWidth:0}}><span style={{fontWeight:600,color:t.pink,textTransform:"none",letterSpacing:0,fontSize:"var(--hc-text-secondary)"}}>Personas</span> are voice and roleplay profiles focused on identity, tone, scenario, backstory, and conversational style.</div>
       </div>
     </div>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
         <span style={{display:"flex",color:activeColor}}>{profileTab==="personas"?<IC.User/>:<IC.Cube/>}</span>
-        <span style={{fontSize:12,fontWeight:800,textTransform:"uppercase",letterSpacing:.8,color:activeColor}}>{activeLabel}</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,textTransform:"none",letterSpacing:0,color:activeColor}}>{activeLabel}</span>
       </div>
-      {!activeProfiles.length&&<EmptyState t={t} font={font} icon={profileTab==="personas"?"🎭":"🤖"} title={`No ${activeLabel.toLowerCase()} yet`} hint={activeEmpty} action={<button onClick={profileTab==="personas"?createPersona:createAgent} style={btnS(activeColor)}><IC.Plus/> New {profileTab==="personas"?"Persona":"Agent"}</button>}/>}
+      {!activeProfiles.length&&<EmptyState icon={profileTab==="personas"?<IC.User/>:<IC.Bot/>} title={`No ${activeLabel.toLowerCase()} yet`} hint={activeEmpty} action={<button onClick={profileTab==="personas"?createPersona:createAgent} style={btnS(activeColor)}><IC.Plus/> New {profileTab==="personas"?"Persona":"Agent"}</button>}/>}
       {activeProfiles.map(mc=>profileTab==="personas"?renderPersona(mc):renderAgent(mc))}
     </div>
   </div>;})()
@@ -6182,19 +6371,19 @@ function HyprChat(){
 
       :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {/* Toolbar */}
-    <div style={{padding:"14px 20px",flexShrink:0,display:"flex",alignItems:"center",gap:14,borderBottom:`1px solid ${t.brd}28`,background:`${t.bgDeep}E8`,minHeight:62,boxSizing:"border-box",flexWrap:"wrap"}}>
+    <div style={{padding:"14px 20px",flexShrink:0,display:"flex",alignItems:"center",gap:14,borderBottom:"1px solid var(--hc-line-subtle)",background:`${t.bgDeep}F5`,minHeight:62,boxSizing:"border-box",flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"center",gap:10,minWidth:180}}>
         <span style={{display:"flex",color:t.acc}}><IC.Database/></span>
         <div>
-          <div style={{fontSize:14,fontWeight:800,color:t.acc,letterSpacing:1,textTransform:"uppercase",lineHeight:1}}>Models</div>
-          <div style={{fontSize:10,color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from Hugging Face</div>
+          <div style={{fontSize:"var(--hc-text-display)",fontWeight:600,color:t.acc,letterSpacing:0,textTransform:"none",lineHeight:1}}>Models</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from Hugging Face</div>
         </div>
       </div>
-      <div style={{display:"flex",alignItems:"center",gap:4,padding:3,minWidth:0,maxWidth:"100%",overflowX:"auto",borderRadius:8,border:`1px solid ${t.brd}28`,background:`${t.surface}44`}}>
+      <div style={{display:"flex",alignItems:"center",gap:4,padding:3,minWidth:0,maxWidth:"100%",flexWrap:"wrap",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",background:`${t.surface}F5`}}>
         {[["ollama","Ollama","🦙",installedModelCount],["hf","Hugging Face","🤗",hfModelCount],["hyprfit","HyprFit","⚡",null]].map(([key,label,icon,count])=>{
           const active=modelsTab===key;
-          return <button key={key} onClick={()=>{setModelsTab(key);setModelParamsOpen(null);setShowModelfile(false);if(key!=="hf")setHfSelected(null);}} style={{padding:"7px 13px",flexShrink:0,whiteSpace:"nowrap",borderRadius:7,border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
-            <span>{icon}</span><span>{label}</span>{count!=null&&<span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>}
+          return <button key={key} onClick={()=>{setModelsTab(key);setModelParamsOpen(null);setShowModelfile(false);if(key!=="hf")setHfSelected(null);}} style={{padding:"7px 13px",flexShrink:0,whiteSpace:"nowrap",borderRadius:"var(--hc-radius)",border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
+            <span>{icon}</span><span>{label}</span>{count!=null&&<span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:"var(--hc-text-secondary)",padding:"1px 5px"}}>{count}</span>}
           </button>;
         })}
       </div>
@@ -6206,13 +6395,13 @@ function HyprChat(){
     {modelsTab==="ollama"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
 
       {/* Left: model list */}
-      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`,...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}20`,flexShrink:0}:{})}}>
+      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}F5`,...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
         {/* Search bar */}
-        <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:`1px solid ${t.brd}16`}}>
+        <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)"}}>
           <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
             <div style={{position:"relative",flex:1}}>
               <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:t.mut,display:"flex",opacity:.75}}><IC.Search/></span>
-              <input value={modelSearch} onChange={e=>setModelSearch(e.target.value)} placeholder="Search installed models..." style={{...inputS,width:"100%",fontSize:13,padding:"9px 13px 9px 34px",background:t.bgDeep}}/>
+              <input value={modelSearch} onChange={e=>setModelSearch(e.target.value)} placeholder="Search installed models..." style={{...inputS,width:"100%",fontSize:"var(--hc-text-control)",padding:"9px 13px 9px 34px",background:t.bgDeep}}/>
             </div>
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"space-between"}}>
@@ -6246,11 +6435,11 @@ function HyprChat(){
             const icon=(n)=>{const b=n.toLowerCase();if(b.startsWith("hf.co/"))return"🤗";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";if(b.includes("wizard"))return"🧙";return"🤖";};
             const famEmoji={HuggingFace:"🤗",Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
             const allItems=Object.values(families).flat();
-            if(!visibleModels.length)return <div style={{...mmPanelS,padding:14}}><EmptyState t={t} font={font} compact icon={<IC.Layers/>} title="No installed models yet" hint="Pull a model from Ollama to get started." action={<button onClick={()=>{try{pullInputRef.current?.scrollIntoView({block:"center",behavior:"smooth"});pullInputRef.current?.focus();}catch{}}} style={{...btnS(t.acc),fontSize:10}}><IC.Download/> Pull a Model</button>}/></div>;
-            if(allItems.length===0&&searchLower)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:12,textAlign:"center"}}>No models matching "{modelSearch}"</div>;
+            if(!visibleModels.length)return <div style={{...mmPanelS,padding:14}}><EmptyState t={t} font={font} compact icon={<IC.Layers/>} title="No installed models yet" hint="Pull a model from Ollama to get started." action={<button onClick={()=>{try{pullInputRef.current?.scrollIntoView({block:"center",behavior:"smooth"});pullInputRef.current?.focus();}catch{}}} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}><IC.Download/> Pull a Model</button>}/></div>;
+            if(allItems.length===0&&searchLower)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"center"}}>No models matching "{modelSearch}"</div>;
             return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:16}}>
-              <div style={{fontSize:11,color:t.mut,textTransform:"uppercase",letterSpacing:.7,margin:"0 2px 7px",display:"flex",alignItems:"center",gap:7}}>
-                <span style={{opacity:.82}}>{famEmoji[fam]||"🤖"}</span><span style={{fontWeight:900}}>{fam}</span><span style={{opacity:.6}}>{items.length}</span>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,margin:"0 2px 7px",display:"flex",alignItems:"center",gap:7}}>
+                <span style={{opacity:.82}}>{famEmoji[fam]||"🤖"}</span><span style={{fontWeight:700}}>{fam}</span><span style={{opacity:.6}}>{items.length}</span>
               </div>
               {items.map(({m,name,tag})=>{
                 const sc=szCol(tag);const sel=modelParamsOpen===m;
@@ -6261,26 +6450,26 @@ function HyprChat(){
                 const diskSz=md.size?fmtSize(md.size):"";
                 const caps=capTags(m);
                 return <div key={m} onClick={()=>{const newSel=sel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);setFixTemplateMsg(null);setFixTemplateFamily("");if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
-                  style={{display:"flex",alignItems:"center",gap:12,padding:"13px 14px",borderRadius:8,marginBottom:7,cursor:"pointer",background:sel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${sel?t.acc:t.brd}${sel?"55":"18"}`,transition:"all .15s",boxShadow:sel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-                  <span style={{fontSize:18,flexShrink:0,width:24,textAlign:"center"}}>{icon(name)}</span>
+                  style={{display:"flex",alignItems:"center",gap:12,padding:"13px 14px",borderRadius:"var(--hc-radius)",marginBottom:7,cursor:"pointer",background:sel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${sel?t.acc:t.brd}${sel?"55":"18"}`,transition:"all .15s",boxShadow:sel?`inset 3px 0 0 ${t.acc}`:"none"}}>
+                  <span style={{fontSize:"var(--hc-text-title)",flexShrink:0,width:24,textAlign:"center"}}>{icon(name)}</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <span style={{fontSize:14,fontWeight:800,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.25}}>{name}</span>
+                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.25}}>{name}</span>
                       {m.startsWith("hf.co/")&&<span style={mmChipS(t.warm)}>HF</span>}
                       {hasCustom&&<div style={{width:6,height:6,borderRadius:"50%",background:t.acc,flexShrink:0}} title="Custom parameters"/>}
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:6,marginTop:5,flexWrap:"wrap"}}>
-                      {paramSz&&<span style={{fontSize:11,color:sc,fontWeight:800}}>{paramSz}</span>}
-                      {!paramSz&&<span style={{fontSize:11,color:sc,fontWeight:800}}>{tag}</span>}
-                      {quant&&(()=>{const qc=quantColor(quant);return <span style={{...mmChipS(qc),fontSize:10,padding:"2px 7px"}}>{quant}</span>;})()}
-                      {diskSz&&<span style={{fontSize:10,color:t.mut,opacity:.85}}>{diskSz}</span>}
+                      {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:600}}>{paramSz}</span>}
+                      {!paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:600}}>{tag}</span>}
+                      {quant&&(()=>{const qc=quantColor(quant);return <span style={{...mmChipS(qc),fontSize:"var(--hc-text-secondary)",padding:"2px 7px"}}>{quant}</span>;})()}
+                      {diskSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.85}}>{diskSz}</span>}
                     </div>
                     {caps.length>0&&<div style={{display:"flex",gap:3,marginTop:4,flexWrap:"wrap"}}>
-                      {caps.slice(0,3).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:10,padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
+                      {caps.slice(0,3).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:"var(--hc-text-secondary)",padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
                     </div>}
                   </div>
                   <button onClick={e=>{e.stopPropagation();deleteModel(m);}} title="Delete model" style={{...mmIconBtnS(t.err),opacity:.35,background:"transparent",borderColor:"transparent"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.35}><IC.Trash/></button>
-                  <span style={{fontSize:13,color:sel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
+                  <span style={{fontSize:"var(--hc-text-control)",color:sel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
                 </div>;
               })}
             </div>);
@@ -6297,12 +6486,12 @@ function HyprChat(){
               <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
                 <div style={{minWidth:isMobile?0:220,flex:"1 1 260px"}}>
                   <div style={mmKickerS}>Ollama pull</div>
-                  <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4}}>Pull Ollama model</div>
-                  <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Install a model by name, then tune its overrides from the inventory list.</div>
+                  <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.text,marginTop:4}}>Pull Ollama model</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.45}}>Install a model by name, then tune its overrides from the inventory list.</div>
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center",flex:"1 1 340px",minWidth:isMobile?0:280,flexWrap:isMobile?"wrap":"nowrap"}}>
-                  <input ref={pullInputRef} value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,minWidth:180,fontSize:13,padding:"9px 11px",background:t.bgDeep}}/>
-                  <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"9px 14px",fontSize:12,flexShrink:0,opacity:pullName.trim()?1:.55}}><IC.Download/> Pull</button>
+                  <input ref={pullInputRef} value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,minWidth:180,fontSize:"var(--hc-text-control)",padding:"9px 11px",background:t.bgDeep}}/>
+                  <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"9px 14px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:pullName.trim()?1:.55}}><IC.Download/> Pull</button>
                 </div>
               </div>
             </div>
@@ -6310,8 +6499,8 @@ function HyprChat(){
               <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:18,flexWrap:"wrap"}}>
                 <div>
                   <div style={mmKickerS}>Defaults</div>
-                  <div style={{fontSize:20,fontWeight:900,color:t.text,marginTop:4}}>Global model behavior</div>
-                  <div style={{fontSize:12,color:t.mut,marginTop:5,maxWidth:520,lineHeight:1.5}}>Applied to every model unless that model has its own override. Select a model from the inventory to tune context and sampling individually.</div>
+                  <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,marginTop:4}}>Global model behavior</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,maxWidth:520,lineHeight:1.5}}>Applied to every model unless that model has its own override. Select a model from the inventory to tune context and sampling individually.</div>
                 </div>
                 <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
                   <span style={mmChipS(t.acc)}>{models.filter(m=>!isCloudModelName(m)).length} installed</span>
@@ -6324,22 +6513,22 @@ function HyprChat(){
             ].map(([lbl,type,min,max,step,val,setter,fmt,l1,l2,l3,tipKey])=>
               <div key={lbl} style={{...mmPanelS,padding:"14px 16px",marginBottom:12}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
-                  <span style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.6,fontWeight:900}}>{lbl} {tipKey&&<Tip k={tipKey} t={t}/>}</span>
-                  <span style={{fontSize:16,fontWeight:700,color:t.acc,fontVariantNumeric:"tabular-nums"}}>{fmt(val)}</span>
+                  <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl} {tipKey&&<Tip k={tipKey} t={t}/>}</span>
+                  <span style={{fontSize:"var(--hc-text-reading)",fontWeight:700,color:t.acc,fontVariantNumeric:"tabular-nums"}}>{fmt(val)}</span>
                 </div>
                 <input type="range" min={min} max={max} step={step} value={val} onChange={e=>setter(e.target.value)} style={{width:"100%",accentColor:t.acc,cursor:"pointer",height:6}}/>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
               </div>
             )}
             </div>
             <div style={{...mmPanelS,padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12}}>
               <div>
                 <div style={mmKickerS}>Next step</div>
-                <div style={{fontSize:12,color:t.dim,marginTop:5,lineHeight:1.5}}>Select an installed model to set its context window, tool template, and per-model sampling overrides.</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:5,lineHeight:1.5}}>Select an installed model to set its context window, tool template, and per-model sampling overrides.</div>
               </div>
               <div>
                 <div style={mmKickerS}>Global context</div>
-                <div style={{fontSize:18,fontWeight:900,color:t.acc,marginTop:5}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx}</div>
+                <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.acc,marginTop:5}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx}</div>
                 <div style={mmMetaS}>Configured from Settings</div>
               </div>
             </div>
@@ -6381,13 +6570,13 @@ function HyprChat(){
               }
               setFixingTemplate(false);
             };
-            return <div style={{maxWidth:900,animation:"fadeIn .2s"}}>
+            return <div className="hc-reveal" style={{maxWidth:900}}>
               {/* Model header */}
               <div style={{...mmPanelStrongS,padding:"18px 20px",marginBottom:14,display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-                <span style={{fontSize:28,width:40,height:40,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.acc}10`,border:`1px solid ${t.acc}22`,flexShrink:0}}>{icon(name)}</span>
+                <span style={{fontSize:28,width:40,height:40,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.acc}10`,border:`1px solid ${t.acc}22`,flexShrink:0}}>{icon(name)}</span>
                 <div style={{flex:1,minWidth:220}}>
                   <div style={mmKickerS}>Installed model</div>
-                  <div style={{fontSize:20,fontWeight:900,color:t.text,marginTop:3,wordBreak:"break-word"}}>{name}</div>
+                  <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,marginTop:3,wordBreak:"break-word"}}>{name}</div>
                   <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:7}}>
                     <span style={mmChipS(sc)}>{tag}</span>
                     {quant&&<span style={mmChipS(quantColor(quant))}>{quant}</span>}
@@ -6396,44 +6585,44 @@ function HyprChat(){
                   </div>
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
-                  <button onClick={()=>useModelFromManager(m)} style={{...btnS(t.acc),padding:"8px 16px",fontSize:12,fontWeight:900}}>Use Model</button>
+                  <button onClick={()=>useModelFromManager(m)} style={{...btnS(t.acc),padding:"8px 16px",fontSize:"var(--hc-text-control)",fontWeight:700}}>Use Model</button>
                   <button onClick={()=>deleteModel(m)} title="Delete model" style={mmIconBtnS(t.err)}><IC.Trash/></button>
                 </div>
               </div>
               {/* Tool calling template fix */}
               <details style={{...mmPanelS,marginBottom:14,padding:"0 14px"}}>
-                <summary style={{fontSize:12,fontWeight:900,color:t.warm,cursor:"pointer",padding:"12px 0",display:"flex",alignItems:"center",gap:7}}>🔧 Advanced · Tool Calling Template</summary>
-                <div style={{fontSize:11,color:t.mut,margin:"0 0 12px",lineHeight:1.5}}>Apply a chat template so this model can use tools. This is mainly for custom GGUF models.</div>
+                <summary style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.warm,cursor:"pointer",padding:"12px 0",display:"flex",alignItems:"center",gap:7}}>🔧 Advanced · Tool Calling Template</summary>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,margin:"0 0 12px",lineHeight:1.5}}>Apply a chat template so this model can use tools. This is mainly for custom GGUF models.</div>
                 <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:fixTemplateMsg?10:0}}>
                   <select value={effectiveFamily} onChange={e=>setFixTemplateFamily(e.target.value)}
-                    style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:12,flex:1,minWidth:160,outline:"none",cursor:"pointer"}}>
+                    style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",flex:1,minWidth:160,cursor:"pointer"}}>
                     {TEMPLATE_OPTIONS.map(([k,l])=><option key={k} value={k}>{l}</option>)}
                   </select>
                   <button onClick={applyTemplate} disabled={fixingTemplate}
-                    style={{...btnS(t.warm),padding:"7px 16px",fontSize:12,flexShrink:0,opacity:fixingTemplate?0.6:1}}>
+                    style={{...btnS(t.warm),padding:"7px 16px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:fixingTemplate?0.6:1}}>
                     {fixingTemplate?"Applying...":"Apply Template"}
                   </button>
                 </div>
-                {fixTemplateMsg&&<div style={{fontSize:11,color:fixTemplateMsg.ok?t.ok:t.err,padding:"6px 10px",background:fixTemplateMsg.ok?`${t.ok}12`:`${t.err}12`,borderRadius:7,border:`1px solid ${fixTemplateMsg.ok?t.ok:t.err}33`}}>{fixTemplateMsg.text}</div>}
+                {fixTemplateMsg&&<div style={{fontSize:"var(--hc-text-secondary)",color:fixTemplateMsg.ok?t.ok:t.err,padding:"6px 10px",background:fixTemplateMsg.ok?`${t.ok}12`:`${t.err}12`,borderRadius:"var(--hc-radius)",border:`1px solid ${fixTemplateMsg.ok?t.ok:t.err}33`}}>{fixTemplateMsg.text}</div>}
               </details>
               {/* Info strip */}
               {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:14}}>
-                {paramSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Parameters</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{paramSz}</div></div>}
-                {diskSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Disk Size</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{diskSz}</div></div>}
-                {family&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Family</div><div style={{fontSize:15,fontWeight:900,color:t.text,textTransform:"capitalize",marginTop:4}}>{family}</div></div>}
-                {modifiedAt&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Added</div><div style={{fontSize:13,fontWeight:800,color:t.dim,marginTop:4}}>{modifiedAt}</div></div>}
+                {paramSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Parameters</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{paramSz}</div></div>}
+                {diskSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Disk Size</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{diskSz}</div></div>}
+                {family&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Family</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize",marginTop:4}}>{family}</div></div>}
+                {modifiedAt&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Added</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.dim,marginTop:4}}>{modifiedAt}</div></div>}
               </div>}
               {/* Modelfile viewer */}
               <div style={{...mmPanelS,marginBottom:14,padding:"12px 14px"}}>
-                <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.dim,cursor:"pointer",fontSize:12,padding:0,display:"flex",alignItems:"center",gap:6,marginBottom:showModelfile?10:0,fontWeight:800}}>
+                <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.dim,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,display:"flex",alignItems:"center",gap:6,marginBottom:showModelfile?10:0,fontWeight:600}}>
                   <span style={{transition:"transform .2s",transform:showModelfile?"rotate(90deg)":"none",display:"inline-block"}}>›</span>
                   {modelInfoLoading&&!info.modelfile?"Loading modelfile...":"View Modelfile"}
                 </button>
-                {showModelfile&&<pre style={{background:t.bgDeep,border:`1px solid ${t.brd}33`,borderRadius:10,padding:"12px 14px",fontSize:11,color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:260,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
+                {showModelfile&&<pre style={{background:t.bgDeep,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:"12px 14px",fontSize:"var(--hc-text-secondary)",color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:260,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
               </div>
               {/* Parameter sliders */}
               <div style={{...mmSectionTitleS,marginTop:18}}>Generation overrides</div>
-              <div style={{fontSize:12,color:t.mut,marginBottom:12}}>Leave blank to inherit global defaults.</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:12}}>Leave blank to inherit global defaults.</div>
               {[
                 ["temperature","Temperature","0","2","0.05","Precise","Balanced","Creative"],
                 ["top_p","Top-P","0.1","1","0.05","Focused","Balanced","Diverse"],
@@ -6443,16 +6632,16 @@ function HyprChat(){
                 const numVal=isEmpty?parseFloat(key==="temperature"?defaultTemp:key==="top_p"?defaultTopP:"1.1"):parseFloat(raw);
                 return <div key={key} style={{...mmPanelS,padding:"13px 14px",marginBottom:10}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <span style={{fontSize:12,color:isEmpty?t.mut:t.dim,textTransform:"uppercase",letterSpacing:.6,fontWeight:900}}>{lbl}</span>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:isEmpty?t.mut:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl}</span>
                     <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0,opacity:.7}}>reset</button>}
-                      <span style={{fontSize:15,fontWeight:900,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:54,textAlign:"right"}}>{isEmpty?"global":numVal.toFixed(2)}</span>
+                      {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,opacity:.7}}>reset</button>}
+                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:54,textAlign:"right"}}>{isEmpty?"global":numVal.toFixed(2)}</span>
                     </div>
                   </div>
                   <input type="range" min={min} max={max} step={step} value={numVal}
                     onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))}
                     style={{width:"100%",accentColor:isEmpty?t.mut:t.acc,cursor:"pointer",opacity:isEmpty?0.6:1,height:6}}/>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
                 </div>;
               })}
               {/* Top-K */}
@@ -6461,13 +6650,13 @@ function HyprChat(){
                   const key="top_k";const val=mp[key]||"";const isEmpty=val===""||val==="default";
                   return <div style={{...mmPanelS,padding:"13px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
                     <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-                      <span style={{fontSize:12,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:900}}>Top-K</span>
-                      {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0}}>reset</button>}
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:700}}>Top-K</span>
+                      {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>reset</button>}
                     </div>
                     <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))}
                       placeholder="Default" min="1" max="200" step="1"
-                      style={{...inputS,padding:"7px 10px",fontSize:13,color:isEmpty?t.mut:t.acc,width:"100%"}}/>
-                    <div style={{fontSize:10,color:t.mut,marginTop:5}}>Integer sample pool</div>
+                      style={{...inputS,padding:"7px 10px",fontSize:"var(--hc-text-control)",color:isEmpty?t.mut:t.acc,width:"100%"}}/>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5}}>Integer sample pool</div>
                   </div>;
                 })()}
               </div>
@@ -6478,23 +6667,23 @@ function HyprChat(){
                   const effectiveCtx=isDefault?numCtx:parseInt(ctxVal);
                   return <div>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                      <span style={{fontSize:12,color:t.dim,textTransform:"uppercase",letterSpacing:.6,fontWeight:900}}>Context Window <Tip k="num_ctx" t={t}/></span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>Context Window <Tip k="num_ctx" t={t}/></span>
                       <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        {!isDefault&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:0}}>reset to global</button>}
-                        <span style={{fontSize:11,color:isDefault?t.mut:t.acc,fontWeight:600}}>{isDefault?"global default":""}</span>
+                        {!isDefault&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>reset to global</button>}
+                        <span style={{fontSize:"var(--hc-text-secondary)",color:isDefault?t.mut:t.acc,fontWeight:600}}>{isDefault?"global default":""}</span>
                       </div>
                     </div>
                     <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                      {[4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:v===numCtx?"":String(v)}}))} style={{padding:"6px 14px",borderRadius:7,border:`1px solid ${effectiveCtx===v?t.acc:t.brd}44`,background:effectiveCtx===v?`${t.acc}22`:t.bgDeep,color:effectiveCtx===v?t.acc:t.dim,fontFamily:font,fontSize:12,cursor:"pointer",fontWeight:effectiveCtx===v?700:400}}>
+                      {[4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:v===numCtx?"":String(v)}}))} style={{padding:"6px 14px",borderRadius:"var(--hc-radius)",border:`1px solid ${effectiveCtx===v?t.acc:t.brd}44`,background:effectiveCtx===v?`${t.acc}22`:t.bgDeep,color:effectiveCtx===v?t.acc:t.dim,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:effectiveCtx===v?700:400}}>
                         {v>=1024?`${(v/1024).toFixed(0)}K`:v}
                       </button>)}
                     </div>
                     <input aria-label="Model context tokens" type="number" min="1" step="1" value={isDefault?"":ctxVal} placeholder={`Global: ${numCtx}`} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:e.target.value}}))} style={{...inputS,marginTop:8}}/>
-                    {effectiveCtx>0&&<div style={{fontSize:11,color:isDefault?t.mut:t.acc,marginTop:4,fontWeight:600}}>{effectiveCtx>=1024?`${(effectiveCtx/1024).toFixed(0)}K`:effectiveCtx} tokens{isDefault?" (from Settings)":""}</div>}
+                    {effectiveCtx>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:isDefault?t.mut:t.acc,marginTop:4,fontWeight:600}}>{effectiveCtx>=1024?`${(effectiveCtx/1024).toFixed(0)}K`:effectiveCtx} tokens{isDefault?" (from Settings)":""}</div>}
                   </div>;
                 })()}
               </div>
-              {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:12,width:"100%",justifyContent:"center",padding:"8px 16px"}}>Reset All to Defaults</button>}
+              {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",width:"100%",justifyContent:"center",padding:"8px 16px"}}>Reset All to Defaults</button>}
             </div>;
           })()
         }
@@ -6505,29 +6694,29 @@ function HyprChat(){
     {modelsTab==="hf"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
 
       {/* Left: search + installed Hugging Face models */}
-      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":`1px solid ${t.brd}20`,display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}66`,...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}20`,flexShrink:0}:{})}}>
-        <div style={{padding:"12px 12px 10px",borderBottom:`1px solid ${t.brd}18`,flexShrink:0}}>
+      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}F5`,...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
+        <div style={{padding:"12px 12px 10px",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
             <div>
               <div style={mmKickerS}>Hugging Face</div>
-              <div style={{fontSize:13,fontWeight:900,color:t.text,marginTop:3}}>Search GGUF models</div>
+              <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:3}}>Search GGUF models</div>
             </div>
             <span style={mmChipS(t.warm)}>{hfModelCount} installed</span>
           </div>
         </div>
 
         <>
-        <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:`1px solid ${t.brd}16`}}>
+        <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)"}}>
           <div style={{display:"flex",gap:6}}>
             <input value={hfSearch} onChange={e=>setHfSearch(e.target.value)} onKeyDown={e=>e.key==="Enter"&&hfDoSearch(hfSearch)}
-              placeholder="Search HuggingFace models..." style={{...inputS,flex:1,fontSize:13,padding:"9px 11px",background:t.bgDeep}}/>
-            <button onClick={()=>hfDoSearch(hfSearch)} disabled={hfLoading||!hfSearch.trim()} style={{...btnS(t.acc),padding:"7px 10px",flexShrink:0,opacity:(!hfLoading&&hfSearch.trim())?1:.55}}><IC.Search/></button>
+              placeholder="Search HuggingFace models..." style={{...inputS,flex:1,fontSize:"var(--hc-text-control)",padding:"9px 11px",background:t.bgDeep}}/>
+            <button aria-label="Search" onClick={()=>hfDoSearch(hfSearch)} disabled={hfLoading||!hfSearch.trim()} style={{...btnS(t.acc),padding:"7px 10px",flexShrink:0,opacity:(!hfLoading&&hfSearch.trim())?1:.55}}><IC.Search/></button>
           </div>
-          <label style={{display:"flex",alignItems:"center",gap:6,marginTop:8,cursor:"pointer",fontSize:11,color:t.mut}}>
+          <label style={{display:"flex",alignItems:"center",gap:6,marginTop:8,cursor:"pointer",fontSize:"var(--hc-text-secondary)",color:t.mut}}>
             <input type="checkbox" checked={hfGgufOnly} onChange={e=>setHfGgufOnly(e.target.checked)} style={{accentColor:t.acc}}/>
             GGUF only (Ollama-compatible)
           </label>
-          {!hfResults.length&&!hfLoading&&<div style={{marginTop:10,fontSize:11,color:t.mut,lineHeight:1.7}}>
+          {!hfResults.length&&!hfLoading&&<div style={{marginTop:10,fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.7}}>
             Try: {["Llama 3","Qwen2.5","Mistral","Gemma","Phi-3"].map((s,i)=><span key={s}>
               <span style={{color:t.acc,cursor:"pointer"}} onClick={()=>{setHfSearch(s);hfDoSearch(s);}}>{s}</span>
               {i<4?" · ":""}
@@ -6535,7 +6724,7 @@ function HyprChat(){
           </div>}
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"10px 12px 14px"}}>
-          {hfLoading&&<div style={{display:"flex",justifyContent:"center",padding:24,gap:5,alignItems:"center",color:t.mut,fontSize:11}}>
+          {hfLoading&&<div style={{display:"flex",justifyContent:"center",padding:24,gap:5,alignItems:"center",color:t.mut,fontSize:"var(--hc-text-secondary)"}}>
             <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>Searching...
           </div>}
           {hfResults.map(m=>{
@@ -6550,20 +6739,20 @@ function HyprChat(){
               if(b.match(/abliterated|uncensored|unfiltered|dolphin/))caps.push({label:"Uncensored",emoji:"🔓",color:"#ef4444"});
               if(b.match(/instruct|chat|[\-:]it(?:$|[\-:])/))caps.push({label:"Instruct",emoji:"📝",color:"#64748b"});
               return caps;})();
-            return <div key={m.id} onClick={()=>hfSelectModel(m)} style={{padding:"13px 14px",borderRadius:8,marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-              <div style={{fontSize:10,color:t.mut,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{author}/</div>
-              <div style={{fontSize:14,fontWeight:800,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:6}}>{name||m.id}</div>
+            return <div key={m.id} onClick={()=>hfSelectModel(m)} style={{padding:"13px 14px",borderRadius:"var(--hc-radius)",marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{author}/</div>
+              <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:6}}>{name||m.id}</div>
               <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-                <span style={{fontSize:10,color:t.mut}}>⬇ {m.downloads>999?`${(m.downloads/1000).toFixed(1)}k`:m.downloads}</span>
-                <span style={{fontSize:10,color:t.mut}}>♥ {m.likes}</span>
-                {hfCaps.slice(0,4).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:10,padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>⬇ {m.downloads>999?`${(m.downloads/1000).toFixed(1)}k`:m.downloads}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>♥ {m.likes}</span>
+                {hfCaps.slice(0,4).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:"var(--hc-text-secondary)",padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
               </div>
             </div>;
           })}
           {(()=>{
             const hfModels=models.filter(m=>m.startsWith("hf.co/"));
             if(!hfModels.length)return null;
-            return <div style={{marginTop:hfResults.length?16:4,paddingTop:12,borderTop:`1px solid ${t.brd}18`}}>
+            return <div style={{marginTop:hfResults.length?16:4,paddingTop:12,borderTop:"1px solid var(--hc-line-subtle)"}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,margin:"0 2px 8px"}}>
                 <span style={mmKickerS}>Installed from Hugging Face</span>
                 <span style={mmMetaS}>{hfModels.length} model{hfModels.length===1?"":"s"}</span>
@@ -6579,19 +6768,19 @@ function HyprChat(){
                 const repoName=repoBase.split("/").pop()||repoBase;
                 const caps=capTags(repoName);
                 return <div key={m} onClick={()=>{const newSel=isSel?null:m;setModelParamsOpen(newSel);setHfSelected(null);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
-                  style={{padding:"11px 12px",borderRadius:8,marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}38`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",display:"flex",alignItems:"center",gap:10,boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-                  <span style={{fontSize:17,flexShrink:0,width:22,textAlign:"center"}}>🤗</span>
+                  style={{padding:"11px 12px",borderRadius:"var(--hc-radius)",marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}38`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",display:"flex",alignItems:"center",gap:10,boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
+                  <span style={{fontSize:"var(--hc-text-title)",flexShrink:0,width:22,textAlign:"center"}}>🤗</span>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:10,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoBase}</div>
-                    <div style={{fontSize:13,fontWeight:900,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{repoName}</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoBase}</div>
+                    <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{repoName}</div>
                     <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",marginTop:5}}>
-                      {quant&&<span style={{...mmChipS(quantColor(quant)),fontSize:9,padding:"2px 6px"}}>{quant}</span>}
-                      {paramSz&&<span style={{fontSize:9,color:t.mut}}>{paramSz}</span>}
-                      {diskSz&&<span style={{fontSize:9,color:t.mut}}>{diskSz}</span>}
-                      {caps.slice(0,2).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:9,padding:"2px 6px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
+                      {quant&&<span style={{...mmChipS(quantColor(quant)),fontSize:"var(--hc-text-secondary)",padding:"2px 6px"}}>{quant}</span>}
+                      {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{paramSz}</span>}
+                      {diskSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{diskSz}</span>}
+                      {caps.slice(0,2).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:"var(--hc-text-secondary)",padding:"2px 6px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
                     </div>
                   </div>
-                  <span style={{fontSize:13,color:isSel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
+                  <span style={{fontSize:"var(--hc-text-control)",color:isSel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
                 </div>;
               })}
             </div>;
@@ -6619,12 +6808,12 @@ function HyprChat(){
               const repoPath=m.replace("hf.co/","");
               const repoName=repoPath.split("/").pop()?.split(":")[0]||m;
               const sc=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
-              return <div style={{maxWidth:900,animation:"fadeIn .2s"}}>
+              return <div className="hc-reveal" style={{maxWidth:900}}>
                 <div style={{...mmPanelStrongS,padding:"18px 20px",marginBottom:14,display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-                  <span style={{fontSize:26,width:40,height:40,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,flexShrink:0}}>🤗</span>
+                  <span style={{fontSize:26,width:40,height:40,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,flexShrink:0}}>🤗</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={mmKickerS}>{repoPath.split(":")[0]}</div>
-                    <div style={{fontSize:20,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:3}}>{repoName}</div>
+                    <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:3}}>{repoName}</div>
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:7}}>
                       <span style={mmChipS(t.warm)}>HuggingFace</span>
                       {quant&&<span style={mmChipS(quantColor(quant))}>{quant}</span>}
@@ -6634,40 +6823,40 @@ function HyprChat(){
                   </div>
                   <div style={{display:"flex",flexDirection:"column",gap:7,alignItems:"flex-end",flexShrink:0}}>
                     <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>useModelFromManager(m)} style={{...btnS(t.acc),padding:"8px 16px",fontSize:12,fontWeight:900}}>Use Model</button>
+                      <button onClick={()=>useModelFromManager(m)} style={{...btnS(t.acc),padding:"8px 16px",fontSize:"var(--hc-text-control)",fontWeight:700}}>Use Model</button>
                       <button onClick={()=>deleteModel(m)} title="Delete model" style={mmIconBtnS(t.err)}><IC.Trash/></button>
                     </div>
-                    <button onClick={e=>{e.stopPropagation();patchToolModel(m,"This model can now use tools.");}} disabled={!!makingToolModel} style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}18`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}44`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"6px 12px",borderRadius:7,fontSize:10,fontWeight:900,whiteSpace:"nowrap",letterSpacing:.2,transition:"all .15s"}}>{makingToolModel===m?"Patching...":"Enable Tool Calling"}</button>
+                    <button onClick={e=>{e.stopPropagation();patchToolModel(m,"This model can now use tools.");}} disabled={!!makingToolModel} style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}18`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}44`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"6px 12px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontWeight:700,whiteSpace:"nowrap",letterSpacing:.2,transition:"all .15s"}}>{makingToolModel===m?"Patching...":"Enable Tool Calling"}</button>
                   </div>
                 </div>
                 {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:14}}>
-                  {paramSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Parameters</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{paramSz}</div></div>}
-                  {diskSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Disk Size</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{diskSz}</div></div>}
-                  {family&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Family</div><div style={{fontSize:15,fontWeight:900,color:t.text,textTransform:"capitalize",marginTop:4}}>{family}</div></div>}
-                  {modifiedAt&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Added</div><div style={{fontSize:13,fontWeight:800,color:t.dim,marginTop:4}}>{modifiedAt}</div></div>}
+                  {paramSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Parameters</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{paramSz}</div></div>}
+                  {diskSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Disk Size</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{diskSz}</div></div>}
+                  {family&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Family</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize",marginTop:4}}>{family}</div></div>}
+                  {modifiedAt&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Added</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.dim,marginTop:4}}>{modifiedAt}</div></div>}
                 </div>}
                 <div style={{...mmPanelS,marginBottom:14,padding:"12px 14px"}}>
-                  <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.dim,cursor:"pointer",fontSize:12,padding:0,display:"flex",alignItems:"center",gap:6,marginBottom:showModelfile?8:0,fontWeight:800}}>
+                  <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.dim,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,display:"flex",alignItems:"center",gap:6,marginBottom:showModelfile?8:0,fontWeight:600}}>
                     <span style={{transition:"transform .2s",transform:showModelfile?"rotate(90deg)":"none",display:"inline-block"}}>›</span>
                     {modelInfoLoading&&!info.modelfile?"Loading modelfile...":"View Modelfile"}
                   </button>
-                  {showModelfile&&<pre style={{background:t.bgDeep,border:`1px solid ${t.brd}33`,borderRadius:8,padding:"10px 12px",fontSize:10,color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:200,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
+                  {showModelfile&&<pre style={{background:t.bgDeep,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:"10px 12px",fontSize:"var(--hc-text-secondary)",color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:200,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
                 </div>
                 <div style={{...mmSectionTitleS,marginTop:18}}>Generation overrides</div>
-                <div style={{fontSize:12,color:t.mut,marginBottom:12}}>Leave blank to inherit global defaults.</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:12}}>Leave blank to inherit global defaults.</div>
                 {[["temperature","Temperature","0","2","0.05","Precise","Balanced","Creative"],["top_p","Top-P","0.1","1","0.05","Focused","Balanced","Diverse"],["repeat_penalty","Repeat Penalty","1","2","0.05","None","Normal","Strong"]].map(([key,lbl,min,max,step,l1,l2,l3])=>{
                   const raw=mp[key]||"";const isEmpty=raw===""||raw==="default";
                   const numVal=isEmpty?parseFloat(key==="temperature"?defaultTemp:key==="top_p"?defaultTopP:"1.1"):parseFloat(raw);
                   return <div key={key} style={{...mmPanelS,padding:"13px 14px",marginBottom:10}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                      <span style={{fontSize:12,color:isEmpty?t.mut:t.dim,textTransform:"uppercase",letterSpacing:.6,fontWeight:900}}>{lbl}</span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:isEmpty?t.mut:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl}</span>
                       <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0,opacity:.7}}>reset</button>}
-                        <span style={{fontSize:15,fontWeight:900,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:54,textAlign:"right"}}>{isEmpty?"global":numVal.toFixed(2)}</span>
+                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,opacity:.7}}>reset</button>}
+                        <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:54,textAlign:"right"}}>{isEmpty?"global":numVal.toFixed(2)}</span>
                       </div>
                     </div>
                     <input type="range" min={min} max={max} step={step} value={numVal} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} style={{width:"100%",accentColor:isEmpty?t.mut:t.acc,cursor:"pointer",opacity:isEmpty?0.6:1}}/>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
                   </div>;
                 })}
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
@@ -6675,82 +6864,85 @@ function HyprChat(){
                     const val=mp[key]||"";const isEmpty=val===""||val==="default";
                     return <div key={key} style={{...mmPanelS,padding:"12px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                        <span style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:900}}>{lbl}</span>
-                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:9,padding:0}}>reset</button>}
+                        <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl}</span>
+                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>reset</button>}
                       </div>
-                      <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} placeholder="Default" min={min} max={max} step={step} style={{...inputS,padding:"5px 8px",fontSize:12,color:isEmpty?t.mut:t.acc,width:"100%"}}/>
-                      <div style={{fontSize:9,color:t.mut,marginTop:4}}>{desc}</div>
+                      <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} placeholder="Default" min={min} max={max} step={step} style={{...inputS,padding:"5px 8px",fontSize:"var(--hc-text-control)",color:isEmpty?t.mut:t.acc,width:"100%"}}/>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>{desc}</div>
                     </div>;
                   })}
                 </div>
-                {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:10,width:"100%",justifyContent:"center"}}>Reset All to Defaults</button>}
+                {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",width:"100%",justifyContent:"center"}}>Reset All to Defaults</button>}
               </div>;
             })()}
           </div>
         :!hfSelected?<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{...mmPanelS,padding:"28px 34px",textAlign:"center",maxWidth:380}}>
             <span style={{fontSize:32}}>🤗</span>
-            <div style={{fontSize:14,fontWeight:900,color:t.text,marginTop:10}}>Search HuggingFace</div>
-            <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.5}}>Select a GGUF model to inspect files, compatibility, and README details.</div>
+            <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:10}}>Search HuggingFace</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.5}}>Select a GGUF model to inspect files, compatibility, and README details.</div>
           </div>
         </div>:
         <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
           {/* Model header */}
-          <div style={{padding:"16px 20px",flexShrink:0,borderBottom:`1px solid ${t.brd}20`,display:"flex",alignItems:"center",gap:12,background:`${t.surface}33`}}>
-            <span style={{fontSize:24,width:36,height:36,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,flexShrink:0}}>🤗</span>
+          <div style={{padding:"16px 20px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:12,background:`${t.surface}F5`}}>
+            <span style={{fontSize:24,width:36,height:36,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,flexShrink:0}}>🤗</span>
             <div style={{flex:1,minWidth:0}}>
               <div style={mmKickerS}>{hfSelected.id.split("/")[0]}/</div>
-              <div style={{fontSize:17,fontWeight:900,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:3}}>{hfSelected.id.split("/")[1]||hfSelected.id}</div>
+              <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:3}}>{hfSelected.id.split("/")[1]||hfSelected.id}</div>
             </div>
-            <div style={{display:"flex",gap:12,fontSize:10,color:t.mut,flexShrink:0,alignItems:"center"}}>
+            <div style={{display:"flex",gap:12,fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,alignItems:"center"}}>
               {hfModelInfo?.gguf_files?.length>0&&(()=>{
                 const total=hfModelInfo.gguf_files.reduce((a,f)=>a+(f.size||0),0);
-                return total>0?<span style={{fontWeight:700,color:t.warm,fontSize:11}}>{fmtSize(total)}</span>:null;
+                return total>0?<span style={{fontWeight:700,color:t.warm,fontSize:"var(--hc-text-secondary)"}}>{fmtSize(total)}</span>:null;
               })()}
               <span>⬇ {hfSelected.downloads>999?`${(hfSelected.downloads/1000).toFixed(1)}k`:hfSelected.downloads}</span>
               <span>♥ {hfSelected.likes}</span>
             </div>
           </div>
           {hfModelInfo&&(()=>{
-            const compat=hfCompatibilityReport(hfSelected,hfModelInfo,hfReadme,hfSelectedFiles);
+            const compat=hfReport;
             const c=compat.level==="bad"?t.err:compat.level==="warn"?(t.warm||"#eab308"):t.ok;
-            const icon=compat.level==="bad"?"⚠":compat.level==="warn"?"△":"✓";
-            const title=compat.level==="ok"?"No obvious Ollama compatibility flags":compat.level==="bad"?"Likely compatibility issue":"Possible compatibility issue";
+            const title=compat.level==="ok"?(hfSelectedFiles.length?"Looks good for this Ollama":"Pick a file to check it against this Ollama"):compat.level==="bad"?"Likely compatibility issue":"Possible compatibility issue";
             return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:`1px solid ${c}22`,background:`${c}0C`,display:"flex",gap:10,alignItems:"flex-start"}}>
-              <span style={{color:c,fontSize:13,fontWeight:900,lineHeight:"18px",flexShrink:0}}>{icon}</span>
+              <span style={{color:c,display:"flex",lineHeight:"18px",flexShrink:0,paddingTop:1}}>{compat.level==="ok"?<IC.Check/>:<IC.Alert/>}</span>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:11,fontWeight:800,color:c,letterSpacing:.2}}>Ollama Compatibility · {title}</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:c,letterSpacing:.2}}>Ollama Compatibility · {title}</div>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:5}}>
                   {compat.issues.length?compat.issues.map(issue=>{
                     const ic=issue.level==="bad"?t.err:issue.level==="warn"?(t.warm||"#eab308"):t.f1;
-                    return <span key={issue.label} title={issue.detail} style={{fontSize:9,color:ic,border:`1px solid ${ic}44`,background:`${ic}12`,borderRadius:6,padding:"2px 6px",fontWeight:700}}>{issue.label}</span>;
-                  }):<span style={{fontSize:10,color:t.mut}}>Metadata and README do not show common Ollama loader risks.</span>}
+                    return <span key={issue.label} title={issue.detail} style={{fontSize:"var(--hc-text-secondary)",color:ic,border:`1px solid ${ic}44`,background:`${ic}12`,borderRadius:"var(--hc-radius)",padding:"2px 6px",fontWeight:700}}>{issue.label}</span>;
+                  }):<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{hfCompatLoading?"Checking the file header and this Ollama's architectures…":"Metadata and README do not show common Ollama loader risks."}</span>}
                 </div>
               </div>
             </div>;
           })()}
           {/* Download bar — sticky top */}
           {hfSelectedFiles.length>0&&(()=>{
-            const compat=hfCompatibilityReport(hfSelected,hfModelInfo,hfReadme,hfSelectedFiles);
-            const risky=compat.level!=="ok";
+            const compat=hfReport;
+            const risky=compat.flagged;
             const c=compat.level==="bad"?t.err:compat.level==="warn"?(t.warm||"#eab308"):t.ok;
-            return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:`1px solid ${t.brd}18`,background:`${c}06`,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-              <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="Model name, e.g. llama3-q5" style={{...inputS,fontSize:11,padding:"7px 10px",width:220,flex:"none",background:t.bgDeep}}/>
-              <span style={{fontSize:9,color:t.mut,flexShrink:0}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</span>
-              {risky&&<span style={{fontSize:9,color:c,fontWeight:800,flexShrink:0}}>compatibility flagged</span>}
+            const busyHere=hfDownloadRepo===hfSelected?.id, busyElsewhere=!!hfDownloadRepo&&!busyHere;
+            return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)",background:`${c}06`,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="Model name, e.g. llama3-q5" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"7px 10px",width:220,flex:"none",background:t.bgDeep}}/>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</span>
+              {hfCompatLoading?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,display:"inline-flex",alignItems:"center",gap:6}}><Dots/> Resolving pull…</span>
+              :compat.pull?.resolved?<span title={compat.pull.pullName} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,flexShrink:0}}>Pulls {fmtPullBytes(compat.pull.modelBytes)} model{compat.pull.projectorBytes?` + ${fmtPullBytes(compat.pull.projectorBytes)} projector`:""} · tag {compat.pull.tag}</span>
+              :compat.pull?.tag?<span title={compat.pull.pullName} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>Pulls by tag {compat.pull.tag}</span>:null}
+              {risky&&<span style={{fontSize:"var(--hc-text-secondary)",color:c,fontWeight:600,flexShrink:0}}>compatibility flagged</span>}
               <div style={{flex:1}}/>
-              <button onClick={hfDownload} disabled={hfDownloading||!hfDownloadName.trim()} style={{...btnS(hfDownloading?t.mut:c),padding:"6px 14px",fontSize:11,flexShrink:0,opacity:hfDownloading?0.7:1}}>
-                <IC.Download/>{hfDownloading?"Queued":risky?"Download anyway":"Download"}
+              <button onClick={hfDownload} disabled={!!hfDownloadRepo||!hfDownloadName.trim()} style={{...btnS(hfDownloadRepo?t.mut:c),padding:"6px 14px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:hfDownloadRepo?0.7:1}}>
+                {busyHere?<Spinner size={12}/>:<IC.Download/>}{busyHere?"Downloading…":busyElsewhere?"Another download is running":risky?"Download anyway":"Download"}
               </button>
             </div>;
           })()}
           {/* Body: files left, readme right */}
           <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
             {/* Files + download */}
-            <div style={{width:isMobile?"100%":"clamp(280px,24vw,320px)",minWidth:isMobile?0:280,borderRight:isMobile?"none":`1px solid ${t.brd}18`,overflowY:"auto",padding:"16px 14px",background:`${t.bgDeep}33`,...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}18`,flexShrink:0}:{})}}>
+            <div style={{width:isMobile?"100%":"clamp(280px,24vw,320px)",minWidth:isMobile?0:280,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",overflowY:"auto",padding:"16px 14px",background:`${t.bgDeep}F5`,...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
               <div style={{...mmKickerS,marginBottom:10}}>GGUF Files</div>
-              {!hfModelInfo?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>Loading...</div>:
-              hfModelInfo.gguf_files.length===0?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>No GGUF files.</div>:
+              {!hfModelInfo?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>Loading...</div>:
+              hfModelInfo.gguf_files.length===0?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>No GGUF files.</div>:
               <>
                 {(()=>{
                   const groups=getPartGroups(hfModelInfo.gguf_files);
@@ -6761,14 +6953,14 @@ function HyprChat(){
                     const toggle=()=>{if(allSel)setHfSelectedFiles(p=>p.filter(n=>!files.map(f=>f.name).includes(n)));else setHfSelectedFiles(p=>[...new Set([...p,...files.map(f=>f.name)])]);};
                     const fname=isGroup?groupKey:files[0].name;
                     const ql=quantLabel(fname);const qc=quantColor(ql);
-                    return <div key={groupKey} onClick={toggle} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 10px",borderRadius:8,background:allSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${allSel?t.acc:t.brd}${allSel?"55":"18"}`,marginBottom:5,cursor:"pointer",transition:"all .12s"}}>
+                    return <div key={groupKey} onClick={toggle} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 10px",borderRadius:"var(--hc-radius)",background:allSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${allSel?t.acc:t.brd}${allSel?"55":"18"}`,marginBottom:5,cursor:"pointer",transition:"all .12s"}}>
                       <input type="checkbox" checked={allSel} onChange={toggle} onClick={e=>e.stopPropagation()} style={{accentColor:t.acc,flexShrink:0,marginTop:2}}/>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:2,flexWrap:"wrap"}}>
-                          {ql&&<span style={{fontSize:9,padding:"1px 6px",borderRadius:5,background:`${qc}20`,color:qc,fontWeight:700,border:`1px solid ${qc}44`,letterSpacing:.3,flexShrink:0}}>{ql}</span>}
-                          <span style={{fontSize:10,fontWeight:600,color:allSel?t.acc:t.text,wordBreak:"break-all",lineHeight:1.3}}>{fname}</span>
+                          {ql&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius-sm)",background:`${qc}20`,color:qc,fontWeight:700,border:`1px solid ${qc}44`,letterSpacing:.3,flexShrink:0}}>{ql}</span>}
+                          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:allSel?t.acc:t.text,wordBreak:"break-all",lineHeight:1.3}}>{fname}</span>
                         </div>
-                        <div style={{fontSize:9,color:t.mut}}>{isGroup?`${files.length} parts · ${fmtSize(totalSize)}`:fmtSize(files[0].size)}</div>
+                        <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{isGroup?`${files.length} parts · ${fmtSize(totalSize)}`:fmtSize(files[0].size)}</div>
                       </div>
                     </div>;
                   });
@@ -6778,9 +6970,9 @@ function HyprChat(){
             {/* README */}
             <div style={{flex:1,overflowY:"auto",padding:"18px 22px"}}>
               <div style={{...mmKickerS,marginBottom:12}}>README</div>
-              {hfReadmeLoading?<div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>Loading README...</div>:
-              hfReadme?<div style={{fontSize:12,lineHeight:1.7,color:t.dim}}><MDWrap>{md(hfReadme)}</MDWrap></div>:
-              <div style={{color:t.mut,fontSize:11,fontStyle:"italic"}}>No README available.</div>}
+              {hfReadmeLoading?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>Loading README...</div>:
+              hfReadme?<div style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.7,color:t.dim}}><MDWrap>{md(hfReadme)}</MDWrap></div>:
+              <div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>No README available.</div>}
             </div>
           </div>
         </div>}
@@ -6789,25 +6981,25 @@ function HyprChat(){
 
     {/* ── HYPRFIT TAB ── */}
     {modelsTab==="hyprfit"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
-      <div style={{width:isMobile?"100%":"clamp(340px,28vw,440px)",minWidth:isMobile?0:320,borderRight:isMobile?"none":`1px solid ${t.brd}20`,background:`${t.bgDeep}66`,overflowY:"auto",padding:"18px 18px 28px",boxSizing:"border-box",...(isMobile?{maxHeight:"45%",borderBottom:`1px solid ${t.brd}20`,flexShrink:0}:{})}}>
+      <div style={{width:isMobile?"100%":"clamp(340px,28vw,440px)",minWidth:isMobile?0:320,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",background:`${t.bgDeep}F5`,overflowY:"auto",padding:"18px 18px 28px",boxSizing:"border-box",...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
           <div>
             <div style={mmKickerS}>HyprFit</div>
-            <div style={{fontSize:18,fontWeight:900,color:t.text,marginTop:4}}>Hardware profile</div>
-            <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.45}}>Saved profile used for model fit and loadout estimates.</div>
+            <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.text,marginTop:4}}>Hardware profile</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.45}}>Saved profile used for model fit and loadout estimates.</div>
           </div>
           <div style={{display:"flex",gap:6}}>
             <button title="Refresh recommendations" onClick={()=>loadHyprfit(true)} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
             <button title="Rescan hardware" onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...mmIconBtnS(t.warm),opacity:hyprfitRescanning?0.6:1}}><IC.Activity/></button>
           </div>
         </div>
-        {!hyprfitProfile?<div style={{...mmPanelS,padding:20,color:t.mut,fontSize:12}}>Loading profile...</div>:<div style={{...mmPanelStrongS,padding:16}}>
+        {!hyprfitProfile?<div style={{...mmPanelS,padding:20,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading profile...</div>:<div style={{...mmPanelStrongS,padding:16}}>
           {[
             ["name","Profile name","text"],
             ["gpu_name","GPU label","text"],
           ].map(([key,label,type])=><label key={key} style={{display:"block",marginBottom:11}}>
-            <span style={{display:"block",fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>{label}</span>
-            <input type={type} value={hyprfitProfile[key]||""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:e.target.value}))} style={{...inputS,fontSize:12,padding:"8px 10px",background:t.bgDeep}}/>
+            <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>{label}</span>
+            <input type={type} value={hyprfitProfile[key]||""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:e.target.value}))} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",background:t.bgDeep}}/>
           </label>)}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
             {[
@@ -6817,25 +7009,25 @@ function HyprChat(){
               ["max_loaded_models","Warm models",1,32,1],
               ["num_parallel","Parallel slots",1,16,1],
             ].map(([key,label,min,max,step])=><label key={key} style={{display:"block",marginBottom:10}}>
-              <span style={{display:"block",fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>{label}</span>
-              <input type="number" min={min} max={max} step={step} value={hyprfitProfile[key]??""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:Number(e.target.value)}))} style={{...inputS,fontSize:12,padding:"8px 10px",background:t.bgDeep}}/>
+              <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>{label}</span>
+              <input type="number" min={min} max={max} step={step} value={hyprfitProfile[key]??""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:Number(e.target.value)}))} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",background:t.bgDeep}}/>
             </label>)}
             <label style={{display:"block",marginBottom:10}}>
-              <span style={{display:"block",fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,marginBottom:4}}>KV cache</span>
-              <select value={hyprfitProfile.kv_cache_type||"q8_0"} onChange={e=>setHyprfitProfile(p=>({...p,kv_cache_type:e.target.value}))} style={{...inputS,fontSize:12,padding:"8px 10px",background:t.bgDeep}}>
+              <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>KV cache</span>
+              <select value={hyprfitProfile.kv_cache_type||"q8_0"} onChange={e=>setHyprfitProfile(p=>({...p,kv_cache_type:e.target.value}))} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",background:t.bgDeep}}>
                 <option value="q8_0">q8_0</option>
                 <option value="f16">f16</option>
                 <option value="q4_0">q4_0</option>
               </select>
             </label>
           </div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:t.dim,cursor:"pointer",margin:"2px 0 14px"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim,cursor:"pointer",margin:"2px 0 14px"}}>
             <input type="checkbox" checked={!!hyprfitProfile.sched_spread} onChange={e=>setHyprfitProfile(p=>({...p,sched_spread:e.target.checked}))} style={{accentColor:t.acc}}/>
             Spread model across visible GPUs
           </label>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-            <button onClick={saveHyprfitProfile} disabled={hyprfitSaving} style={{...btnS(t.ok),justifyContent:"center",padding:"9px 10px",fontSize:12,opacity:hyprfitSaving?0.65:1}}>{hyprfitSaving?"Saving...":"Save Profile"}</button>
-            <button onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...btnS(t.warm),justifyContent:"center",padding:"9px 10px",fontSize:12,opacity:hyprfitRescanning?0.65:1}}><IC.Activity/> {hyprfitRescanning?"Scanning":"Rescan Hardware"}</button>
+            <button onClick={saveHyprfitProfile} disabled={hyprfitSaving} style={{...btnS(t.ok),justifyContent:"center",padding:"9px 10px",fontSize:"var(--hc-text-control)",opacity:hyprfitSaving?0.65:1}}>{hyprfitSaving?"Saving...":"Save Profile"}</button>
+            <button onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...btnS(t.warm),justifyContent:"center",padding:"9px 10px",fontSize:"var(--hc-text-control)",opacity:hyprfitRescanning?0.65:1}}><IC.Activity/> {hyprfitRescanning?"Scanning":"Rescan Hardware"}</button>
           </div>
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:12}}>
             <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.backend||"unknown"}</span>
@@ -6854,7 +7046,7 @@ function HyprChat(){
         </div>}
         {hyprfit?.assumptions?.length>0&&<div style={{...mmPanelS,padding:"12px 14px",marginTop:14}}>
           <div style={{...mmKickerS,marginBottom:7}}>Estimate notes</div>
-          {hyprfit.assumptions.map((a,i)=><div key={i} style={{fontSize:11,color:t.mut,lineHeight:1.5,marginBottom:i===hyprfit.assumptions.length-1?0:5}}>{a}</div>)}
+          {hyprfit.assumptions.map((a,i)=><div key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.5,marginBottom:i===hyprfit.assumptions.length-1?0:5}}>{a}</div>)}
         </div>}
       </div>
       <div style={{flex:1,overflowY:"auto",padding:"22px 28px 38px"}}>
@@ -6884,8 +7076,8 @@ function HyprChat(){
             <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,flexWrap:"wrap"}}>
               <div>
                 <div style={mmKickerS}>Model loadout</div>
-                <div style={{fontSize:22,fontWeight:900,color:t.text,marginTop:4}}>HyprFit recommendations</div>
-                <div style={{fontSize:12,color:t.mut,marginTop:5,lineHeight:1.5,maxWidth:660}}>{activeMeta?.summary||"Ranked for the saved hardware profile, current Ollama inventory, warm-model budget, and estimated context memory."}</div>
+                <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,marginTop:4}}>HyprFit recommendations</div>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.5,maxWidth:660}}>{activeMeta?.summary||"Ranked for the saved hardware profile, current Ollama inventory, warm-model budget, and estimated context memory."}</div>
               </div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
                 <span style={mmChipS(t.acc)}>{hyprfit?.profile?.total_vram_gb??0} GB VRAM</span>
@@ -6900,15 +7092,15 @@ function HyprChat(){
               {cats.map(c=>{
                 const active=c.id===activeCat;
                 const count=c.count??(grouped[c.id]||[]).length;
-                return <button key={c.id} onClick={()=>setHyprfitCategory(c.id)} style={{...btnS(active?t.acc:t.mut,active?`${t.acc}1A`:`${t.surface}44`),padding:"7px 10px",fontSize:10,borderColor:active?`${t.acc}66`:`${t.brd}22`,whiteSpace:"nowrap"}}>
+                return <button key={c.id} onClick={()=>setHyprfitCategory(c.id)} style={{...btnS(active?t.acc:t.mut,active?`${t.acc}1A`:`${t.surface}44`),padding:"7px 10px",fontSize:"var(--hc-text-control)",borderColor:active?`${t.acc}66`:`${t.brd}22`,whiteSpace:"nowrap"}}>
                   <span>{c.label}</span>
-                  <span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:8,padding:"1px 5px"}}>{count}</span>
+                  <span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:"var(--hc-text-secondary)",padding:"1px 5px"}}>{count}</span>
                 </button>;
               })}
             </div>
-            {hyprfitLoading&&!hyprfit?<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>Loading HyprFit recommendations...</div>:
-            hyprfit?.ollama_error?<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}44`,color:t.warm,fontSize:11}}>Ollama inventory unavailable: {hyprfit.ollama_error}</div>:null}
-            {hyprfit?.hf_error&&<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}33`,color:t.mut,fontSize:11}}>Hugging Face discovery unavailable: {hyprfit.hf_error}</div>}
+            {hyprfitLoading&&!hyprfit?<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"center"}}>Loading HyprFit recommendations...</div>:
+            hyprfit?.ollama_error?<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}44`,color:t.warm,fontSize:"var(--hc-text-secondary)"}}>Ollama inventory unavailable: {hyprfit.ollama_error}</div>:null}
+            {hyprfit?.hf_error&&<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}33`,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Hugging Face discovery unavailable: {hyprfit.hf_error}</div>}
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(292px,1fr))",gap:12}}>
               {recs.map(rec=>{
                 const fitColor=rec.fit==="great"?t.ok:rec.fit==="fits"?t.acc:rec.fit==="tight"?t.warm:rec.fit==="too_large"?t.err:t.mut;
@@ -6921,17 +7113,17 @@ function HyprChat(){
                   <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
                     <div style={{minWidth:0}}>
                       <div style={mmKickerS}>{rec.purpose}</div>
-                      <div style={{fontSize:17,fontWeight:900,color:t.text,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.name}</div>
-                      <div style={{fontSize:11,color:t.mut,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.pull_name}</div>
+                      <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.text,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.name}</div>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.pull_name}</div>
                     </div>
                     <span style={mmChipS(fitColor)}>{rec.fit_label}</span>
                   </div>
-                  <div style={{fontSize:12,color:t.dim,lineHeight:1.5,minHeight:54}}>{rec.summary}</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.5,minHeight:54}}>{rec.summary}</div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:8}}>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Score</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{scorePct}</div></div>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Need</div><div style={{fontSize:15,fontWeight:900,color:fitColor,marginTop:4}}>{requiredGb} GB</div></div>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:15,fontWeight:900,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:12,fontWeight:900,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Score</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{scorePct}</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Need</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:fitColor,marginTop:4}}>{requiredGb} GB</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
+                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
                   </div>
                   <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
                     <span style={mmChipS(sourceColor)}>{rec.source||"Curated"}</span>
@@ -6942,117 +7134,743 @@ function HyprChat(){
                     {rec.installed&&<span style={mmChipS(t.ok)}>Installed</span>}
                     {(rec.badges||[]).slice(0,3).map(b=><span key={b} style={mmChipS(t.mut,`${t.surface}66`)}>{b}</span>)}
                   </div>
-                  {(rec.downloads||rec.likes||modified)&&<div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:10,color:t.mut}}>
+                  {(rec.downloads||rec.likes||modified)&&<div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:"var(--hc-text-secondary)",color:t.mut}}>
                     {rec.downloads? <span>⬇ {compact(rec.downloads)}</span>:null}
                     {rec.likes? <span>♥ {compact(rec.likes)}</span>:null}
                     {modified? <span>{modified}</span>:null}
                   </div>}
-                  <div style={{fontSize:11,color:fitColor,lineHeight:1.45,marginTop:"auto"}}>{rec.fit_note}</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:fitColor,lineHeight:1.45,marginTop:"auto"}}>{rec.fit_note}</div>
                   <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                    <button onClick={()=>fillPullFromHyprfit(rec.pull_name)} style={{...btnS(t.acc),padding:"7px 11px",fontSize:11}}><IC.Download/> Fill Pull Field</button>
-                    {rec.installed&&<button onClick={()=>useModelFromManager(rec.installed_name)} style={{...btnS(t.ok),padding:"7px 11px",fontSize:11}}>Use Installed</button>}
+                    <button onClick={()=>fillPullFromHyprfit(rec.pull_name)} style={{...btnS(t.acc),padding:"7px 11px",fontSize:"var(--hc-text-control)"}}><IC.Download/> Fill Pull Field</button>
+                    {rec.installed&&<button onClick={()=>useModelFromManager(rec.installed_name)} style={{...btnS(t.ok),padding:"7px 11px",fontSize:"var(--hc-text-control)"}}>Use Installed</button>}
                   </div>
                 </div>;
               })}
             </div>
-            {!hyprfitLoading&&!recs.length&&<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:12,textAlign:"center"}}>No recommendations available in {activeMeta?.label||"this category"}.</div>}
+            {!hyprfitLoading&&!recs.length&&<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"center"}}>No recommendations available in {activeMeta?.label||"this category"}.</div>}
           </div>;
         })()}
       </div>
     </div>}
   </div>
 
-      :panel==="analytics"?<AnalyticsPanel t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
+      :panel==="analytics"?<AnalyticsPanel font={font} t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
-      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
+      :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel focusId={workspaceJobFocus} workspaces={workspaces} t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else if(destination==='kb'){setPanel("kb");setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:"center"}),150);}else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
 
-      :panel==="library"?<PanelBoundary key={panel}><LibrarySearchPanel t={t} btnS={btnS} inputS={inputS} onNavigate={result=>{if(result.kind==='chat')loadConversation(result.parent_id);else if(result.kind==='artifact')openArtifact(result.source_id);else if(result.kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(result.source_id);}else{setSelectedLibraryNote(result.source_id);setPanel('notes');}}}/></PanelBoundary>
+      :panel==="library"?<PanelBoundary key={panel}><LibrarySearchPanel state={libraryState} setState={setLibraryState} t={t} btnS={btnS} inputS={inputS} onNavigate={result=>{if(result.kind==='chat'){setMessageFocus({conversation:result.parent_id,id:result.source_id});loadConversation(result.parent_id);}else if(result.kind==='artifact')openArtifact(result.source_id);else if(result.kind==='research'){setPanel('research');setResearchView('reports');loadResearchReport(result.source_id);}else{setSelectedLibraryNote(result.source_id);setPanel('notes');}}}/></PanelBoundary>
 
-      :(panel==="tasks"||panel==="notifications")?<PanelBoundary key={panel}><TasksPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/></PanelBoundary>
+      :(panel==="tasks"||panel==="notifications")?<PanelBoundary key={panel}><TasksPanel onNavigate={navigateWorkspaceContent} models={models} workspaces={workspaces} convs={convs} t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} tab={panel==="notifications"?"notifications":"tasks"} setTab={tb=>setPanel(tb==="notifications"?"notifications":"tasks")} onUnseenChange={setNotifUnseen}/></PanelBoundary>
 
       :panel==="email"?<PanelBoundary key={panel}><EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
 
-      :panel==="notes"?<PanelBoundary key={panel}><NotesPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} initialNoteId={selectedLibraryNote}/></PanelBoundary>
+      :panel==="notes"?<PanelBoundary key={panel}><NotesPanel workspaces={workspaces} t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} initialNoteId={selectedLibraryNote} onInitialNoteConsumed={()=>setSelectedLibraryNote(null)}/></PanelBoundary>
 
       :panel==="calendar"?<PanelBoundary key={panel}><CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
 
       :panel==="assistant"?<AssistantPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} models={models} openAssistantChat={async cid=>{let live=cid;try{const ar=await fetch(`${API}/api/assistant`);const ad=await ar.json();live=ad?.profile?.conversation_id||cid;}catch{}if(!live)return;try{const r=await fetch(`${API}/api/conversations`);const cs=await r.json();const isCouncil=v=>v==="1"||v===1||v===true;setConvs(cs.map(c=>({...c,messages:[],is_council:isCouncil(c.is_council),council_config_id:c.council_config_id||null})));}catch{}setActId(live);loadConversation(live);setPanel("chat");}}/>
 
-      :panel==="settings"?ReactDOM.createPortal(<div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
-    <div style={{width:isMobile?"100%":"min(1100px,95vw)",maxHeight:isMobile?"100%":"85vh",height:isMobile?"100%":"85vh",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,boxShadow:"0 8px 48px #0008",overflow:"hidden",animation:"fadeIn .25s",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
-      <div style={{borderRight:isMobile?"none":`1px solid ${t.brd}44`,background:`${t.surface}50`,padding:isMobile?"calc(8px + env(safe-area-inset-top)) 12px 8px":18,display:"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:`1px solid ${t.brd}44`,alignItems:"center"}:{})}}>
+      :panel==="settings"?null
+
+      :<>
+        {/* CHAT - full width, pills inline */}
+        <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}
+          onDragOver={e=>{e.preventDefault();e.stopPropagation();setDragOver(true);}}
+          onDragLeave={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);}}
+          onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
+          {/* Drag overlay */}
+          {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:"var(--hc-radius-dialog)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
+            <div style={{fontSize:"var(--hc-text-control)",color:t.acc,fontWeight:700,letterSpacing:1}}>{isCoderPersonaName(act?.persona_name)?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
+          </div>}
+          {/* Scroll-to-top / Scroll-to-bottom */}
+          {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
+          {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
+          {/* Messages */}
+          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
+          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
+            {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
+            :<><ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>
+            {!act?.is_council&&!(isMobile&&keyboardOpen)&&<div style={{pointerEvents:"auto",transform:isEmptyChatSurface&&!isMobile?"translateY(-40px)":"none",transition:"transform .35s ease"}}><StarterChips t={t} font={font} items={starterItems} onPick={it=>{if(it.run){it.run();return;}setInp(it.text||"");setTimeout(()=>inpRef.current?.focus(),30);}}/></div>}</>}
+          </div>:act?.is_council?(()=>{
+            const councilCfg=councils.find(c=>c.id===act.council_config_id);
+            const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
+            const members=councilCfg?.members||[];
+            const turns=[];let curTurn=null;
+            for(const msg of(act.messages||[])){
+              const meta=getMeta(msg);
+              if(msg.role==="user"&&!meta.council_member_id&&!meta.council_host){
+                curTurn={user:msg,rounds:{},host:null};turns.push(curTurn);
+              }else if(msg.role==="assistant"){
+                if(!curTurn){curTurn={user:{role:"user",content:""},rounds:{},host:null};turns.push(curTurn);}
+                if(meta.council_host)curTurn.host=msg;
+                else{
+                  const rnd=meta.debate_round||0;
+                  if(!curTurn.rounds[rnd])curTurn.rounds[rnd]=[];
+                  curTurn.rounds[rnd].push(msg);
+                }
+              }
+            }
+            const isLastTurn=ti=>ti===turns.length-1;
+            const memberProfile=m=>m?.model_config_id?mcs.find(mc=>mc.id===m.model_config_id):null;
+            const memberById=id=>members.find(m=>m.id===id)||{};
+            const memberView=(id,meta={},live={})=>{
+              const member=memberById(id);
+              const mc=memberProfile(member);
+              const model=meta.council_model||live.model||mc?.base_model||member.model||"";
+              const name=meta.council_persona||live.member_name||mc?.name||member.persona_name||model.split(":")[0]||"Council member";
+              const avatar=mc?profileAvatar(mc):"";
+              const pts=member.points||0;
+              return {member,mc,model,name,avatar,pts};
+            };
+            const chip=(color,children,extra={})=><span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 7px",borderRadius:"var(--hc-radius)",background:`${color}12`,border:`1px solid ${color}30`,color,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap",...extra}}>{children}</span>;
+            const avatarNode=(view,size=34,color=t.acc)=><div style={{width:size,height:size,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${color}10`,border:`1px solid ${color}38`,color,overflow:"hidden",flexShrink:0}}>
+              {view.avatar?<img src={avatarSrc(view.avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+            </div>;
+            const tallyFromVotes=votes=>votes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
+            const sortedTally=tally=>Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([id,votes])=>({id,votes,view:memberView(id)}));
+            const livePhase=councilRunning?(councilVoting?"Peer vote":councilRound?.label||"Deliberating"):"Session history";
+            const responseCard=(resp,ri,roundKey,tally,live=false)=>{
+              const meta=live?resp.metadata:getMeta(resp);
+              const memberId=meta.council_member_id;
+              const view=memberView(memberId,meta,live?resp.live:{});
+              const votes=tally[memberId]||0;
+              const ptsColor=view.pts>0?t.ok:view.pts<0?t.err:t.mut;
+              const ckey=`council-card-${roundKey}-${ri}`;
+              const expanded=expandedRounds[ckey]===true;
+              const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
+              const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
+              return <div id={resp.id?`saved-message-${resp.id}`:undefined} key={ckey} style={{scrollMarginTop:80,background:`${t.surface}F5`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:"var(--hc-radius-card)",overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
+                <div style={{padding:11,borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",gap:9,alignItems:"center"}}>
+                  {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
+                      {view.mc&&chip(t.pink,"Persona",{fontSize:"var(--hc-text-secondary)",padding:"2px 6px"})}
+                    </div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{view.model||"model unavailable"}</div>
+                  </div>
+                  <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+                    {votes>0&&chip(t.ok,<><IC.Trophy/>{votes}</>,{fontSize:"var(--hc-text-secondary)"})}
+                    {chip(ptsColor,`${view.pts>0?"+":""}${view.pts} pt`,{fontSize:"var(--hc-text-secondary)"})}
+                  </div>
+                </div>
+                {respondingTo.length>0&&<div style={{padding:"8px 11px 0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                  <span style={{fontSize:"var(--hc-text-secondary)",textTransform:"none",letterSpacing:0,color:t.mut,fontWeight:700}}>Responding to</span>
+                  {respondingTo.slice(0,4).map(r=>chip(t.acc,r.name||r.id,{fontSize:"var(--hc-text-secondary)",padding:"2px 6px"}))}
+                </div>}
+                <div ref={el=>{if(live&&!resp.live.done&&el)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.7,color:t.dim,maxHeight:expanded?760:300,overflowY:"auto"}}>
+                  <MDWrap>{md(resp.content||"")}</MDWrap>
+                  {live&&!resp.live.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                </div>
+                <div style={{padding:"7px 10px",borderTop:"1px solid var(--hc-line-subtle)",display:"flex",gap:6,alignItems:"center"}}>
+                  <button onClick={()=>setExpandedRounds(p=>({...p,[ckey]:!expanded}))} style={{...btnS(t.mut),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}>{expanded?"Compact":"Expand"}</button>
+                  {memberId&&<>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Mark best answer (+5)" style={{...btnS(t.ok),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.Star/> Best</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Add points (+2)" style={{...btnS(t.acc),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.ChevDown style={{transform:"rotate(180deg)"}}/> Good</button>
+                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Subtract points (-2)" style={{...btnS(t.err),padding:"5px 7px",fontSize:"var(--hc-text-control)"}}><IC.ChevDown/> Weak</button>
+                  </>}
+                  <button onClick={()=>cp(resp.content,ckey)} style={{...btnS(t.mut),padding:"5px 7px",fontSize:"var(--hc-text-control)",marginLeft:"auto"}}>{copied===ckey?<IC.Check/>:<IC.Copy/>}</button>
+                </div>
+              </div>;
+            };
+            const ballotPanel=(votes,hostMeta={})=>{
+              if(!votes.length&&!councilVoting)return null;
+              const tally=tallyFromVotes(votes);
+              const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
+              return <div style={{background:`${t.surface}F5`,border:`1px solid ${t.pink}32`,borderRadius:"var(--hc-radius-card)",padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:12}}>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}><IC.Trophy/> Peer Ballot</div>
+                  {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                    {leaders.map((l,i)=><div key={l.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 8px",borderRadius:"var(--hc-radius)",background:i===0?`${t.ok}12`:`${t.bgDeep}72`,border:`1px solid ${i===0?t.ok:t.brd}30`}}>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:i===0?t.ok:t.mut,fontWeight:700,width:18}}>{i+1}</span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</span>
+                      {chip(i===0?t.ok:t.mut,`${l.votes} vote${l.votes===1?"":"s"}`,{fontSize:"var(--hc-text-secondary)"})}
+                    </div>)}
+                  </div>:<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.5}}>Waiting for council members to cast their peer votes.</div>}
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                  {votes.length?votes.map((v,vi)=><div key={vi} style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"7px 8px",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,border:"1px solid var(--hc-line-subtle)"}}>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:90,maxWidth:150}}>{v.voter_name}</span>
+                    <span style={{height:1,background:`linear-gradient(90deg,${t.acc}55,${t.ok}55)`,width:28,flexShrink:0}}/>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.ok,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:100,maxWidth:170}}>{v.voted_for_name}</span>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45,flex:"1 1 220px",minWidth:0}}>{v.reason||"No reason supplied."}</span>
+                  </div>):<div style={{display:"flex",alignItems:"center",gap:5,color:t.pink,fontSize:"var(--hc-text-secondary)",fontWeight:600}}>
+                    {[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)} Voting in progress
+                  </div>}
+                </div>
+              </div>;
+            };
+            return <div key={actId||"empty"} style={{maxWidth:1540,margin:"0 auto",padding:"0 20px 8px",overflowY:"auto"}}>
+              <div style={{position:"sticky",top:0,zIndex:8,margin:"0 0 16px",padding:"10px 0 8px",background:`linear-gradient(180deg,${t.bg}F8,${t.bg}D8 70%,transparent)`,backdropFilter:"blur(8px)"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"10px 12px"}}>
+                  <div style={{width:34,height:34,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,color:t.pink}}><IC.Council/></div>
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,letterSpacing:.4}}>{councilCfg?.name||"Council Session"}</span>
+                      {chip(t.pink,`${members.length} members`)}
+                      {chip(councilRunning?t.ok:t.mut,livePhase)}
+                      {councilRound?.total_rounds>1&&chip(t.acc,`Round ${(councilRound.round||0)+1}/${councilRound.total_rounds}`)}
+                    </div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{members.map(m=>memberView(m.id).name).join(" / ")||"No council members configured"}</div>
+                  </div>
+                  {councilCfg?.host_model&&chip(t.warm,<><IC.Crown/>{councilCfg.host_model}</>)}
+                </div>
+              </div>
+              {turns.map((turn,ti)=>{
+                const hostMeta=turn.host?getMeta(turn.host):{};
+                const isLive=councilRunning&&isLastTurn(ti);
+                const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
+                const turnTally=tallyFromVotes(turnVotes);
+                const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
+                return <div id={turn.user.id?`saved-message-${turn.user.id}`:undefined} key={ti} style={{scrollMarginTop:80,display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+                    <div style={{width:26,height:26,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
+                    <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
+                  </div>
+                  <div>
+                    <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:"12px 14px",marginBottom:14}}>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.f4,fontWeight:700,textTransform:"none",letterSpacing:0,marginBottom:6}}>Address to the council</div>
+                      <div style={{fontSize:fontSize,lineHeight:1.65,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
+                    </div>
+                    {roundNums.map(rnd=>{
+                      const rKey=`${ti}-${rnd}`;
+                      const resps=turn.rounds[rnd]||[];
+                      const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
+                      const isExpanded=resps.some(m=>String(m.id)===String(messageFocus?.id))|| (expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true);
+                      return <div key={rnd} style={{marginBottom:14}}>
+                        <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:"var(--hc-radius)",padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
+                          <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
+                          {rnd===0?<IC.Council/>:<IC.GitBranch/>}
+                          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}>{label}</span>
+                          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
+                        </button>
+                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
+                          {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
+                        </div>}
+                      </div>;
+                    })}
+                    {isLive&&councilRound&&<div style={{marginBottom:14}}>
+                      <div style={{border:`1px solid ${t.pink}28`,background:`${t.pink}08`,borderRadius:"var(--hc-radius)",padding:"8px 10px",display:"flex",alignItems:"center",gap:8,color:t.pink}}>
+                        <IC.GitBranch/><span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0}}>{councilRound.label}</span>
+                        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
+                      </div>
+                      {councilKbStatus&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
+                        {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
+                      </div>
+                    </div>}
+                    {ballotPanel(turnVotes,hostMeta)}
+                    {(turn.host||(isLive&&councilHostContent))&&<div id={turn.host?.id?`saved-message-${turn.host.id}`:undefined} style={{scrollMarginTop:80,background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:"var(--hc-radius-card)",padding:14,marginTop:12,animation:"fadeIn .3s"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                        <div style={{width:28,height:28,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
+                        <div style={{minWidth:0,flex:1}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,textTransform:"none",letterSpacing:0}}>Moderator Verdict</div>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{councilCfg?.host_model||act.model||"host model"}</div>
+                        </div>
+                        {(hostMeta.winner||hostMeta.winners?.[0])&&chip(t.ok,<><IC.Trophy/>{(hostMeta.winner||hostMeta.winners[0]).name}</>)}
+                        {isLive&&!turn.host&&<div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
+                      </div>
+                      <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
+                        <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
+                        {(()=>{const usage=turn.host?.metadata?.usage||(isLive?councilUsage:null);return usage?<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:8}}>{usage.prompt_tokens||0} input · {usage.gen_tokens||0} output tokens{usage.estimated_cost_usd!=null?` · estimated $${usage.estimated_cost_usd.toFixed(4)}`:''}{usage.usage_uncertain?' · incomplete provider usage; further paid calls withheld':''}</div>:null;})()}
+                        {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                      </div>
+                    </div>}
+                    {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
+                  </div>
+                </div>;
+              })}
+              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12}}>
+                {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
+              </div>}
+              <div ref={chatEnd}/>
+            </div>;
+          })():<div key={actId||"empty"} className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
+            {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
+              const totalMessages=messageRows.length;
+              const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
+              const hiddenCount=Math.max(0,totalMessages-visibleCount);
+              const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
+              // Find the last assistant message once so live search/tool events attach to the active answer.
+              let lastAssistantMsgIdx=-1;
+              messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
+              return <>
+              {hiddenCount>0&&<div style={{display:"flex",justifyContent:"center",margin:"0 0 14px"}}>
+                <button onClick={()=>revealOlderMessages(actId,totalMessages)} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.surface}F5`,color:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>
+                  <span style={{display:"inline-flex",transform:"rotate(180deg)"}}><IC.ChevDown/></span>
+                  Show older ({hiddenCount})
+                </button>
+              </div>}
+              {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
+              // Consecutive same-role messages group: repeated avatar+name collapse, tighter spacing.
+              const grouped=visibleRows[visibleIdx-1]?.msg.role===msg.role;
+              const nextGrouped=visibleRows[visibleIdx+1]?.msg.role===msg.role;
+              const activeProfile=!isU?getProfileForConversation(act):null;
+              const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
+              const personaName=!isU&&act?.persona_name;
+              const msgProfileType=personaName?getConversationProfileType(act):null;
+              const personaColor=!isU&&personaName?(msgProfileType==="persona"?t.pink:t.acc):t.acc;
+              const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
+              const meta=_metaObj(msg.metadata);
+              const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
+              const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
+              const liveEventsForMsg=isLastAssistant?evts:[];
+              const activityLive=!!msg.isS&&streaming&&streamingCidRef.current===actId;
+              const activityEvents=activityLive&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:liveEventsForMsg;
+              const activityStatus=msg._activityStatus||meta.delivery_status||"";
+              const messageWorkflowIds=!isU?[...new Set([...workflowIds(meta,liveEventsForMsg),...coderWorkflows.filter(w=>w.origin_message_id&&String(w.origin_message_id)===String(msg.id)).map(w=>w.id)])]:[];
+              const messageWorkflows=messageWorkflowIds.map(id=>coderWorkflows.find(w=>w.id===id)||{id,workflow_version:3,state:'queued'});
+              // For the message that is ACTIVELY streaming, derive run ids from
+              // the UNCAPPED stream buffer (same source the finalize PATCH
+              // uses): the live `evts` state keeps only the last 200 events, so
+              // on long Daedalus turns the early plan/build run ids scroll out
+              // and the stepper's earlier checkmarks regress until the turn
+              // finishes. Gate on msg.isS — the ref deliberately survives chat
+              // switches, so a non-streaming message must never read it.
+              // Reading the ref at render time is safe — evts updates already
+              // trigger these renders (same pattern as the finalize _rawEvts).
+              const runIdEvts=!isU&&msg.isS&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:evts;
+              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,runIdEvts):[];
+              const docRunIds=!isU?documentRunIds(meta,runIdEvts===evts?liveEventsForMsg:runIdEvts):[];
+              const documentEvents=[...savedEvents,...liveEventsForMsg];
+              const hasDocumentActivity=docRunIds.length>0||documentEvents.some(isDocumentEvent);
+              if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
+              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
+              const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
+              const quickSearchPayload=renderOpts?.quickSearch;
+              const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
+              return <React.Fragment key={`${actId}:${msg._activityKey||msg.id||i}`}>
+              <div id={`saved-message-${msg.id}`} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
+                {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
+                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
+                  {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
+                </div>}
+                <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
+                  {(!grouped||refinedN>0)&&<div style={{fontSize:"var(--hc-text-secondary)",marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
+                    {isU?<span style={{color:t.mut}}>you</span>:personaName
+                      ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:"var(--hc-radius-card)",color:t.pink}}>
+                        {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:"var(--hc-radius-sm)",objectFit:"cover"}} alt=""/>}
+                        {personaName}
+                      </span>
+                      :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
+                    {msg.created_at&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+                    {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius)",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
+                  </div>}
+                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t}/>}
+                  {!isU&&activityLive&&<WaitingQuote active={streaming&&tokC===0&&!renderedContent} quotes={customQuotes} t={t}/>}
+                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":isDaedalusOutput?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
+                    {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
+                        onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
+                      <div style={{display:"flex",gap:4}}>
+                        {isU
+                          ?<button onClick={()=>editMessage(i,editingMsg.content)} style={btnS(t.ok)}>Save & Send</button>
+                          :<button onClick={()=>saveAssistantEdit(i,editingMsg.content)} style={btnS(t.ok)}>Save</button>}
+                        <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
+                      </div>
+                    </div>
+                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
+                    {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
+                      {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
+                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
+                        <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
+                      </div>)}
+                    </div>}
+                    {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
+                      {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:500,color:t.text}}>
+                        <span style={{fontSize:"var(--hc-text-reading)"}}>📄</span>
+                        <span>{p.name}</span>
+                        {p.pages>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:400}}>{p.pages} pages</span>}
+                      </span>)}
+                    </div>}
+                    {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
+                  </div>
+                  {!isU&&!isDaedalusOutput&&<ToolStatus evts={isLastAssistant&&evts.length?evts:savedEvents} savedEvts={savedEvents} historical={!msg.isS} showActivity={false} msgContent={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>}
+                  {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
+                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
+                  {(()=>{if(isU||isDaedalusOutput||hasDocumentActivity)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
+                  {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
+                      Sources, in priority: explicit metadata.run_ids (written server-side at
+                      each round boundary — survives mid-stream reload), then live events
+                      (current message), then saved_events (history). */}
+                  {(()=>{
+                    if(isU||isDaedalusOutput) return null;
+                    const isLast = isLastAssistant;
+                    // Merge run_ids from all three sources, dedup, preserve first-seen order.
+                    const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
+                    const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
+                    const seen = new Set();
+                    const runIds = [];
+                    for(const r of [...ridsFromMeta, ...ridsFromEvts]){
+                      if(r && !docRunIds.includes(r) && !seen.has(r)){seen.add(r); runIds.push(r);}
+                    }
+                    if(!runIds.length) return null;
+                    return runIds.map(rid =>
+                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md} onOpenArtifact={openArtifact}/>
+                    );
+                  })()}
+                  {/* Inline code execution output */}
+                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
+                    <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
+                      <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{"\u25BE"}</span>
+                      <span>{d.success?"\u2705":"\u274C"}</span>
+                      <span style={{fontWeight:600,color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{d.language||"code"} output</span>
+                      {d.exec_time&&<span style={{color:t.mut,marginLeft:"auto",fontSize:"var(--hc-text-secondary)"}}>{parseFloat(d.exec_time).toFixed(1)}s</span>}
+                    </div>
+                    {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,borderBottom:d.stderr?"1px solid var(--hc-line-subtle)":"none",fontFamily:codeFont}}>{d.stdout}</pre>}
+                    {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,background:`${t.err}08`,fontFamily:codeFont}}>{d.stderr}</pre>}
+                  </div>;});})()}
+                  {/* KB sources strip — numbered citation sources for this reply */}
+                  {(()=>{
+                    if(isU||msg.isS||isDaedalusOutput)return null;
+                    const co=renderOpts;
+                    if(!co?.citations?.length)return null;
+                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
+                    return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                        {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)"}}>
+                          <span style={{fontWeight:700,color:t.acc,fontSize:"var(--hc-text-secondary)",flexShrink:0}}>[{s2.n}]</span>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>📄 {s2.filename} <span style={{color:t.mut,fontWeight:400,fontSize:"var(--hc-text-secondary)"}}>chunk {s2.chunk_index}{typeof s2.score==="number"?` · ${Math.round(s2.score*100)}% relevance`:""}</span></div>
+                            {s2.snippet&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:2,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{s2.snippet}</div>}
+                          </div>
+                        </div>)}
+                      </div>
+                    </Collapsible>;
+                  })()}
+                  {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
+                  {!msg.isS&&!isEditing&&<div className="msg-toolbar" style={{...msgToolbarS,flexWrap:"wrap",maxWidth:"100%",rowGap:4}}>
+                    {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} className="hc-icon-btn" data-tip={copied===mid?"Copied":"Copy"} aria-label="Copy message" style={{color:copied===mid?t.ok:t.mut}}>{copied===mid?<IC.Check/>:<IC.Copy/>}</button>}
+                    {!isU&&msg.id!=null&&<button onClick={()=>setInspectorMessage(msg.id)} className="hc-icon-btn" data-tip="Response context" aria-label="Response context" style={{color:t.mut}}><IC.Layers/></button>}
+                    {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} className={generating?undefined:"hc-icon-btn"} data-tip={generating?undefined:playing?"Stop playback":"Read aloud"} aria-label={(playing||generating)?"Stop playback":"Read aloud"} style={generating?msgActionS(t.warm):{color:playing?t.acc:t.mut}}>
+                      {generating?<><Spinner size={10} style={{color:t.warm}}/> {ttsPhase||"generating"}</>:playing?<IC.Stop/>:<IC.Volume/>}
+                    </button>;})()}
+                    {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
+                      <button onClick={()=>regenerate(i)} className="hc-icon-btn" data-tip="Regenerate" aria-label="Regenerate response" style={{color:t.mut,borderRadius:"var(--hc-radius-sm) 0 0 var(--hc-radius-sm)"}}><IC.Refresh/></button>
+                      <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} aria-label="Regenerate with a different model, temperature or profile" aria-expanded={regenPopover?.index===i} className="hc-icon-btn" style={{color:regenPopover?.index===i?t.acc:t.mut,width:22,minWidth:22,borderRadius:"0 var(--hc-radius-sm) var(--hc-radius-sm) 0"}}><IC.ChevDown/></button>
+                      {regenPopover?.index===i&&<div className="hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 4px)",left:0,padding:10,zIndex:20,minWidth:240}}>
+                        <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginBottom:8,fontWeight:700}}>Regenerate with</div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Model</div>
+                          <select value={regenPopover.model} onChange={e=>setRegenPopover(p=>({...p,model:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}>
+                            <option value="">(default: {act?.model||"current"})</option>
+                            {models.map(m=><option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div style={{marginBottom:6}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Temperature</div>
+                          <input type="number" min="0" max="2" step="0.05" placeholder={`default: ${defaultTemp}`} value={regenPopover.temperature} onChange={e=>setRegenPopover(p=>({...p,temperature:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}/>
+                        </div>
+                        <div style={{marginBottom:8}}>
+                          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:2}}>Profile</div>
+                          <select value={regenPopover.personaId} onChange={e=>setRegenPopover(p=>({...p,personaId:e.target.value}))} style={{width:"100%",fontSize:"var(--hc-text-control)",padding:"4px 6px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius-sm)",fontFamily:font,boxSizing:"border-box"}}>
+                            <option value="">(default: current)</option>
+                            <option value="none">-- No profile --</option>
+                            <optgroup label="Agents">
+                              {mcs.filter(isAgentProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
+                            </optgroup>
+                            <optgroup label="Personas">
+                              {mcs.filter(isPersonaProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
+                            </optgroup>
+                          </select>
+                        </div>
+                        <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+                          <button onClick={()=>setRegenPopover(null)} style={{background:"none",border:"1px solid var(--hc-line)",color:t.mut,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button>
+                          <button onClick={()=>{
+                            const ov={};
+                            if(regenPopover.model)ov.model=regenPopover.model;
+                            if(regenPopover.temperature!==""){const n=parseFloat(regenPopover.temperature);if(!isNaN(n))ov.temperature=n;}
+                            if(regenPopover.personaId)ov.persona_id=regenPopover.personaId==="none"?null:regenPopover.personaId;
+                            setRegenPopover(null);
+                            regenerate(i, Object.keys(ov).length?ov:undefined);
+                          }} style={{background:`${t.acc}22`,border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Regenerate</button>
+                        </div>
+                      </div>}
+                    </div>}
+                    {!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} className="hc-icon-btn" data-tip={isU?"Edit and resend":"Edit response"} aria-label={isU?"Edit and resend":"Edit response (raw)"} style={{color:t.mut}}><IC.Pencil/></button>}
+                    {!streaming&&!ghostActive&&<button onClick={()=>forkAt(i)} className="hc-icon-btn" data-tip="Fork from here" aria-label="Fork conversation from this point" style={{color:t.mut}}><IC.GitBranch/></button>}
+                    {!streaming&&<button onClick={()=>delMsg(i)} className="hc-icon-btn" data-tip="Delete" aria-label="Delete this message" style={{color:t.mut}}><IC.Trash/></button>}
+                    {!isU&&msg.content&&!streaming&&msg.metadata?.truncated&&i===(act.messages||[]).length-1&&<button onClick={()=>continueMessage(i)} title="Response was cut off by the output-token limit — continue it" style={msgActionS(t.warm)}><IC.Play/> continue</button>}
+                    {!isU&&msg.content&&!streaming&&<>
+                      <button onClick={()=>rateMessage(i,1)} className={`hc-icon-btn${msg.rating===1?" is-rated":""}`} data-tip="Good response" aria-label="Good response" aria-pressed={msg.rating===1} style={{color:msg.rating===1?t.ok:t.mut}}><IC.ThumbUp/></button>
+                      <button onClick={()=>rateMessage(i,-1)} className={`hc-icon-btn${msg.rating===-1?" is-rated":""}`} data-tip="Poor response" aria-label="Poor response" aria-pressed={msg.rating===-1} style={{color:msg.rating===-1?t.err:t.mut}}><IC.ThumbDown/></button>
+                    </>}
+                    {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
+                  </div>}
+                </div>
+              </div></React.Fragment>;
+            })}</>;})()}
+            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
+            {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
+            <div ref={chatEnd}/>
+          </div>}
+        </div>
+        </div>
+        <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
+          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
+          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
+        {/* INPUT */}
+        <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
+          <div className="hc-composer-extras">
+          {runPill.mounted&&(()=>{const currentRun=runPill.value;
+            const phaseLabel={searching:"searching",thinking:"thinking",tool:"tool running",streaming:"streaming",voting:"council voting",council:"council",stopped:"stopped",failed:"failed",complete:"complete"}[currentRun.phase]||currentRun.phase||"running";
+            const pct=currentRun.pct!=null?Math.max(0,Math.min(100,Number(currentRun.pct)||0)):null;
+            const active=streaming||councilRunning||searchLoading;
+            return <div className="hc-run-pill hc-live-head is-active hc-pop" data-placement="top" {...runPill.props} style={{maxWidth:chatWidth,margin:"0 auto 7px",display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:`${currentRun.color}0d`,boxShadow:`0 0 0 1px ${currentRun.color}2f`,color:currentRun.color,fontSize:"var(--hc-text-secondary)",minHeight:31,boxSizing:"border-box"}}>
+              <span className={`hc-activity-dot${active?" is-running":""}`} aria-hidden="true" style={{width:7,height:7,color:currentRun.color}}/>
+              <span key={phaseLabel} className="hc-activity-label" style={{fontSize:"var(--hc-text-secondary)"}}>{phaseLabel}</span>
+              <span style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
+              {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
+              {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
+              {streaming&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Stop</button>}
+            </div>;
+          })()}
+          {/* Attachment chips */}
+          {quickSearchError&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",justifyContent:"flex-start"}}>
+            <span style={{display:"inline-flex",alignItems:"center",gap:7,padding:"4px 9px",borderRadius:"var(--hc-radius)",background:`${t.warm}10`,border:`1px solid ${t.warm}30`,color:t.warm,fontSize:"var(--hc-text-secondary)",fontWeight:700,maxWidth:"100%"}}>
+              <span style={{width:6,height:6,borderRadius:"50%",background:t.warm,flexShrink:0}}/>
+              Quick Search
+              <span style={{color:t.mut,fontWeight:500,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{quickSearchError}</span>
+              <button aria-label="Close" onClick={()=>setQuickSearchError(null)} style={{background:"none",border:"none",color:t.warm,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,lineHeight:1}}>×</button>
+            </span>
+          </div>}
+          {/* Council suggested prompts */}
+          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
+                <Dots style={{color:t.pink}}/>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Generating suggestions…</span>
+              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
+                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:"var(--hc-radius-dialog)",padding:"5px 12px",fontSize:"var(--hc-text-control)",color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
+                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
+                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
+                {s}
+              </button>)}
+              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:"1px solid var(--hc-line)",borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",flexShrink:0}}>↻</button>}
+            </div>}
+          {preparingSend&&<div role="status" aria-live="polite" style={{maxWidth:chatWidth,margin:"0 auto",padding:"6px 0",fontSize:"var(--hc-text-secondary)",color:t.warm}}>{preparingSend}</div>}
+          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0",pointerEvents:preparingSend?"none":undefined,opacity:preparingSend?0.65:1}}>
+            {attachments.map((a,i)=>a.type==="image"?
+              <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 6px 3px 3px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
+                <img src={a.dataUrl} alt={a.name} style={{height:26,width:26,objectFit:"cover",borderRadius:"var(--hc-radius-sm)",border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer",flexShrink:0}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
+                <span style={{color:t.mut,fontWeight:400,fontSize:"var(--hc-text-secondary)"}}>{(a.size/1024).toFixed(0)}KB</span>
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.acc,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",opacity:.78,lineHeight:1}}>&times;</button>
+              </span>
+            :a.type==="pdf"?
+              <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:a.error?`${t.err}10`:`${t.acc}10`,border:`1px solid ${a.loading?t.warm:a.error?t.err:t.acc}30`,color:a.loading?t.warm:a.error?t.err:t.acc,padding:"4px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,transition:"all .2s",maxWidth:"100%",minHeight:30,boxSizing:"border-box"}}>
+                <span style={{fontSize:"var(--hc-text-control)"}}>{a.loading?"⏳":"📄"}</span>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{a.name}</span>
+                {!a.loading&&!a.error&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
+                {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
+                {a.error&&<span style={{color:t.err,fontWeight:500,fontSize:"var(--hc-text-secondary)",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.error}</span>}
+                {a.error&&a.file&&<button disabled={!!preparingSend} onClick={()=>{const f=a.file;setAttachments(p=>p.filter((_,j)=>j!==i));handleFileUpload([f]);}} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700}}>Retry</button>}
+                <button aria-label="Close" disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:a.error?t.err:t.mut,cursor:"pointer",padding:"1px 4px",fontSize:"var(--hc-text-control)",opacity:.8}}>&times;</button>
+              </span>
+            :<span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.f1}10`,border:`1px solid ${t.f1}30`,color:t.f1,padding:"4px 7px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-secondary)",fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
+                <IC.Paperclip/>
+                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:190}}>{a.name}</span>
+                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",opacity:.78,lineHeight:1}}>&times;</button>
+              </span>)}
+          </div>}
+          </div>
+          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",...floatS,borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
+            {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:"inherit",pointerEvents:"none",overflow:"hidden",zIndex:0}}>
+              {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
+            </div>}
+            {/* Slash command menu — type "/" to insert a prompt-library prompt */}
+            {slashMenuActive()&&(()=>{
+              const matches=slashMatchesFor(inp);
+              const hi=Math.min(slashIdx,Math.max(matches.length-1,0));
+              return <div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,padding:8}}>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,padding:"2px 6px 6px"}}>Prompts — ↑↓ select · Enter insert · Esc dismiss</div>
+                <div style={{maxHeight:230,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {matches.map((p,ix)=><div key={p.id||ix} onMouseDown={e=>{e.preventDefault();insertPrompt(p);}} onMouseEnter={()=>setSlashIdx(ix)}
+                    style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:ix===hi?`${t.f1}18`:`${t.surface}44`,border:`1px solid ${ix===hi?`${t.f1}44`:`${t.brd}22`}`}}>
+                    <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                      <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:ix===hi?t.f1:t.text}}>{p.title}</span>
+                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.f1}}>{p.category||"General"}</span>
+                      {/\{\{\s*[\w][\w .\-]*?\s*\}\}/.test(p.content||"")&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"0 4px",borderRadius:"var(--hc-radius-sm)",background:`${t.warm}18`,color:t.warm,fontWeight:700}}>vars</span>}
+                    </div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(p.content||"").slice(0,90)}</div>
+                  </div>)}
+                  {!matches.length&&<div style={{textAlign:"center",padding:12,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No matching prompts — Esc to dismiss</div>}
+                </div>
+              </div>;
+            })()}
+            {/* {{variable}} fill-in card for prompt insertion */}
+            {slashVarFill&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,borderColor:`${t.warm}44`,padding:12}}>
+              <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.warm,marginBottom:8}}>Fill in “{slashVarFill.title}”</div>
+              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</span>
+                <input autoFocus={ix===0} value={v.value} onChange={e=>setSlashVarFill(s=>({...s,vars:s.vars.map((x,j)=>j===ix?{...x,value:e.target.value}:x)}))}
+                  onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();applyVarFill();}if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashVarFill(null);}}}
+                  style={{fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bg,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius)",fontFamily:font,boxSizing:"border-box"}}/>
+              </label>)}
+              <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
+                <button onClick={()=>setSlashVarFill(null)} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)"}}>Cancel</button>
+                <button onClick={applyVarFill} style={{...btnS(t.warm),fontSize:"var(--hc-text-control)",fontWeight:700}}>Insert</button>
+              </div>
+            </div>}
+            {!act?.is_council&&<><div className="hc-composer-anchor hc-quick-anchor" ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
+              <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" aria-label="Quick actions" aria-expanded={showQuickMenu} className={`hc-icon-btn is-lg${showQuickMenu?" is-open":""}`} style={{color:showQuickMenu?t.acc:t.mut,opacity:showQuickMenu?1:.75,fontSize:"var(--hc-text-title)"}}><IC.Plus/></button>
+              {showQuickMenu&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"115%",left:0,zIndex:300,minWidth:220,padding:6,display:"flex",flexDirection:"column",gap:2}}>
+                <button disabled={!!preparingSend} onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:`${t.surface}F5`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}><IC.Paperclip/> Attach files</button>
+                {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>⚡ Prompt Library</button>}
+                {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
+              </div>}
+            </div>
+            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS}/>
+            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
+            {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
+              {showPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,minWidth:280,maxWidth:360,padding:8}}>
+                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:"var(--hc-text-control)"}} autoFocus/>
+                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                    <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text}}>{p.title}</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.f1,marginTop:1}}>{p.category||"General"}</div>
+                  </div>)}
+                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>No matches</div>}
+                </div>
+                <div style={{borderTop:"1px solid var(--hc-line-subtle)",marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{setShowPromptPicker(false);setShowQuickMenu(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:"var(--hc-text-control)"}}>Manage Prompts →</button>
+                </div>
+              </div>}
+            </div>}
+            </>}
+            <textarea className="hc-composer-input" ref={inpRef} value={inp} onChange={e=>{const v=e.target.value;setInp(v);if(!v.startsWith("/"))setSlashDismissed(false);setSlashIdx(0);}} onKeyDown={e=>{
+              if(slashMenuActive()){
+                const matches=slashMatchesFor(inp);
+                if(matches.length){
+                  if(e.key==="ArrowDown"){e.preventDefault();setSlashIdx(i=>(i+1)%matches.length);return;}
+                  if(e.key==="ArrowUp"){e.preventDefault();setSlashIdx(i=>(i-1+matches.length)%matches.length);return;}
+                  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
+                  if(e.key==="Tab"){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
+                }
+                if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
+              }
+              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
+              disabled={streaming||councilRunning||loadingConv||!!preparingSend}
+              style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
+              onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
+              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
+            {!act?.is_council&&(()=>{
+              const cap=effortCaps[effortModel],native=cap?.mode==='native',choices=effortChoices(cap);
+              const saved=actId?nativeEffort[actId]?.[effortModel]:pendingNativeEffort[effortModel];
+              const selected=native?nativeChoice(cap,saved):REVIEW_LEVELS[reviewLevel(resolveEffort(actId))];
+              return <div className="hc-composer-anchor" ref={effortPickerRef} style={{position:'relative',flexShrink:0}}>
+                <button aria-label="Response effort" onClick={()=>setShowEffortPicker(p=>!p)} title={`${selected.name} — ${selected.desc}`} style={{background:'none',border:'none',color:t.pink,cursor:'pointer',padding:'3px 8px',borderRadius:'var(--hc-radius)',display:'flex',alignItems:'center',gap:4,fontWeight:600}}>
+                  <span>{selected.emoji}</span><span className="hc-effort-label" style={{fontSize:"var(--hc-text-secondary)"}}>{selected.name}</span>
+                </button>
+                {showEffortPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" data-align="end" style={{position:'absolute',bottom:'110%',right:0,zIndex:300,borderColor:`${t.pink}33`,minWidth:230,padding:6}}>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:'3px 6px 5px',fontWeight:700}}>EFFORT — {native?'NATIVE REASONING':'SELF-REVIEW'}</div>
+                  {choices.map(choice=><button key={JSON.stringify(choice.value)} onClick={()=>{
+                    if(native){if(actId)setNativeEffort(p=>({...p,[actId]:{...(p[actId]||{}),[effortModel]:choice.value}}));else setPendingNativeEffort(p=>({...p,[effortModel]:choice.value}));}
+                    else if(actId)setEffortPerChat(p=>({...p,[actId]:choice.value}));else setPendingEffort(choice.value);
+                    setShowEffortPicker(false);
+                  }} style={{display:'flex',alignItems:'center',gap:6,width:'100%',textAlign:'left',padding:'6px 8px',borderRadius:"var(--hc-radius)",background:selected.value===choice.value?`${t.pink}18`:'transparent',border:'none',color:selected.value===choice.value?t.pink:t.dim,cursor:'pointer',fontSize:"var(--hc-text-control)",fontFamily:font,marginBottom:2}}>
+                    <span style={{fontSize:"var(--hc-text-control)"}}>{choice.emoji}</span><div><div style={{fontWeight:600}}>{choice.name}{(native?choice.isDefault:globalEffort===choice.value)&&<small style={{color:t.mut,marginLeft:5}}>{native?'model default':'default'}</small>}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{choice.desc}</div></div>
+                  </button>)}
+                  {cap?.source==='metadata unavailable'&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:6}}>Model controls unavailable; using self-review.</div>}
+                  {effortModel==='auto'&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:6}}>Native controls are resolved after routing. A routed native model uses its own default.</div>}
+                  {!native&&<button onClick={()=>{if(actId)setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});else setPendingEffort(null);setShowEffortPicker(false);}} style={{width:'100%',background:'none',border:'none',color:t.mut,cursor:'pointer',fontSize:"var(--hc-text-control)",padding:6}}>Use global review default</button>}
+                </div>}
+              </div>;
+            })()}
+            {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:"var(--hc-radius)",cursor:"pointer"}}>Retry transcription</button>}
+            {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} className="hc-icon-btn is-lg" style={{color:recording?t.err:transcribing?t.warm:t.mut,background:recording?`${t.err}22`:undefined,cursor:transcribing?"default":"pointer",animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
+              {transcribing?<Spinner size={13} style={{color:t.warm}}/>:<IC.Mic/>}
+            </button>}
+            {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
+            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+          </div>
+        </div>
+        </div>
+      </>}
+      {/* Settings dialog: a body portal, rendered beside the panel chain so it opens from any view, including a workspace detail. */}
+      {settingsPresence.mounted&&ReactDOM.createPortal(<div className="hc-viewport-overlay hc-scrim" {...settingsPresence.props} style={{position:"fixed",inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
+    <div ref={settingsFocus} role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1} className="hc-dialog hc-dialog-card hc-elev-3" style={{zoom:_uiScale,width:isMobile?"calc(100vw / var(--hc-ui-scale))":"min(1100px,calc(95vw / var(--hc-ui-scale)))",maxHeight:isMobile?"calc((var(--hc-viewport-height) - var(--hc-safe-bottom)) / var(--hc-ui-scale))":"calc(var(--hc-viewport-height) / var(--hc-ui-scale))",height:isMobile?"calc((var(--hc-viewport-height) - var(--hc-safe-bottom)) / var(--hc-ui-scale))":"calc(85vh / var(--hc-ui-scale))",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",overflow:"hidden",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
+      <div style={{borderRight:"none",background:"var(--hc-sunken)",padding:isMobile?"calc(8px + env(safe-area-inset-top, 0px) / var(--hc-ui-scale)) 12px 8px":"18px 14px",display:"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:"1px solid var(--hc-line-subtle)",alignItems:"center"}:{})}}>
         <div style={{display:isMobile?"none":"flex",alignItems:"center",gap:9,marginBottom:10}}>
           <span style={{color:t.acc,display:"flex"}}><IC.Settings/></span>
           <div>
-            <div style={{fontSize:15,fontWeight:800,color:t.text,letterSpacing:.4}}>Settings</div>
+            <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text}}>Settings</div>
           </div>
         </div>
-        <div style={{flex:1,minHeight:0,overflowY:isMobile?"hidden":"auto",display:"flex",flexDirection:isMobile?"row":"column",gap:8,paddingRight:2,...(isMobile?{overflowX:"auto"}:{})}}>
-          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} style={{width:isMobile?"auto":"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",transition:"background .15s ease,border-color .15s ease,color .15s ease",...(isMobile?{flexShrink:0}:{})}}>
-            <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>{icon}</span>
-            <span style={{minWidth:0,flex:1}}>
-              <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
-              <span style={{display:isMobile?"none":"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{hint}</span>
+        <div style={{flex:1,minHeight:0,overflowY:isMobile?"hidden":"auto",display:"flex",flexDirection:isMobile?"row":"column",gap:2,paddingRight:2,...(isMobile?{overflowX:"auto"}:{})}}>
+          {settingsTabs.filter(([id])=>id!=="changelog").map(([id,icon,label,hint])=>{const active=settingsTab===id;return <button key={id} onClick={()=>{setSettingsTab(id);if(id!=="connections")setShowHealthMonitor(false);}} aria-current={active?"page":undefined} className={`hc-settings-nav-item${active?" is-active":""}${isMobile?" is-row":""}`} style={{width:isMobile?"auto":"100%",fontFamily:font,...(isMobile?{flexShrink:0}:{})}}>
+            <span className="hc-settings-nav-icon" aria-hidden="true">{icon}</span>
+            <span className="hc-settings-nav-text">
+              <span className="hc-settings-nav-label">{label}</span>
+              <span className="hc-settings-nav-hint">{hint}</span>
             </span>
           </button>;})}
         </div>
-        {(()=>{const active=settingsTab==="changelog";return <button onClick={async()=>{setSettingsTab("changelog");setShowHealthMonitor(false);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}}} style={{width:isMobile?"auto":"100%",display:"flex",alignItems:"center",gap:10,textAlign:"left",padding:"10px 11px",borderRadius:10,border:`1px solid ${active?t.acc:t.brd}33`,background:active?`${t.acc}18`:`${t.bgDeep}88`,color:active?t.acc:t.dim,cursor:"pointer",fontFamily:font,boxShadow:"none",marginTop:isMobile?0:8,...(isMobile?{flexShrink:0}:{})}}>
-          <span style={{fontSize:16,width:20,textAlign:"center",flexShrink:0}}>📋</span>
-          <span style={{minWidth:0,flex:1}}>
-            <span style={{display:"block",fontSize:12,fontWeight:800,color:active?t.acc:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Changelog</span>
-            <span style={{display:isMobile?"none":"block",fontSize:9,color:t.mut,marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>Release notes and updates</span>
+        {(()=>{const active=settingsTab==="changelog";return <button onClick={async()=>{setSettingsTab("changelog");setShowHealthMonitor(false);if(!changelogContent){try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}}} aria-current={active?"page":undefined} className={`hc-settings-nav-item${active?" is-active":""}${isMobile?" is-row":""}`} style={{width:isMobile?"auto":"100%",fontFamily:font,marginTop:isMobile?0:8,...(isMobile?{flexShrink:0}:{})}}>
+          <span className="hc-settings-nav-icon" aria-hidden="true"><IC.File/></span>
+          <span className="hc-settings-nav-text">
+            <span className="hc-settings-nav-label">Changelog</span>
+            <span className="hc-settings-nav-hint">Release notes and updates</span>
           </span>
         </button>;})()}
+        {isMobile&&<button aria-label="Close" className="hc-icon-btn is-lg" onClick={closeSettings} style={{flexShrink:0,marginLeft:4,color:t.mut}}><IC.X/></button>}
       </div>
       <div style={{display:"flex",overflow:"hidden",minWidth:0,...(isMobile?{flexDirection:"column"}:{})}}>
-    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",overflowY:"auto",padding:isMobile?"16px 14px":"22px 30px",transition:"flex .3s ease",minWidth:0}}>
-    <div style={{maxWidth:980}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-        <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>{activeSettingsTitle}</h3>
+    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden",transition:"flex .3s ease"}}>
+    <div style={{flexShrink:0,padding:isMobile?"12px 14px 10px":"18px 30px 12px",borderBottom:"1px solid var(--hc-line-subtle)"}}>
+      <div style={{maxWidth:980,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+        <h3 style={{fontSize:"var(--hc-text-title)",fontWeight:600,color:t.text,margin:0}}>{activeSettingsTitle}</h3>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          {settingsPulse&&<span style={{fontSize:10,color:settingsPulse.type==="error"?t.err:t.ok,border:`1px solid ${settingsPulse.type==="error"?t.err:t.ok}33`,background:`${settingsPulse.type==="error"?t.err:t.ok}12`,borderRadius:999,padding:"3px 8px",fontWeight:700,animation:"fadeIn .15s"}}>{settingsPulse.text}</span>}
-          {settingsTab==="changelog"&&<button onClick={async()=>{setChangelogContent(null);try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}} style={{...btnS(t.f1),fontSize:11,padding:"5px 10px"}}>Refresh</button>}
-          <button onClick={closeSettings} style={{...btnS(t.mut),fontSize:12,padding:"6px 10px"}}>✕</button>
+          {settingsPulse&&<span role="status" aria-live="polite" style={{fontSize:"var(--hc-text-secondary)",color:settingsPulse.type==="error"?t.err:t.ok,border:`1px solid ${settingsPulse.type==="error"?t.err:t.ok}33`,background:`${settingsPulse.type==="error"?t.err:t.ok}12`,borderRadius:"var(--hc-radius-pill)",padding:"3px 8px",fontWeight:600,animation:"fadeIn .15s"}}>{settingsPulse.text}</span>}
+          {settingsTab==="changelog"&&<button aria-label="Refresh changelog" data-tip="Refresh" className="hc-icon-btn is-lg tip-below" onClick={async()=>{setChangelogContent(null);try{const r=await fetch(`${API}/api/changelog`);const d=await r.json();setChangelogContent(d.content||"");}catch{setChangelogContent("# Changelog\n\nFailed to load.");}}} style={{color:t.mut}}><IC.Refresh/></button>}
+          {!isMobile&&<button aria-label="Close" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={closeSettings} style={{color:t.mut}}><IC.X/></button>}
         </div>
       </div>
+    </div>
+    <div style={{flex:1,minHeight:0,overflowY:"auto",padding:isMobile?"14px 14px 16px":"18px 30px 22px"}}>
+    <div style={{maxWidth:980}}>
 
       {/* TILE: Users */}
-      <div style={{display:settingsTab==="users"?"block":"none",animation:"fadeIn .18s ease"}}>
-        {settingSection("Current Session",<button onClick={logoutCurrentUser} style={{...btnS(t.warm),fontSize:12,padding:"8px 14px",whiteSpace:"nowrap"}}>Log Out</button>,
+      <div className="hc-tab-pane" style={{display:settingsTab==="users"?"block":"none"}}>
+        {settingSection("Current Session",<button onClick={logoutCurrentUser} style={{...btnS(t.warm),fontSize:"var(--hc-text-control)",padding:"8px 14px",whiteSpace:"nowrap"}}>Log Out</button>,
           <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
-            <span style={{fontSize:14,color:t.text,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentUser?.name||"None"}</span>
-            {currentUser?.password_enabled&&<span style={{fontSize:9,color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:999,padding:"1px 7px",fontWeight:800}}>Password</span>}
+            <span style={{fontSize:"var(--hc-text-control)",color:t.text,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentUser?.name||"None"}</span>
+            {currentUser?.password_enabled&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:"var(--hc-radius-pill)",padding:"1px 7px",fontWeight:600}}>Password</span>}
           </div>
         ,"Local profiles for keeping HyprChat data separate on this install.")}
 
-        {loginError&&<div style={{fontSize:11,color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:7,padding:"7px 9px",marginBottom:12}}>{loginError}</div>}
+        {loginError&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:"var(--hc-radius)",padding:"7px 9px",marginBottom:12}}>{loginError}</div>}
 
         {settingSection("Create Profile",null,
           <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(180px,1fr) minmax(180px,1fr) 96px",gap:8,alignItems:"center"}}>
-            <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="New user name" style={{...inputS,fontSize:12}}/>
-            <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={{...inputS,fontSize:12}}/>
-            <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),fontSize:12,padding:"8px 13px",height:38,opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
+            <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="New user name" style={{...inputS,fontSize:"var(--hc-text-control)"}}/>
+            <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={{...inputS,fontSize:"var(--hc-text-control)"}}/>
+            <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),fontSize:"var(--hc-text-control)",padding:"8px 13px",height:38,opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
           </div>
         )}
 
-        {settingSection("Manage Profiles",<div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:10,color:t.dim}}>{users.length} profile{users.length===1?"":"s"}</span><button onClick={refreshUsers} style={{...btnS(t.mut),fontSize:10,padding:"4px 9px"}}><IC.Refresh/> Refresh</button></div>,
+        {settingSection("Manage Profiles",<div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>{users.length} profile{users.length===1?"":"s"}</span><button onClick={refreshUsers} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"4px 9px"}}><IC.Refresh/> Refresh</button></div>,
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {users.map(u=>{const isCurrent=u.id===currentUserId;const canManage=isCurrent||currentUserId==="default";const nameDraft=userNameDrafts[u.id]??u.name??"";const pwdDraft=userPasswordDrafts[u.id]||"";return <div key={u.id} style={{background:t.bgDeep,border:`1px solid ${isCurrent?t.acc:t.brd}30`,borderRadius:9,padding:"11px 12px"}}>
+              {users.map(u=>{const isCurrent=u.id===currentUserId;const canManage=isCurrent||currentUserId==="default";const nameDraft=userNameDrafts[u.id]??u.name??"";const pwdDraft=userPasswordDrafts[u.id]||"";return <div key={u.id} style={{background:t.bgDeep,border:`1px solid ${isCurrent?t.acc:t.brd}30`,borderRadius:"var(--hc-radius)",padding:"11px 12px"}}>
                 <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
                   <div style={{display:"flex",alignItems:"center",gap:7,minWidth:0}}>
-                    <span style={{fontSize:10,color:isCurrent?t.acc:t.mut,fontWeight:900,textTransform:"uppercase",letterSpacing:.6,flexShrink:0}}>{isCurrent?"Current":"Profile"}</span>
-                    <span style={{fontSize:13,color:t.text,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.name}</span>
-                    {u.password_enabled&&<span style={{fontSize:9,color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:999,padding:"1px 6px",fontWeight:800,flexShrink:0}}>Password</span>}
-                    {u.id==="default"&&<span style={{fontSize:9,color:t.mut,border:`1px solid ${t.brd}33`,borderRadius:999,padding:"1px 6px",fontWeight:800,flexShrink:0}}>Main</span>}
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:isCurrent?t.acc:t.mut,fontWeight:700,textTransform:"none",letterSpacing:0,flexShrink:0}}>{isCurrent?"Current":"Profile"}</span>
+                    <span style={{fontSize:"var(--hc-text-control)",color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.name}</span>
+                    {u.password_enabled&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,border:`1px solid ${t.warm}33`,background:`${t.warm}12`,borderRadius:"var(--hc-radius-pill)",padding:"1px 6px",fontWeight:600,flexShrink:0}}>Password</span>}
+                    {u.id==="default"&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-pill)",padding:"1px 6px",fontWeight:600,flexShrink:0}}>Main</span>}
                   </div>
-                  {u.id!=="default"&&canManage&&<button onClick={()=>deleteManagedUser(u)} title="Delete profile" style={{...btnS(t.err),fontSize:10,padding:"6px 8px",height:32,flexShrink:0}}><IC.Trash/></button>}
+                  {u.id!=="default"&&canManage&&<button onClick={()=>deleteManagedUser(u)} title="Delete profile" style={{...btnS(t.err),fontSize:"var(--hc-text-control)",padding:"6px 8px",height:32,flexShrink:0}}><IC.Trash/></button>}
                 </div>
                 {canManage&&<div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr) 74px":"minmax(180px,1fr) 74px minmax(180px,1fr) 74px minmax(72px,auto)",gap:8,alignItems:"center"}}>
-                  <input value={nameDraft} onChange={e=>setUserNameDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:12,padding:"8px 10px"}}/>
-                  <button onClick={()=>updateManagedUser(u.id,{name:nameDraft})} disabled={!nameDraft.trim()||nameDraft===u.name} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",height:36,opacity:nameDraft.trim()&&nameDraft!==u.name?1:.45,justifyContent:"center"}}>Save</button>
-                  <input type="password" value={pwdDraft} onChange={e=>setUserPasswordDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder={u.password_enabled?"New password":"Set password"} style={{...inputS,fontSize:12,padding:"8px 10px"}}/>
-                  <button onClick={()=>updateManagedUser(u.id,{password:pwdDraft})} disabled={!pwdDraft} style={{...btnS(t.warm),fontSize:10,padding:"6px 9px",height:36,opacity:pwdDraft?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}>Set</button>
-                  {u.password_enabled?<button onClick={()=>updateManagedUser(u.id,{clear_password:true})} style={{...btnS(t.mut),fontSize:10,padding:"6px 9px",height:36,whiteSpace:"nowrap",justifyContent:"center"}}>Clear</button>:<span/>}
+                  <input value={nameDraft} onChange={e=>setUserNameDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder="Display name" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
+                  <button onClick={()=>updateManagedUser(u.id,{name:nameDraft})} disabled={!nameDraft.trim()||nameDraft===u.name} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"6px 9px",height:36,opacity:nameDraft.trim()&&nameDraft!==u.name?1:.45,justifyContent:"center"}}>Save</button>
+                  <input type="password" value={pwdDraft} onChange={e=>setUserPasswordDrafts(p=>({...p,[u.id]:e.target.value}))} placeholder={u.password_enabled?"New password":"Set password"} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
+                  <button onClick={()=>updateManagedUser(u.id,{password:pwdDraft})} disabled={!pwdDraft} style={{...btnS(t.warm),fontSize:"var(--hc-text-control)",padding:"6px 9px",height:36,opacity:pwdDraft?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}>Set</button>
+                  {u.password_enabled?<button onClick={()=>updateManagedUser(u.id,{clear_password:true})} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"6px 9px",height:36,whiteSpace:"nowrap",justifyContent:"center"}}>Clear</button>:<span/>}
                 </div>}
               </div>;})}
             </div>
@@ -7060,26 +7878,26 @@ function HyprChat(){
       </div>
 
       {/* TILE: Connections */}
-      <div style={{display:settingsTab==="connections"?"block":"none",animation:"fadeIn .18s ease"}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="connections"?"block":"none"}}>
         <DocumentSettings enabled={documentsEnabled} onChange={setDocumentsEnabled} t={t} font={font}/>
         {settingSection("Service Status",
             <button onClick={async()=>{
               const next=!showHealthMonitor;
               setShowHealthMonitor(next);
               if(next&&!healthHistory){try{const r=await fetch(`${API}/api/health/history?days=90`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setHealthHistory(d);}catch(e){console.error("Health history:",e);notify({type:"warning",text:"Health history failed",detail:e.message||String(e),duration:5000});}}
-            }} style={{padding:"5px 11px",borderRadius:7,border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:11,cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
-              <span style={{fontSize:13}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
+            }} style={{padding:"5px 11px",borderRadius:"var(--hc-radius)",border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
+              <span style={{fontSize:"var(--hc-text-control)"}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:7,border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:12}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
-              {s?.response_ms!=null&&<span style={{fontSize:10,color:t.mut}}>{s.response_ms}ms</span>}
-              {rl&&<span style={{padding:"1px 6px",borderRadius:4,background:`${STATUS_DEGRADED}20`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:9,fontWeight:800,color:STATUS_DEGRADED}}>Limited</span>}
+              {s?.response_ms!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{s.response_ms}ms</span>}
+              {rl&&<span style={{padding:"1px 6px",borderRadius:"var(--hc-radius-sm)",background:`${STATUS_DEGRADED}20`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:STATUS_DEGRADED}}>Limited</span>}
             </div>;})}
           </div>
-        ,<div>Runtime endpoint health at a glance.{health.searxng?.search_summary&&<div role="status" style={{marginTop:6,color:health.searxng.status==="ok"?t.dim:STATUS_DEGRADED,overflowWrap:"anywhere"}}>{health.searxng.search_summary}<div style={{fontSize:10,color:t.mut,marginTop:3}}>{searchHealthSample(health.searxng)}</div></div>}</div>)}
-        {settingSection("Cloud Models",<button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:10,padding:"5px 9px"}}><IC.Refresh/> Refresh</button>,
+        ,<div>Runtime endpoint health at a glance.{health.searxng?.search_summary&&<div role="status" style={{marginTop:6,color:health.searxng.status==="ok"?t.dim:STATUS_DEGRADED,overflowWrap:"anywhere"}}>{health.searxng.search_summary}<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{searchHealthSample(health.searxng)}</div></div>}</div>)}
+        {settingSection("Cloud Models",<button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"5px 9px"}}><IC.Refresh/> Refresh</button>,
           <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10}}>
             {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"],["custom","Custom","(optional key)","Any OpenAI-compatible endpoint — OpenRouter, Groq, vLLM, llama.cpp..."]].map(([provider,label,placeholder,hint])=>{
               const st=modelProviders[provider]||{provider,label,enabled:false,has_key:false,key_source:"none",key_hint:"",base_url:"",custom_label:""};
@@ -7093,18 +7911,18 @@ function HyprChat(){
               const testReady=isCustom?!!st.base_url:(!!key||st.has_key);
               return <div key={provider} style={{...subSecS,display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"120px minmax(0,1fr) auto",gap:10,alignItems:"center"}}>
                 <div>
-                  <div style={{display:"flex",alignItems:"center",gap:7,fontSize:12,fontWeight:900,color:t.text}}><span>{provider==="openai"?"◎":provider==="anthropic"?"✦":"⌬"}</span>{isCustom&&st.custom_label?st.custom_label:label}</div>
-                  <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text}}><span>{provider==="openai"?"◎":provider==="anthropic"?"✦":"⌬"}</span>{isCustom&&st.custom_label?st.custom_label:label}</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{hint}</div>
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"minmax(180px,1fr) auto",gap:8,alignItems:"center"}}>
-                  {isCustom&&<input value={customBaseUrl??(st.base_url||"")} onChange={e=>setCustomBaseUrl(e.target.value)} placeholder="Full base URL, e.g. https://openrouter.ai/api/v1" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px",gridColumn:"1 / -1"}}/>}
-                  {isCustom&&<input value={customLabel??(st.custom_label||"")} onChange={e=>setCustomLabel(e.target.value)} placeholder="Display name (e.g. OpenRouter)" style={{...inputS,fontSize:12,padding:"8px 10px",gridColumn:"1 / -1"}}/>}
-                  <input type="password" value={key} onChange={e=>setProviderKeys(p=>({...p,[provider]:e.target.value}))} placeholder={st.key_hint?`Saved ${st.key_hint}`:placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
-                  <label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
+                  {isCustom&&<input value={customBaseUrl??(st.base_url||"")} onChange={e=>setCustomBaseUrl(e.target.value)} placeholder="Full base URL, e.g. https://openrouter.ai/api/v1" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px",gridColumn:"1 / -1"}}/>}
+                  {isCustom&&<input value={customLabel??(st.custom_label||"")} onChange={e=>setCustomLabel(e.target.value)} placeholder="Display name (e.g. OpenRouter)" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",gridColumn:"1 / -1"}}/>}
+                  <input type="password" value={key} onChange={e=>setProviderKeys(p=>({...p,[provider]:e.target.value}))} placeholder={st.key_hint?`Saved ${st.key_hint}`:placeholder} style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
+                  <label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
                     <input type="checkbox" checked={enabled} onChange={e=>saveModelProvider(provider,{enabled:e.target.checked})} disabled={!!busy}/>
                     Enabled
                   </label>
-                  <div style={{gridColumn:"1 / -1",display:"flex",gap:8,alignItems:"center",fontSize:9,color:statusColor}}>
+                  <div style={{gridColumn:"1 / -1",display:"flex",gap:8,alignItems:"center",fontSize:"var(--hc-text-secondary)",color:statusColor}}>
                     <span style={{width:7,height:7,borderRadius:"50%",background:statusColor,boxShadow:`0 0 6px ${statusColor}66`}}/>
                     <span>{configured?(enabled?`Ready${isCustom?"":` (${st.key_source})`}`:isCustom?"Disabled":"Key disabled"):isCustom?"No base URL saved":"No key saved"}</span>
                     {st.last_test_status==="ok"&&<span style={{color:t.ok}}>Test passed</span>}
@@ -7112,9 +7930,9 @@ function HyprChat(){
                   </div>
                 </div>
                 <div style={{display:"flex",gap:6,justifyContent:"flex-end",flexWrap:"wrap"}}>
-                  <button onClick={()=>testModelProvider(provider)} disabled={!!busy||!testReady} style={{...btnS(t.f1),fontSize:10,padding:"6px 9px",opacity:(busy||!testReady)?0.5:1}}>{busy==="testing"?"Testing...":"Test"}</button>
-                  <button onClick={()=>saveModelProvider(provider,{enabled})} disabled={!!busy||!saveReady} style={{...btnS(t.ok),fontSize:10,padding:"6px 9px",opacity:(busy||!saveReady)?0.5:1}}>{busy==="saving"?"Saving...":"Save"}</button>
-                  <button onClick={()=>deleteModelProvider(provider)} disabled={!!busy||(!st.has_key&&!configured)} style={{...btnS(t.err),fontSize:10,padding:"6px 8px",opacity:(busy||(!st.has_key&&!configured))?0.45:1}}><IC.Trash/></button>
+                  <button onClick={()=>testModelProvider(provider)} disabled={!!busy||!testReady} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"6px 9px",opacity:(busy||!testReady)?0.5:1}}>{busy==="testing"?"Testing...":"Test"}</button>
+                  <button onClick={()=>saveModelProvider(provider,{enabled})} disabled={!!busy||!saveReady} style={{...btnS(t.ok),fontSize:"var(--hc-text-control)",padding:"6px 9px",opacity:(busy||!saveReady)?0.5:1}}>{busy==="saving"?"Saving...":"Save"}</button>
+                  <button aria-label="Delete" onClick={()=>deleteModelProvider(provider)} disabled={!!busy||(!st.has_key&&!configured)} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",padding:"6px 8px",opacity:(busy||(!st.has_key&&!configured))?0.45:1}}><IC.Trash/></button>
                 </div>
               </div>;
             })}
@@ -7132,12 +7950,12 @@ function HyprChat(){
               ["Voice TTS",ttsUrl,setTtsUrl,"http://192.168.1.115:8880","Text-to-speech — Kokoro (optional)"],
             ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr)",gap:12,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,marginBottom:5}}>
-                <span style={{fontSize:12,color:t.dim,fontWeight:700}}>{label}</span>
-                <span style={{fontSize:9,color:t.mut,display:"none"}}>{hint}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700}}>{label}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,display:"none"}}>{hint}</span>
               </div>
               <div>
-                <input value={value} onChange={e=>setter(e.target.value)} placeholder={placeholder} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
-                <div style={{fontSize:9,color:t.mut,marginTop:4}}>{hint}</div>
+                <input value={value} onChange={e=>setter(e.target.value)} placeholder={placeholder} style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
+                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>{hint}</div>
               </div>
             </label>)}
           </div>
@@ -7148,50 +7966,50 @@ function HyprChat(){
               </span>,<>
             <div style={{display:"grid",gridTemplateColumns:isMobile?"repeat(2,minmax(0,1fr))":"minmax(130px,1fr) 90px minmax(100px,.8fr) 120px",gap:9,alignItems:"end"}}>
               <label>
-                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Host</span>
-                <input value={ollamaScanSshHost} onChange={e=>setOllamaScanSshHost(e.target.value)} placeholder="derived from Ollama URL" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+                <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>Host</span>
+                <input value={ollamaScanSshHost} onChange={e=>setOllamaScanSshHost(e.target.value)} placeholder="derived from Ollama URL" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
               </label>
               <label>
-                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Port</span>
-                <input type="number" min={1} max={65535} value={ollamaScanSshPort} onChange={e=>setOllamaScanSshPort(e.target.value)} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+                <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>Port</span>
+                <input type="number" min={1} max={65535} value={ollamaScanSshPort} onChange={e=>setOllamaScanSshPort(e.target.value)} style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
               </label>
               <label>
-                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>User</span>
-                <input value={ollamaScanSshUser} onChange={e=>setOllamaScanSshUser(e.target.value)} placeholder="root" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+                <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>User</span>
+                <input value={ollamaScanSshUser} onChange={e=>setOllamaScanSshUser(e.target.value)} placeholder="root" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
               </label>
               <label>
-                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Auth</span>
-                <select value={ollamaScanSshAuthMode} onChange={e=>setOllamaScanSshAuthMode(e.target.value)} style={{...inputS,fontSize:12,padding:"8px 10px"}}>
+                <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>Auth</span>
+                <select value={ollamaScanSshAuthMode} onChange={e=>setOllamaScanSshAuthMode(e.target.value)} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}>
                   <option value="key">SSH key</option>
                   <option value="password">Password</option>
                 </select>
               </label>
             </div>
             {ollamaScanSshAuthMode==="key"?<label style={{display:"block",marginTop:9}}>
-              <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Key path</span>
-              <input value={ollamaScanSshKeyPath} onChange={e=>setOllamaScanSshKeyPath(e.target.value)} placeholder="/root/.ssh/id_ed25519" style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+              <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>Key path</span>
+              <input value={ollamaScanSshKeyPath} onChange={e=>setOllamaScanSshKeyPath(e.target.value)} placeholder="/root/.ssh/id_ed25519" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
             </label>:<div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:8,alignItems:"end",marginTop:9}}>
               <label>
-                <span style={{display:"block",fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,fontWeight:800,marginBottom:4}}>Password</span>
-                <input type="password" value={ollamaScanSshPassword} onChange={e=>{setOllamaScanSshPassword(e.target.value);setOllamaScanSshClearPassword(false);}} placeholder={ollamaScanSshHasPassword?"Saved password":"SSH password"} style={{...inputS,fontFamily:"monospace",fontSize:12,padding:"8px 10px"}}/>
+                <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>Password</span>
+                <input type="password" value={ollamaScanSshPassword} onChange={e=>{setOllamaScanSshPassword(e.target.value);setOllamaScanSshClearPassword(false);}} placeholder={ollamaScanSshHasPassword?"Saved password":"SSH password"} style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
               </label>
-              <button type="button" onClick={()=>{setOllamaScanSshPassword("");setOllamaScanSshHasPassword(false);setOllamaScanSshClearPassword(true);}} disabled={!ollamaScanSshHasPassword&&!ollamaScanSshPassword} style={{...btnS(t.err),fontSize:10,padding:"7px 10px",opacity:(!ollamaScanSshHasPassword&&!ollamaScanSshPassword)?0.45:1}}>Clear</button>
+              <button type="button" onClick={()=>{setOllamaScanSshPassword("");setOllamaScanSshHasPassword(false);setOllamaScanSshClearPassword(true);}} disabled={!ollamaScanSshHasPassword&&!ollamaScanSshPassword} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",padding:"7px 10px",opacity:(!ollamaScanSshHasPassword&&!ollamaScanSshPassword)?0.45:1}}>Clear</button>
             </div>}
         </>,"Used only by HyprFit Rescan Hardware for remote Ollama hosts.",t.warm)}
         {(ttsUrl||sttUrl)&&settingSection("🎙 Voice",null,
           <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
-            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:t.dim}}>
+            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:t.dim}}>
               Voice:
-              <select value={ttsVoice} onChange={e=>setTtsVoice(e.target.value)} style={{...inputS,width:"auto",fontSize:11,padding:"4px 8px"}}>
+              <select value={ttsVoice} onChange={e=>setTtsVoice(e.target.value)} style={{...inputS,width:"auto",fontSize:"var(--hc-text-control)",padding:"4px 8px"}}>
                 {ttsVoice&&!ttsVoices.includes(ttsVoice)&&<option value={ttsVoice}>{ttsVoice}</option>}
                 {ttsVoices.map(v=><option key={v} value={v}>{v}</option>)}
               </select>
             </label>}
-            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:t.dim,cursor:"pointer"}}>
+            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:t.dim,cursor:"pointer"}}>
               <input type="checkbox" checked={ttsAutoplay} onChange={e=>{setTtsAutoplay(e.target.checked);localStorage.setItem("hc-tts-autoplay",e.target.checked?"1":"0");}}/>
               Auto-play replies
             </label>}
-            <span style={{fontSize:9,color:t.mut}}>Mic capture needs a secure context — over plain HTTP, allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Mic capture needs a secure context — over plain HTTP, allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure</span>
           </div>
         )}
         <div style={{display:"flex",justifyContent:"flex-end",gap:10,alignItems:"center",marginTop:12}}>
@@ -7225,75 +8043,75 @@ function HyprChat(){
                 setTimeout(()=>setConnectionsSaveState(null),2200);
               }catch(e){console.error("Connection settings:",e);setConnectionsSaveState("failed");notify({type:"error",text:"Connection save failed",detail:e.message});}
               setConnectionsSaving(false);
-            }} style={{...btnS(t.ok),opacity:connectionsSaving ? .6 : 1,fontSize:12,padding:"8px 16px",whiteSpace:"nowrap"}}>
+            }} style={{...btnS(t.ok),opacity:connectionsSaving ? .6 : 1,fontSize:"var(--hc-text-control)",padding:"8px 16px",whiteSpace:"nowrap"}}>
               {connectionsSaving?"Saving...":"Save Connections"}
             </button>
         </div>
-        {connectionsSaveState&&<div style={{fontSize:10,color:connectionsSaveState==="failed"?t.err:connectionsSaveState==="saved"?t.ok:t.mut,marginTop:6,textAlign:"right"}}>{connectionsSaveState==="saving"?"Saving...":connectionsSaveState==="saved"?"Saved":"Failed"}</div>}
+        {connectionsSaveState&&<div style={{fontSize:"var(--hc-text-secondary)",color:connectionsSaveState==="failed"?t.err:connectionsSaveState==="saved"?t.ok:t.mut,marginTop:6,textAlign:"right"}}>{connectionsSaveState==="saving"?"Saving...":connectionsSaveState==="saved"?"Saved":"Failed"}</div>}
       </div>
 
       {/* TILE: Model & Generation */}
-      <div style={{display:settingsTab==="generation"?"block":"none",animation:"fadeIn .18s ease"}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="generation"?"block":"none"}}>
         {settingSection("Generation Defaults",null,<>
         <div>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
           {chipRow([4096,8192,16384,32768,65536,131072,262144].map(v=>({v,label:v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:String(v)})),numCtx,setNumCtx)}
           <input aria-label="Default context tokens" type="number" min="1" step="1" value={numCtx} onChange={e=>{if(Number(e.target.value)>0)setNumCtx(Number(e.target.value));}} style={{...inputS,marginTop:8}}/>
-          {numCtx>0&&<div style={{fontSize:11,color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
+          {numCtx>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
         </div>
         <div>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
           {chipRow(["auto","on","off"].map(v=>({v,label:v==="auto"?"Auto":v==="on"?"On":"Off"})),thinkMode,setThinkMode)}
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Controls whether models use thinking tokens. Auto lets the model decide.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>For models without native effort levels. Persona overrides take priority; Auto uses the model default. Native effort selections take priority over these switches.</div>
         </div>
         <div>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Default Effort Level</div>
-          {chipRow(EFFORT_LEVELS.map((lv,v)=>({v,title:lv.desc,label:<><span style={{fontSize:14}}>{lv.emoji}</span>{lv.name}</>})),globalEffort,setGlobalEffort,{color:t.pink})}
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>After the initial answer, the model re-examines and refines it. {EFFORT_LEVELS[globalEffort].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Default Self-Review Level</div>
+          {chipRow(EFFORT_LEVELS.map((lv,v)=>({v,title:lv.desc,label:<><span style={{fontSize:"var(--hc-text-control)"}}>{lv.emoji}</span>{lv.name}</>})),globalEffort,setGlobalEffort,{color:t.pink})}
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>For models without native effort levels, the model reviews its initial answer. {EFFORT_LEVELS[reviewLevel(globalEffort)].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
         </div>
         <div>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Auto-Compact Long Chats</div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:contextCompaction?t.ok:t.dim,cursor:"pointer"}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Auto-Compact Long Chats</div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:contextCompaction?t.ok:t.dim,cursor:"pointer"}}>
             <input type="checkbox" checked={contextCompaction} onChange={e=>setContextCompaction(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
             {contextCompaction?"Enabled":"Disabled"}
           </label>
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>When a chat nears its context window, older turns are summarized by the Workspace Analysis Model so long conversations keep their beginning. Original messages are never modified.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>When a chat nears its context window, older turns are summarized by the Workspace Analysis Model so long conversations keep their beginning. Original messages are never modified.</div>
         </div>
         <div>
-          <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:ragReranker?t.ok:t.dim,cursor:"pointer"}}>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:ragReranker?t.ok:t.dim,cursor:"pointer"}}>
             <input type="checkbox" checked={ragReranker} onChange={e=>setRagReranker(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
             {ragReranker?"Enabled":"Disabled"}
           </label>
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Knowledge-base retrieval reorders its candidate excerpts with a quick Workspace Analysis Model relevance pass before answering. Sharper citations at the cost of ~1-2s per KB question; falls back to normal ranking on any error.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Knowledge-base retrieval reorders its candidate excerpts with a quick Workspace Analysis Model relevance pass before answering. Sharper citations at the cost of ~1-2s per KB question; falls back to normal ranking on any error.</div>
         </div>
         </>,"Global model behavior. Individual chats can still override effort and tools.")}
 
         {settingSection("Workspace Analysis Model",null,<div>
           <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
-          <div style={{fontSize:10,color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
         </div>)}
 
         {settingSection("Smart Model Routing",
-          <label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:modelRouting.enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
+          <label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:modelRouting.enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
             <input type="checkbox" checked={modelRouting.enabled} onChange={e=>{const next={...modelRouting,enabled:e.target.checked};setModelRouting(next);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_routing:next})}).then(()=>refreshModels()).catch(()=>{});}} style={{accentColor:t.ok,cursor:"pointer"}}/>
             {modelRouting.enabled?"Enabled":"Disabled"}
           </label>,
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12,opacity:modelRouting.enabled?1:.55}}>
             {[["chat","💬 Chat","casual conversation, writing, general questions"],["code","💻 Code","programming, debugging, scripts"],["reasoning","🧠 Reasoning","math, logic, multi-step analysis"],["long_context","📜 Long Context","prompts over ~12K tokens (no classifier call)"]].map(([k,label,hint])=><div key={k}>
-              <div style={{fontSize:11,color:t.dim,fontWeight:700,marginBottom:4}}>{label}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700,marginBottom:4}}>{label}</div>
               <ModelPicker value={modelRouting[k]} onChange={v=>{const next={...modelRouting,[k]:v};setModelRouting(next);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_routing:next})}).then(()=>refreshModels()).catch(()=>{});}} models={models.filter(m=>m!=="auto")} modelDetails={modelDetails} t={t} font={font}/>
-              <div style={{fontSize:9,color:t.mut,marginTop:3}}>{hint}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{hint}</div>
             </div>)}
           </div>
         ,"Adds an 🧭 Auto entry to the model picker. Each message is classified locally by the Workspace Analysis Model and routed to the model you set per category.")}
 
-        {settingSection("Chat Image Generation",<span style={{fontSize:9,color:t.acc,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:6,padding:"2px 6px",fontWeight:800}}>ComfyUI</span>,<>
+        {settingSection("Chat Image Generation",<span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,background:`${t.acc}12`,border:`1px solid ${t.acc}28`,borderRadius:"var(--hc-radius)",padding:"2px 6px",fontWeight:600}}>ComfyUI</span>,<>
           {!comfyuiUrl
-            ?<div style={{fontSize:11,color:t.mut}}>ComfyUI is not configured — set its URL in Settings → Connections first.</div>
+            ?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>ComfyUI is not configured — set its URL in Settings → Connections first.</div>
             :(()=>{
-              const sel={...inputS,padding:"8px 10px",fontSize:12};
+              const sel={...inputS,padding:"8px 10px",fontSize:"var(--hc-text-secondary)"};
               const inp=sel;
               const cks=imgChatLists?.checkpoints||[];
               const vaeList=imgChatLists?.vaes||[];
@@ -7303,7 +8121,7 @@ function HyprChat(){
                   <section style={subSecS}>
                     <div style={secHeadRowS}>
                       <div style={secTitleS}>Generation Target</div>
-                      {hasPreset&&<div title="Has saved Image Studio defaults" style={{fontSize:9,color:t.acc,fontWeight:800}}>★ preset</div>}
+                      {hasPreset&&<div title="Has saved Image Studio defaults" style={{fontSize:"var(--hc-text-secondary)",color:t.acc,fontWeight:600}}>★ preset</div>}
                     </div>
                     <div style={secGridS}>
                       <label style={secFieldLabelS}>Image model
@@ -7344,24 +8162,24 @@ function HyprChat(){
                   <section style={subSecS}>
                     <div style={secHeadRowS}>
                       <div style={secTitleS}>Prompt Defaults</div>
-                      <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{selectedModelLabel}</div>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>{selectedModelLabel}</div>
                     </div>
                     {imgChatCkpt?<>
                   <div>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default prompt saved with this model</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt saved with this model</div>
                     <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
                   </div>
                   <div>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default negative prompt for this model</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt for this model</div>
                     <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
                   </div>
                 </>:<>
                   <div>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
                     <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
                   </div>
                   <div>
-                    <div style={{fontSize:10,color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
                     <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
                   </div>
                 </>}
@@ -7371,7 +8189,7 @@ function HyprChat(){
                   <section style={subSecS}>
                     <div style={secHeadRowS}>
                       <div style={secTitleS}>Prompt Model</div>
-                      <div style={{fontSize:9,color:t.mut}}>persona photos + enhance</div>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>persona photos + enhance</div>
                     </div>
                   {modelField({icon:"📷",value:imgChatComposeModel,set:setImgChatComposeModel,inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
                   {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>setImgChatAutoEnhance(v=>!v),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
@@ -7385,7 +8203,7 @@ function HyprChat(){
       {/* TILE: Daedalus — all coder-agent-related settings live here.
           Includes the umbrella Planning/Coder model pickers, the new collapsible
           per-agent model overrides card, and OpenHands runtime knobs. */}
-      <div style={{display:settingsTab==="daedalus"?"block":"none",animation:"fadeIn .18s ease"}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="daedalus"?"block":"none"}}>
         {settingSection("Models",null,<>
         {modelField({label:"Code Planning Model",icon:"🧠",value:planningModel,set:setPlanningModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated planning model",hint:"Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model."})}
         {modelField({label:"Code Generator Model",icon:"🧬",value:coderModel,set:setCoderModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated coder model",hint:"Used by Builder + Fixer agents. Empty = uses the active chat model."})}
@@ -7395,12 +8213,12 @@ function HyprChat(){
             The reset button clears the override (returns to inheritance). */}
         <div>
           <div onClick={()=>setCoderBotModelsOpen(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",userSelect:"none"}}>
-            <span style={{fontSize:14}}>🎛</span>
-            <span style={{fontSize:12,fontWeight:700,color:t.text,letterSpacing:.3}}>Per-Agent Model Overrides</span>
+            <span style={{fontSize:"var(--hc-text-control)"}}>🎛</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,letterSpacing:.3}}>Per-Agent Model Overrides</span>
             <span style={{flex:1}}/>
-            <span style={{fontSize:10,color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
           </div>
-          <div style={{fontSize:10,color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Reviewer for verification, Acceptance, and ProjectQA. Fixer model overrides apply to legacy workflows.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Reviewer for verification, Acceptance, and ProjectQA. Fixer model overrides apply to legacy workflows.</div>
 
           {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`,display:"flex",flexDirection:"column",gap:14}}>
             {modelField({label:"📐 Architect Model",icon:"📐",value:architectModel,set:setArchitectModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Architect agent only"})}
@@ -7417,7 +8235,7 @@ function HyprChat(){
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {toggleField("Aider Enabled",aiderEnabled,()=>setAiderEnabled(!aiderEnabled),aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer")}
           {modelField({label:"Aider/Fix Model",icon:"🛠",value:aiderModel,set:setAiderModel,activateValue:fixerModel||coderModel||models[0]||"",inheritTitle:"Inherits from Fixer/Coder Model",inheritDesc:"Click to pin the Aider edit model"})}
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:11,color:t.mut,cursor:"pointer"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.mut,cursor:"pointer"}}>
             <input type="checkbox" checked={aiderAutoTest} onChange={e=>setAiderAutoTest(e.target.checked)} style={{accentColor:t.acc}}/>
             Auto-run safe test command after Aider edits
           </label>
@@ -7428,96 +8246,104 @@ function HyprChat(){
 
         {settingSection("Builder Behavior",null,<>
         <div>
-          <label style={{fontSize:12,color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
-          <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
+          <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
+          <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
             <option value="low">Low — fastest, minimal think tokens</option>
             <option value="medium">Medium — balanced (recommended for local Ollama)</option>
             <option value="high">High — most thorough, slow on local models</option>
           </select>
-          <div style={{fontSize:9,color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
         </div>
 
         <div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:t.dim,fontWeight:600,cursor:"pointer"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,cursor:"pointer"}}>
             <input type="checkbox" checked={openhandsDisableThinking} onChange={e=>setOpenhandsDisableThinking(e.target.checked)} style={{accentColor:t.acc}}/>
             Disable model thinking during builds
           </label>
-          <div style={{fontSize:9,color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
         </div>
         {sliderField({label:"Legacy Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1,hint:"Legacy workflows only. Persistent jobs use Turns per coding attempt above."})}
         </>,"How the Builder model reasons before each tool call. These save as you change them.")}
       </div>
 
       {/* TILE: Appearance */}
-      <div style={{display:settingsTab==="appearance"?"block":"none",animation:"fadeIn .18s ease"}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="appearance"?"block":"none"}}>
         {settingSection("Theme & Background",null,(()=>{
             const previewKey=pendingTheme||tm;
             const pTh=THEMES[previewKey]||t;
             return <div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:8,alignItems:"end",marginBottom:8}}>
                 <div>
-                  <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
-                  <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
+                  <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                     {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
                   </select>
                 </div>
                 <div>
-                  <div style={{fontSize:12,color:t.dim,marginBottom:6,fontWeight:600}}>Background</div>
-                  <select value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:font,fontSize:12,outline:"none",cursor:"pointer"}}>
+                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Background</div>
+                  <select value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                     {BACKGROUND_EFFECTS.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
                 </div>
               </div>
-              <div style={{padding:"10px 14px",background:pTh.bgDeep,border:`1px solid ${pTh.brd}44`,borderRadius:10,marginBottom:8}}>
+              <div style={{padding:"10px 14px",background:pTh.bgDeep,border:`1px solid ${pTh.brd}44`,borderRadius:"var(--hc-radius-card)",marginBottom:8}}>
                 <div style={{display:"flex",gap:4,marginBottom:8,flexWrap:"wrap"}}>
                   {[["bg",pTh.bg],["surface",pTh.surface],["text",pTh.text],["accent",pTh.acc],["warm",pTh.warm],["ok",pTh.ok],["err",pTh.err],["pink",pTh.pink]].map(([label,c])=><div key={label} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                    <div style={{width:18,height:18,borderRadius:4,background:c,border:`1px solid ${pTh.brd}66`}}/>
-                    <span style={{fontSize:7,color:pTh.mut}}>{label}</span>
+                    <div style={{width:18,height:18,borderRadius:"var(--hc-radius-sm)",background:c,border:`1px solid ${pTh.brd}66`}}/>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:pTh.mut}}>{label}</span>
                   </div>)}
                 </div>
-                <div style={{borderRadius:8,overflow:"hidden",background:pTh.bg,padding:8}}>
+                <div style={{borderRadius:"var(--hc-radius)",overflow:"hidden",background:pTh.bg,padding:8}}>
                   <div style={{display:"flex",gap:6,marginBottom:4}}>
-                    <div style={{flex:1,padding:"6px 10px",borderRadius:8,background:`${pTh.surface}CC`,fontSize:10,color:pTh.text}}>Hello!</div>
+                    <div style={{flex:1,padding:"6px 10px",borderRadius:"var(--hc-radius)",background:`${pTh.surface}CC`,fontSize:"var(--hc-text-secondary)",color:pTh.text}}>Hello!</div>
                   </div>
                   <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
-                    <div style={{flex:1,maxWidth:"70%",padding:"6px 10px",borderRadius:8,background:`${pTh.acc}22`,border:`1px solid ${pTh.acc}33`,fontSize:10,color:pTh.acc}}>Response preview</div>
+                    <div style={{flex:1,maxWidth:"70%",padding:"6px 10px",borderRadius:"var(--hc-radius)",background:`${pTh.acc}22`,border:`1px solid ${pTh.acc}33`,fontSize:"var(--hc-text-secondary)",color:pTh.acc}}>Response preview</div>
                   </div>
                 </div>
               </div>
               <div style={{display:"flex",gap:6}}>
-                {pendingTheme&&pendingTheme!==tm&&<><button onClick={()=>{setTm(pendingTheme);setPendingTheme(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:7,background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600}}>Apply</button>
-                <button onClick={()=>setPendingTheme(null)} style={{padding:"6px 12px",borderRadius:7,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12}}>Cancel</button></>}
+                {pendingTheme&&pendingTheme!==tm&&<><button onClick={()=>{setTm(pendingTheme);setPendingTheme(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:"var(--hc-radius)",background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Apply</button>
+                <button onClick={()=>setPendingTheme(null)} style={{padding:"6px 12px",borderRadius:"var(--hc-radius)",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button></>}
               </div>
             </div>;
           })())}
-        {settingSection("Font",null,(()=>{
+        {settingSection("Typography",null,(()=>{
             const previewIdx=pendingFont!==null?pendingFont:fi;
             const pF=FONTS[previewIdx]||FONTS[0];
             return <div>
-              <select value={previewIdx} onChange={e=>setPendingFont(parseInt(e.target.value))} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"8px 12px",borderRadius:8,fontFamily:pF.v,fontSize:12,outline:"none",cursor:"pointer",marginBottom:8}}>
+              <label htmlFor="hc-code-font" style={{display:'block',marginBottom:8}}>Code font</label>
+              <select id="hc-code-font" value={previewIdx} onChange={e=>setPendingFont(parseInt(e.target.value))} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:pF.v,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8}}>
                 {FONTS.map((f,i)=><option key={i} value={i} style={{fontFamily:f.v}}>{f.name}</option>)}
               </select>
-              <div style={{padding:"10px 14px",background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:10,marginBottom:8}}>
-                <div style={{fontFamily:pF.v,fontSize:14,color:t.text,marginBottom:6,lineHeight:1.6}}>The quick brown fox jumps over the lazy dog.</div>
-                <div style={{fontFamily:pF.v,fontSize:11,color:t.dim,lineHeight:1.5}}>{"const x = () => { return 42; };"}</div>
-                <div style={{display:"flex",gap:12,marginTop:8}}>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <span style={{fontSize:10,color:t.mut}}>UI Size</span>
-                    <select value={uiFontSize} onChange={e=>{setUiFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"4px 8px",borderRadius:6,fontFamily:pF.v,fontSize:11,outline:"none",cursor:"pointer"}}>
+              <label htmlFor="hc-ui-font" style={{display:'block',marginBottom:8}}>Interface &amp; chat font</label>
+              <select id="hc-ui-font" aria-describedby="hc-ui-font-help" value={uiFi} onChange={e=>{setUiFi(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8}}>
+                <option value={-1}>Match code font (monospace)</option>
+                {UI_FONTS.map((f,i)=><option key={i} value={i} style={{fontFamily:f.v}}>{f.name}</option>)}
+              </select>
+              <div id="hc-ui-font-help" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:10}}>The interface font applies to menus, settings and chat text. Choose “Match code font” to use the selected code font for these too. Code blocks always use the code font.</div>
+              <div style={{padding:"10px 14px",background:t.bgDeep,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",marginBottom:8}}>
+                <div style={{fontFamily:uiFont?uiFont.v:pF.v,fontSize:fontSize,color:t.text,marginBottom:6,lineHeight:1.6}}>The quick brown fox jumps over the lazy dog.</div>
+                <div style={{fontFamily:pF.v,fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.5}}>{"const x = () => { return 42; };"}</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:12,marginTop:8}}>
+                  <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:6}}>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>UI scale</span>
+                    <select aria-label="UI scale" value={uiFontSize} onChange={e=>{setUiFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"4px 8px",borderRadius:"var(--hc-radius)",fontFamily:pF.v,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                       {[10,11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
                     </select>
                   </div>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <span style={{fontSize:10,color:t.mut}}>Chat Size</span>
-                    <select value={fontSize} onChange={e=>{setFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.text,padding:"4px 8px",borderRadius:6,fontFamily:pF.v,fontSize:11,outline:"none",cursor:"pointer"}}>
+                  <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:6}}>
+                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>Reading text size</span>
+                    <select aria-label="Reading text size" aria-describedby="hc-reading-size-help" value={fontSize} onChange={e=>{setFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"4px 8px",borderRadius:"var(--hc-radius)",fontFamily:pF.v,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                       {[11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
                     </select>
                   </div>
                 </div>
+                <div id="hc-reading-size-help" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:8}}>Changes body text in chats, council responses, and research reports.</div>
               </div>
               <div style={{display:"flex",gap:6}}>
-                {pendingFont!==null&&pendingFont!==fi&&<><button onClick={()=>{setFi(pendingFont);setPendingFont(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:7,background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:12,fontWeight:600}}>Apply</button>
-                <button onClick={()=>setPendingFont(null)} style={{padding:"6px 12px",borderRadius:7,background:t.bgDeep,border:`1px solid ${t.brd}44`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12}}>Cancel</button></>}
+                {pendingFont!==null&&pendingFont!==fi&&<><button onClick={()=>{setFi(pendingFont);setPendingFont(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:"var(--hc-radius)",background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Apply</button>
+                <button onClick={()=>setPendingFont(null)} style={{padding:"6px 12px",borderRadius:"var(--hc-radius)",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button></>}
               </div>
             </div>;
           })())}
@@ -7531,8 +8357,8 @@ function HyprChat(){
             [autoExpandThink,setAutoExpandThink,"Auto-think"],
             [showNavLabels,setShowNavLabels,"Nav Labels"],
             [autoTitle,setAutoTitle,"Auto Title"],
-          ].map(([val,setter,label],idx)=><div key={idx} onClick={()=>{setter(!val);flashSettingsPulse("Saved locally","success");}} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.bgDeep}`,borderRadius:7,border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer",fontSize:12}}>
-            <span style={{color:val?t.acc:t.mut,fontSize:14}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
+          ].map(([val,setter,label],idx)=><div key={idx} onClick={()=>{setter(!val);flashSettingsPulse("Saved locally","success");}} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.bgDeep}`,borderRadius:"var(--hc-radius)",border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer",fontSize:"var(--hc-text-secondary)"}}>
+            <span style={{color:val?t.acc:t.mut,fontSize:"var(--hc-text-control)"}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
             <span style={{color:val?t.acc:t.dim,fontWeight:600}}>{label}</span>
           </div>)}
           </div>
@@ -7544,10 +8370,10 @@ function HyprChat(){
       </div>
 
       {/* TILE: RAG Pipeline */}
-      <div style={{display:settingsTab==="rag"?"block":"none",animation:"fadeIn .18s ease"}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="rag"?"block":"none"}}>
         <div style={{display:"flex",justifyContent:"flex-end",alignItems:"center",marginBottom:12}}>
           <div style={{display:"flex",gap:8}}>
-            <button onClick={()=>setRagSettings({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000,retrieval_deadline_seconds:3})} style={{...btnS(t.mut),fontSize:12,padding:"5px 12px"}}>Default</button>
+            <button onClick={()=>setRagSettings({embed_model:"nomic-embed-text",chunk_size:500,chunk_overlap:50,top_k:6,max_context_chars:6000,research_top_k:4,research_max_chars:3000,retrieval_deadline_seconds:3})} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"5px 12px"}}>Default</button>
             <button disabled={ragSaving} onClick={async()=>{
               setRagSaving(true);setRagSaveState("saving");
               try{
@@ -7557,7 +8383,7 @@ function HyprChat(){
                 setTimeout(()=>setRagSaveState(null),2200);
               }catch(e){setRagSaveState("failed");notify({type:"error",text:"RAG settings failed",detail:e.message});}
               setRagSaving(false);
-            }} style={{...btnS(t.ok),opacity:ragSaving?0.5:1,fontSize:12,padding:"5px 12px"}}>
+            }} style={{...btnS(t.ok),opacity:ragSaving?0.5:1,fontSize:"var(--hc-text-control)",padding:"5px 12px"}}>
               {ragSaving?"Saving...":"Save"}
             </button>
             <button onClick={async()=>{
@@ -7572,75 +8398,75 @@ function HyprChat(){
                 notify({type:"success",text:"Reindex complete",detail:`${d.kbs?.length||0} knowledge bases reindexed.`});
               }catch(e){updateActivity(activityId,{status:"error",error:e.message,message:"Reindex failed"});notify({type:"error",text:"Reindex failed",detail:e.message});}
               fetch(`${API}/api/rag/stats`).then(r=>r.json()).then(setRagStats).catch(()=>{});
-            }} style={{...btnS(t.f1),fontSize:12,padding:"5px 12px"}}>🔄 Reindex</button>
+            }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"5px 12px"}}><IC.Refresh/> Reindex</button>
           </div>
         </div>
-        {ragSaveState&&<div style={{fontSize:10,color:ragSaveState==="failed"?t.err:ragSaveState==="saved"?t.ok:t.mut,marginTop:-8,marginBottom:10,textAlign:"right"}}>{ragSaveState==="saving"?"Saving...":ragSaveState==="saved"?"Saved":"Failed"}</div>}
+        {ragSaveState&&<div style={{fontSize:"var(--hc-text-secondary)",color:ragSaveState==="failed"?t.err:ragSaveState==="saved"?t.ok:t.mut,marginTop:-8,marginBottom:10,textAlign:"right"}}>{ragSaveState==="saving"?"Saving...":ragSaveState==="saved"?"Saved":"Failed"}</div>}
 
         {settingSection(<>Embedding Model <Tip k="embed_model" t={t}/></>,null,
-          <input value={ragSettings.embed_model} onChange={e=>setRagSettings(p=>({...p,embed_model:e.target.value}))} placeholder="nomic-embed-text" style={{...inputS,fontFamily:"monospace",fontSize:13,width:"100%",padding:"8px 12px"}}/>
+          <input value={ragSettings.embed_model} onChange={e=>setRagSettings(p=>({...p,embed_model:e.target.value}))} placeholder="nomic-embed-text" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",width:"100%",padding:"8px 12px"}}/>
         )}
 
         {settingSection("📐 Chunking",null,<>
           <div style={{display:"flex",gap:16}}>
             <div style={{flex:1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                <span style={{fontSize:10,color:t.dim,fontWeight:600}}>Chunk Size <Tip k="chunk_size" t={t}/></span>
-                <span style={{fontSize:12,fontWeight:700,color:t.acc,fontFamily:"monospace"}}>{ragSettings.chunk_size}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600}}>Chunk Size <Tip k="chunk_size" t={t}/></span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc,fontFamily:codeFont}}>{ragSettings.chunk_size}</span>
               </div>
               <input type="range" min={128} max={2000} step={64} value={ragSettings.chunk_size} onChange={e=>setRagSettings(p=>({...p,chunk_size:parseInt(e.target.value)}))} style={{width:"100%",accentColor:t.acc}}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>128</span><span>2000</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}><span>128</span><span>2000</span></div>
             </div>
             <div style={{flex:1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                <span style={{fontSize:10,color:t.dim,fontWeight:600}}>Overlap <Tip k="chunk_overlap" t={t}/></span>
-                <span style={{fontSize:12,fontWeight:700,color:t.acc,fontFamily:"monospace"}}>{ragSettings.chunk_overlap}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600}}>Overlap <Tip k="chunk_overlap" t={t}/></span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc,fontFamily:codeFont}}>{ragSettings.chunk_overlap}</span>
               </div>
               <input type="range" min={0} max={200} step={10} value={ragSettings.chunk_overlap} onChange={e=>setRagSettings(p=>({...p,chunk_overlap:parseInt(e.target.value)}))} style={{width:"100%",accentColor:t.acc}}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>0</span><span>200</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}><span>0</span><span>200</span></div>
             </div>
           </div>
           {/* Visual chunk preview */}
-          <div style={{background:`${t.surface}44`,borderRadius:8,padding:"8px 10px",border:`1px solid ${t.brd}15`}}>
-            <div style={{fontSize:9,color:t.mut,marginBottom:6,fontWeight:600,textTransform:"uppercase",letterSpacing:.5}}>Preview</div>
+          <div style={{background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",padding:"8px 10px",border:"1px solid var(--hc-line-subtle)"}}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:6,fontWeight:600,textTransform:"none",letterSpacing:0}}>Preview</div>
             <div style={{display:"flex",gap:2,alignItems:"center",height:22}}>
               {[0,1,2,3,4].map(i=>{
                 const w=Math.max(20,Math.min(80,ragSettings.chunk_size/25));
                 const ov=Math.max(0,Math.min(w-4,ragSettings.chunk_overlap/25));
                 const colors=[t.acc,t.warm,t.f1,t.ok,t.pink];
                 return <React.Fragment key={i}>
-                  {i>0&&ov>0&&<div style={{width:ov,height:18,background:`${t.text}18`,borderRadius:2,marginLeft:-ov,marginRight:0,zIndex:1,border:`1px dashed ${t.mut}44`}} title={`${ragSettings.chunk_overlap} char overlap`}/>}
-                  <div style={{width:w,height:18,background:`${colors[i]}22`,border:`1px solid ${colors[i]}44`,borderRadius:3,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:colors[i],fontWeight:700,flexShrink:0}}>{ragSettings.chunk_size}</div>
+                  {i>0&&ov>0&&<div style={{width:ov,height:18,background:`${t.text}18`,borderRadius:"var(--hc-radius-sm)",marginLeft:-ov,marginRight:0,zIndex:1,border:`1px dashed ${t.mut}44`}} title={`${ragSettings.chunk_overlap} char overlap`}/>}
+                  <div style={{width:w,height:18,background:`${colors[i]}22`,border:`1px solid ${colors[i]}44`,borderRadius:"var(--hc-radius-sm)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",color:colors[i],fontWeight:700,flexShrink:0}}>{ragSettings.chunk_size}</div>
                 </React.Fragment>;
               })}
-              <span style={{fontSize:9,color:t.mut,marginLeft:4}}>...</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:4}}>...</span>
             </div>
           </div>
         </>,null,t.warm)}
 
         {settingSection("🔍 Retrieval",null,<>
-          <label style={{fontSize:12}}>Retrieval deadline (seconds)<input type="number" min={1} max={30} value={ragSettings.retrieval_deadline_seconds||3} onChange={e=>setRagSettings(p=>({...p,retrieval_deadline_seconds:Number(e.target.value)}))} style={inputS}/></label>
+          <label style={{fontSize:"var(--hc-text-secondary)"}}>Retrieval deadline (seconds)<input type="number" min={1} max={30} value={ragSettings.retrieval_deadline_seconds||3} onChange={e=>setRagSettings(p=>({...p,retrieval_deadline_seconds:Number(e.target.value)}))} style={inputS}/></label>
           <div style={{display:"flex",gap:16}}>
             <div style={{flex:1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                <span style={{fontSize:10,color:t.dim,fontWeight:600}}>Max Context <Tip k="max_context" t={t}/></span>
-                <span style={{fontSize:12,fontWeight:700,color:t.f1,fontFamily:"monospace"}}>{ragSettings.max_context_chars>=1000?`${(ragSettings.max_context_chars/1000).toFixed(ragSettings.max_context_chars%1000?1:0)}K`:ragSettings.max_context_chars}</span>
+                <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600}}>Max Context <Tip k="max_context" t={t}/></span>
+                <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.f1,fontFamily:codeFont}}>{ragSettings.max_context_chars>=1000?`${(ragSettings.max_context_chars/1000).toFixed(ragSettings.max_context_chars%1000?1:0)}K`:ragSettings.max_context_chars}</span>
               </div>
               <input type="range" min={1000} max={20000} step={500} value={ragSettings.max_context_chars} onChange={e=>setRagSettings(p=>({...p,max_context_chars:parseInt(e.target.value)}))} style={{width:"100%",accentColor:t.f1}}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:t.mut,marginTop:2}}><span>1K</span><span>20K</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}><span>1K</span><span>20K</span></div>
             </div>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <div>
-              <div style={{fontSize:10,color:t.dim,marginBottom:6,fontWeight:600}}>KB Retrieval (top-K) <Tip k="top_k" t={t}/></div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>KB Retrieval (top-K) <Tip k="top_k" t={t}/></div>
               <div style={{display:"flex",gap:3}}>
-                {[3,4,6,8,10,12].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,top_k:v}))} style={{flex:1,padding:"6px 0",borderRadius:6,border:`1px solid ${ragSettings.top_k===v?t.f1:t.brd}33`,background:ragSettings.top_k===v?`${t.f1}22`:t.bgDeep,color:ragSettings.top_k===v?t.f1:t.dim,fontSize:12,cursor:"pointer",fontFamily:font,fontWeight:ragSettings.top_k===v?700:400,transition:"all .15s"}}>{v}</button>)}
+                {[3,4,6,8,10,12].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,top_k:v}))} style={{flex:1,padding:"6px 0",borderRadius:"var(--hc-radius)",border:`1px solid ${ragSettings.top_k===v?t.f1:t.brd}33`,background:ragSettings.top_k===v?`${t.f1}22`:t.bgDeep,color:ragSettings.top_k===v?t.f1:t.dim,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font,fontWeight:ragSettings.top_k===v?700:400,transition:"all .15s"}}>{v}</button>)}
               </div>
             </div>
             <div>
-              <div style={{fontSize:10,color:t.dim,marginBottom:6,fontWeight:600}}>Research Memory (top-K) <Tip k="research_top_k" t={t}/></div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Research Memory (top-K) <Tip k="research_top_k" t={t}/></div>
               <div style={{display:"flex",gap:3}}>
-                {[2,4,6,8,10].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,research_top_k:v}))} style={{flex:1,padding:"6px 0",borderRadius:6,border:`1px solid ${ragSettings.research_top_k===v?t.pink:t.brd}33`,background:ragSettings.research_top_k===v?`${t.pink}22`:t.bgDeep,color:ragSettings.research_top_k===v?t.pink:t.dim,fontSize:12,cursor:"pointer",fontFamily:font,fontWeight:ragSettings.research_top_k===v?700:400,transition:"all .15s"}}>{v}</button>)}
+                {[2,4,6,8,10].map(v=><button key={v} onClick={()=>setRagSettings(p=>({...p,research_top_k:v}))} style={{flex:1,padding:"6px 0",borderRadius:"var(--hc-radius)",border:`1px solid ${ragSettings.research_top_k===v?t.pink:t.brd}33`,background:ragSettings.research_top_k===v?`${t.pink}22`:t.bgDeep,color:ragSettings.research_top_k===v?t.pink:t.dim,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font,fontWeight:ragSettings.research_top_k===v?700:400,transition:"all .15s"}}>{v}</button>)}
               </div>
             </div>
           </div>
@@ -7657,21 +8483,21 @@ function HyprChat(){
                 updateActivity(activityId,{status:"done",message:`Purged ${d.deleted} collections`,pct:100});
                 notify({type:"success",text:"RAG collections purged",detail:`Deleted ${d.deleted} collections.`});
               }catch(e){updateActivity(activityId,{status:"error",error:e.message,message:"Purge failed"});notify({type:"error",text:"Purge failed",detail:e.message});}
-            }} style={{...btnS(t.err),padding:"3px 10px",fontSize:9}}>🗑 Purge</button>:null,<>
+            }} style={{...btnS(t.err),padding:"3px 10px",fontSize:"var(--hc-text-control)"}}>🗑 Purge</button>:null,<>
           <div style={{display:"flex",gap:0,marginBottom:ragStats.collections?.length?10:0}}>
             {[
               {label:"Collections",value:ragStats.total_collections||0,color:t.acc},
               {label:"Chunks",value:ragStats.total_chunks||0,color:t.warm},
               {label:"Disk",value:ragStats.disk_usage||"—",color:t.ok}
-            ].map((s,i)=><div key={i} style={{flex:1,textAlign:"center",padding:"6px 0",borderRight:i<2?`1px solid ${t.brd}22`:"none"}}>
-              <div style={{fontSize:22,fontWeight:800,color:s.color,lineHeight:1.2}}>{s.value}</div>
-              <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,marginTop:2}}>{s.label}</div>
+            ].map((s,i)=><div key={i} style={{flex:1,textAlign:"center",padding:"6px 0",borderRight:i<2?"1px solid var(--hc-line-subtle)":"none"}}>
+              <div style={{fontSize:"var(--hc-text-display)",fontWeight:600,color:s.color,lineHeight:1.2}}>{s.value}</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginTop:2}}>{s.label}</div>
             </div>)}
           </div>
           {ragStats.collections&&ragStats.collections.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4}}>
             {ragStats.collections.map((c,i)=>{
               const isRes=c.name.startsWith("research-");const col=isRes?t.pink:t.acc;
-              return <span key={i} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:6,background:`${col}10`,border:`1px solid ${col}20`,fontSize:10,color:col,transition:"all .15s"}}
+              return <span key={i} style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${col}10`,border:`1px solid ${col}20`,fontSize:"var(--hc-text-secondary)",color:col,transition:"all .15s"}}
                 onMouseOver={e=>{e.currentTarget.style.background=`${col}22`;e.currentTarget.style.borderColor=`${col}44`;}}
                 onMouseOut={e=>{e.currentTarget.style.background=`${col}10`;e.currentTarget.style.borderColor=`${col}20`;}}>
                 {isRes?"🧠":"📚"} {c.name.replace("research-","").slice(0,20)} <span style={{fontWeight:700,color:t.mut}}>{c.count}</span>
@@ -7681,46 +8507,46 @@ function HyprChat(){
       </div>
 
       {/* TILE: Loading Quotes */}
-      <div style={{display:settingsTab==="quotes"?"block":"none",animation:"fadeIn .18s ease"}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="quotes"?"block":"none"}}>
         {settingSection(<>Loading Quotes <span style={{color:t.mut,fontWeight:400}}>({customQuotes.length})</span></>,
-          <button onClick={async()=>{const ok=await confirmAction({title:"Restore loading quotes",body:"Replace the current loading quotes with the built-in defaults?",confirmLabel:"Restore Defaults",tone:"warning"});if(!ok)return;setCustomQuotes(DEFAULT_LOADING_QUOTES);setEditQuoteIdx(null);notify({type:"success",text:"Loading quotes saved locally"});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.mut),fontSize:11,padding:"5px 11px",whiteSpace:"nowrap"}}>Restore Defaults</button>,<>
+          <button onClick={async()=>{const ok=await confirmAction({title:"Restore loading quotes",body:"Replace the current loading quotes with the built-in defaults?",confirmLabel:"Restore Defaults",tone:"warning"});if(!ok)return;setCustomQuotes(DEFAULT_LOADING_QUOTES);setEditQuoteIdx(null);notify({type:"success",text:"Loading quotes saved locally"});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"5px 11px",whiteSpace:"nowrap"}}>Restore Defaults</button>,<>
         <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:"min(48vh,460px)",overflowY:"auto",paddingRight:4}}>
-          {customQuotes.map((q,i)=>editQuoteIdx===i?<div key={i} style={{background:t.bgDeep,border:`1px solid ${t.acc}33`,borderRadius:10,padding:12}}>
-            <textarea value={editQuoteText} onChange={e=>setEditQuoteText(e.target.value)} style={{...inputS,minHeight:72,resize:"vertical",fontSize:12,lineHeight:1.5,marginBottom:8}}/>
-            <input value={editQuoteAttr} onChange={e=>setEditQuoteAttr(e.target.value)} placeholder="Attribution" style={{...inputS,fontSize:12,padding:"8px 10px",marginBottom:10}}/>
+          {customQuotes.map((q,i)=>editQuoteIdx===i?<div key={i} style={{background:t.bgDeep,border:`1px solid ${t.acc}33`,borderRadius:"var(--hc-radius-card)",padding:12}}>
+            <textarea value={editQuoteText} onChange={e=>setEditQuoteText(e.target.value)} style={{...inputS,minHeight:72,resize:"vertical",fontSize:"var(--hc-text-control)",lineHeight:1.5,marginBottom:8}}/>
+            <input value={editQuoteAttr} onChange={e=>setEditQuoteAttr(e.target.value)} placeholder="Attribution" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",marginBottom:10}}/>
             <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-              <button onClick={()=>{setEditQuoteIdx(null);setEditQuoteText("");setEditQuoteAttr("");}} style={{...btnS(t.mut),fontSize:11}}>Cancel</button>
-              <button onClick={()=>{if(!editQuoteText.trim())return;setCustomQuotes(p=>p.map((x,j)=>j===i?{t:editQuoteText.trim(),a:editQuoteAttr.trim()}:x));setEditQuoteIdx(null);setEditQuoteText("");setEditQuoteAttr("");notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.ok),fontSize:11}}>Save</button>
+              <button onClick={()=>{setEditQuoteIdx(null);setEditQuoteText("");setEditQuoteAttr("");}} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)"}}>Cancel</button>
+              <button onClick={()=>{if(!editQuoteText.trim())return;setCustomQuotes(p=>p.map((x,j)=>j===i?{t:editQuoteText.trim(),a:editQuoteAttr.trim()}:x));setEditQuoteIdx(null);setEditQuoteText("");setEditQuoteAttr("");notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.ok),fontSize:"var(--hc-text-control)"}}>Save</button>
             </div>
-          </div>:<div key={i} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"start",background:t.bgDeep,border:`1px solid ${t.brd}22`,borderRadius:10,padding:"11px 12px"}}>
+          </div>:<div key={i} style={{display:"grid",gridTemplateColumns:"minmax(0,1fr) auto",gap:12,alignItems:"start",background:t.bgDeep,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"11px 12px"}}>
             <div style={{minWidth:0}}>
-              <div style={{fontSize:13,color:t.text,lineHeight:1.55,fontStyle:"italic"}}>"{q.t}"</div>
-              <div style={{fontSize:11,color:t.acc,marginTop:6,fontWeight:700}}>— {q.a||"Unknown"}</div>
+              <div style={{fontSize:"var(--hc-text-control)",color:t.text,lineHeight:1.55,fontStyle:"italic"}}>"{q.t}"</div>
+              <div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,marginTop:6,fontWeight:700}}>— {q.a||"Unknown"}</div>
             </div>
             <div style={{display:"flex",gap:6}}>
-              <button onClick={()=>{setEditQuoteIdx(i);setEditQuoteText(q.t||"");setEditQuoteAttr(q.a||"");}} style={{...btnS(t.f1),padding:"5px 9px",fontSize:10}}>Edit</button>
-              <button onClick={()=>{setCustomQuotes(p=>p.filter((_,j)=>j!==i));if(editQuoteIdx===i)setEditQuoteIdx(null);notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.err),padding:"5px 9px",fontSize:10}}>Remove</button>
+              <button onClick={()=>{setEditQuoteIdx(i);setEditQuoteText(q.t||"");setEditQuoteAttr(q.a||"");}} style={{...btnS(t.f1),padding:"5px 9px",fontSize:"var(--hc-text-control)"}}>Edit</button>
+              <button onClick={()=>{setCustomQuotes(p=>p.filter((_,j)=>j!==i));if(editQuoteIdx===i)setEditQuoteIdx(null);notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}} style={{...btnS(t.err),padding:"5px 9px",fontSize:"var(--hc-text-control)"}}>Remove</button>
             </div>
           </div>)}
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(180px,1fr) auto",gap:8,alignItems:"center",borderTop:`1px solid ${t.brd}22`,paddingTop:12}}>
-          <input value={newQuoteText} onChange={e=>setNewQuoteText(e.target.value)} placeholder='Quote text...' style={{...inputS,fontSize:12,padding:"8px 12px"}}/>
-          <input value={newQuoteAttr} onChange={e=>setNewQuoteAttr(e.target.value)} placeholder="By" style={{...inputS,fontSize:12,padding:"8px 12px"}}
+        <div style={{display:"grid",gridTemplateColumns:"minmax(0,2fr) minmax(180px,1fr) auto",gap:8,alignItems:"center",borderTop:"1px solid var(--hc-line-subtle)",paddingTop:12}}>
+          <input value={newQuoteText} onChange={e=>setNewQuoteText(e.target.value)} placeholder='Quote text...' style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 12px"}}/>
+          <input value={newQuoteAttr} onChange={e=>setNewQuoteAttr(e.target.value)} placeholder="By" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 12px"}}
             onKeyDown={e=>{if(e.key==="Enter"&&newQuoteText.trim()){setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}}}/>
           <button onClick={()=>{if(!newQuoteText.trim())return;setCustomQuotes(p=>[...p,{t:newQuoteText.trim(),a:newQuoteAttr.trim()}]);setNewQuoteText("");setNewQuoteAttr("");notify({type:"success",text:"Loading quotes saved locally",duration:2500});flashSettingsPulse("Saved locally","success");}}
-            disabled={!newQuoteText.trim()} style={{...btnS(t.f1),opacity:newQuoteText.trim()?1:.4,flexShrink:0,fontSize:12,padding:"7px 14px",whiteSpace:"nowrap"}}>+ Add</button>
+            disabled={!newQuoteText.trim()} style={{...btnS(t.f1),opacity:newQuoteText.trim()?1:.4,flexShrink:0,fontSize:"var(--hc-text-control)",padding:"7px 14px",whiteSpace:"nowrap"}}>+ Add</button>
         </div>
         </>,"Shown on the startup loading screen. Edit, remove, or add quotes below.")}
       </div>
 
       {/* TILE: Sandbox & Cleanup */}
-      <div style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none",animation:"fadeIn .18s ease"}}>
-        <div style={{fontSize:14,fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
+      <div className="hc-tab-pane" style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none"}}>
+        <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
         <SandboxSection t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
       </div>
 
 	      {/* TILE: Danger Zone */}
-	      <div style={{display:settingsTab==="danger"?"block":"none",animation:"fadeIn .18s ease"}}>
+	      <div className="hc-tab-pane" style={{display:settingsTab==="danger"?"block":"none"}}>
 	        {settingSection("Backup & Restore",null,
 	        <div style={{display:"flex",flexDirection:"column",gap:10}}>
 	          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
@@ -7742,7 +8568,7 @@ function HyprChat(){
 	            </label>
 	            {backupStatus?.restore_pending&&<button onClick={async()=>{try{const r=await fetch(`${API}/api/backup/restore`,{method:"DELETE"});if(!r.ok)throw new Error(`HTTP ${r.status}`);setBackupStatus(p=>({...(p||{}),restore_pending:false}));notify({type:"info",text:"Staged restore cancelled",duration:3000});}catch(err){notify({type:"error",text:"Cancel failed",detail:err.message||String(err)});}}} style={btnS(t.err)}>✕ Cancel Staged Restore</button>}
 	          </div>
-	          {backupStatus?.restore_pending&&<div style={{fontSize:11,color:t.warm,fontWeight:700}}>⚠ A restore is staged — it will apply on the next service restart.</div>}
+	          {backupStatus?.restore_pending&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,fontWeight:700}}>⚠ A restore is staged — it will apply on the next service restart.</div>}
 	        </div>
 	        ,"Backup = database (provider API keys and connector secrets scrubbed) + uploads + knowledge bases + settings. RAG vectors are rebuilt after restore via Knowledge Bases → Reindex All.")}
 	        {settingSection("⚠️ Danger Zone",null,
@@ -7758,10 +8584,10 @@ function HyprChat(){
 	              ["☢","Delete All / Fresh Install","Everything, including current user and local models",freshInstallReset,true],
 	            ]:[]),
 	          ].map(([icon,label,desc,onClick,strong])=><button key={label} onClick={onClick} style={{...btnS(t.err),padding:"10px 12px",minHeight:62,justifyContent:"flex-start",alignItems:"center",gap:10,background:strong?`${t.err}16`:`${t.err}0C`,borderColor:strong?`${t.err}55`:`${t.err}34`,textAlign:"left"}}>
-	            <span style={{fontSize:18,width:24,textAlign:"center",flexShrink:0}}>{icon}</span>
+	            <span style={{fontSize:"var(--hc-text-title)",width:24,textAlign:"center",flexShrink:0}}>{icon}</span>
 	            <span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0}}>
-	              <span style={{fontSize:12,fontWeight:900,color:t.err,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
-	              <span style={{fontSize:10,color:t.dim,lineHeight:1.3,fontWeight:600}}>{desc}</span>
+	              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.err,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{label}</span>
+	              <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.3,fontWeight:600}}>{desc}</span>
 	            </span>
 	          </button>)}
 	        </div>
@@ -7769,26 +8595,28 @@ function HyprChat(){
 	      </div>
 
       {/* TILE: Changelog */}
-      <div style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0,animation:"fadeIn .18s ease"}}>
-        <div style={{maxHeight:"calc(85vh - 120px)",overflowY:"auto",padding:"6px 4px 20px",lineHeight:1.7,fontSize:13,color:t.text}}>
+      <div className="hc-tab-pane" style={{display:settingsTab==="changelog"?"block":"none",padding:0,overflow:"hidden",background:"transparent",border:"none",borderRadius:0,marginBottom:0}}>
+        <div style={{padding:"6px 4px 20px",lineHeight:1.7,fontSize:"var(--hc-text-control)",color:t.text}}>
           {!changelogContent?<div style={{textAlign:"center",padding:40,color:t.mut,display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
-            <div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><div key={i} style={{width:6,height:6,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-            Loading changelog...
+            <Dots style={{color:t.acc}}/>
+            Loading changelog…
           </div>:<div className="changelog-markdown"><MDWrap>{md(changelogContent,{changelog:true})}</MDWrap></div>}
         </div>
       </div>
 
     </div>
+    </div>
   </div>
 
     {/* ── HEALTH MONITOR PANEL (slides in from right) ── */}
-    {showHealthMonitor&&<div style={{flex:isMobile?"0 0 48%":"0 0 50%",overflowY:"auto",padding:isMobile?"16px 14px":"20px 24px",borderLeft:isMobile?"none":`1px solid ${t.brd}22`,background:`${t.bg}`,animation:"fadeIn .3s ease",...(isMobile?{borderTop:`1px solid ${t.brd}22`}:{})}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
-        <h3 style={{fontSize:16,fontWeight:700,color:t.acc,letterSpacing:1,textTransform:"uppercase",margin:0}}>Service Monitor</h3>
-        <button onClick={()=>setShowHealthMonitor(false)} style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:7,color:t.dim,cursor:"pointer",padding:"4px 10px",fontSize:12}}>✕ Close</button>
+    {showHealthMonitor&&<div style={{flex:isMobile?"0 0 48%":"0 0 50%",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:`${t.bg}`,animation:"fadeIn .3s ease",...(isMobile?{borderTop:"1px solid var(--hc-line-subtle)"}:{})}}>
+      <div style={{flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,padding:isMobile?"12px 14px 10px":"18px 24px 12px",borderBottom:"1px solid var(--hc-line-subtle)"}}>
+        <h3 style={{fontSize:"var(--hc-text-title)",fontWeight:600,color:t.text,margin:0}}>Service Monitor</h3>
+        <button aria-label="Close service monitor" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={()=>setShowHealthMonitor(false)} style={{color:t.mut}}><IC.X/></button>
       </div>
-      {!healthHistory?<div style={{color:t.mut,fontSize:12}}>Loading uptime data...</div>
-      :Object.keys(healthHistory.services||{}).length===0?<div style={{color:t.mut,fontSize:12}}>No health data yet. Checks run every 5 minutes — data will appear shortly.</div>
+      <div style={{flex:1,minHeight:0,overflowY:"auto",padding:isMobile?"14px":"16px 24px 20px"}}>
+      {!healthHistory?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading uptime data...</div>
+      :Object.keys(healthHistory.services||{}).length===0?<EmptyState compact icon={<IC.Activity/>} title="No health data yet" hint="Checks run every 5 minutes — data will appear shortly."/>
       :Object.entries(healthHistory.services).map(([svc,data])=>{
         const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?STATUS_DEGRADED:t.err;
         const statusLabel=data.current_status==="ok"?"Operational":data.current_status==="degraded"?"Degraded":"Down";
@@ -7803,13 +8631,13 @@ function HyprChat(){
           padded.push(found||{day:ds,ok_pct:0,degraded_pct:0,error_pct:0,total_checks:0,avg_ms:0});
         }
         const isRL=svc==="searxng"&&health.searxng?.rate_limited;
-        return <div key={svc} style={{background:`${t.surface}33`,border:`1px solid ${t.brd}22`,borderRadius:12,padding:"14px 16px",marginBottom:14}}>
+        return <div key={svc} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"14px 16px",marginBottom:14}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:14,fontWeight:700,color:t.text,textTransform:"capitalize"}}>{svc}</span>
-              {isRL&&<span style={{padding:"3px 10px",borderRadius:6,background:`${STATUS_DEGRADED}18`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:11,fontWeight:600,color:STATUS_DEGRADED}}>Still Operational, limited engine usage</span>}
+              <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize"}}>{svc}</span>
+              {isRL&&<span style={{padding:"3px 10px",borderRadius:"var(--hc-radius)",background:`${STATUS_DEGRADED}18`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:STATUS_DEGRADED}}>Still Operational, limited engine usage</span>}
             </div>
-            <div style={{fontSize:12,fontWeight:600,color:isRL?STATUS_DEGRADED:statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:isRL?STATUS_DEGRADED:statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
           </div>
           {/* Uptime bar chart */}
           <div style={{display:"flex",gap:1,height:34,alignItems:"flex-end",marginBottom:6}}>
@@ -7817,722 +8645,101 @@ function HyprChat(){
               const hasData=d.total_checks>0;
               const barColor=!hasData?`${t.brd}33`:d.error_pct>50?t.err:d.error_pct>0?"#e05050":d.degraded_pct>30?STATUS_DEGRADED:d.degraded_pct>0?"#b8d040":t.ok;
               const title=hasData?`${d.day}\n${d.ok_pct}% ok, ${d.degraded_pct}% degraded, ${d.error_pct}% down\n${d.total_checks} checks, avg ${d.avg_ms}ms`:`${d.day}\nNo data`;
-              return <div key={i} title={title} style={{flex:1,height:hasData?34:20,background:barColor,borderRadius:2,cursor:"pointer",opacity:hasData?1:.3,transition:"opacity .15s"}}
+              return <div key={i} title={title} style={{flex:1,height:hasData?34:20,background:barColor,borderRadius:"var(--hc-radius-sm)",cursor:"pointer",opacity:hasData?1:.3,transition:"opacity .15s"}}
                 onMouseEnter={e=>e.target.style.opacity="0.7"} onMouseLeave={e=>e.target.style.opacity=hasData?"1":"0.3"}/>;
             })}
           </div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:10,color:t.mut}}>90 days ago</span>
-            <span style={{fontSize:11,color:t.dim,fontWeight:600}}>{data.uptime_pct}% uptime</span>
-            <span style={{fontSize:10,color:t.mut}}>Today</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>90 days ago</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600}}>{data.uptime_pct}% uptime</span>
+            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Today</span>
           </div>
-          {data.avg_response_ms>0&&<div style={{fontSize:10,color:t.mut,marginTop:4}}>Avg response: {data.avg_response_ms}ms</div>}
+          {data.avg_response_ms>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Avg response: {data.avg_response_ms}ms</div>}
         </div>;
       })}
 
       {/* Legend */}
-      <div style={{display:"flex",gap:12,padding:"8px 0",fontSize:11,color:t.dim}}>
+      <div style={{display:"flex",gap:12,padding:"8px 0",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
         {[[t.ok,"Operational"],[STATUS_DEGRADED,"Degraded"],[t.err,"Down"],[`${t.brd}33`,"No data"]].map(([c,l])=><div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
-          <div style={{width:12,height:12,borderRadius:2,background:c}}/>{l}
+          <div style={{width:12,height:12,borderRadius:"var(--hc-radius-sm)",background:c}}/>{l}
         </div>)}
       </div>
 
       {/* Refresh button */}
       <button onClick={async()=>{try{const r=await fetch(`${API}/api/health/history?days=90`);const d=await r.json();setHealthHistory(d);}catch{}
         try{const r2=await fetch(`${API}/api/health`);const d2=await r2.json();setHealth(d2.services||{});}catch{}
-      }} style={{...btnS(t.f1),fontSize:12,padding:"6px 14px",marginTop:4}}>🔄 Refresh</button>
+      }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"6px 14px",marginTop:4}}><IC.Refresh/> Refresh</button>
+      </div>
     </div>}
   </div>
     </div>
-  </div>,document.body)
-
-      :<>
-        {/* CHAT - full width, pills inline */}
-        <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}
-          onDragOver={e=>{e.preventDefault();e.stopPropagation();setDragOver(true);}}
-          onDragLeave={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);}}
-          onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);const files=Array.from(e.dataTransfer.files);if(files.length)handleFileUpload(files);}}>
-          {/* Drag overlay */}
-          {dragOver&&<div style={{position:"absolute",inset:0,zIndex:50,background:`${t.acc}12`,border:`3px dashed ${t.acc}`,borderRadius:16,display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(4px)",pointerEvents:"none"}}>
-            <div style={{fontSize:15,color:t.acc,fontWeight:700,letterSpacing:1}}>{isCoderPersonaName(act?.persona_name)?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
-          </div>}
-          {/* Scroll-to-top / Scroll-to-bottom */}
-          {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
-          {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:`1px solid ${t.brd}33`,borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:14,boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
-          {/* Messages */}
-          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
-          {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
-            {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
-            :<ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>}
-          </div>:act?.is_council?(()=>{
-            const councilCfg=councils.find(c=>c.id===act.council_config_id);
-            const getMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-            const members=councilCfg?.members||[];
-            const turns=[];let curTurn=null;
-            for(const msg of(act.messages||[])){
-              const meta=getMeta(msg);
-              if(msg.role==="user"&&!meta.council_member_id&&!meta.council_host){
-                curTurn={user:msg,rounds:{},host:null};turns.push(curTurn);
-              }else if(msg.role==="assistant"){
-                if(!curTurn){curTurn={user:{role:"user",content:""},rounds:{},host:null};turns.push(curTurn);}
-                if(meta.council_host)curTurn.host=msg;
-                else{
-                  const rnd=meta.debate_round||0;
-                  if(!curTurn.rounds[rnd])curTurn.rounds[rnd]=[];
-                  curTurn.rounds[rnd].push(msg);
-                }
-              }
-            }
-            const isLastTurn=ti=>ti===turns.length-1;
-            const memberProfile=m=>m?.model_config_id?mcs.find(mc=>mc.id===m.model_config_id):null;
-            const memberById=id=>members.find(m=>m.id===id)||{};
-            const memberView=(id,meta={},live={})=>{
-              const member=memberById(id);
-              const mc=memberProfile(member);
-              const model=meta.council_model||live.model||mc?.base_model||member.model||"";
-              const name=meta.council_persona||live.member_name||mc?.name||member.persona_name||model.split(":")[0]||"Council member";
-              const avatar=mc?profileAvatar(mc):"";
-              const pts=member.points||0;
-              return {member,mc,model,name,avatar,pts};
-            };
-            const chip=(color,children,extra={})=><span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 7px",borderRadius:7,background:`${color}12`,border:`1px solid ${color}30`,color,fontSize:10,fontWeight:800,whiteSpace:"nowrap",...extra}}>{children}</span>;
-            const avatarNode=(view,size=34,color=t.acc)=><div style={{width:size,height:size,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:`${color}10`,border:`1px solid ${color}38`,color,overflow:"hidden",flexShrink:0}}>
-              {view.avatar?<img src={avatarSrc(view.avatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
-            </div>;
-            const tallyFromVotes=votes=>votes.reduce((a,v)=>({...a,[v.voted_for]:(a[v.voted_for]||0)+1}),{});
-            const sortedTally=tally=>Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([id,votes])=>({id,votes,view:memberView(id)}));
-            const livePhase=councilRunning?(councilVoting?"Peer vote":councilRound?.label||"Deliberating"):"Session history";
-            const responseCard=(resp,ri,roundKey,tally,live=false)=>{
-              const meta=live?resp.metadata:getMeta(resp);
-              const memberId=meta.council_member_id;
-              const view=memberView(memberId,meta,live?resp.live:{});
-              const votes=tally[memberId]||0;
-              const ptsColor=view.pts>0?t.ok:view.pts<0?t.err:t.mut;
-              const ckey=`council-card-${roundKey}-${ri}`;
-              const expanded=expandedRounds[ckey]===true;
-              const respondingTo=Array.isArray(meta.responding_to)?meta.responding_to:[];
-              const activeBorder=votes>0?t.ok:(roundKey===0?t.acc:t.pink);
-              return <div key={ckey} style={{background:`${t.surface}66`,border:`1px solid ${activeBorder}${votes>0?"66":"30"}`,borderRadius:10,overflow:"hidden",boxShadow:votes>0?`0 0 0 1px ${activeBorder}18`:"none",minWidth:0,transition:"border-color .15s ease,box-shadow .15s ease"}}>
-                <div style={{padding:11,borderBottom:`1px solid ${t.brd}22`,display:"flex",gap:9,alignItems:"center"}}>
-                  {avatarNode(view,34,roundKey===0?t.acc:t.pink)}
-                  <div style={{minWidth:0,flex:1}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
-                      <span style={{fontSize:12,fontWeight:900,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{view.name}</span>
-                      {view.mc&&chip(t.pink,"Persona",{fontSize:9,padding:"2px 6px"})}
-                    </div>
-                    <div style={{fontSize:9,color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{view.model||"model unavailable"}</div>
-                  </div>
-                  <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
-                    {votes>0&&chip(t.ok,<><IC.Trophy/>{votes}</>,{fontSize:9})}
-                    {chip(ptsColor,`${view.pts>0?"+":""}${view.pts} pt`,{fontSize:9})}
-                  </div>
-                </div>
-                {respondingTo.length>0&&<div style={{padding:"8px 11px 0",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                  <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:.7,color:t.mut,fontWeight:900}}>Responding to</span>
-                  {respondingTo.slice(0,4).map(r=>chip(t.acc,r.name||r.id,{fontSize:9,padding:"2px 6px"}))}
-                </div>}
-                <div ref={el=>{if(live&&!resp.live.done&&el)el.scrollTop=el.scrollHeight;}} style={{padding:"10px 12px",fontSize:fontSize-1,lineHeight:1.7,color:t.dim,maxHeight:expanded?760:300,overflowY:"auto"}}>
-                  <MDWrap>{md(resp.content||"")}</MDWrap>
-                  {live&&!resp.live.done&&<span style={{display:"inline-block",width:2,height:13,background:t.acc,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                </div>
-                <div style={{padding:"7px 10px",borderTop:`1px solid ${t.brd}18`,display:"flex",gap:6,alignItems:"center"}}>
-                  <button onClick={()=>setExpandedRounds(p=>({...p,[ckey]:!expanded}))} style={{...btnS(t.mut),padding:"5px 7px",fontSize:9}}>{expanded?"Compact":"Expand"}</button>
-                  {memberId&&<>
-                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,5)} title="Mark best answer (+5)" style={{...btnS(t.ok),padding:"5px 7px",fontSize:9}}><IC.Star/> Best</button>
-                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,2)} title="Add points (+2)" style={{...btnS(t.acc),padding:"5px 7px",fontSize:9}}><IC.ChevDown style={{transform:"rotate(180deg)"}}/> Good</button>
-                    <button onClick={()=>scoreCouncilMember(act.council_config_id,memberId,-2)} title="Subtract points (-2)" style={{...btnS(t.err),padding:"5px 7px",fontSize:9}}><IC.ChevDown/> Weak</button>
-                  </>}
-                  <button onClick={()=>cp(resp.content,ckey)} style={{...btnS(t.mut),padding:"5px 7px",fontSize:9,marginLeft:"auto"}}>{copied===ckey?<IC.Check/>:<IC.Copy/>}</button>
-                </div>
-              </div>;
-            };
-            const ballotPanel=(votes,hostMeta={})=>{
-              if(!votes.length&&!councilVoting)return null;
-              const tally=tallyFromVotes(votes);
-              const leaders=hostMeta.winners||sortedTally(tally).map(x=>({id:x.id,name:x.view.name,votes:x.votes}));
-              return <div style={{background:`${t.surface}66`,border:`1px solid ${t.pink}32`,borderRadius:10,padding:12,margin:"12px 0",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:12}}>
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,color:t.pink,fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.7}}><IC.Trophy/> Peer Ballot</div>
-                  {leaders.length?<div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {leaders.map((l,i)=><div key={l.id||i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 8px",borderRadius:8,background:i===0?`${t.ok}12`:`${t.bgDeep}72`,border:`1px solid ${i===0?t.ok:t.brd}30`}}>
-                      <span style={{fontSize:10,color:i===0?t.ok:t.mut,fontWeight:900,width:18}}>{i+1}</span>
-                      <span style={{fontSize:11,color:t.text,fontWeight:800,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.name}</span>
-                      {chip(i===0?t.ok:t.mut,`${l.votes} vote${l.votes===1?"":"s"}`,{fontSize:9})}
-                    </div>)}
-                  </div>:<div style={{fontSize:11,color:t.mut,lineHeight:1.5}}>Waiting for council members to cast their peer votes.</div>}
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:7}}>
-                  {votes.length?votes.map((v,vi)=><div key={vi} style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"7px 8px",borderRadius:8,background:`${t.bgDeep}72`,border:`1px solid ${t.brd}22`}}>
-                    <span style={{fontSize:11,color:t.acc,fontWeight:800,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:90,maxWidth:150}}>{v.voter_name}</span>
-                    <span style={{height:1,background:`linear-gradient(90deg,${t.acc}55,${t.ok}55)`,width:28,flexShrink:0}}/>
-                    <span style={{fontSize:11,color:t.ok,fontWeight:900,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:100,maxWidth:170}}>{v.voted_for_name}</span>
-                    <span style={{fontSize:10,color:t.mut,lineHeight:1.45,flex:"1 1 220px",minWidth:0}}>{v.reason||"No reason supplied."}</span>
-                  </div>):<div style={{display:"flex",alignItems:"center",gap:5,color:t.pink,fontSize:11,fontWeight:800}}>
-                    {[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)} Voting in progress
-                  </div>}
-                </div>
-              </div>;
-            };
-            return <div key={actId||"empty"} style={{maxWidth:1540,margin:"0 auto",padding:"0 20px 8px",overflowY:"auto"}}>
-              <div style={{position:"sticky",top:0,zIndex:8,margin:"0 0 16px",padding:"10px 0 8px",background:`linear-gradient(180deg,${t.bg}F8,${t.bg}D8 70%,transparent)`,backdropFilter:"blur(8px)"}}>
-                <div style={{display:"flex",alignItems:"center",gap:10,background:`${t.surface}B8`,border:`1px solid ${t.brd}30`,borderRadius:10,padding:"10px 12px"}}>
-                  <div style={{width:34,height:34,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,color:t.pink}}><IC.Council/></div>
-                  <div style={{minWidth:0,flex:1}}>
-                    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-                      <span style={{fontSize:13,fontWeight:900,color:t.text,letterSpacing:.4}}>{councilCfg?.name||"Council Session"}</span>
-                      {chip(t.pink,`${members.length} members`)}
-                      {chip(councilRunning?t.ok:t.mut,livePhase)}
-                      {councilRound?.total_rounds>1&&chip(t.acc,`Round ${(councilRound.round||0)+1}/${councilRound.total_rounds}`)}
-                    </div>
-                    <div style={{fontSize:10,color:t.mut,marginTop:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{members.map(m=>memberView(m.id).name).join(" / ")||"No council members configured"}</div>
-                  </div>
-                  {councilCfg?.host_model&&chip(t.warm,<><IC.Crown/>{councilCfg.host_model}</>)}
-                </div>
-              </div>
-              {turns.map((turn,ti)=>{
-                const hostMeta=turn.host?getMeta(turn.host):{};
-                const isLive=councilRunning&&isLastTurn(ti);
-                const turnVotes=isLive?councilVotes:(hostMeta.votes||[]);
-                const turnTally=tallyFromVotes(turnVotes);
-                const roundNums=Object.keys(turn.rounds).map(Number).sort((a,b)=>a-b);
-                return <div key={ti} style={{display:"grid",gridTemplateColumns:"26px minmax(0,1fr)",gap:12,marginBottom:28,animation:"fadeIn .3s both"}}>
-                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                    <div style={{width:26,height:26,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.f4}10`,border:`1px solid ${t.f4}35`,color:t.f4}}><IC.User/></div>
-                    <div style={{width:1,flex:1,minHeight:30,background:`linear-gradient(${t.f4}45,${t.pink}33,${t.warm}35)`}}/>
-                  </div>
-                  <div>
-                    <div style={{background:`${t.surface}D8`,border:`1px solid ${t.brd}38`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
-                      <div style={{fontSize:10,color:t.f4,fontWeight:900,textTransform:"uppercase",letterSpacing:.8,marginBottom:6}}>Address to the council</div>
-                      <div style={{fontSize:fontSize,lineHeight:1.65,color:t.text}}><MDWrap>{md(turn.user.content)}</MDWrap></div>
-                    </div>
-                    {roundNums.map(rnd=>{
-                      const rKey=`${ti}-${rnd}`;
-                      const resps=turn.rounds[rnd]||[];
-                      const label=getMeta(resps[0]||{}).round_label||(rnd===0?"Opening Statements":`Rebuttal Round ${rnd}`);
-                      const isExpanded=expandedRounds[rKey]!==undefined?expandedRounds[rKey]:true;
-                      return <div key={rnd} style={{marginBottom:14}}>
-                        <button onClick={()=>setExpandedRounds(p=>({...p,[rKey]:!isExpanded}))} style={{width:"100%",border:`1px solid ${rnd===0?t.acc:t.pink}28`,background:`${rnd===0?t.acc:t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,cursor:"pointer",color:rnd===0?t.acc:t.pink,fontFamily:font}}>
-                          <span style={{transform:isExpanded?"rotate(0deg)":"rotate(-90deg)",transition:"transform .15s"}}><IC.ChevDown/></span>
-                          {rnd===0?<IC.Council/>:<IC.GitBranch/>}
-                          <span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{label}</span>
-                          <span style={{fontSize:10,color:t.mut,marginLeft:"auto"}}>{resps.length} response{resps.length===1?"":"s"}</span>
-                        </button>
-                        {isExpanded&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
-                          {resps.map((resp,ri)=>responseCard(resp,ri,rnd,turnTally,false))}
-                        </div>}
-                      </div>;
-                    })}
-                    {isLive&&councilRound&&<div style={{marginBottom:14}}>
-                      <div style={{border:`1px solid ${t.pink}28`,background:`${t.pink}08`,borderRadius:9,padding:"8px 10px",display:"flex",alignItems:"center",gap:8,color:t.pink}}>
-                        <IC.GitBranch/><span style={{fontSize:11,fontWeight:900,textTransform:"uppercase",letterSpacing:.8}}>{councilRound.label}</span>
-                        <div style={{display:"flex",gap:4,marginLeft:"auto"}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                      </div>
-                      {councilKbStatus&&<div style={{fontSize:10,color:t.dim,margin:"7px 2px 0"}}>{councilKbStatus}</div>}
-                      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12,marginTop:10}}>
-                        {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`live-${resp.round||0}`,turnTally,true))}
-                      </div>
-                    </div>}
-                    {ballotPanel(turnVotes,hostMeta)}
-                    {(turn.host||(isLive&&councilHostContent))&&<div style={{background:`linear-gradient(180deg,${t.warm}10,${t.surface}C8)`,border:`1px solid ${t.warm}34`,borderRadius:10,padding:14,marginTop:12,animation:"fadeIn .3s"}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                        <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}12`,border:`1px solid ${t.warm}34`,color:t.warm}}><IC.Crown/></div>
-                        <div style={{minWidth:0,flex:1}}>
-                          <div style={{fontSize:12,fontWeight:900,color:t.warm,textTransform:"uppercase",letterSpacing:.8}}>Moderator Verdict</div>
-                          <div style={{fontSize:10,color:t.mut}}>{councilCfg?.host_model||act.model||"host model"}</div>
-                        </div>
-                        {(hostMeta.winner||hostMeta.winners?.[0])&&chip(t.ok,<><IC.Trophy/>{(hostMeta.winner||hostMeta.winners[0]).name}</>)}
-                        {isLive&&!turn.host&&<div style={{display:"flex",gap:4}}>{[0,1,2].map(i=><span key={i} style={{width:5,height:5,borderRadius:"50%",background:t.warm,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>}
-                      </div>
-                      <div ref={el=>{if(el&&isLive&&!turn.host)el.scrollTop=el.scrollHeight;}} style={{fontSize:fontSize-1,lineHeight:1.75,color:t.dim,maxHeight:520,overflowY:"auto"}}>
-                        <MDWrap>{md(turn.host?.content||councilHostContent)}</MDWrap>
-                        {(()=>{const usage=turn.host?.metadata?.usage||(isLive?councilUsage:null);return usage?<div style={{fontSize:10,color:t.dim,marginTop:8}}>{usage.prompt_tokens||0} input · {usage.gen_tokens||0} output tokens{usage.estimated_cost_usd!=null?` · estimated $${usage.estimated_cost_usd.toFixed(4)}`:''}{usage.usage_uncertain?' · incomplete provider usage; further paid calls withheld':''}</div>:null;})()}
-                        {isLive&&councilHostContent&&!turn.host&&<span style={{display:"inline-block",width:2,height:13,background:t.warm,marginLeft:2,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                      </div>
-                    </div>}
-                    {quickResults.length>0&&isLastTurn(ti)&&<QuickSearchSourcesPanel payload={_quickSearchPayloadFromEvents(evts,quickResults)} t={t} font={font}/>}
-                  </div>
-                </div>;
-              })}
-              {councilRunning&&!turns.length&&Object.keys(councilResponses).length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:12}}>
-                {Object.entries(councilResponses).map(([mid,resp],ri)=>responseCard({content:resp.content||"",metadata:{council_member_id:mid,council_model:resp.model,council_persona:resp.member_name,debate_round:resp.round,round_label:resp.round_label,responding_to:resp.responding_to||[]},live:resp},ri,`initial-${resp.round||0}`,{},true))}
-              </div>}
-              <div ref={chatEnd}/>
-            </div>;
-          })():<div key={actId||"empty"} style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
-            {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
-              const totalMessages=messageRows.length;
-              const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
-              const hiddenCount=Math.max(0,totalMessages-visibleCount);
-              const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
-              // Find the last assistant message once so live search/tool events attach to the active answer.
-              let lastAssistantMsgIdx=-1;
-              messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
-              return <>
-              {hiddenCount>0&&<div style={{display:"flex",justifyContent:"center",margin:"0 0 14px"}}>
-                <button onClick={()=>revealOlderMessages(actId,totalMessages)} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"6px 12px",borderRadius:8,border:`1px solid ${t.brd}44`,background:`${t.surface}B8`,color:t.mut,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:700}}>
-                  <span style={{display:"inline-flex",transform:"rotate(180deg)"}}><IC.ChevDown/></span>
-                  Show older ({hiddenCount})
-                </button>
-              </div>}
-              {visibleRows.map(({msg,index:i},visibleIdx)=>{const isU=msg.role==="user";const mid=`m${i}`;const isEditing=editingMsg?.index===i;
-              // Consecutive same-role messages group: repeated avatar+name collapse, tighter spacing.
-              const grouped=visibleRows[visibleIdx-1]?.msg.role===msg.role;
-              const nextGrouped=visibleRows[visibleIdx+1]?.msg.role===msg.role;
-              const activeProfile=!isU?getProfileForConversation(act):null;
-              const personaAvatar=!isU&&(act?.persona_avatar||profileAvatar(activeProfile));
-              const personaName=!isU&&act?.persona_name;
-              const msgProfileType=personaName?getConversationProfileType(act):null;
-              const personaColor=!isU&&personaName?(msgProfileType==="persona"?t.pink:t.acc):t.acc;
-              const renderedContent=!isU?replacePersonaPlaceholdersForConversation(msg.content||"",act):msg.content;
-              const meta=_metaObj(msg.metadata);
-              const savedEvents=Array.isArray(meta.saved_events)?meta.saved_events:[];
-              const isLastAssistant=!isU&&i===lastAssistantMsgIdx;
-              const liveEventsForMsg=isLastAssistant?evts:[];
-              const messageWorkflowIds=!isU?[...new Set([...workflowIds(meta,liveEventsForMsg),...coderWorkflows.filter(w=>w.origin_message_id&&String(w.origin_message_id)===String(msg.id)).map(w=>w.id)])]:[];
-              const messageWorkflows=messageWorkflowIds.map(id=>coderWorkflows.find(w=>w.id===id)||{id,workflow_version:3,state:'queued'});
-              // For the message that is ACTIVELY streaming, derive run ids from
-              // the UNCAPPED stream buffer (same source the finalize PATCH
-              // uses): the live `evts` state keeps only the last 200 events, so
-              // on long Daedalus turns the early plan/build run ids scroll out
-              // and the stepper's earlier checkmarks regress until the turn
-              // finishes. Gate on msg.isS — the ref deliberately survives chat
-              // switches, so a non-streaming message must never read it.
-              // Reading the ref at render time is safe — evts updates already
-              // trigger these renders (same pattern as the finalize _rawEvts).
-              const runIdEvts=!isU&&msg.isS&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:evts;
-              const daedalusRunIds=!isU?_daedalusRunIdsForMessage(meta,isLastAssistant,runIdEvts):[];
-              const docRunIds=!isU?documentRunIds(meta,runIdEvts===evts?liveEventsForMsg:runIdEvts):[];
-              const documentEvents=[...savedEvents,...liveEventsForMsg];
-              const hasDocumentActivity=docRunIds.length>0||documentEvents.some(isDocumentEvent);
-              if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
-              const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
-              const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
-              const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
-              const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
-              const quickSearchPayload=renderOpts?.quickSearch;
-              const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
-              return <React.Fragment key={msg.id?`${msg.id}-${i}`:i}>
-              <div className="msg-row" style={{marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start",animation:`fadeIn .3s ${Math.min(visibleIdx*.04,.2)}s both`}}>
-                {grouped?<div style={{width:isU?28:40,flexShrink:0}}/>
-                :<div style={{width:isU?28:40,height:isU?28:40,borderRadius:isU?7:10,display:"flex",alignItems:"center",justifyContent:"center",background:isU?t.bgDeep:`${personaColor}10`,border:`1px solid ${isU?t.f4:personaColor}38`,color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden",boxShadow:"none"}}>
-                  {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
-                </div>}
-                <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
-                  {(!grouped||refinedN>0)&&<div style={{fontSize:11,marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
-                    {isU?<span style={{color:t.mut}}>you</span>:personaName
-                      ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:10,color:t.pink}}>
-                        {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:4,objectFit:"cover"}} alt=""/>}
-                        {personaName}
-                      </span>
-                      :<span style={{color:t.mut}}>{act.model||"assistant"}</span>}
-                    {msg.created_at&&<span style={{fontSize:10,color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
-                    {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:9,padding:"1px 6px",borderRadius:8,background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
-                  </div>}
-                  <div style={{background:isU?`${t.surface}DE`:isDaedalusOutput?"transparent":`${t.surface}3D`,padding:isU?"9px 13px":isDaedalusOutput?"0":"10px 14px",borderRadius:isU?8:isDaedalusOutput?0:10,border:isU?`1px solid ${t.brd}34`:isDaedalusOutput?"none":`1px solid ${t.brd}1C`,lineHeight:1.68,fontSize:fontSize,color:isU?t.text:t.dim}}>
-                    {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
-                      <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:6,fontFamily:font,fontSize:12,outline:"none",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
-                        onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
-                      <div style={{display:"flex",gap:4}}>
-                        {isU
-                          ?<button onClick={()=>editMessage(i,editingMsg.content)} style={btnS(t.ok)}>Save & Send</button>
-                          :<button onClick={()=>saveAssistantEdit(i,editingMsg.content)} style={btnS(t.ok)}>Save</button>}
-                        <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
-                      </div>
-                    </div>
-                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
-                    {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
-                      {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
-                        <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:8,border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
-                        <span style={{fontSize:9,color:t.mut,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:260}}>📷 {img.name}</span>
-                      </div>)}
-                    </div>}
-                    {isU&&msg.metadata?.pdfs?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginTop:msg.content?8:0}}>
-                      {msg.metadata.pdfs.map((p,pi)=><span key={pi} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.err}10`,border:`1px solid ${t.err}25`,padding:"5px 12px",borderRadius:8,fontSize:11,fontWeight:500,color:t.text}}>
-                        <span style={{fontSize:16}}>📄</span>
-                        <span>{p.name}</span>
-                        {p.pages>0&&<span style={{fontSize:9,color:t.mut,fontWeight:400}}>{p.pages} pages</span>}
-                      </span>)}
-                    </div>}
-                    {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
-                    {msg.isS&&!msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:<div style={{display:"flex",gap:4,padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>;})()}
-                  </div>
-                  {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
-                  {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
-                  {msg.isS&&msg.content&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;return isLast&&evts.length>0?<ToolStatus evts={evts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {!msg.isS&&!isDaedalusOutput&&(()=>{const isLast=isLastAssistant;const filteredEvts=evts.filter(e=>(e.data?.tool||"")!=="processing");return isLast&&filteredEvts.length>0?<ToolStatus evts={filteredEvts} savedEvts={msg.metadata?.saved_events||[]} msgContent={msg.content} historical={true} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>:null;})()}
-                  {(()=>{if(isU||isDaedalusOutput||msg.isS||!savedEvents.length)return null;const isLast=isLastAssistant;if(isLast&&evts.length>0)return null;return <ToolStatus evts={savedEvents.filter(e=>(e.data?.tool||"")!=="processing")} historical={true} msgContent={msg.content} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>;})()}
-                  {(()=>{if(isU||isDaedalusOutput||hasDocumentActivity)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
-                  {/* Coder Bot v2 — durable run cards. Render one card per unique run_id.
-                      Sources, in priority: explicit metadata.run_ids (written server-side at
-                      each round boundary — survives mid-stream reload), then live events
-                      (current message), then saved_events (history). */}
-                  {(()=>{
-                    if(isU||isDaedalusOutput) return null;
-                    const isLast = isLastAssistant;
-                    // Merge run_ids from all three sources, dedup, preserve first-seen order.
-                    const ridsFromMeta = Array.isArray(msg.metadata?.run_ids) ? msg.metadata.run_ids : [];
-                    const ridsFromEvts = _runIdsFromEvents(isLast && evts.length>0 ? evts : (msg.metadata?.saved_events||[]));
-                    const seen = new Set();
-                    const runIds = [];
-                    for(const r of [...ridsFromMeta, ...ridsFromEvts]){
-                      if(r && !docRunIds.includes(r) && !seen.has(r)){seen.add(r); runIds.push(r);}
-                    }
-                    if(!runIds.length) return null;
-                    return runIds.map(rid =>
-                      <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md} onOpenArtifact={openArtifact}/>
-                    );
-                  })()}
-                  {/* Inline code execution output */}
-                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:10,overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
-                    <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
-                      <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:10}}>{"\u25BE"}</span>
-                      <span>{d.success?"\u2705":"\u274C"}</span>
-                      <span style={{fontWeight:600,color:d.success?t.ok:t.err,fontSize:11}}>{d.language||"code"} output</span>
-                      {d.exec_time&&<span style={{color:t.mut,marginLeft:"auto",fontSize:10}}>{parseFloat(d.exec_time).toFixed(1)}s</span>}
-                    </div>
-                    {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:12,lineHeight:1.5,borderBottom:d.stderr?`1px solid ${t.brd}22`:"none",fontFamily:font}}>{d.stdout}</pre>}
-                    {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:11,lineHeight:1.5,background:`${t.err}08`,fontFamily:font}}>{d.stderr}</pre>}
-                  </div>;});})()}
-                  {/* KB sources strip — numbered citation sources for this reply */}
-                  {(()=>{
-                    if(isU||msg.isS||isDaedalusOutput)return null;
-                    const co=renderOpts;
-                    if(!co?.citations?.length)return null;
-                    if(co.quickSearch&&co.citations.every(s2=>s2?.kind==="quick_search"))return null;
-                    return <Collapsible theme={t} font={font} summary={`Sources (${co.citations.length})`}>
-                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                        {co.citations.map(s2=><div key={s2.n} style={{display:"flex",gap:8,alignItems:"flex-start",padding:"6px 8px",background:`${t.surface}44`,border:`1px solid ${t.brd}33`,borderRadius:6}}>
-                          <span style={{fontWeight:700,color:t.acc,fontSize:11,flexShrink:0}}>[{s2.n}]</span>
-                          <div style={{minWidth:0}}>
-                            <div style={{fontSize:11,fontWeight:600,color:t.text}}>📄 {s2.filename} <span style={{color:t.mut,fontWeight:400,fontSize:9}}>chunk {s2.chunk_index}{typeof s2.score==="number"?` · ${Math.round(s2.score*100)}% relevance`:""}</span></div>
-                            {s2.snippet&&<div style={{fontSize:10,color:t.dim,marginTop:2,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{s2.snippet}</div>}
-                          </div>
-                        </div>)}
-                      </div>
-                    </Collapsible>;
-                  })()}
-                  {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
-                  {!msg.isS&&!isEditing&&<div className="msg-toolbar" style={msgToolbarS}>
-                    {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} style={msgActionS(copied===mid?t.ok:t.mut)}>
-                      {copied===mid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
-                    </button>}
-                    {!isU&&msg.id!=null&&<button onClick={()=>setInspectorMessage(msg.id)} style={msgActionS(t.mut)}>Context</button>}
-                    {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} title={(playing||generating)?"Stop playback":"Read aloud"} style={msgActionS(playing?t.acc:generating?t.warm:t.mut)}>
-                      {generating?<><span style={{width:10,height:10,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/> {ttsPhase||"generating"}</>:playing?<><IC.Stop/> playing</>:<><IC.Volume/> speak</>}
-                    </button>;})()}
-                    {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
-                      <button onClick={()=>regenerate(i)} style={{...msgActionS(t.mut),borderRadius:"5px 0 0 5px"}}>
-                        <IC.Refresh/> regenerate
-                      </button>
-                      <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} title="Regenerate with different model / temperature / profile" style={{...msgActionS(regenPopover?.index===i?t.acc:t.mut),padding:"3px 5px",borderRadius:"0 5px 5px 0"}}>▾</button>
-                      {regenPopover?.index===i&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,background:t.bgDeep,border:`1px solid ${t.brd}55`,borderRadius:8,padding:10,zIndex:20,minWidth:240,boxShadow:`0 8px 24px rgba(0,0,0,.4)`,animation:"fadeIn .16s ease"}}>
-                        <div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:1,marginBottom:8,fontWeight:700}}>Regenerate with</div>
-                        <div style={{marginBottom:6}}>
-                          <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Model</div>
-                          <select value={regenPopover.model} onChange={e=>setRegenPopover(p=>({...p,model:e.target.value}))} style={{width:"100%",fontSize:11,padding:"4px 6px",background:t.bgDeep,border:`1px solid ${t.brd}55`,color:t.text,borderRadius:4,fontFamily:font,boxSizing:"border-box"}}>
-                            <option value="">(default: {act?.model||"current"})</option>
-                            {models.map(m=><option key={m} value={m}>{m}</option>)}
-                          </select>
-                        </div>
-                        <div style={{marginBottom:6}}>
-                          <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Temperature</div>
-                          <input type="number" min="0" max="2" step="0.05" placeholder={`default: ${defaultTemp}`} value={regenPopover.temperature} onChange={e=>setRegenPopover(p=>({...p,temperature:e.target.value}))} style={{width:"100%",fontSize:11,padding:"4px 6px",background:t.bgDeep,border:`1px solid ${t.brd}55`,color:t.text,borderRadius:4,fontFamily:font,boxSizing:"border-box"}}/>
-                        </div>
-                        <div style={{marginBottom:8}}>
-                          <div style={{fontSize:9,color:t.mut,marginBottom:2}}>Profile</div>
-                          <select value={regenPopover.personaId} onChange={e=>setRegenPopover(p=>({...p,personaId:e.target.value}))} style={{width:"100%",fontSize:11,padding:"4px 6px",background:t.bgDeep,border:`1px solid ${t.brd}55`,color:t.text,borderRadius:4,fontFamily:font,boxSizing:"border-box"}}>
-                            <option value="">(default: current)</option>
-                            <option value="none">-- No profile --</option>
-                            <optgroup label="Agents">
-                              {mcs.filter(isAgentProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
-                            </optgroup>
-                            <optgroup label="Personas">
-                              {mcs.filter(isPersonaProfile).map(mc=><option key={mc.id} value={mc.id}>{mc.name}</option>)}
-                            </optgroup>
-                          </select>
-                        </div>
-                        <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
-                          <button onClick={()=>setRegenPopover(null)} style={{background:"none",border:`1px solid ${t.brd}44`,color:t.mut,cursor:"pointer",padding:"3px 10px",borderRadius:4,fontFamily:font,fontSize:10}}>Cancel</button>
-                          <button onClick={()=>{
-                            const ov={};
-                            if(regenPopover.model)ov.model=regenPopover.model;
-                            if(regenPopover.temperature!==""){const n=parseFloat(regenPopover.temperature);if(!isNaN(n))ov.temperature=n;}
-                            if(regenPopover.personaId)ov.persona_id=regenPopover.personaId==="none"?null:regenPopover.personaId;
-                            setRegenPopover(null);
-                            regenerate(i, Object.keys(ov).length?ov:undefined);
-                          }} style={{background:`${t.acc}22`,border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:4,fontFamily:font,fontSize:10,fontWeight:700}}>Regenerate</button>
-                        </div>
-                      </div>}
-                    </div>}
-                    {!streaming&&<button onClick={()=>setEditingMsg({index:i,content:msg.content})} title={isU?"Edit and resend":"Edit response (raw)"} style={msgActionS(t.mut)}>
-                      <IC.Pencil/> edit
-                    </button>}
-                    {!streaming&&!ghostActive&&<button onClick={()=>forkAt(i)} title="Fork conversation from this point" style={msgActionS(t.mut)}>
-                      <IC.GitBranch/> fork
-                    </button>}
-                    {!streaming&&<button onClick={()=>delMsg(i)} title="Delete this message" style={msgActionS(t.mut)}>
-                      <IC.Trash/> delete
-                    </button>}
-                    {!isU&&msg.content&&!streaming&&msg.metadata?.truncated&&i===(act.messages||[]).length-1&&<button onClick={()=>continueMessage(i)} title="Response was cut off by the output-token limit — continue it" style={msgActionS(t.warm)}>▶ continue</button>}
-                    {!isU&&msg.content&&!streaming&&<>
-                      <button onClick={()=>rateMessage(i,1)} title="Good response" style={msgActionS(msg.rating===1?t.ok:t.mut)}><IC.ThumbUp/></button>
-                      <button onClick={()=>rateMessage(i,-1)} title="Poor response" style={msgActionS(msg.rating===-1?t.err:t.mut)}><IC.ThumbDown/></button>
-                    </>}
-                    {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:9,color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
-                  </div>}
-                </div>
-              </div></React.Fragment>;
-            })}</>;})()}
-            {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} expandedPill={expandedPill} setExpandedPill={setExpandedPill} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
-            {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
-            <div ref={chatEnd}/>
-          </div>}
-        </div>
-        </div>
-        <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
-          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
-          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
-        {/* INPUT */}
-        <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
-          <div className="hc-composer-extras">
-          {currentRun&&(()=>{
-            const phaseLabel={searching:"searching",thinking:"thinking",tool:"tool running",streaming:"streaming",voting:"council voting",council:"council",stopped:"stopped",failed:"failed",complete:"complete"}[currentRun.phase]||currentRun.phase||"running";
-            const pct=currentRun.pct!=null?Math.max(0,Math.min(100,Number(currentRun.pct)||0)):null;
-            const active=streaming||councilRunning||searchLoading;
-            return <div style={{maxWidth:chatWidth,margin:"0 auto 7px",display:"flex",alignItems:"center",gap:8,padding:"6px 10px",borderRadius:8,background:`${currentRun.color}0d`,border:`1px solid ${currentRun.color}2f`,color:currentRun.color,fontSize:11,minHeight:31,boxSizing:"border-box"}}>
-              <span style={{width:7,height:7,borderRadius:"50%",background:currentRun.color,boxShadow:active?`0 0 9px ${currentRun.color}88`:"none",animation:active?"pulse 1.5s infinite":"none",flexShrink:0}}/>
-              <span style={{fontWeight:800,textTransform:"uppercase",letterSpacing:.6,fontSize:9,whiteSpace:"nowrap"}}>{phaseLabel}</span>
-              <span style={{color:t.text,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
-              {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
-              {pct!=null&&<span style={{fontSize:9,color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
-              {streaming&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 7px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Stop</button>}
-            </div>;
-          })()}
-          {/* Attachment chips */}
-          {quickSearchError&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",justifyContent:"flex-start"}}>
-            <span style={{display:"inline-flex",alignItems:"center",gap:7,padding:"4px 9px",borderRadius:8,background:`${t.warm}10`,border:`1px solid ${t.warm}30`,color:t.warm,fontSize:10,fontWeight:700,maxWidth:"100%"}}>
-              <span style={{width:6,height:6,borderRadius:"50%",background:t.warm,flexShrink:0}}/>
-              Quick Search
-              <span style={{color:t.mut,fontWeight:500,maxWidth:260,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{quickSearchError}</span>
-              <button onClick={()=>setQuickSearchError(null)} style={{background:"none",border:"none",color:t.warm,cursor:"pointer",fontSize:11,padding:0,lineHeight:1}}>×</button>
-            </span>
-          </div>}
-          {/* Council suggested prompts */}
-          {act?.is_council&&!councilRunning&&(councilSuggestions.length>0||councilSugLoading)&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-              {councilSugLoading?<div style={{display:"flex",alignItems:"center",gap:5,padding:"4px 0",width:"100%"}}>
-                <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:4,height:4,borderRadius:"50%",background:t.pink,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>
-                <span style={{fontSize:10,color:t.mut}}>Generating suggestions...</span>
-              </div>:councilSuggestions.map((s,i)=><button key={i} onClick={()=>{setInp(s);setCouncilSuggestions([]);setTimeout(()=>inpRef.current?.focus(),50);}}
-                style={{background:`${t.pink}08`,border:`1px solid ${t.pink}25`,borderRadius:20,padding:"5px 12px",fontSize:11,color:t.dim,cursor:"pointer",fontFamily:font,transition:"all .15s",maxWidth:"100%",textAlign:"left",lineHeight:1.4}}
-                onMouseOver={e=>{e.currentTarget.style.background=`${t.pink}18`;e.currentTarget.style.borderColor=`${t.pink}44`;e.currentTarget.style.color=t.text;}}
-                onMouseOut={e=>{e.currentTarget.style.background=`${t.pink}08`;e.currentTarget.style.borderColor=`${t.pink}25`;e.currentTarget.style.color=t.dim;}}>
-                {s}
-              </button>)}
-              {!councilSugLoading&&<button onClick={()=>fetchCouncilSuggestions(act?.council_config_id)} title="Regenerate suggestions" style={{background:"none",border:`1px solid ${t.brd}33`,borderRadius:"50%",width:24,height:24,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:11,flexShrink:0}}>↻</button>}
-            </div>}
-          {preparingSend&&<div role="status" aria-live="polite" style={{maxWidth:chatWidth,margin:"0 auto",padding:"6px 0",fontSize:11,color:t.warm}}>{preparingSend}</div>}
-          {attachments.length>0&&<div style={{maxWidth:chatWidth,margin:"0 auto",display:"flex",flexWrap:"wrap",gap:6,padding:"6px 0",pointerEvents:preparingSend?"none":undefined,opacity:preparingSend?0.65:1}}>
-            {attachments.map((a,i)=>a.type==="image"?
-              <span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.acc}10`,border:`1px solid ${t.acc}30`,padding:"3px 6px 3px 3px",borderRadius:8,fontSize:10,fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
-                <img src={a.dataUrl} alt={a.name} style={{height:26,width:26,objectFit:"cover",borderRadius:5,border:`1px solid ${t.acc}33`,display:"block",cursor:"pointer",flexShrink:0}} onClick={()=>openPreview&&openPreview(a.name,a.dataUrl)}/>
-                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:140}}>{a.name}</span>
-                <span style={{color:t.mut,fontWeight:400,fontSize:9}}>{(a.size/1024).toFixed(0)}KB</span>
-                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.acc,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
-              </span>
-            :a.type==="pdf"?
-              <span key={i} style={{display:"inline-flex",alignItems:"center",gap:6,background:a.loading?`${t.warm}12`:a.error?`${t.err}10`:`${t.acc}10`,border:`1px solid ${a.loading?t.warm:a.error?t.err:t.acc}30`,color:a.loading?t.warm:a.error?t.err:t.acc,padding:"4px 7px",borderRadius:8,fontSize:10,fontWeight:600,transition:"all .2s",maxWidth:"100%",minHeight:30,boxSizing:"border-box"}}>
-                <span style={{fontSize:13}}>{a.loading?"⏳":"📄"}</span>
-                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{a.name}</span>
-                {!a.loading&&!a.error&&a.pages>0&&<span style={{color:t.mut,fontWeight:400}}>{a.pages}p</span>}
-                {a.loading&&<span style={{color:t.mut,fontWeight:400,fontStyle:"italic"}}>extracting...</span>}
-                {a.error&&<span style={{color:t.err,fontWeight:500,fontSize:9,maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.error}</span>}
-                {a.error&&a.file&&<button disabled={!!preparingSend} onClick={()=>{const f=a.file;setAttachments(p=>p.filter((_,j)=>j!==i));handleFileUpload([f]);}} style={{background:"none",border:`1px solid ${t.acc}55`,color:t.acc,cursor:"pointer",padding:"2px 7px",borderRadius:6,fontFamily:font,fontSize:9,fontWeight:700}}>Retry</button>}
-                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:a.error?t.err:t.mut,cursor:"pointer",padding:"1px 4px",fontSize:12,opacity:.8}}>&times;</button>
-              </span>
-            :<span key={i} title={a.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:`${t.f1}10`,border:`1px solid ${t.f1}30`,color:t.f1,padding:"4px 7px",borderRadius:8,fontSize:10,fontWeight:600,maxWidth:260,minHeight:30,boxSizing:"border-box"}}>
-                <IC.Paperclip/>
-                <span style={{color:t.text,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:190}}>{a.name}</span>
-                <button disabled={!!preparingSend} onClick={()=>setAttachments(p=>p.filter((_,j)=>j!==i))} title="Remove attachment" style={{background:"none",border:"none",color:t.f1,cursor:"pointer",padding:"1px 3px",fontSize:12,opacity:.78,lineHeight:1}}>&times;</button>
-              </span>)}
-          </div>}
-          </div>
-          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} style={{maxWidth:chatWidth,margin:"0 auto",...glass,background:composerState==="error"?`${t.err}08`:composerState==="stopped"?`${t.surface}E8`:glass.background,borderRadius:8,padding:isEmptyChatSurface?"9px 7px 9px 14px":"6px 6px 6px 12px",display:"flex",alignItems:"center",gap:6,border:`1px solid ${composerColor}${composerActive||composerFocused?"55":"32"}`,boxShadow:composerActive?`0 0 10px ${composerColor}18`:composerFocused?`0 0 0 2px ${composerColor}12`:"none",transition:"border-color .18s, box-shadow .22s, background .18s",minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`}}>
-            {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:8,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
-              {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
-            </div>}
-            {/* Slash command menu — type "/" to insert a prompt-library prompt */}
-            {slashMenuActive()&&(()=>{
-              const matches=slashMatchesFor(inp);
-              const hi=Math.min(slashIdx,Math.max(matches.length-1,0));
-              return <div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:320,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:8,animation:"fadeIn .14s ease"}}>
-                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800,padding:"2px 6px 6px"}}>Prompts — ↑↓ select · Enter insert · Esc dismiss</div>
-                <div style={{maxHeight:230,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {matches.map((p,ix)=><div key={p.id||ix} onMouseDown={e=>{e.preventDefault();insertPrompt(p);}} onMouseEnter={()=>setSlashIdx(ix)}
-                    style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:ix===hi?`${t.f1}18`:`${t.surface}44`,border:`1px solid ${ix===hi?`${t.f1}44`:`${t.brd}22`}`}}>
-                    <div style={{display:"flex",alignItems:"baseline",gap:6}}>
-                      <span style={{fontSize:11,fontWeight:700,color:ix===hi?t.f1:t.text}}>{p.title}</span>
-                      <span style={{fontSize:9,color:t.f1}}>{p.category||"General"}</span>
-                      {/\{\{\s*[\w][\w .\-]*?\s*\}\}/.test(p.content||"")&&<span style={{fontSize:8,padding:"0 4px",borderRadius:3,background:`${t.warm}18`,color:t.warm,fontWeight:700}}>vars</span>}
-                    </div>
-                    <div style={{fontSize:9,color:t.mut,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{(p.content||"").slice(0,90)}</div>
-                  </div>)}
-                  {!matches.length&&<div style={{textAlign:"center",padding:12,color:t.mut,fontSize:11}}>No matching prompts — Esc to dismiss</div>}
-                </div>
-              </div>;
-            })()}
-            {/* {{variable}} fill-in card for prompt insertion */}
-            {slashVarFill&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,right:0,maxWidth:480,zIndex:330,background:t.bgDeep,border:`1px solid ${t.warm}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,padding:12,animation:"fadeIn .14s ease"}}>
-              <div style={{fontSize:11,fontWeight:800,color:t.warm,marginBottom:8}}>Fill in “{slashVarFill.title}”</div>
-              {slashVarFill.vars.map((v,ix)=><label key={v.name} style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"110px 1fr",gap:8,alignItems:"center",marginBottom:6}}>
-                <span style={{fontSize:10,color:t.dim,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis"}}>{v.name}</span>
-                <input autoFocus={ix===0} value={v.value} onChange={e=>setSlashVarFill(s=>({...s,vars:s.vars.map((x,j)=>j===ix?{...x,value:e.target.value}:x)}))}
-                  onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();applyVarFill();}if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashVarFill(null);}}}
-                  style={{fontSize:11,padding:"6px 9px",background:t.bg,border:`1px solid ${t.brd}44`,color:t.text,borderRadius:7,fontFamily:font,boxSizing:"border-box"}}/>
-              </label>)}
-              <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
-                <button onClick={()=>setSlashVarFill(null)} style={{...btnS(t.mut),fontSize:10}}>Cancel</button>
-                <button onClick={applyVarFill} style={{...btnS(t.warm),fontSize:10,fontWeight:700}}>Insert</button>
-              </div>
-            </div>}
-            {!act?.is_council&&<><div className="hc-composer-anchor hc-quick-anchor" ref={quickMenuRef} style={{position:"relative",flexShrink:0}}>
-              <button onClick={()=>{setShowQuickMenu(p=>!p);setShowPromptPicker(false);}} title="Quick actions" style={{background:showQuickMenu?`${t.acc}18`:"none",border:showQuickMenu?`1px solid ${t.acc}44`:"none",color:showQuickMenu?t.acc:t.mut,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,opacity:showQuickMenu?1:.75,borderRadius:7,fontSize:17,lineHeight:1}}><IC.Plus/></button>
-              {showQuickMenu&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"115%",left:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:220,padding:7,display:"flex",flexDirection:"column",gap:4,animation:"fadeIn .16s ease"}}>
-                <button disabled={!!preparingSend} onClick={()=>{fileRef.current?.click();setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:`${t.surface}66`,color:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}><IC.Paperclip/> Attach files</button>
-                {validPrompts.length>0&&<button onClick={()=>{setShowPromptPicker(true);setPromptSearch("");setShowQuickMenu(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:showPromptPicker?`${t.f1}18`:`${t.surface}66`,color:showPromptPicker?t.f1:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>⚡ Prompt Library</button>}
-                {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:8,border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:12,textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
-              </div>}
-            </div>
-            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS}/>
-            <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
-            {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
-              {showPromptPicker&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:12,boxShadow:`0 4px 24px #0008`,minWidth:280,maxWidth:360,padding:8,animation:"fadeIn .16s ease"}}>
-                <input value={promptSearch} onChange={e=>setPromptSearch(e.target.value)} placeholder="Search prompts..." style={{...inputS,marginBottom:6,padding:"5px 8px",fontSize:11}} autoFocus/>
-                <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())||p.content.toLowerCase().includes(promptSearch.toLowerCase())).map(p=><div key={p.id} onClick={(e)=>{e.stopPropagation();insertPrompt(p);}} style={{padding:"7px 10px",borderRadius:8,cursor:"pointer",background:`${t.surface}66`,border:`1px solid ${t.brd}22`,transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.f1}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
-                    <div style={{fontSize:11,fontWeight:600,color:t.text}}>{p.title}</div>
-                    <div style={{fontSize:9,color:t.f1,marginTop:1}}>{p.category||"General"}</div>
-                  </div>)}
-                  {validPrompts.filter(p=>!promptSearch||p.title.toLowerCase().includes(promptSearch.toLowerCase())).length===0&&<div style={{textAlign:"center",padding:16,color:t.mut,fontSize:11}}>No matches</div>}
-                </div>
-                <div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{setShowPromptPicker(false);setShowQuickMenu(false);setPanel("prompts");}} style={{...btnS(t.f1),width:"100%",justifyContent:"center",fontSize:9}}>Manage Prompts →</button>
-                </div>
-              </div>}
-            </div>}
-            </>}
-            <textarea ref={inpRef} value={inp} onChange={e=>{const v=e.target.value;setInp(v);if(!v.startsWith("/"))setSlashDismissed(false);setSlashIdx(0);}} onKeyDown={e=>{
-              if(slashMenuActive()){
-                const matches=slashMatchesFor(inp);
-                if(matches.length){
-                  if(e.key==="ArrowDown"){e.preventDefault();setSlashIdx(i=>(i+1)%matches.length);return;}
-                  if(e.key==="ArrowUp"){e.preventDefault();setSlashIdx(i=>(i-1+matches.length)%matches.length);return;}
-                  if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
-                  if(e.key==="Tab"){e.preventDefault();insertPrompt(matches[Math.min(slashIdx,matches.length-1)]);return;}
-                }
-                if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
-              }
-              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
-              disabled={streaming||councilRunning||loadingConv||!!preparingSend}
-              style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,outline:"none",resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
-              onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
-              onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
-            {!act?.is_council&&(()=>{const lvl=resolveEffort(actId);const L=EFFORT_LEVELS[lvl]||EFFORT_LEVELS[0];const overridden=actId?effortPerChat[actId]!==undefined&&effortPerChat[actId]!==globalEffort:pendingEffort!==null&&pendingEffort!==globalEffort;return <div className="hc-composer-anchor" ref={effortPickerRef} style={{position:"relative",flexShrink:0}}>
-              <button onClick={()=>setShowEffortPicker(p=>!p)} title={`Effort: ${L.name} — ${L.desc}${overridden?" (overrides global)":""}`} style={{background:showEffortPicker?`${t.pink}15`:"none",border:overridden?`1px solid ${t.pink}55`:"none",color:lvl>0?t.pink:t.mut,cursor:"pointer",padding:"3px 8px",borderRadius:8,display:"flex",alignItems:"center",gap:4,fontSize:11,flexShrink:0,opacity:lvl>0?1:.65,fontWeight:600}}>
-                <span style={{fontSize:13}}>{L.emoji}</span><span className="hc-effort-label" style={{fontSize:10}}>{L.name}</span>
-              </button>
-              {showEffortPicker&&<div className="hc-composer-menu" style={{position:"absolute",bottom:"110%",right:0,zIndex:300,background:t.bgDeep,border:`1px solid ${t.pink}33`,borderRadius:10,boxShadow:`0 4px 24px #0008`,minWidth:200,padding:6,animation:"fadeIn .16s ease"}}>
-                <div style={{fontSize:9,color:t.mut,textTransform:"uppercase",letterSpacing:.5,padding:"3px 6px 5px",fontWeight:700}}>Effort — this chat</div>
-                {EFFORT_LEVELS.map((lv,v)=><button key={v} onClick={()=>{if(actId){setEffortPerChat(p=>({...p,[actId]:v}));}else{setPendingEffort(v);}setShowEffortPicker(false);}} style={{display:"flex",alignItems:"center",gap:6,width:"100%",textAlign:"left",padding:"6px 8px",borderRadius:6,background:lvl===v?`${t.pink}18`:"transparent",border:"none",color:lvl===v?t.pink:t.dim,cursor:"pointer",fontSize:11,fontFamily:font,marginBottom:2}}>
-                  <span style={{fontSize:14}}>{lv.emoji}</span>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:600}}>{lv.name}{globalEffort===v&&<span style={{fontSize:8,color:t.mut,marginLeft:4,opacity:.7}}>default</span>}</div>
-                    <div style={{fontSize:9,color:t.mut}}>{lv.desc}</div>
-                  </div>
-                </button>)}
-                {((actId&&effortPerChat[actId]!==undefined)||(!actId&&pendingEffort!==null))&&<div style={{borderTop:`1px solid ${t.brd}22`,marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{if(actId){setEffortPerChat(p=>{const n={...p};delete n[actId];return n;});}else{setPendingEffort(null);}setShowEffortPicker(false);}} style={{width:"100%",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:10,padding:"4px 0",fontFamily:font}}>Use global default →</button>
-                </div>}
-              </div>}
-            </div>;})()}
-            {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:6,cursor:"pointer"}}>Retry transcription</button>}
-            {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} style={{background:recording?`${t.err}22`:"none",border:recording?`1px solid ${t.err}66`:"1px solid transparent",color:recording?t.err:transcribing?t.warm:t.mut,cursor:transcribing?"default":"pointer",padding:"6px 8px",borderRadius:8,display:"flex",alignItems:"center",flexShrink:0,animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
-              {transcribing?<span style={{width:13,height:13,border:`2px solid ${t.warm}44`,borderTopColor:t.warm,borderRadius:"50%",display:"inline-block",animation:"spin 1s linear infinite"}}/>:<IC.Mic/>}
-            </button>}
-            {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
-            :councilRunning?<button onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,padding:"10px 14px",borderRadius:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,padding:"10px 14px",borderRadius:8,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all .2s",boxShadow:"none",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
-          </div>
-        </div>
-        </div>
-      </>}
+  </div>,document.body)}
       </div>{/* end inner panel column */}
       {/* Preview panel — outside panel ternary so it renders alongside any panel */}
-      {previewFile&&<div role="complementary" aria-label="Preview panel" style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":`1px solid ${t.brd}33`,background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
+      {previewFile&&<div ref={previewFocus} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label="Preview panel" style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":"1px solid var(--hc-line)",background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
             {/* Drag handle */}
             {!isMobile&&<div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
             {/* Header */}
-            <div style={{padding:"9px 12px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}88`}}>
-              <span style={{fontSize:11,fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
-              <span style={{fontSize:9,color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:4,flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
+            <div style={{padding:"9px 12px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}F5`}}>
+              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
               {previewFile.isExternal
-                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:4,flexShrink:0}}>↗ open</a>
-                :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:4,flexShrink:0}}>⬇</a>}
-              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:16,padding:"0 2px",flexShrink:0,lineHeight:1}}>✕</button>
+                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
+                :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}
+              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1,display:"flex"}}><IC.X/></button>
             </div>
             {/* Content */}
             <div style={{flex:1,overflowY:"auto",padding:14}}>
               {previewFile.artifactId?<DocumentPreviewPanel key={previewFile.artifactId} artifactId={previewFile.artifactId} events={evts} t={t} font={font} onRevision={a=>setPreviewFile(p=>p?{...p,artifactId:a.artifact_id,filename:a.filename,url:a.url,type:a.filename.split(".").pop().toLowerCase()}:p)}/>
-              :previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:10,color:t.err}}>
-                <div style={{fontWeight:700,fontSize:12}}>⚠ {previewError}</div>
+              :previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:"var(--hc-radius-card)",color:t.err}}>
+                <div style={{fontWeight:700,fontSize:"var(--hc-text-secondary)"}}>⚠ {previewError}</div>
                 {previewFile.isExternal
-                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
-                  :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:11,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
+                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
+                  :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
               </div>
               :!previewFile.isExternal&&previewFile.type==="pdf"
                 ?<iframe src={userScopedUrl(previewFile.url)} title={previewFile.filename} style={{width:"100%",height:"100%",minHeight:500,border:0,background:"white"}}/>
               :previewFile.isExternal&&previewFile.type==="pdf"
-                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:6,minHeight:500}} title={previewFile.filename}/>
+                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",minHeight:500}} title={previewFile.filename}/>
               :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
-                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
+                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",display:"block"}} alt={previewFile.filename}/>
               :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)&&!previewFile.isExternal
-                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:6,display:"block"}} alt={previewFile.filename}/>
+                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",display:"block"}} alt={previewFile.filename}/>
                 :previewFile.type==="archive"&&previewArchive
                 ?<div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",background:`${t.surface}88`,borderRadius:8,border:`1px solid ${t.brd}22`}}>
-                    <span style={{fontSize:20}}>📦</span>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)"}}>
+                    <span style={{fontSize:"var(--hc-text-display)"}}>📦</span>
                     <div style={{flex:1}}>
-                      <div style={{fontSize:12,fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
-                      <div style={{fontSize:10,color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
+                      <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
+                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
                     </div>
-                    <a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:10,textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:6,fontWeight:600}}>⬇ Download</a>
+                    <a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)",fontWeight:600}}>⬇ Download</a>
                   </div>
-                  <div style={{borderRadius:8,border:`1px solid ${t.brd}22`,overflow:"hidden"}}>
+                  <div style={{borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",overflow:"hidden"}}>
                     {previewArchive.entries.filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/").map((entry,i)=>{
                       const depth=Math.max(0,(entry.name.match(/\//g)||[]).length-(entry.is_dir?1:0));
                       const basename=entry.is_dir?entry.name.replace(/\/$/,"").split("/").pop()+"/":entry.name.split("/").pop();
                       const sizeStr=entry.is_dir?"":entry.size>=1048576?(entry.size/1048576).toFixed(1)+"MB":entry.size>=1024?(entry.size/1024).toFixed(1)+"KB":entry.size+"B";
                       const extC=(basename.match(/\.(\w+)$/)||[])[1]||"";
                       const iconColor=entry.is_dir?t.warm:["py","js","ts","rs","go","java","c","cpp","sh"].includes(extC)?t.acc:["md","txt","log","csv"].includes(extC)?t.dim:["json","yaml","toml","xml","html","css"].includes(extC)?t.f1:t.mut;
-                      return <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",paddingLeft:10+depth*16,background:i%2===0?"transparent":`${t.surface}33`,borderBottom:i<previewArchive.entries.length-1?`1px solid ${t.brd}11`:"none",fontSize:11,color:entry.is_dir?t.warm:t.dim}}>
-                        <span style={{fontSize:12,flexShrink:0,color:iconColor}}>{entry.is_dir?"📁":"📄"}</span>
+                      return <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",paddingLeft:10+depth*16,background:i%2===0?"transparent":`${t.surface}33`,borderBottom:i<previewArchive.entries.length-1?"1px solid var(--hc-line-subtle)":"none",fontSize:"var(--hc-text-secondary)",color:entry.is_dir?t.warm:t.dim}}>
+                        <span style={{fontSize:"var(--hc-text-secondary)",flexShrink:0,color:iconColor}}>{entry.is_dir?"📁":"📄"}</span>
                         <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:entry.is_dir?600:400}}>{basename}</span>
-                        {sizeStr&&<span style={{fontSize:9,color:t.mut,flexShrink:0,fontFamily:"monospace"}}>{sizeStr}</span>}
+                        {sizeStr&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,fontFamily:codeFont}}>{sizeStr}</span>}
                       </div>;
                     })}
                   </div>
                 </div>
                 :previewFile.type==="html"&&previewContent
-                ?<iframe sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:6,background:"#fff",minHeight:400}} title={previewFile.filename}/>
+                ?<iframe sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",background:"#fff",minHeight:400}} title={previewFile.filename}/>
                 :["md","markdown","mdx"].includes(previewFile.type)&&previewContent
-                ?<div style={{lineHeight:1.7,fontSize:12,color:t.dim}}><MDWrap>{md(previewContent)}</MDWrap></div>
+                ?<div style={{lineHeight:1.7,fontSize:"var(--hc-text-secondary)",color:t.dim}}><MDWrap>{md(previewContent)}</MDWrap></div>
                 :previewContent
-                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:11,color:t.dim,fontFamily:font,lineHeight:1.6}}>{previewContent}</pre>
+                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:codeFont,lineHeight:1.6}}>{previewContent}</pre>
                 :!["png","jpg","jpeg","gif","webp","svg","archive"].includes(previewFile.type)
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
+                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
                 :previewFile.type==="archive"&&!previewArchive&&!previewError
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:12,gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>
+                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>
                 :null
               }
             </div>
@@ -8542,61 +8749,62 @@ function HyprChat(){
 
 
     {/* KB File Preview Modal */}
-    {kbPreview&&<div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:100,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>{if(e.target===e.currentTarget)setKbPreview(null);}}>
-      <div style={{background:t.bgDeep,border:`1px solid ${t.brd}44`,borderRadius:16,width:"min(720px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",boxShadow:`0 8px 48px #0008`,overflow:"hidden",animation:"fadeIn .25s"}}>
-        <div style={{padding:"12px 20px",borderBottom:`1px solid ${t.brd}22`,display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}88`}}>
-          <span style={{fontSize:14}}>{kbPreview.isPdf?"📕":"📄"}</span>
-          <span style={{fontSize:13,fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{kbPreview.filename}</span>
-          {kbPreview.isPdf&&!kbPreview.pdfFullView&&kbPreview.truncated&&<span style={{fontSize:9,color:t.warm,flexShrink:0}}>Pages 1-{kbPreview.previewed_pages} of {kbPreview.total_pages}</span>}
-          {kbPreview.truncated&&!kbPreview.isPdf&&<span style={{fontSize:9,color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
-          {kbPreview.isPdf&&kbPreview.rawUrl&&<button onClick={()=>setKbPreview(p=>({...p,pdfFullView:!p.pdfFullView}))} style={{background:kbPreview.pdfFullView?`${t.acc}25`:`${t.acc}12`,border:`1px solid ${t.acc}44`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:6,fontSize:10,fontWeight:600,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>{kbPreview.pdfFullView?"Text View":"Full PDF"}</button>}
-          <button onClick={()=>setKbPreview(null)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:18,padding:"0 4px",lineHeight:1}}>✕</button>
+    {kbPreview&&<div ref={kbFocus} role="dialog" aria-modal="true" aria-label="Knowledge file preview" className="hc-viewport-overlay hc-scrim" style={{position:"fixed",inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)setKbPreview(null);}}>
+      <div className="hc-dialog hc-dialog-card hc-elev-3" style={{width:"min(720px,95vw)",maxHeight:"85vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{padding:"12px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:8,flexShrink:0,background:`${t.surface}F5`}}>
+          <span style={{fontSize:"var(--hc-text-control)"}}>{kbPreview.isPdf?"📕":"📄"}</span>
+          <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.acc,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{kbPreview.filename}</span>
+          {kbPreview.isPdf&&!kbPreview.pdfFullView&&kbPreview.truncated&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,flexShrink:0}}>Pages 1-{kbPreview.previewed_pages} of {kbPreview.total_pages}</span>}
+          {kbPreview.truncated&&!kbPreview.isPdf&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm,flexShrink:0}}>Showing first 200 of {kbPreview.total_lines} lines</span>}
+          {kbPreview.isPdf&&kbPreview.rawUrl&&<button onClick={()=>setKbPreview(p=>({...p,pdfFullView:!p.pdfFullView}))} style={{background:kbPreview.pdfFullView?`${t.acc}25`:`${t.acc}12`,border:`1px solid ${t.acc}44`,color:t.acc,cursor:"pointer",padding:"3px 10px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>{kbPreview.pdfFullView?"Text View":"Full PDF"}</button>}
+          {kbPreview.rawUrl&&<a href={kbPreview.rawUrl} target="_blank" rel="noopener noreferrer" style={{color:t.acc,fontSize:"var(--hc-text-secondary)"}}>Download original</a>}
+          <button aria-label="Close" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={()=>setKbPreview(null)} style={{color:t.mut}}><IC.X/></button>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
           {kbPreview.loading?<div style={{textAlign:"center",padding:40,color:t.mut}}>Loading preview...</div>
-          :kbPreview.isPdf&&kbPreview.pdfFullView?<iframe src={kbPreview.rawUrl} style={{width:"100%",height:"75vh",border:"none",borderRadius:8}}/>
-          :kbPreview.rawUrl&&kbPreview.isImage?<img src={kbPreview.rawUrl} style={{maxWidth:"100%",maxHeight:"75vh",objectFit:"contain",borderRadius:8}} alt={kbPreview.filename}/>
-          :<pre style={{fontSize:11,lineHeight:1.6,color:t.text,fontFamily:font,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{kbPreview.content}</pre>}
+          :kbPreview.isPdf&&kbPreview.pdfFullView?<iframe src={kbPreview.rawUrl} style={{width:"100%",height:"75vh",border:"none",borderRadius:"var(--hc-radius)"}}/>
+          :kbPreview.rawUrl&&kbPreview.isImage?<img src={kbPreview.rawUrl} style={{maxWidth:"100%",maxHeight:"75vh",objectFit:"contain",borderRadius:"var(--hc-radius)"}} alt={kbPreview.filename}/>
+          :<pre style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.6,color:t.text,fontFamily:codeFont,whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0}}>{kbPreview.content}</pre>}
         </div>
       </div>
     </div>}
 
-    {confirmDialog&&ReactDOM.createPortal((()=>{const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const isPrompt=!!confirmDialog.prompt;const phraseOk=isPrompt?!!confirmPhrase.trim():(!requiredText||confirmPhrase===requiredText);const close=v=>{const dlg=confirmDialog;const phrase=confirmPhrase;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(dlg.prompt?(v?phrase.trim():null):v);};return <div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:12000,background:"rgba(0,0,0,.66)",display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
-      <div className="hc-dialog-card" style={{width:"min(420px,94vw)",background:t.bgDeep,border:`1px solid ${c}44`,borderRadius:14,boxShadow:"0 18px 70px rgba(0,0,0,.55)",padding:18,animation:"fadeIn .16s"}}>
+    <ShortcutSheet open={showShortcuts} onClose={()=>setShowShortcuts(false)} t={t} font={font}/>
+    {confirmPresence.mounted&&ReactDOM.createPortal((()=>{const confirmDialog=confirmPresence.value;const c={danger:t.err,warning:t.warm,success:t.ok,info:t.acc}[confirmDialog.tone]||t.acc;const requiredText=confirmDialog.requiredText||"";const isPrompt=!!confirmDialog.prompt;const phraseOk=isPrompt?!!confirmPhrase.trim():(!requiredText||confirmPhrase===requiredText);const close=v=>{const dlg=confirmDialog;const phrase=confirmPhrase;setConfirmDialog(null);setConfirmPhrase("");dlg.resolve&&dlg.resolve(dlg.prompt?(v?phrase.trim():null):v);};return <div className="hc-viewport-overlay hc-scrim" {...confirmPresence.props} style={{position:"fixed",inset:0,zIndex:12000,display:"flex",alignItems:"center",justifyContent:"center",padding:18,fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)close(false);}}>
+      <div ref={confirmFocus} role="dialog" aria-modal="true" aria-label={confirmDialog.title} tabIndex={-1} className="hc-dialog-card hc-dialog hc-elev-3" style={{zoom:'var(--hc-ui-scale,1)',width:'min(420px,calc((100vw - 24px) / var(--hc-ui-scale,1)))',maxHeight:'calc((var(--hc-viewport-height) - 36px) / var(--hc-ui-scale,1))',overflowY:'auto',borderColor:`${c}44`,padding:18}}>
         <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
-          <div style={{width:28,height:28,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:800}}>{isPrompt?"✎":"!"}</div>
-          <div style={{fontSize:14,fontWeight:800,color:t.text,letterSpacing:.3}}>{confirmDialog.title}</div>
+          <div style={{width:28,height:28,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:600}}>{isPrompt?"✎":"!"}</div>
+          <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text,letterSpacing:.3}}>{confirmDialog.title}</div>
         </div>
-        {confirmDialog.body&&<div style={{fontSize:12,color:t.dim,lineHeight:1.6,marginBottom:18}}>{confirmDialog.body}</div>}
+        {confirmDialog.body&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.6,marginBottom:18}}>{confirmDialog.body}</div>}
         {(requiredText||isPrompt)&&<div style={{margin:"-4px 0 18px",display:"grid",gap:7}}>
-          {confirmDialog.inputLabel&&<div style={{fontSize:10,color:t.mut,textTransform:"uppercase",letterSpacing:.6,fontWeight:800}}>{confirmDialog.inputLabel}</div>}
-          <input value={confirmPhrase} onChange={e=>setConfirmPhrase(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&phraseOk)close(true);}} placeholder={requiredText} autoFocus style={{...inputS,borderColor:phraseOk?`${c}66`:`${c}33`,background:`${c}08`,fontSize:12}}/>
+          {confirmDialog.inputLabel&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600}}>{confirmDialog.inputLabel}</div>}
+          <input value={confirmPhrase} onChange={e=>setConfirmPhrase(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&phraseOk)close(true);}} placeholder={requiredText} autoFocus style={{...inputS,borderColor:phraseOk?`${c}66`:`${c}33`,background:`${c}08`,fontSize:"var(--hc-text-control)"}}/>
         </div>}
         <div style={{display:"flex",justifyContent:"flex-end",gap:8}}>
-          <button onClick={()=>close(false)} style={{...btnS(t.mut),fontSize:12,padding:"7px 12px"}}>{confirmDialog.cancelLabel}</button>
-          <button onClick={()=>phraseOk&&close(true)} disabled={!phraseOk} style={{...btnS(c),fontSize:12,padding:"7px 13px",fontWeight:800,opacity:phraseOk?1:.42,cursor:phraseOk?"pointer":"not-allowed"}}>{confirmDialog.confirmLabel}</button>
+          <button onClick={()=>close(false)} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"7px 12px"}}>{confirmDialog.cancelLabel}</button>
+          <button onClick={()=>phraseOk&&close(true)} disabled={!phraseOk} style={{...btnS(c),fontSize:"var(--hc-text-control)",padding:"7px 13px",fontWeight:600,opacity:phraseOk?1:.42,cursor:phraseOk?"pointer":"not-allowed"}}>{confirmDialog.confirmLabel}</button>
         </div>
       </div>
     </div>;})(),document.body)}
 
     {/* Toast host */}
     {toasts.length>0&&<div className="hc-toast-host" style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",zIndex:520,display:"flex",flexDirection:"column",gap:7,pointerEvents:"none",width:"min(440px,calc(100vw - 28px))"}}>
-      {toasts.map(tt=>{const c={success:t.ok,error:t.err,warning:t.warm,info:t.acc}[tt.type||"info"]||t.acc;const action=tt.action||(tt.onUndo?{label:"Undo",onClick:tt.onUndo}:null);return <div key={tt.id} style={{display:"flex",alignItems:"center",gap:10,background:t.bgDeep,border:`1px solid ${c}55`,borderRadius:10,padding:"9px 12px",fontSize:12,color:t.dim,boxShadow:`0 8px 24px rgba(0,0,0,.4)`,pointerEvents:"auto",animation:"fadeIn .2s"}}>
+      {toasts.map(tt=>{const c={success:t.ok,error:t.err,warning:t.warm,info:t.acc}[tt.type||"info"]||t.acc;const action=tt.action||(tt.onUndo?{label:"Undo",onClick:tt.onUndo}:null);return <div key={tt.id} className="hc-toast hc-elev-2" data-leaving={tt.leaving?"":undefined} style={{display:"flex",alignItems:"center",gap:10,borderLeft:`3px solid ${c}`,padding:"9px 12px",fontSize:"var(--hc-text-secondary)",color:t.dim,pointerEvents:"auto"}}>
         <span style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 8px ${c}88`,flexShrink:0}}/>
         <span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0,flex:1}}>
           <span style={{color:t.text,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{tt.text}</span>
-          {tt.detail&&<span style={{fontSize:10,color:t.mut,lineHeight:1.35,wordBreak:"break-word"}}>{tt.detail}</span>}
+          {tt.detail&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,wordBreak:"break-word"}}>{tt.detail}</span>}
         </span>
-        {action&&<button onClick={()=>{action.onClick&&action.onClick();setToasts(ts=>ts.filter(x=>x.id!==tt.id));}} style={{background:"none",border:`1px solid ${c}55`,color:c,cursor:"pointer",padding:"3px 9px",borderRadius:6,fontFamily:font,fontSize:11,fontWeight:700,flexShrink:0}}>{action.label}</button>}
-        <button onClick={()=>setToasts(ts=>ts.filter(x=>x.id!==tt.id))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"1px 3px",fontSize:13,flexShrink:0}}>×</button>
+        {action&&<button onClick={()=>{action.onClick&&action.onClick();dismissToast(tt.id);}} style={{background:"none",border:`1px solid ${c}55`,color:c,cursor:"pointer",padding:"3px 9px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0}}>{action.label}</button>}
+        <button aria-label="Close" onClick={()=>dismissToast(tt.id)} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",padding:"1px 3px",fontSize:"var(--hc-text-control)",flexShrink:0}}>×</button>
       </div>;})}
     </div>}
 
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=${FONTS[fi].i}&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=${FONTS[fi].i}${uiFont?.i?`&family=${uiFont.i}`:""}&display=swap');
       @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
       @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
-      @keyframes slide{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}
       .composer-trace{position:absolute;display:block;background:linear-gradient(90deg,transparent,var(--trace-color),transparent);filter:drop-shadow(0 0 4px var(--trace-color));opacity:.52;pointer-events:none}
       .composer-trace-top{top:0;left:0;width:42%;height:2px;animation:traceX 1.25s linear infinite}
       .composer-trace-bottom{right:0;bottom:0;width:42%;height:2px;animation:traceXReverse 1.25s linear infinite}
@@ -8608,62 +8816,15 @@ function HyprChat(){
       @keyframes traceXReverse{0%{transform:translateX(115%)}100%{transform:translateX(-260%)}}
       @keyframes traceY{0%{transform:translateY(-115%)}100%{transform:translateY(260%)}}
       @keyframes traceYReverse{0%{transform:translateY(115%)}100%{transform:translateY(-260%)}}
-      @keyframes marquee-think{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(-50%,0,0)}}
-      .pill-marquee-wrap{overflow:hidden;max-width:280px;display:inline-block;vertical-align:middle;-webkit-mask-image:linear-gradient(to right,transparent 0%,black 8%,black 92%,transparent 100%);mask-image:linear-gradient(to right,transparent 0%,black 8%,black 92%,transparent 100%)}
-      .pill-marquee-inner{display:inline-block;white-space:nowrap;animation:marquee-think 12s linear infinite;will-change:transform;backface-visibility:hidden}
       @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
       @keyframes glow{0%,100%{box-shadow:0 0 8px ${t.acc}88}50%{box-shadow:0 0 16px ${t.acc}CC}}
       @keyframes pGlow{0%,100%{box-shadow:0 0 4px ${t.err}44}50%{box-shadow:0 0 14px ${t.err}88}}
       @keyframes pCouncilGlow{0%,100%{box-shadow:0 0 4px ${t.pink}44}50%{box-shadow:0 0 14px ${t.pink}88}}
       @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
       @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
-      @keyframes bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
-      @keyframes swing{0%,100%{transform:rotate(-12deg)}50%{transform:rotate(12deg)}}
       @keyframes bop{0%,100%{transform:scale(1)}50%{transform:scale(1.3)}}
-      @keyframes memoryPulse{0%{transform:scale(1);opacity:1}25%{transform:scale(1.3);opacity:.7}50%{transform:scale(1);opacity:1}75%{transform:scale(1.2);opacity:.8}100%{transform:scale(1);opacity:1}}
       @keyframes writing{0%{transform:rotate(-8deg) translateY(0)}25%{transform:rotate(4deg) translateY(-1px)}50%{transform:rotate(-6deg) translateY(0)}75%{transform:rotate(5deg) translateY(-1px)}100%{transform:rotate(-8deg) translateY(0)}}
-      @keyframes pillGlow {
-  0%,100%{box-shadow:0 0 4px var(--pill-glow,rgba(120,200,255,.25));}
-  50%{box-shadow:0 0 10px var(--pill-glow,rgba(120,200,255,.55));}
-}
-	      @keyframes glitch{0%,90%,100%{transform:skewX(0)}92%{transform:skewX(-5deg)}94%{transform:skewX(5deg)}96%{transform:skewX(-3deg)}98%{transform:skewX(3deg)}}
 	      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
-	      @keyframes ripple{0%{transform:scale(0);opacity:1}100%{transform:scale(4);opacity:0}}
-	      @keyframes convTitleMarquee{0%,12%{transform:translateX(0)}88%,100%{transform:translateX(calc(-1 * var(--conv-title-marquee,0px)))}}
-	      a[download]:hover{background:${t.ok}28 !important;border-color:${t.ok}66 !important;transform:translateY(-1px);box-shadow:0 3px 12px ${t.ok}22;}
-      a[download]:active{transform:translateY(0);}
-      .nav-panel-button:hover{background:var(--nav-hover-bg) !important;border-color:var(--nav-hover-border) !important;color:var(--nav-hover-color) !important;box-shadow:0 0 0 1px var(--nav-hover-ring),0 4px 14px var(--nav-hover-shadow) !important;transform:translateY(-1px);}
-      .nav-panel-button.is-active:hover{background:var(--nav-active-hover-bg) !important;}
-      .nav-panel-button:active{transform:translateY(0);}
-	      .conv-row{transition:background .14s ease,border-color .14s ease;}
-	      .conv-row:not(.is-act):hover{background:var(--conv-row-hover-bg) !important;--conv-action-bg:var(--conv-row-hover-bg);}
-	      .conv-title-clip{display:block;-webkit-mask-image:linear-gradient(90deg,#000 0%,#000 calc(100% - 34px),rgba(0,0,0,.86) calc(100% - 22px),rgba(0,0,0,.35) calc(100% - 9px),transparent 100%);mask-image:linear-gradient(90deg,#000 0%,#000 calc(100% - 34px),rgba(0,0,0,.86) calc(100% - 22px),rgba(0,0,0,.35) calc(100% - 9px),transparent 100%);}
-	      .conv-title-text{display:inline-block;white-space:nowrap;padding-right:24px;will-change:transform;}
-	      .conv-row[data-title-overflow="1"]:hover .conv-title-text,.conv-row[data-title-overflow="1"]:focus-within .conv-title-text{animation:convTitleMarquee 9s .35s linear infinite alternate;}
-	      @media (prefers-reduced-motion:reduce){.conv-row[data-title-overflow="1"]:hover .conv-title-text,.conv-row[data-title-overflow="1"]:focus-within .conv-title-text{animation:none;}}
-	      .conv-actions{z-index:2;}
-	      .conv-actions::before{content:"";position:absolute;inset:-7px -6px -7px -4px;z-index:0;pointer-events:none;background:linear-gradient(90deg,transparent 0%,var(--conv-action-bg) 18%,var(--conv-action-bg) 100%),linear-gradient(90deg,transparent 0%,${t.bgDeep}E6 16%,${t.bgDeep}E6 100%);-webkit-backdrop-filter:blur(7px) saturate(1.08);backdrop-filter:blur(7px) saturate(1.08);opacity:0;transition:opacity .14s ease,background .14s ease;}
-	      .conv-row:hover .conv-actions::before,.conv-row:focus-within .conv-actions::before,.conv-actions.has-sticky-actions::before{opacity:.94;}
-	      .conv-act{opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease;}
-      .conv-act{position:relative;z-index:1;}
-      .conv-act.on{opacity:1;}
-      .conv-row:hover .conv-act{opacity:1;}
-      .conv-act:hover{background:${t.sfBri}33 !important;}
-      .conv-del:hover{color:${t.err} !important;}
-      .msg-toolbar{opacity:0;transition:opacity .15s ease;}
-      .msg-row:hover .msg-toolbar,.msg-row:focus-within .msg-toolbar{opacity:1;}
-      @media (hover:none){
-        .conv-act{opacity:1;}
-        .conv-row .conv-actions::before{opacity:.94;}
-        .msg-toolbar{opacity:1;}
-      }
-      *{scrollbar-width:auto;scrollbar-color:${t.sfBri} transparent}
-      *::-webkit-scrollbar{width:7px;height:10px}*::-webkit-scrollbar-track{background:transparent;border-radius:5px}
-      *::-webkit-scrollbar-thumb{background:${t.sfBri};border-radius:5px}*::-webkit-scrollbar-thumb:hover{background:${t.acc}88}
-      ::selection{background:${t.acc}44}
-      textarea::placeholder,input::placeholder{color:${t.mut}55}
-      select option{background:${t.bgDeep};color:${t.text}}
-      button{transition:filter .15s ease,border-color .15s ease,background-color .15s ease,color .15s ease;position:relative;overflow:hidden}button:hover{filter:brightness(1.08)}button:active{filter:brightness(.98)}
     `}</style>
   </div></div>;
 }

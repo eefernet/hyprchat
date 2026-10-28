@@ -1,5 +1,6 @@
 """Runtime settings, cleanup, RAG stats, changelog, and analytics routes."""
 import os
+import asyncio
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -487,6 +488,12 @@ async def cleanup_now():
     """Preserve durable, referenced and unresolved legacy outputs."""
     from durable_storage import cleanup_outputs
     return await asyncio.to_thread(cleanup_outputs)
+
+
+@router.get('/api/settings/cleanup-preview')
+async def cleanup_preview():
+    from durable_storage import cleanup_outputs
+    return await asyncio.to_thread(cleanup_outputs, dry_run=True)
 
 
 @router.post("/api/settings/cleanup-codebox")

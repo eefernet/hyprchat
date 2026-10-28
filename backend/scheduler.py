@@ -442,6 +442,10 @@ async def _execute_task(task: dict, run_id: str, *, trigger: str,
 
 async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
     """Run the task body. Returns a short result summary for task_runs."""
+    workspace_id = task.get('workspace_id') or ''
+    if workspace_id:
+        import workspace_service
+        await workspace_service.require_workspace(workspace_id)
     task_type = task.get("task_type") or "llm"
     prompt = (task.get("prompt") or "").strip()
     if extra_context:
@@ -459,13 +463,20 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
         )
 
     if task_type == "research":
+        research_context = {}
+        if workspace_id:
+            context = await db.build_workspace_memory_context(workspace_id=workspace_id,query=prompt)
+            research_context = {'kb_ids':await workspace_service.knowledge_ids(workspace_id),
+                'inputs':[{'kind':'text','name':'Workspace context','text':context['context']}] if context['context'] else []}
         if not _create_research_report:
             raise RuntimeError("research pipeline not wired")
         report = await _create_research_report({
             "query": prompt or task.get("title") or "scheduled research",
             "model": task.get("model") or "",
+            **research_context,
         })
         report_id = report['id']
+        if workspace_id: await db.add_research_report_to_workspace(workspace_id,report_id)
         await task_queue.attach_child(run_id, report_id)
         while True:
             current = await db.get_research_report(report_id)
@@ -494,7 +505,8 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
 
     delivery = task.get("delivery_json") or {}
     conv_id = task.get("conversation_id") or ""
-    if delivery.get("conversation", True) and conv_id:
+    if (workspace_id or task.get("tool_ids") or delivery.get("conversation", True)) and conv_id:
+        if workspace_id: await db.add_conv_to_workspace(workspace_id,conv_id)
         text = await assistant_mod.run_headless_chat(
             conversation_id=conv_id,
             prompt=prompt,
@@ -504,12 +516,13 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
             tool_ids=task.get("tool_ids") or None,
             run_id=run_id,
             task_id=task["id"],
+            **({"workspace_id": workspace_id} if workspace_id else {}),
             http=_http,
             events=_events,
         )
         # The brief itself is the result — notifications/ntfy show it instead
         # of the old "delivered to conversation ..." debug marker.
-        return (text or "").strip()[:2000] or f"delivered to conversation {conv_id}"
+        return (text or "").strip() or f"delivered to conversation {conv_id}"
 
     # No conversation delivery: single bounded completion, local-only fallback.
     import model_providers
@@ -520,7 +533,7 @@ async def _dispatch(task: dict, run_id: str, *, extra_context: str = "") -> str:
                                       ollama_url=config.OLLAMA_URL),
         run_id,
     )
-    return (text or "").strip()[:20000]
+    return (text or "").strip()
 
 
 async def _deliver_result(task: dict, status: str, result_text: str, error: str) -> None:

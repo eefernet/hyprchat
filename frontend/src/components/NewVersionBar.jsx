@@ -16,10 +16,10 @@ export default function NewVersionBar(){
     return()=>{window.removeEventListener('focus',onFocus);document.removeEventListener('visibilitychange',onFocus);clearInterval(timer);};
   },[]);
   if(!stale||dismissed)return null;
-  const button={background:'transparent',color:'inherit',border:'1px solid currentColor',borderRadius:6,padding:'4px 10px',cursor:'pointer',font:'inherit'};
+  const button={background:'transparent',color:'inherit',border:'1px solid currentColor',borderRadius:"var(--hc-radius)",padding:'4px 10px',cursor:'pointer',font:'inherit'};
   return <div role="status" style={{position:'fixed',left:'50%',bottom:'calc(16px + env(safe-area-inset-bottom, 0px))',transform:'translateX(-50%)',zIndex:9999,
-    display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',justifyContent:'center',maxWidth:'calc(100vw - 32px)',padding:'8px 14px',borderRadius:10,
-    background:'var(--bg, #10222c)',color:'var(--fg, #e6edf3)',border:'1px solid var(--acc, #5ab0ff)',boxShadow:'0 6px 24px rgba(0,0,0,.35)',fontSize:13}}>
+    display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',justifyContent:'center',maxWidth:'calc(100vw - 32px)',padding:'8px 14px',borderRadius:"var(--hc-radius-card)",
+    background:'var(--bg, #10222c)',color:'var(--fg, #e6edf3)',border:'1px solid var(--acc, #5ab0ff)',boxShadow:"var(--hc-shadow-2)",fontSize:"var(--hc-text-control)"}}>
     <span>A new version of HyprChat is available.</span>
     <button style={button} onClick={()=>window.location.reload()}>Reload</button>
     <button style={button} onClick={()=>setDismissed(true)} aria-label="Dismiss new version notice">Later</button>

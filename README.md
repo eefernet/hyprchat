@@ -267,7 +267,14 @@ Councils run multiple models against the same prompt, optionally debate across r
 
 ### 📚 Knowledge Bases & Workspaces
 
-Upload documents, attach knowledge bases to profiles, index uploaded code projects, and group related chats into workspaces. Workspaces can analyze topics and generate profile prompts from accumulated context.
+Upload documents, attach knowledge bases to profiles, index uploaded code projects, and organize related work in **Workspaces** (on the nav rail by default; rearrange it in Settings → Appearance → Navigation Bar). Each workspace has an overview, chats, linked knowledge, reviewed memory, notes/todos, tasks, jobs, reports, and artifacts.
+
+- **Project chat context** — New chat from a workspace saves and links the conversation together. A chat can use a selected workspace, automatic context (only when linked to exactly one workspace), or no workspace context. Linked KBs join profile KBs during retrieval; workspace memory still requires enablement and accepted/current entries. Ghost Mode excludes both. The context inspector records the workspace and KBs used for each response.
+- **Knowledge snapshots** — create a bounded snapshot of linked chats and reports, inspect its creation time and omitted/truncated sources, then wait for indexing before creating an agent. Snapshots do not update automatically. Per-file readiness, retry, and Test knowledge are available in workspace and KB panels; a timeout is never reported as completed indexing.
+- **Daily work** — link notes to several workspaces, edit/filter tags, and view todos by due date. Scheduled tasks can belong to one workspace, with model, tools, timezone, conversation, delivery options, and a three-occurrence schedule preview. Run history retains full results with conversation/report links; queued runs retain their submitted workspace selection.
+- **Find and reopen** — Search this workspace or Library Search finds chats, notes, reports, and artifacts, including artifacts inherited from linked chats. Chat hits open the matching saved message, note hits open the exact note, and returning to search preserves its filters.
+
+Deleting a workspace preserves its chats, notes, knowledge, reports, and artifacts. It removes workspace-specific memory and links, pauses and detaches its tasks, and cancels queued runs for that workspace. Work already running can finish; review it in Jobs. Database upgrades add the association tables and context fields automatically on startup.
 
 KB answers use **hybrid retrieval** (ChromaDB vectors + SQLite FTS5 keywords, fused) and render clickable inline `[n]` citation chips.
 
@@ -512,11 +519,13 @@ User → HyprChat (:8000)
 
 ### Tests and Builds
 
-Run from the repository root with the backend virtual environment active. Install the test runner alongside the backend requirements:
+Use Python 3.12 to match production (`.python-version`). From the repository root, create an isolated environment and install the hashed test lock:
 
 ```bash
-python3 -m pip install -r backend/requirements.txt pytest
-python3 -m compileall -q backend
+uv venv --python 3.12 .venv
+uv pip sync --python .venv/bin/python --require-hashes backend/test-requirements.lock.txt
+source .venv/bin/activate
+python -m compileall -q backend
 ```
 
 **Offline regression checks** for coding references and interactive search:
@@ -534,7 +543,7 @@ python3 -m pytest \
 **Full backend suite**, including live integration cases when a server is available:
 
 ```bash
-HYPRCHAT_URL=http://127.0.0.1:8000 python3 -m pytest backend/tests/ -v
+HYPRCHAT_URL=http://127.0.0.1:8000 bash backend/tests/run_tests.sh
 ```
 
 Use a dedicated test instance with disposable data: integration tests create and modify resources. Endpoint tests skip when no server is reachable; missing optional dependencies can also cause skips, so a skipped test is not a verified pass. Browser and live model-evaluation cases have additional setup documented in the [Daedalus guide](docs/daedalus-workflows.md).

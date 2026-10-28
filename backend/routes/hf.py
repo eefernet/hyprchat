@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Request
 
 import hf as hf_module
+import hf_compat
 
 from .context import route_context
 
@@ -27,3 +28,16 @@ async def hf_readme_ep(repo_id: str):
 @router.post("/api/hf/download")
 async def hf_download_ep(request: Request):
     return await hf_module.hf_download(route_context().http, request)
+
+
+@router.get("/api/hf/compat")
+async def hf_compat_ep(repo_id: str, filename: str):
+    """Per-file compatibility facts: exact pull tag, GGUF header, what the HF
+    registry will serve (model + projector bytes) and whether the local Ollama
+    already runs that architecture. Every probe degrades to null on failure."""
+    import os
+    safe = os.path.basename(filename)
+    if not repo_id or not safe or safe != filename or not safe.lower().endswith(".gguf"):
+        from fastapi import HTTPException
+        raise HTTPException(400, "repo_id and a .gguf filename are required")
+    return await hf_compat.compat_info(route_context().http, repo_id, filename)

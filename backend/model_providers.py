@@ -852,7 +852,7 @@ async def _stream_openai(
     key = await get_api_key("openai")
     if not key:
         raise ProviderError("OpenAI API key is not configured.", provider="openai")
-    if tools:
+    if tools or any(m.get('provider_state') for m in messages):
         import provider_tools  # lazy: only tool-enabled rounds need it
         payload: dict[str, Any] = {
             "model": model_name,
@@ -871,10 +871,15 @@ async def _stream_openai(
     # unless we add explicit per-model capability metadata later.
     # Reasoning models spend invisible reasoning tokens inside max_output_tokens,
     # so a 4096 default can produce a truncated or empty visible answer.
-    _is_reasoning = bool(re.match(r"^o\d", model_name.lower())) or model_name.lower().startswith("gpt-5")
+    _is_reasoning = bool(re.match(r"^o\d", model_name.lower())) or model_name.lower().startswith(("gpt-5", "gpt-6"))
     max_tokens = _max_output_tokens(options, default=16384 if _is_reasoning else 4096)
     if max_tokens:
         payload["max_output_tokens"] = max_tokens
+
+    if options.get('reasoning_level') is not None:
+        payload['reasoning'] = {'effort': options['reasoning_level']}
+        payload['store'] = False
+        payload['include'] = ['reasoning.encrypted_content']
 
     async with http.stream(
         "POST",
@@ -889,6 +894,8 @@ async def _stream_openai(
             raise ProviderError(text[:500] or f"OpenAI HTTP {resp.status_code}", provider="openai", status_code=resp.status_code)
         async for obj in _iter_sse_json(resp):
             typ = obj.get("type", "")
+            if typ == 'response.output_item.done' and (obj.get('item') or {}).get('type') in {'reasoning', 'message'}:
+                yield {'type': 'provider_state', 'item': obj['item']}
             if tools:
                 tc_event = provider_tools.openai_tool_call_event(obj)
                 if tc_event:
@@ -933,7 +940,7 @@ async def _stream_anthropic(
     key = await get_api_key("anthropic")
     if not key:
         raise ProviderError("Anthropic API key is not configured.", provider="anthropic")
-    if tools:
+    if tools or any(m.get('provider_state') for m in messages):
         import provider_tools  # lazy: only tool-enabled rounds need it
         system, anth_messages = provider_tools.anthropic_messages_native(messages)
     else:
@@ -953,6 +960,14 @@ async def _stream_anthropic(
         payload["temperature"] = options["temperature"]
     elif options.get("top_p") is not None:
         payload["top_p"] = options["top_p"]
+
+    if options.get('reasoning_level') is not None:
+        # Opus 4.5 supports effort but predates adaptive thinking.
+        if not re.fullmatch(r'claude-opus-4-5(?:-\d{4}-?\d{2}-?\d{2})?', model_name):
+            payload['thinking'] = {'type': 'adaptive'}
+        payload['output_config'] = {'effort': options['reasoning_level']}
+        payload.pop('temperature', None)
+        payload.pop('top_p', None)
 
     input_tokens = 0
     output_tokens = 0
@@ -1073,11 +1088,22 @@ async def _anthropic_stream_events(
 ) -> AsyncIterator[dict]:
     stop_reason = ""
     tool_acc = None
+    reasoning_blocks = {}
     if parse_tools:
         import provider_tools  # lazy: only tool-enabled rounds need it
         tool_acc = provider_tools.AnthropicToolAccumulator()
     async for obj in _iter_sse_json(resp):
         typ = obj.get("type", "")
+        index = obj.get('index', 0)
+        if typ == 'content_block_start' and (obj.get('content_block') or {}).get('type') in {'thinking', 'redacted_thinking'}:
+            reasoning_blocks[index] = dict(obj['content_block'])
+        elif typ == 'content_block_delta' and index in reasoning_blocks:
+            delta = obj.get('delta') or {}
+            for key in ('thinking', 'signature'):
+                if key in delta:
+                    reasoning_blocks[index][key] = reasoning_blocks[index].get(key, '') + delta[key]
+        elif typ == 'content_block_stop' and index in reasoning_blocks:
+            yield {'type': 'provider_state', 'item': reasoning_blocks.pop(index)}
         if tool_acc is not None:
             tc_event = tool_acc.feed(obj)
             if tc_event:

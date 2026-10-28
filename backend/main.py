@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, Que
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 import backup as backup_svc
 import image_job_store
@@ -645,6 +645,9 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     think_budget: Optional[int] = None  # None=auto, 0=disable thinking, 1=enable thinking
+    effort_mode: Optional[str] = Field(default=None, pattern='^auto$')
+    reasoning_level: StrictBool | StrictStr | None = None
+    reasoning_model: str = ''
     effort_rounds: Optional[int] = None  # 0=off, 1-3=extra self-review passes after the initial answer
     # Clean user-visible content for the latest user message (without the appended
     # `[Attached N image: ...]` hint that messages[].content carries for the model).
@@ -703,13 +706,18 @@ class FetchUrlRequest(BaseModel):
     max_chars: int = config.MAX_FETCH_CHARS
 
 class ConversationCreate(BaseModel):
+    tool_ids: Optional[list[str]] = None
+    persona_name: Optional[str] = None
+    persona_avatar: Optional[str] = None
+    workspace_context: Optional[dict] = None
     title: str = "New Chat"
-    model: str = config.DEFAULT_MODEL
-    system_prompt: str = ""
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
     model_config_id: Optional[str] = None
     use_memories: Optional[str] = "0"
 
 class ConversationUpdate(BaseModel):
+    workspace_context: Optional[dict] = None
     title: Optional[str] = None
     model: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -2016,8 +2024,19 @@ async def cancel_coder_workflow(workflow_id: str):
 @app.post("/api/conversations")
 async def create_conversation(req: ConversationCreate):
     id = f"conv-{uuid.uuid4().hex[:12]}"
-    await db.create_conversation(id, req.title, req.model, req.system_prompt, req.model_config_id, req.use_memories or "0")
-    return {"id": id, **req.model_dump()}
+    try:
+        import workspace_service
+        chosen = await workspace_service.validate_selection(req.workspace_context)
+        workspace_id = chosen.get('workspace_id')
+        resolved = await workspace_service.resolve_defaults(req.model_dump(exclude_unset=True), workspace_id)
+        if workspace_id:
+            available = (await list_models())['models']
+            if resolved['model'] not in available:
+                raise ValueError(f"Configured model '{resolved['model']}' is unavailable. Choose an available model in workspace settings or for this chat.")
+        await db.create_conversation(id, title=req.title, use_memories=req.use_memories or "0", workspace_context=chosen, **resolved)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_conversation(id)
 
 
 @app.get("/api/conversations")
@@ -2036,8 +2055,12 @@ async def get_conversation(conv_id: str):
 @app.patch("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, req: ConversationUpdate):
     kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
-    await db.update_conversation(conv_id, **kwargs)
-    return {"status": "updated"}
+    if not await db.get_conversation(conv_id): raise HTTPException(404, "Conversation not found")
+    try:
+        await db.update_conversation(conv_id, **kwargs)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_conversation(conv_id)
 
 
 @app.delete("/api/conversations/{conv_id}")
@@ -2116,7 +2139,14 @@ async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
     meta = body.get("metadata")
     if content is None and meta is None:
         raise HTTPException(400, "content or metadata required")
-    await db.update_message(msg_id, content=content, metadata=meta)
+    if content is not None and not isinstance(content, str):
+        raise HTTPException(400, "content must be text")
+    if meta is not None and not isinstance(meta, dict):
+        raise HTTPException(400, "metadata must be an object")
+    try:
+        await db.patch_message_presentation(conv_id, msg_id, content=content, metadata=meta)
+    except LookupError as error:
+        raise HTTPException(404, 'Message not found') from error
     # Manual assistant edits arrive content-only (the stream-finalize PATCH
     # always carries metadata). Re-index the edited text for history recall
     # when this conversation is memory-enabled; delete-first keeps it clean.
@@ -2442,18 +2472,22 @@ async def get_file_index_status(kb_id: str, filename: str):
 
 
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
-async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
+async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200, chunk: Optional[int] = None):
     """Preview first N lines of a KB file."""
     user_id = db.current_user_id()
     _db = await db.get_db()
     try:
         cursor = await _db.execute(
-            """SELECT f.filename FROM kb_files f
+            """SELECT f.filename,COALESCE((SELECT title FROM workspace_source_files sf WHERE sf.file_id=f.id LIMIT 1),f.filename) display_name FROM kb_files f
                JOIN knowledge_bases kb ON kb.id=f.kb_id
                WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
             (file_id, kb_id, user_id),
         )
         row = await cursor.fetchone()
+        if row and chunk is not None:
+            passage=await _db.execute_fetchall('SELECT text FROM kb_chunks_fts WHERE kb_id=? AND filename=? AND CAST(chunk_index AS INTEGER)=? LIMIT 1',(kb_id,row['filename'],chunk))
+            if passage:
+                return {'filename':row['display_name'],'content':passage[0]['text'],'truncated':False,'total_lines':len(passage[0]['text'].splitlines()),'location':rag.location_from_text(passage[0]['text']),'passage':True}
     finally:
         await _db.close()
     if not row:
@@ -2465,14 +2499,21 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200):
         raise HTTPException(400, "Invalid path")
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
+    import workspace_service
+    if os.path.splitext(filename)[1].lower() not in workspace_service.SUPPORTED_DOCUMENTS:
+        return {'filename':row['display_name'],'content':'Preview unavailable for this format. Download the original file.','truncated':False,'total_lines':0}
+    lines=max(1,min(lines,1000))
     try:
         def _read_lines():
+            if os.path.splitext(filename)[1].lower() in {'.pdf','.docx','.pptx','.xlsx'}:
+                return rag.parse_file(file_path,filename).splitlines(keepends=True)
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                return f.readlines()
+                import itertools
+                return list(itertools.islice(f,lines+1))
         all_lines = await asyncio.to_thread(_read_lines)
         total = len(all_lines)
         content = "".join(all_lines[:lines])
-        return {"filename": filename, "content": content, "truncated": total > lines, "total_lines": total}
+        return {"filename": row["display_name"], "content": content, "truncated": total > lines, "total_lines": total}
     except UnicodeDecodeError:
         return {"filename": filename, "content": "Binary file — preview not available", "truncated": False, "total_lines": 0}
 
@@ -2568,7 +2609,7 @@ async def raw_kb_file(kb_id: str, file_id: int):
     _db = await db.get_db()
     try:
         cursor = await _db.execute(
-            """SELECT f.filename FROM kb_files f
+            """SELECT f.filename,COALESCE((SELECT title FROM workspace_source_files sf WHERE sf.file_id=f.id LIMIT 1),f.filename) display_name FROM kb_files f
                JOIN knowledge_bases kb ON kb.id=f.kb_id
                WHERE f.id=? AND f.kb_id=? AND kb.user_id=?""",
             (file_id, kb_id, user_id),
@@ -2585,7 +2626,7 @@ async def raw_kb_file(kb_id: str, file_id: int):
         raise HTTPException(400, "Invalid path")
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
-    return FileResponse(file_path, filename=filename)
+    return FileResponse(file_path, filename=row["display_name"])
 
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
@@ -2844,12 +2885,13 @@ async def get_image_job(job_id: str):
                 from PIL import Image
                 with Image.open(io.BytesIO(data)) as decoded:
                     decoded.verify()
-                temporary = filepath + ".part"
-                with open(temporary, "wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(temporary, filepath)
+                from durable_storage import temporary_output
+                with temporary_output(db.current_user_id(), job_id) as temporary:
+                    with open(temporary, "wb") as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(temporary, filepath)
         except Exception as e:
             job.update(error="Image transfer failed; poll again to retry", retryable=True)
             await image_job_store.save(job)
@@ -3165,37 +3207,14 @@ async def purge_image_studio():
         # lose the result before HyprChat's done-poll picks it up.
         history_cleared = bool(await comfyui.clear_history())
         comfyui_files = await comfyui.cleanup_outputs()
-    # Scrub journald — historical backend log lines include generation
-    # prompts. The service is unprivileged (User=hyprchat, NoNewPrivileges),
-    # so the actual rotate+vacuum is done by a root path-unit helper
-    # (scripts/install-journal-scrub.sh) watching for this trigger file.
+    # Image deletion never rotates or vacuums the host's shared journal.
     journal_cleared = False
-    try:
-        _trigger = os.path.join(os.path.dirname(config.SETTINGS_PATH), ".journal-scrub-request")
-        with open(_trigger, "w") as f:
-            f.write(datetime.utcnow().isoformat())
-        for _ in range(20):  # helper consumes the trigger when done (~3s)
-            await asyncio.sleep(0.5)
-            if not os.path.exists(_trigger):
-                journal_cleared = True
-                break
-        if not journal_cleared:
-            # Helper not installed — don't leave a stale trigger behind
-            try:
-                os.remove(_trigger)
-            except OSError:
-                pass
-    except Exception as e:
-        print(f"[IMAGE PURGE] journal scrub request failed: {e}")
     notes = []
     if cleanup_skipped:
         notes.append(f"ComfyUI cleanup skipped ({cleanup_skipped}) — run Delete all again to clear its history/copies.")
     elif comfyui_files is None:
         notes.append("ComfyUI cleanup node not installed — its file copies remain "
                      "until the daily cron (install scripts/comfyui_hyprchat_cleanup.py).")
-    if not journal_cleared:
-        notes.append("Journal scrub helper not installed — old server log lines remain "
-                     "(run scripts/install-journal-scrub.sh on the server once).")
     notes.append("Retained legacy storage copies may remain pending ownership review.")
     note = " ".join(notes)
     return {
@@ -3221,7 +3240,16 @@ async def list_workspaces():
 @app.post("/api/workspaces")
 async def create_workspace_ep(body: dict = Body(...)):
     ws_id = f"ws-{uuid.uuid4().hex[:8]}"
-    return await db.create_workspace(ws_id, body.get("name", "New Workspace"), body.get("description", ""))
+    name = str(body.get("name", "New Workspace")).strip()
+    if not name or len(name)>200: raise HTTPException(400, "Workspace name must be 1–200 characters")
+    try:
+        await db.create_workspace(ws_id, name, str(body.get("description", "")),
+                                  chat_defaults=body.get('chat_defaults', {}),
+                                  source_context_enabled=body.get('source_context_enabled', True),
+                                  instructions=str(body.get('instructions', ''))[:20000])
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_workspace(ws_id)
 
 
 @app.get("/api/workspaces/{ws_id}")
@@ -3234,8 +3262,21 @@ async def get_workspace_ep(ws_id: str):
 
 @app.patch("/api/workspaces/{ws_id}")
 async def update_workspace_ep(ws_id: str, body: dict = Body(...)):
-    await db.update_workspace(ws_id, **body)
-    return {"ok": True}
+    if not await db.get_workspace_basic(ws_id): raise HTTPException(404, "Workspace not found")
+    for field in ('description','instructions'):
+        if field in body and (not isinstance(body[field],str) or len(body[field])>20000):
+            raise HTTPException(400, f'{field} must be text of at most 20000 characters')
+    if 'memory_enabled' in body and body['memory_enabled'] not in (0,1,True,False,'0','1'):
+        raise HTTPException(400, 'memory_enabled must be 0 or 1')
+    if 'name' in body:
+        if not isinstance(body['name'],str) or not body['name'].strip() or len(body['name'])>200:
+            raise HTTPException(400, "Workspace name must be 1–200 characters")
+        body['name'] = body['name'].strip()
+    try:
+        await db.update_workspace(ws_id, **body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return await db.get_workspace(ws_id)
 
 
 @app.delete("/api/workspaces/{ws_id}")
@@ -3246,12 +3287,15 @@ async def delete_workspace_ep(ws_id: str):
 
 @app.post("/api/workspaces/{ws_id}/conversations")
 async def add_conv_to_ws(ws_id: str, body: dict = Body(...)):
+    if not await db.get_workspace_basic(ws_id) or not await db.get_conversation(body.get("conversation_id", "")):
+        raise HTTPException(404, "Workspace or conversation not found")
     await db.add_conv_to_workspace(ws_id, body["conversation_id"])
     return {"ok": True}
 
 
 @app.delete("/api/workspaces/{ws_id}/conversations/{conv_id}")
 async def remove_conv_from_ws(ws_id: str, conv_id: str):
+    if not await db.get_workspace_basic(ws_id): raise HTTPException(404, "Workspace not found")
     await db.remove_conv_from_workspace(ws_id, conv_id)
     return {"ok": True}
 
@@ -3785,17 +3829,20 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
     if not ws:
         raise HTTPException(404)
     parts = [f"# Workspace: {ws['name']}\n{ws.get('description', '')}"]
+    coverage = {"created_at": datetime.utcnow().isoformat(), "conversation_ids": [], "report_ids": [], "truncated": False}
     total = 0
     MAX = 60000
     for conv_meta in ws.get("conversations", []):
         conv = await db.get_conversation(conv_meta["id"])
         if not conv:
             continue
+        coverage["conversation_ids"].append(conv_meta["id"])
         parts.append(f"\n\n=== {conv.get('title', 'Chat')} ===")
         for msg in conv.get("messages", []):
             if msg["role"] not in ("user", "assistant"):
                 continue
-            chunk = msg["content"][:2000]
+            chunk = msg["content"][:min(2000, max(0,MAX-total))]
+            coverage["truncated"] |= len(chunk)<len(msg["content"])
             parts.append(f"\n[{'User' if msg['role'] == 'user' else 'Assistant'}]: {chunk}")
             total += len(chunk)
             if total >= MAX:
@@ -3808,6 +3855,7 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
             report = await db.get_research_report(report_meta["id"])
             if not report:
                 continue
+            coverage["report_ids"].append(report_meta["id"])
             parts.append(f"\n\n=== Research Report: {report.get('title') or report.get('query', 'Untitled')} ===")
             report_bits = [
                 f"Query: {report.get('query', '')}",
@@ -3816,6 +3864,8 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
                 (report.get("report_markdown") or "")[:8000],
             ]
             chunk = "\n".join(bit for bit in report_bits if bit).strip()
+            coverage["truncated"] |= len(chunk)>MAX-total or len(report.get("report_markdown") or "")>8000
+            chunk = chunk[:max(0,MAX-total)]
             parts.append("\n" + chunk)
             total += len(chunk)
             if total >= MAX:
@@ -3831,8 +3881,13 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
     with open(fpath, "w", encoding="utf-8") as fh:
         fh.write(kb_content)
     await db.add_kb_file(kb_id, "workspace_knowledge.md", fpath, len(kb_content.encode()), "text/markdown")
-    all_kbs = await db.get_kbs()
-    return next((k for k in all_kbs if k["id"] == kb_id), {"id": kb_id, "name": kb_name})
+    coverage['omitted_conversations'] = len(ws.get('conversations',[]))-len(coverage['conversation_ids'])
+    coverage['omitted_reports'] = len(ws.get('reports',[]))-len(coverage['report_ids'])
+    import workspace_service, indexing_jobs
+    await workspace_service.link(ws_id, 'knowledge', kb_id, snapshot=coverage)
+    indexing_id = await indexing_jobs.submit(kb_id, 'workspace_knowledge.md', fpath)
+    _track_bg(indexing_jobs.execute(indexing_id))
+    return {**(await db.get_kb(kb_id)), 'indexing_job_id': indexing_id, 'snapshot': coverage}
 
 
 # ============================================================

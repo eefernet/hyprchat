@@ -33,7 +33,7 @@ export default function ChatHero({t,font,user,tagline,isCouncil,lifted,compact=f
   if(isCouncil)return <div className="hc-hero" style={rootS}>
     <style>{HERO_CSS}</style>
     <div style={{...rise(0)}}><div style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>⚖️</div></div>
-    <div style={{fontSize:12,color:t.mut,letterSpacing:1,...rise(.12)}}>Ask the council</div>
+    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,letterSpacing:1,...rise(.12)}}>Ask the council</div>
   </div>;
   return <div className="hc-hero" style={rootS}>
     <style>{HERO_CSS}</style>
@@ -43,22 +43,22 @@ export default function ChatHero({t,font,user,tagline,isCouncil,lifted,compact=f
         background:`conic-gradient(from 0deg, transparent 0 68%, ${t.acc}55 84%, ${t.acc2}33 94%, transparent)`,
         filter:"blur(5px)",opacity:.85,animation:"spin 14s linear infinite"}}/>
       <div style={{position:"relative",width:68,height:68,animation:"float 6s ease-in-out infinite"}}>
-        <div style={{width:68,height:68,borderRadius:18,background:t.bgDeep,border:`1px solid ${t.brd}77`,position:"relative",overflow:"hidden",
+        <div style={{width:68,height:68,borderRadius:"var(--hc-radius-dialog)",background:t.bgDeep,border:"1px solid var(--hc-line-strong)",position:"relative",overflow:"hidden",
           boxShadow:`0 10px 40px ${t.acc}1c, 0 0 26px ${t.acc}14`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-          <div style={{position:"absolute",inset:6,borderRadius:13,border:`1px solid ${t.brd}33`,background:`${t.surface}55`}}/>
-          <div style={{position:"absolute",left:23,top:18,width:10,height:32,borderRadius:2,background:t.acc,opacity:.95}}/>
-          <div style={{position:"absolute",right:23,bottom:18,width:10,height:32,borderRadius:2,background:t.warm,opacity:.9}}/>
+          <div style={{position:"absolute",inset:6,borderRadius:"var(--hc-radius-card)",border:"1px solid var(--hc-line)",background:`${t.surface}F5`}}/>
+          <div style={{position:"absolute",left:23,top:18,width:10,height:32,borderRadius:"var(--hc-radius-sm)",background:t.acc,opacity:.95}}/>
+          <div style={{position:"absolute",right:23,bottom:18,width:10,height:32,borderRadius:"var(--hc-radius-sm)",background:t.warm,opacity:.9}}/>
         </div>
       </div>
     </div>}
     <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:8,maxWidth:"100%"}}>
-      <div style={{fontSize:compact?22:34,fontWeight:800,letterSpacing:1.2,lineHeight:1,
+      <div style={{fontSize:compact?22:34,fontWeight:600,letterSpacing:1.2,lineHeight:1,
         backgroundImage:`linear-gradient(115deg, ${t.text}, ${t.acc} 45%, ${t.acc2})`,
         WebkitBackgroundClip:"text",backgroundClip:"text",color:"transparent",
         filter:`drop-shadow(0 2px 16px ${t.acc}22)`,...rise(.08)}}>HyprChat</div>
-      <div style={{fontSize:15.5,fontWeight:650,color:t.text,letterSpacing:.3,...rise(.16)}}>{greeting}</div>
+      <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text,letterSpacing:.3,...rise(.16)}}>{greeting}</div>
       <div style={{width:150,height:1,background:`linear-gradient(90deg,transparent,${t.acc}88,${t.acc2}66,transparent)`,...rise(.22)}}/>
-      {!compact&&<div key={tagline} style={{fontSize:12.5,color:t.dim,letterSpacing:.5,textAlign:"center",maxWidth:mobile?"100%":460,lineHeight:1.65,...rise(.3)}}>{tagline}</div>}
+      {!compact&&<div key={tagline} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,letterSpacing:.5,textAlign:"center",maxWidth:mobile?"100%":460,lineHeight:1.65,...rise(.3)}}>{tagline}</div>}
     </div>
   </div>;
 }

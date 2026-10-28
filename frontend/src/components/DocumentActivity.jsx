@@ -29,7 +29,7 @@ export default function DocumentActivity({runIds,events=[],live=false,t,onPrevie
   },[key,runs,events]);
   const validations=[...new Set(relevant.filter(e=>e.type==='tool_error'&&!e.data?.run_id).map(e=>e.data?.status).filter(Boolean))];
   if(!runIds.length&&!validations.length&&!files.length)return null;
-  return <div aria-label="Document activity" style={{display:'grid',gap:7,marginTop:8,fontSize:12}}>
+  return <div aria-label="Document activity" style={{display:'grid',gap:7,marginTop:8,fontSize:"var(--hc-text-secondary)"}}>
     {runIds.map(id=>{
       const row=runs[id],env=row?.result_envelope||{};
       const ev=[...relevant].reverse().find(e=>e.data?.run_id===id&&['tool_end','tool_error'].includes(e.type));
@@ -39,15 +39,15 @@ export default function DocumentActivity({runIds,events=[],live=false,t,onPrevie
       return <div key={id} role={failed?'alert':undefined} style={{color:failed?t.err:stopped?t.mut:t.dim,display:'flex',gap:8,alignItems:'center'}}>
         <span>{failed?`Document failed: ${env.error||ev?.data?.status||'Processing failed'}`:stopped?'Document stopped':state==='cancelling'?'Stopping document…':busy?'Processing document…':labels[action]||'Document operation finished'}</span>
         {state==='cancelling'&&env.error&&<span role="status">{env.error}</span>}
-        {busy&&<button onClick={async()=>{try{const r=await fetch(`${API}/api/runs/${encodeURIComponent(id)}/cancel`,{method:'POST'});const result=await r.json();if(!r.ok)throw new Error(result.detail||'Could not stop the document job.');setRuns(old=>({...old,[id]:{...old[id],id,status:result.status}}));setError(result.error||'');}catch(e){setError(e.message||'Could not stop the document job.');}}} style={{background:'none',border:`1px solid ${t.brd}`,borderRadius:5,color:t.mut,cursor:'pointer'}}>{state==='cancelling'?'Retry Stop':'Stop'}</button>}
+        {busy&&<button onClick={async()=>{try{const r=await fetch(`${API}/api/runs/${encodeURIComponent(id)}/cancel`,{method:'POST'});const result=await r.json();if(!r.ok)throw new Error(result.detail||'Could not stop the document job.');setRuns(old=>({...old,[id]:{...old[id],id,status:result.status}}));setError(result.error||'');}catch(e){setError(e.message||'Could not stop the document job.');}}} style={{background:'none',border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius-sm)",color:t.mut,cursor:'pointer'}}>{state==='cancelling'?'Retry Stop':'Stop'}</button>}
       </div>;
     })}
     {validations.map(v=><div role="alert" key={v} style={{color:t.err}}>{v}</div>)}
     {error&&<div role="status" style={{color:t.mut}}>{error}</div>}
-    {files.map(a=><div key={a.artifact_id} style={{display:'flex',alignItems:'center',gap:8,padding:'9px 11px',border:`1px solid ${t.brd}55`,borderRadius:8,background:`${t.surface}88`}}>
+    {files.map(a=><div key={a.artifact_id} style={{display:'flex',alignItems:'center',gap:8,padding:'9px 11px',border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`}}>
       <span style={{flex:1,minWidth:0,overflowWrap:'anywhere',color:t.text}}>{a.filename}</span>
       <a href={userScopedUrl(a.url)} download={a.filename} style={{color:t.ok}}>Download</a>
-      <button title="Preview" aria-label={`Preview ${a.filename}`} onClick={()=>onPreview(a.filename,a.url)} style={{background:'none',border:`1px solid ${t.acc}55`,borderRadius:5,padding:'4px 8px',color:t.acc,cursor:'pointer'}}>👁</button>
+      <button title="Preview" aria-label={`Preview ${a.filename}`} onClick={()=>onPreview(a.filename,a.url)} style={{background:'none',border:`1px solid ${t.acc}55`,borderRadius:"var(--hc-radius-sm)",padding:'4px 8px',color:t.acc,cursor:'pointer'}}>👁</button>
     </div>)}
   </div>;
 }

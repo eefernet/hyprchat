@@ -27,6 +27,7 @@ _WEBHOOK_BODY_CAP = 32 * 1024
 
 
 class TaskCreate(BaseModel):
+    workspace_id: str = ""
     title: str
     prompt: str = ""
     task_type: str = "llm"
@@ -42,6 +43,7 @@ class TaskCreate(BaseModel):
 
 
 class TaskUpdate(BaseModel):
+    workspace_id: Optional[str] = None
     title: Optional[str] = None
     prompt: Optional[str] = None
     task_type: Optional[str] = None
@@ -76,13 +78,46 @@ async def _computed_next_run(schedule_kind: str, schedule_json: dict,
         raise HTTPException(400, str(exc)) from exc
 
 
+async def validate_links(fields):
+    if fields.get('workspace_id') and fields.get('task_type') not in {'llm', 'research'}:
+        raise HTTPException(400, 'Workspace context is available for agent and research tasks')
+    if fields.get('workspace_id') and not await db.get_workspace_basic(fields['workspace_id']):
+        raise HTTPException(404, 'Workspace not found')
+    if fields.get('conversation_id') and not await db.get_conversation(fields['conversation_id']):
+        raise HTTPException(404, 'Conversation not found')
+
+
+@router.post('/api/tasks/preview')
+async def preview_task(req: TaskCreate):
+    import pim
+    from datetime import timedelta
+    timezone = req.timezone or await pim.user_timezone()
+    first = await _computed_next_run(req.schedule_kind, req.schedule_json, timezone, req.event_trigger_json)
+    occurrences = [first] if first else []
+    while occurrences and len(occurrences)<3 and req.schedule_kind!='once':
+        nxt = scheduler.compute_next_run(req.schedule_kind,req.schedule_json,timezone,
+            datetime.fromisoformat(occurrences[-1])+timedelta(seconds=1))
+        if not nxt: break
+        occurrences.append(nxt)
+    return {'timezone':timezone,'occurrences':occurrences}
+
+
+@router.get('/api/tasks/runs/{run_id}')
+async def task_run_detail(run_id: str):
+    run = await db.get_task_run(run_id)
+    if not run: raise HTTPException(404, 'Run not found')
+    return run
+
+
 @router.post("/api/tasks")
 async def create_task(req: TaskCreate):
+    await validate_links(req.model_dump())
     _validate_task_fields(req.task_type, req.schedule_kind)
     next_run = await _computed_next_run(
         req.schedule_kind, req.schedule_json, req.timezone, req.event_trigger_json)
     task = await db.create_scheduled_task(
         f"task-{uuid.uuid4().hex[:10]}",
+        workspace_id=req.workspace_id,
         title=req.title.strip()[:200] or "Untitled task",
         prompt=req.prompt,
         task_type=req.task_type,
@@ -102,8 +137,8 @@ async def create_task(req: TaskCreate):
 
 
 @router.get("/api/tasks")
-async def list_tasks():
-    return await db.list_scheduled_tasks()
+async def list_tasks(workspace_id: str = ""):
+    return await db.list_scheduled_tasks(workspace_id=workspace_id)
 
 
 # NOTE: declared before /api/tasks/{task_id} so "events" isn't captured as an id.
@@ -127,6 +162,7 @@ async def update_task(task_id: str, req: TaskUpdate):
     if not task:
         raise HTTPException(404, "Task not found")
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    await validate_links({**task, **fields})
     # Check-ins are assistant-managed: retyping one to llm/research would
     # silently strip its gatherer brief (build_checkin_prompt keys on
     # task_type). Reject instead of quietly corrupting it.

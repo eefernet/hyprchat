@@ -5,7 +5,7 @@ export default function ResearchRecovery({report,t,btnS,inputS,onRefresh}){
   const [open,setOpen]=useState(false),[versions,setVersions]=useState([]),[question,setQuestion]=useState(''),[answer,setAnswer]=useState(''),[diff,setDiff]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   useEffect(()=>{const c=new AbortController();setAnswer('');setDiff('');setError('');setVersions([]);apiJson(`/api/research/reports/${report.id}/versions`,{signal:c.signal}).then(d=>setVersions(d.versions||[])).catch(e=>{if(e.name!=='AbortError')setError(e.message);});return()=>c.abort();},[report.id,report.updated_at]);
   const run=async(fn)=>{setBusy(true);setError('');try{await fn();}catch(e){if(e.name!=='AbortError')setError(e.message);}finally{setBusy(false);}};
-  return <div style={{padding:'8px 14px',borderBottom:`1px solid ${t.brd}`,fontSize:12}}>
+  return <div style={{padding:'8px 14px',borderBottom:`1px solid ${t.brd}`,fontSize:"var(--hc-text-secondary)"}}>
     <button style={btnS(t.acc)} onClick={()=>setOpen(!open)}>Saved evidence & versions</button>
     {versions.length>0&&['interrupted','failed','partial','cancelled'].includes(report.status)&&<button disabled={busy} style={{...btnS(t.ok),marginLeft:8}} onClick={()=>run(async()=>{await apiJson(`/api/research/reports/${report.id}/resume`,{method:'POST'});onRefresh?.();})}>Resume saved work</button>}
     {open&&<div style={{display:'grid',gap:8,marginTop:8}}>

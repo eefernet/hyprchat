@@ -110,7 +110,7 @@ async def update_assistant_model_config(profile: dict, **fields) -> None:
 
 async def run_headless_chat(*, conversation_id: str, prompt: str, model: str = "",
                             tool_ids: list | None = None, run_id: str = "",
-                            task_id: str = "", http=None, events=None) -> str:
+                            task_id: str = "", http=None, events=None, workspace_id: str = "") -> str:
     """Run one agent turn in `conversation_id`; messages persist as normal rows.
 
     Returns the final assistant text so schedulers can put a real summary in
@@ -170,7 +170,7 @@ async def run_headless_chat(*, conversation_id: str, prompt: str, model: str = "
         effort_rounds=None,
         display_content=None,
         user_metadata={"source": "scheduled_task", "task_id": task_id},
-        workspace_id=None,
+        workspace_id=workspace_id or None,
         use_memories=None,
         ephemeral=False,
         continue_message_id=None,

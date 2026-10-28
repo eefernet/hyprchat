@@ -1,4 +1,55 @@
 <details open>
+<summary>Alpha v18.2 — Oct 26, 2026</summary>
+
+> Workspace project hubs, effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.
+
+## Workspaces
+
+- **Project chats** — start chats from workspace headers and cards. New chat stays in your current workspace, with a separate New general chat option and a workspace shortcut in chat.
+- **Workspace defaults** — set instructions and optional model, persona and tool defaults for new chats. Instructions apply independently of workspace memory.
+- **Sources** — chats automatically find relevant passages from linked content and uploaded documents, with citations back to the originals. Pin or exclude sources, track indexing and retry failures; knowledge snapshots remain available.
+- **Project overview** — find pinned content, recent chats, open todos, active jobs and items needing attention. A searchable content picker links existing work without moving it.
+- **Simpler workspace navigation** — Overview, Chats, Sources, Notes, Activity and Settings group related views, with a section picker on mobile, consistent controls and one Add existing content dialog.
+- **Search without losing your place** — search inside a workspace, open a result and return with your query, filters and position intact. Returning to the previous section preserves unsaved drafts.
+- **Workspaces on the nav rail** — Projects sits beside Chat for everyone (rearrange or hide it in Appearance → Navigation Bar); the sidebar shortcut is gone. The workspace pages share one content width with aligned edges, show new-chat defaults and topics as chips, list chats, reports and sources as compact rows with status chips, switches and page counters, and give every empty card a next step.
+
+## Chat & Reasoning
+
+- **Activity pills** — one expandable pill tracks thinking, tools and reviews, with phase emojis, a smooth live thinking preview and cleaner details on desktop and mobile.
+- **Model-aware effort** — Blurt, Ponder, Forge and Galaxy Brain select native reasoning levels when the model supports them. The menu shows the actual levels and model default. Models with boolean-only thinking, no thinking levels or unknown capabilities keep the existing zero-to-three self-review passes.
+- **Safer self-review** — the completed answer stays visible until a replacement finishes. Failed, interrupted, empty or truncated reviews retain the previous answer; review passes can use only read-only verification tools.
+- **Review history** — inspect earlier answers and restore a completed version from Response Context. It also shows effective effort and token usage for each model call.
+- **Reliable delivery** — the server saves completed responses before reporting completion. Review history survives metadata updates, and cloud tool calls preserve provider reasoning state between rounds.
+
+## Interface
+
+- **Motion** — menus, popovers, dialogs, drawers and toasts pop in from their anchor and fade out when closed; tabs and panes crossfade; new messages animate in while loaded history does not. Everything honours Reduce Motion.
+- **Sleeker surfaces** — tonal elevation with soft, theme-aware shadows replaces most one-pixel boxes, with one radius scale and lighter type weights across Settings, navigation, the composer, the Tools popover and the model picker. Light themes get light scrims and shadows.
+- **Activity pill** — redesigned with crisp icons, a live progress line, icon and label transitions, colour that morphs between Thinking, Searching, Running code, Writing and Reviewing, an animated details drawer and summary chips when the answer completes.
+- **Chat layout** — assistant replies read directly on the canvas, your messages sit right-aligned in a tinted bubble, and message actions are icon buttons with tooltips.
+- **Interface font** — Appearance gains an optional proportional interface font (Inter, Geist or System); code keeps your monospace choice.
+- **Headers that stay put** — Settings, the service monitor, Add existing content, Response context and Document revisions keep their title and close button fixed while the content scrolls.
+- **Icons everywhere** — Settings tabs, the theme toggle, the Pinned header, workspace rows, close, refresh and leave actions use crisp SVG icons instead of emoji and text glyphs; Workspaces, Artifacts and Email each get their own.
+- **Sidebar groups** — chats are grouped into Today, Yesterday, Previous 7 days and Older; the chat that is generating shows a pulsing dot, workspace chats carry a folder marker, and New Chat uses the accent colour.
+- **Empty and loading states** — one empty-state style with a real next step (new todo, new task, check mail, clear filters), shared dots and spinners, and skeletons while workspace data loads.
+- **Small delights** — starter chips on the empty chat, the browser tab shows the chat title and a dot while generating, Send morphs into Stop, a loading quote appears on long waits, the background runs livelier while streaming, and pressing `?` (Shift + /) opens a keyboard-shortcut sheet.
+- **Hugging Face pulls the file you picked** — the Model Manager pulls by exact filename, so fused-MTP, noMTP and draft quants of the same size class no longer collapse into one `:Q4_K_M` tag; the download bar shows what Hugging Face will actually serve (model plus the bundled projector) and the compatibility check now judges your selection against the architectures this Ollama already runs instead of flagging every file in a repo that ships an mmproj. Draft heads are flagged and need "Download anyway".
+- **Startup no longer trips on ownerless notes** — the library-search backfill skips rows whose profile was deleted instead of aborting with a foreign-key error (the service was crash-looping on restart with six such notes).
+- **Clearer reading** — stronger content surfaces, consistent controls and larger labels across panels and themes. Your selected monospace font applies throughout the interface, chat and code.
+- **Familiar chat controls** — restored the original toolbar with separate memory and Ghost mode icons, theme, export and import controls. The composer keeps its subtle outer focus styling without an inner highlighted box.
+- **Room to work** — conversation lists collapse outside Chat and restore on return. Research adapts to available width with report-list and evidence drawers; exports and secondary actions use labeled menus.
+- **Mobile & keyboard** — responsive toolbars, larger touch targets, visible focus, and improved dialog dismissal and focus restoration. Calendar proposals sit below the header.
+
+## Settings & Reliability
+
+- **Profile saves** — failed agent/persona creation, edits and deletion show errors instead of appearing successful. Effort and thinking preferences sync with the signed-in profile.
+- **Cleanup preview** — see reclaimable temporary files and retained storage before cleanup. Saved references, active or interrupted staging files, changed files and unresolved legacy outputs remain protected.
+- **Logging** — removed raw chat/reasoning and tool-argument debug output. Image deletion no longer wipes system journals; the old journal-scrub helper can be retired.
+- **Development environment** — local backend tests now use Python 3.12 and the pinned test dependency lock to match production.
+
+</details>
+
+<details>
 <summary>Alpha v18.1.1 — Oct 15, 2026</summary>
 
 > Office document tools, a Jobs panel, searchable saved work, and more reliable chat, research and scheduling.

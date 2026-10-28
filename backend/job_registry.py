@@ -48,8 +48,8 @@ async def migrate(conn):
     # Columns: kind, domain_id, owner, domain state, title, error, created,
     # updated, ended, details. Views deliberately exclude prompts and credentials.
     sources = {
-        'indexing_jobs': '''SELECT 'indexing',id,user_id,status,filename,error,created_at,updated_at,ended_at,
-            json_object('kb_id',kb_id,'chunks',json_extract(result_json,'$.chunks')) FROM indexing_jobs''',
+        'indexing_jobs': '''SELECT 'indexing',id,user_id,status,COALESCE((SELECT title FROM workspace_source_files f WHERE f.kb_id=indexing_jobs.kb_id AND f.filename=indexing_jobs.filename LIMIT 1),filename),error,created_at,updated_at,ended_at,
+            json_object('kb_id',kb_id,'chunks',json_extract(result_json,'$.chunks'),'index_phase',json_extract(result_json,'$.phase'),'completed',json_extract(result_json,'$.completed'),'total',json_extract(result_json,'$.total')) FROM indexing_jobs''',
         'research_reports': '''SELECT 'research',id,user_id,status,COALESCE(NULLIF(title,''),query),error,
             created_at,updated_at,completed_at,json_object('report_id',id) FROM research_reports''',
         'coder_workflows': '''SELECT 'coding',w.id,c.user_id,
@@ -77,7 +77,8 @@ async def migrate(conn):
                 'retryable',json_extract(job_json,'$.retryable')) FROM image_jobs''',
         'task_runs': '''SELECT 'scheduled',r.id,r.user_id,r.status,t.title,r.error,
             COALESCE(i.queued_at,r.started_at),COALESCE(r.finished_at,r.started_at),r.finished_at,
-            json_object('task_id',r.task_id,'conversation_id',t.conversation_id,'report_id',i.child_report_id)
+            json_object('task_id',r.task_id,'conversation_id',COALESCE(json_extract(i.task_json,'$.conversation_id'),t.conversation_id),
+                'workspace_id',COALESCE(json_extract(i.task_json,'$.workspace_id'),t.workspace_id),'report_id',i.child_report_id)
             FROM task_runs r JOIN scheduled_tasks t ON t.id=r.task_id LEFT JOIN task_run_inputs i ON i.run_id=r.id''',
     }
     for table, query in sources.items():
@@ -137,6 +138,8 @@ def decode(row):
     item = dict(row)
     details = json.loads(item.pop('details_json'))
     item['details'] = details
+    if item['kind']=='indexing' and item['status'] in ACTIVE:
+        item['phase']=details.get('index_phase') or item['phase']
     item['progress'] = None  # Domain phases are real; invented percentages are not.
     item['actions'] = []
     kind, state = item['kind'], item['status']
@@ -179,10 +182,17 @@ async def _progress(conn, item):
     return item
 
 
-async def list_jobs(*, kind='', status='', limit=100, offset=0):
+async def list_jobs(*, kind='', status='', limit=100, offset=0, workspace_id=''):
     conn = await db.get_db()
     try:
         where, args = 'user_id=?', [db.current_user_id()]
+        if workspace_id:
+            where += ''' AND EXISTS(SELECT 1 FROM workspaces w WHERE w.id=? AND w.user_id=jobs.user_id AND (
+                EXISTS(SELECT 1 FROM workspace_conversations l WHERE l.workspace_id=w.id AND l.conversation_id=json_extract(jobs.details_json,'$.conversation_id')) OR
+                EXISTS(SELECT 1 FROM workspace_research_reports l WHERE l.workspace_id=w.id AND l.report_id=json_extract(jobs.details_json,'$.report_id')) OR
+                EXISTS(SELECT 1 FROM workspace_knowledge_bases l WHERE l.workspace_id=w.id AND l.kb_id=json_extract(jobs.details_json,'$.kb_id')) OR
+                json_extract(jobs.details_json,'$.workspace_id')=w.id))'''
+            args.append(workspace_id)
         if kind: where += ' AND kind=?'; args.append(kind)
         if status == 'active': where += " AND status IN ('queued','running','cancelling')"
         elif status: where += ' AND status=?'; args.append(status)

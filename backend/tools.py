@@ -1967,6 +1967,7 @@ async def exec_tool(
     kb_ids: list = None,
     artifact_message_id: int | None = None,
     persona_context: dict | None = None,
+    workspace_id: str | None = None,
 ) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
@@ -2971,17 +2972,18 @@ async def exec_tool(
                 importance = max(1, min(5, int(args.get("importance") or 4)))
             except Exception:
                 importance = 4
-            await events.emit(conv_id, "tool_start", {
-                "tool": "memory", "icon": "brain", "status": "Saving memory...",
-            })
             ws = None
             if scope == "workspace":
                 try:
-                    ws = await db.get_workspace_for_conversation(conv_id)
+                    import workspace_service
+                    ws = await workspace_service.resolve(conv_id, workspace_id)
                 except Exception:
                     ws = None
                 if not ws or not int(ws.get("memory_enabled") or 0):
-                    ws = None  # no memory-enabled workspace — fall back to global
+                    return "ERROR: No active memory-enabled workspace. Choose a workspace and enable its memory before saving workspace memories."
+            await events.emit(conv_id, "tool_start", {
+                "tool": "memory", "icon": "brain", "status": "Saving memory...",
+            })
             try:
                 if ws:
                     existing = await db.list_workspace_memories(ws["id"], status="all")

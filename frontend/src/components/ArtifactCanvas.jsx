@@ -1,3 +1,4 @@
+import useFocusScope from '../useFocusScope.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -133,24 +134,25 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
     onClose?.();
   };
 
-  const btn=(c,solid)=>({background:solid?c:`${c}16`,border:`1px solid ${c}45`,color:solid?t.bg:c,padding:"7px 12px",borderRadius:7,cursor:"pointer",fontFamily:font,fontSize:11,fontWeight:800,display:"inline-flex",alignItems:"center",gap:6});
+  const btn=(c,solid)=>({background:solid?c:`${c}16`,border:`1px solid ${c}45`,color:solid?t.bg:c,padding:"7px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600,display:"inline-flex",alignItems:"center",gap:6});
+  const focus=useFocusScope(true,close);
   const hasSelection=selInfo.from!==selInfo.to;
 
   return createPortal(
-    <div className="hc-viewport-overlay" style={{position:"fixed",inset:0,zIndex:9000,background:`${t.bgDeep}F2`,backdropFilter:"blur(4px)",display:"flex",flexDirection:"column",fontFamily:font,paddingTop:"env(safe-area-inset-top, 0px)",paddingBottom:"var(--hc-safe-bottom, 0px)"}}>
+    <div ref={focus} role="dialog" aria-modal="true" aria-label="Artifact editor" className="hc-viewport-overlay hc-pane" style={{position:"fixed",inset:0,zIndex:9000,background:`${t.bgDeep}F5`,backdropFilter:"blur(4px)",display:"flex",flexDirection:"column",fontFamily:font,paddingTop:"env(safe-area-inset-top, 0px)",paddingBottom:"var(--hc-safe-bottom, 0px)"}}>
       {/* Header */}
-      <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",borderBottom:`1px solid ${t.brd}30`,background:t.bgDeep}}>
-        <span style={{fontSize:13,fontWeight:900,color:t.text}}>✏️ Canvas</span>
-        <span style={{fontSize:11,color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0}}>
-          {a.filename}{dirty&&<span style={{color:t.warm,fontWeight:800}}> • unsaved</span>}
+      <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:10,padding:"10px 16px",borderBottom:"1px solid var(--hc-line-subtle)",background:t.bgDeep}}>
+        <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text}}>✏️ Canvas</span>
+        <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:0}}>
+          {a.filename}{dirty&&<span style={{color:t.warm,fontWeight:600}}> • unsaved</span>}
         </span>
         <button onClick={save} disabled={!dirty||saving||loadState!=="ready"} style={{...btn(t.ok,true),opacity:(!dirty||saving||loadState!=="ready")?0.5:1}}>{saving?"Saving...":"Save as revision"}</button>
         <button onClick={close} style={btn(t.mut)}>Close</button>
       </div>
 
       {/* AI edit bar */}
-      <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:`1px solid ${t.brd}22`,background:`${t.surface}66`}}>
-        <span style={{fontSize:10,color:hasSelection?t.acc:t.mut,fontWeight:800,whiteSpace:"nowrap"}}>
+      <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderBottom:"1px solid var(--hc-line-subtle)",background:`${t.surface}F5`}}>
+        <span style={{fontSize:"var(--hc-text-secondary)",color:hasSelection?t.acc:t.mut,fontWeight:600,whiteSpace:"nowrap"}}>
           {hasSelection?`✨ ${selInfo.to-selInfo.from} chars selected`:"✨ whole document"}
         </span>
         <input className="hc-canvas-instruction"
@@ -160,7 +162,7 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
           onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();runAiEdit();}}}
           placeholder={hasSelection?"How should the selection change? (Enter to run)":"Select text in the editor, or describe a whole-document edit"}
           disabled={aiBusy||loadState!=="ready"}
-          style={{flex:1,minWidth:0,background:t.bg,border:`1px solid ${t.brd}40`,color:t.text,padding:"7px 10px",borderRadius:7,fontFamily:font,fontSize:11,outline:"none"}}
+          style={{flex:1,minWidth:0,background:t.bg,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}
         />
         <button onClick={runAiEdit} disabled={aiBusy||!instruction.trim()||loadState!=="ready"} style={{...btn(t.acc,true),opacity:(aiBusy||!instruction.trim())?0.55:1}}>
           {aiBusy?"Editing...":"AI Edit"}
@@ -170,35 +172,35 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
       {/* Editor */}
       <div style={{flex:1,minHeight:0,display:"flex",flexDirection:"column",padding:"10px 16px 16px"}}>
         {loadState==="loading"&&<div style={{padding:20}}><SkeletonText t={t} lines={8}/></div>}
-        {loadState==="error"&&<div style={{color:t.err,fontSize:12,padding:20}}>Failed to load: {loadError}</div>}
+        {loadState==="error"&&<div style={{color:t.err,fontSize:"var(--hc-text-secondary)",padding:20}}>Failed to load: {loadError}</div>}
         <div
           ref={hostRef}
           onMouseUp={refreshSelection}
           onKeyUp={refreshSelection}
-          style={{flex:1,minHeight:0,overflow:"hidden",border:`1px solid ${t.brd}30`,borderRadius:10,background:t.bg,display:loadState==="ready"?"block":"none"}}
+          style={{flex:1,minHeight:0,overflow:"hidden",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",background:t.bg,display:loadState==="ready"?"block":"none"}}
         />
       </div>
 
       {/* Diff preview */}
-      {pendingEdit&&<div style={{position:"absolute",inset:"auto 16px calc(16px + var(--hc-safe-bottom, 0px)) 16px",maxHeight:"55%",display:"flex",flexDirection:"column",gap:8,background:t.bgDeep,border:`1px solid ${t.acc}55`,borderRadius:12,padding:14,boxShadow:"0 12px 40px rgba(0,0,0,.5)"}}>
+      {pendingEdit&&<div style={{position:"absolute",inset:"auto 16px calc(16px + var(--hc-safe-bottom, 0px)) 16px",maxHeight:"55%",display:"flex",flexDirection:"column",gap:8,background:t.bgDeep,border:`1px solid ${t.acc}55`,borderRadius:"var(--hc-radius-card)",padding:14,boxShadow:"var(--hc-shadow-2)"}}>
         <div className="hc-canvas-toolbar" style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:11,fontWeight:900,color:t.acc}}>✨ Proposed edit</span>
-          <span style={{fontSize:10,color:t.mut,flex:1}}>{pendingEdit.original.length} → {pendingEdit.replacement.length} chars</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.acc}}>✨ Proposed edit</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flex:1}}>{pendingEdit.original.length} → {pendingEdit.replacement.length} chars</span>
           <button onClick={applyEdit} style={btn(t.ok,true)}>Apply</button>
           <button onClick={()=>setPendingEdit(null)} style={btn(t.err)}>Reject</button>
         </div>
         {diffFallback
           ?<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,minHeight:0,overflow:"hidden",flex:1}}>
             <div style={{minWidth:0,display:"flex",flexDirection:"column",gap:4,minHeight:0}}>
-              <span style={{fontSize:9,color:t.err,fontWeight:800,textTransform:"uppercase"}}>Before</span>
-              <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10.5,lineHeight:1.55,color:t.dim,background:`${t.err}0C`,border:`1px solid ${t.err}25`,borderRadius:8,padding:10,fontFamily:font}}>{pendingEdit.original||"(empty)"}</pre>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.err,fontWeight:600,textTransform:"none"}}>Before</span>
+              <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.dim,background:`${t.err}0C`,border:`1px solid ${t.err}25`,borderRadius:"var(--hc-radius)",padding:10,fontFamily:font}}>{pendingEdit.original||"(empty)"}</pre>
             </div>
             <div style={{minWidth:0,display:"flex",flexDirection:"column",gap:4,minHeight:0}}>
-              <span style={{fontSize:9,color:t.ok,fontWeight:800,textTransform:"uppercase"}}>After</span>
-              <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:10.5,lineHeight:1.55,color:t.text,background:`${t.ok}0C`,border:`1px solid ${t.ok}25`,borderRadius:8,padding:10,fontFamily:font}}>{pendingEdit.replacement||"(empty)"}</pre>
+              <span style={{fontSize:"var(--hc-text-secondary)",color:t.ok,fontWeight:600,textTransform:"none"}}>After</span>
+              <pre style={{margin:0,flex:1,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-word",fontSize:"var(--hc-text-secondary)",lineHeight:1.55,color:t.text,background:`${t.ok}0C`,border:`1px solid ${t.ok}25`,borderRadius:"var(--hc-radius)",padding:10,fontFamily:font}}>{pendingEdit.replacement||"(empty)"}</pre>
             </div>
           </div>
-          :<div ref={diffHostRef} style={{flex:1,minHeight:0,overflow:"auto",border:`1px solid ${t.brd}30`,borderRadius:8,background:`${t.bgDeep}66`,fontFamily:font}}/>}
+          :<div ref={diffHostRef} style={{flex:1,minHeight:0,overflow:"auto",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`,fontFamily:font}}/>}
       </div>}
     </div>,
     document.body,

@@ -1,5 +1,6 @@
 """Saved indexing submissions; interrupted work requires an explicit retry."""
 import asyncio
+from contextvars import ContextVar
 import hashlib
 import json
 from pathlib import Path
@@ -46,6 +47,7 @@ async def execute(identity):
         if claimed.rowcount!=1: return
     finally: await conn.close()
     state,error,result='failed','',{}
+    progress_token=current_job.set(identity)
     try:
         if not await db.get_kb(job['kb_id']): raise LookupError('Knowledge base no longer exists')
         if await asyncio.to_thread(digest,job['filepath']) != job['sha256']:
@@ -61,6 +63,7 @@ async def execute(identity):
         error=str(exc)[:1000]
         return {'error':error,'filename':job['filename']}
     finally:
+        current_job.reset(progress_token)
         conn=await db.get_db()
         try:
             await conn.execute('UPDATE indexing_jobs SET status=?,error=?,result_json=?,updated_at=CURRENT_TIMESTAMP,ended_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',
@@ -90,7 +93,7 @@ async def latest(kb_id,filename):
         if not rows:return None
         row=dict(rows[0]);state=row['status']
         return {**json.loads(row['result_json']), 'filename':filename,'job_id':row['id'],
-            'status':'indexing' if state in {'queued','running'} else 'done' if state=='succeeded' else 'error',
+            'state':state, 'status':'indexing' if state in {'queued','running'} else 'done' if state=='succeeded' else 'partial' if state=='partial' else 'error',
             'error':row['error']}
     finally: await conn.close()
 
@@ -101,3 +104,17 @@ async def reconcile():
         await conn.execute("UPDATE indexing_jobs SET status='interrupted',error='Backend restarted; retry indexing from its saved source',updated_at=CURRENT_TIMESTAMP,ended_at=CURRENT_TIMESTAMP WHERE status IN ('queued','running')")
         await conn.commit()
     finally: await conn.close()
+
+
+current_job = ContextVar('indexing_job_progress', default=None)
+
+
+async def report_progress(phase, completed=None, total=None):
+    identity=current_job.get()
+    if not identity:return
+    conn=await db.get_db()
+    try:
+        await conn.execute("UPDATE indexing_jobs SET result_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND status='running'",
+                           (json.dumps({'phase':phase,'completed':completed,'total':total}),identity,db.current_user_id()))
+        await conn.commit()
+    finally:await conn.close()

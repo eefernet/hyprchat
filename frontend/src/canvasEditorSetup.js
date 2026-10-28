@@ -44,7 +44,7 @@ export function createEditor({parent,doc,filename,t,onDocChanged}){
   const dark=isDarkBg(t.bg);
   const chrome=EditorView.theme({
     "&":{backgroundColor:"transparent",color:t.text,height:"100%",fontSize:"12.5px"},
-    ".cm-scroller":{fontFamily:"inherit",lineHeight:1.6,overflow:"auto"},
+    ".cm-scroller":{fontFamily:"var(--hc-font-code)",lineHeight:1.6,overflow:"auto"},
     ".cm-content":{caretColor:t.acc},
     ".cm-gutters":{backgroundColor:"transparent",color:t.mut,border:"none"},
     "&.cm-focused":{outline:"none"},
@@ -89,7 +89,7 @@ export function createDiffView({parent,original,modified,t}){
   const dark=isDarkBg(t.bg);
   const chrome=EditorView.theme({
     "&":{backgroundColor:"transparent",color:t.text,fontSize:"11px"},
-    ".cm-scroller":{fontFamily:"inherit",lineHeight:1.55,overflow:"auto"},
+    ".cm-scroller":{fontFamily:"var(--hc-font-code)",lineHeight:1.55,overflow:"auto"},
     ".cm-gutters":{backgroundColor:"transparent",color:t.mut,border:"none"},
     "&.cm-focused":{outline:"none"},
     ".cm-changedLine":{backgroundColor:`${t.ok}14`},
