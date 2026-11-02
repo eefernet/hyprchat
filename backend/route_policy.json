@@ -66,6 +66,7 @@
   "GET /api/changelog": "profile",
   "GET /api/coder/projects": "profile",
   "GET /api/coder/projects/{project_id}/history": "profile",
+  "GET /api/coder/projects/{project_id}/versions": "profile",
   "GET /api/coder/workflows": "profile",
   "GET /api/coder/workflows/{workflow_id}": "profile",
   "GET /api/coder/workflows/{workflow_id}/checkpoint": "profile",
@@ -211,6 +212,7 @@
   "POST /api/calendar/sync": "profile",
   "POST /api/chat-files/stage": "profile",
   "POST /api/chat/stream": "profile",
+  "POST /api/coder/projects/{project_id}/accept": "profile",
   "POST /api/coder/projects/{project_id}/select": "profile",
   "POST /api/coder/upload-project": "profile",
   "POST /api/coder/workflows": "profile",
@@ -328,5 +330,8 @@
   "PUT /api/model-configs/{mc_id}": "profile",
   "PUT /api/notifications/channels/ntfy": "profile",
   "PUT /api/prefs/{key}": "profile",
-  "PUT /api/tools/{tool_id}": "profile"
+  "PUT /api/tools/{tool_id}": "profile",
+  "POST /api/coder/workflows/{workflow_id}/previews": "profile",
+  "GET /api/coder/workflows/{workflow_id}/previews/{identity}": "profile",
+  "DELETE /api/coder/workflows/{workflow_id}/previews/{identity}": "profile"
 }

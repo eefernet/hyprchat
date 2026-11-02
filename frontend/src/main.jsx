@@ -2406,7 +2406,9 @@ function HyprChat(){
           const rr = await fetch(`${API}/api/runs?conversation_id=${id}`);
           if(rr.ok){
             const runs = await rr.json();
-            const anyRunning = (runs||[]).some(r=>r.status==="running"||r.status==="queued");
+            // A persistent Daedalus job owns its own Stop on the job card; its operation rows
+            // must not put the composer into streaming mode on reload.
+            const anyRunning = (runs||[]).some(r=>(r.status==="running"||r.status==="queued")&&!String(r.workflow_id||"").startsWith("cw3-"));
             if(anyRunning && reqId===loadReqRef.current){
               // No local fetch to abort — set streaming=true so the input bar
               // shows the stop button. Clicking stop will clear this UI state;
@@ -7437,6 +7439,8 @@ function HyprChat(){
               if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
               const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              // A persistent job's card shows progress, not the reply: keep the assistant's words above it.
+              const hidesReply=isDaedalusOutput&&!hasDocumentActivity&&!messageWorkflows.some(w=>w.workflow_version===3);
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               const quickSearchPayload=renderOpts?.quickSearch;
@@ -7460,7 +7464,7 @@ function HyprChat(){
                   </div>}
                   {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t}/>}
                   {!isU&&activityLive&&<WaitingQuote active={streaming&&tokC===0&&!renderedContent} quotes={customQuotes} t={t}/>}
-                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":isDaedalusOutput?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
+                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":hidesReply?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -7471,7 +7475,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
+                    :hidesReply?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -7610,7 +7614,7 @@ function HyprChat(){
         </div>
         <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
           {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
-          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
+          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} jobs={standaloneCoderJobs} onChange={setCodingOptions} t={t} font={font}/></div>}
         {/* INPUT */}
         <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
           <div className="hc-composer-extras">

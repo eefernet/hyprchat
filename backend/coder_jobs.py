@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 import time
@@ -38,8 +39,17 @@ def configure(http, events):
     _HTTP, _EVENTS, _CLOSING = http, events, False
 
 
+def worker_base(job):
+    if job.get('engine') == 'openhands159':
+        value = os.environ.get('DAEDALUS_ENGINE_URL', '').strip()
+        if not value:
+            raise ValueError('The isolated OpenHands 1.59 worker is not configured')
+        return value.rstrip('/')
+    return config.OPENHANDS_URL.rstrip('/')
+
+
 def worker_url(job, operation=""):
-    base = config.OPENHANDS_URL.rstrip("/") + f"/jobs/{job['id']}/operations/"
+    base = worker_base(job) + f"/jobs/{job['id']}/operations/"
     return base + (operation or job["worker_operation"])
 
 
@@ -128,7 +138,7 @@ def inherited_protection(source, requested):
     return list(dict.fromkeys([*[p for p in (source or {}).get('protected_files', []) if p not in grounded], *requested]))
 
 
-async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None):
+async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None, source_pointer="", engine="", ui_checks=None):
     if not context_policy.runtime_settings()["daedalus_v3_enabled"]:
         raise ValueError("Enable the new Daedalus workflow in Settings first")
     mode = "edit_project" if mode == "fix_uploaded_project" else mode
@@ -153,23 +163,33 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
     if not project_id and mode != "build_from_prompt":
         active = await db.get_coding_project_by_conv(conversation_id)
         project_id = (active or {}).get("id", "")
+    source_revision = ""
     if project_id:
         project = await db.get_coding_project(project_id)
         if not project:
             raise LookupError("Project not found")
-        source_id = project.get("accepted_job_id") or project.get("openhands_project_id") or ""   # a NULL column is None, not ""
-        if source_id.startswith("cw3-"):
-            source = await store.get(source_id)
-            if not source or not (source.get("acceptance") or {}).get("accepted"):
-                raise ValueError("Source project has no accepted revision")
-        elif not source_id:
-            raise ValueError("This project has no accepted revision yet; continue its existing job")
+        source, source_pointer, source_revision = await resolve_source(project, source_pointer)
     elif mode != "build_from_prompt":
         raise ValueError("Select a registered project")
+    from coder_ui_checks import validate as validate_ui_checks
+    ui_checks = validate_ui_checks(ui_checks if ui_checks is not None else (source or {}).get('ui_checks', []))
+    engine = engine or (source or {}).get('engine') or settings.get('daedalus_engine', 'legacy')
+    if engine not in {'legacy', 'openhands159'}:
+        raise ValueError('Unknown Daedalus engine')
+    if mode == 'ask_uploaded_project':
+        engine = 'legacy'  # Existing grounded Q&A retains its read-only workflow.
+    if engine == 'openhands159':
+        worker_base({'engine': engine})
+        # Explicit follow-up flows add coverage; they cannot silently remove
+        # controller-owned regression interactions inherited from the source.
+        ui_checks = validate_ui_checks(list({json.dumps(flow, sort_keys=True): flow
+            for flow in [*(source or {}).get('ui_checks', []), *ui_checks]}.values()))
     # Policy 7 qualified on repairs and edits first; from-scratch builds keep the default policy
     # until they qualify too. Jobs keep the policy they were created with.
     policy = 7 if POLICY_VERSION >= 7 or (mode == "edit_project" and settings.get("daedalus_policy7_edits")) or (
         mode == "build_from_prompt" and settings.get("daedalus_policy7_builds")) else POLICY_VERSION
+    if engine == 'openhands159':
+        policy = 7  # Existing revision/publication storage; controller dispatch is engine-specific.
     if policy >= 7 and source:
         protected_files = inherited_protection(source, protected_files)
     if source and not execution_commands.get('packages'):
@@ -184,19 +204,65 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
     # The queue consumer may see this row as soon as it commits. Persist the
     # complete source identity with the job so recovery cannot dispatch a
     # partly initialized project after its creating request disconnects.
+    contract_options = {}
+    if engine == 'openhands159':
+        from coder_ui_contract import VERSION, freeze, recipes
+        contract_options = {'engine_behavior_version': 1, 'ui_contract_version': VERSION,
+            'ui_contract': freeze(task, source, mode=mode, source_revision=source_revision),
+            'ui_contract_context': recipes((source or {}).get('checks', [])) or (source or {}).get('ui_contract_context', [])}
     job = await store.create(conversation_id, task, mode, project_id, chosen_model, key or uuid.uuid4().hex,
-        source_job_id=source["id"] if source else "", source_revision_id=source["revision_id"] if source else "",
+        source_job_id=source["id"] if source else "", source_revision_id=source_revision if source else "",
         source_project_id=(project.get("openhands_project_id") or project_id) if project and not source else "",
-        policy_version=policy,
+        policy_version=policy, engine=engine, source_pointer=source_pointer if source else ("upload" if project else ""),
         visual_policy={"enabled":settings["daedalus_visual_review"] if visual_review is None else visual_review,
                        "model":selected_visual,"model_inherited":visual_model is None},
         request_options={"visual_review":visual_review,"visual_model":visual_model,
-                         "execution_commands":execution_commands,"protected_files":protected_files},
+                         "execution_commands":execution_commands,"protected_files":protected_files,
+                         **({'ui_checks': ui_checks} if ui_checks else {}), **contract_options},
         parent_artifact_id=((source or {}).get("artifact") or {}).get("id", ""),
         # Only a policy-7 parent's outcomes carry policy-7 evidence kinds.
         inherited=((source or {}).get('brief', {}).get('outcomes', []) if (source or {}).get('policy_version', 1) >= 7 else []) if policy >= 7 else None)
     spawn(job["id"])
     return job
+
+
+async def resolve_source(project, requested=""):
+    """(source job, pointer, revision) a new job on this project starts from.
+
+    Follow-ups start from the working version (the latest delivered build, review candidates included) so
+    "build X, now add Y" works before anything is accepted; ``requested="accepted"`` starts from the accepted
+    version instead. Uploaded projects have neither pointer and seed from the upload (no source job).
+
+    An accepted version whose job was deleted with its conversation is reported, never silently replaced by the
+    raw upload: an edit seeded from the upload would drop the accepted fix the owner chose. The accepted archive
+    stays pinned and downloadable, so the message says to upload it.
+    """
+    order = ("accepted",) if requested == "accepted" else ("working", "accepted")
+    for pointer in order:
+        job_id = project.get(pointer + "_job_id") or (project.get("openhands_project_id") if pointer == "accepted" else "") or ""
+        revision = project.get(pointer + "_revision_id") or ""
+        if not job_id.startswith("cw3-"):
+            continue
+        source = await store.get(job_id)
+        if not source:
+            continue
+        if pointer == "accepted" and not revision:
+            if not (source.get("acceptance") or {}).get("accepted"):
+                continue
+            revision = source["revision_id"]
+        if revision:
+            return source, pointer, revision
+    upload = project.get("openhands_project_id") or ""
+    upload = "" if upload.startswith("cw3-") else upload
+    from db.coder_promotion import accepted_job_deleted
+    if await accepted_job_deleted(project["id"]):
+        raise ValueError("The job that produced the accepted version was deleted with its conversation; "
+                         "upload the accepted archive to continue from it")
+    if requested == "accepted":
+        raise ValueError("This project has no accepted version yet; edit its latest build instead")
+    if upload:
+        return None, "upload", ""
+    raise ValueError("This project has no delivered build yet; continue its existing job")
 
 
 async def cancel(job_id):
@@ -242,13 +308,20 @@ async def cancel(job_id):
     return await store.get(job_id)
 
 
-async def resume(job_id, *, visual_review=None, visual_model=None, candidate_revision=None, clarification=None):
+async def resume(job_id, *, visual_review=None, visual_model=None, candidate_revision=None, clarification=None, budget_mode=None):
     job = await store.get(job_id)
     if not job:
         raise LookupError("Workflow not found")
-    from coder_policy7_evidence import DURABLE_LIMITS
+    modern = job.get('engine') == 'openhands159'
+    budget_mode = budget_mode or ('preserve' if modern else 'new_allowance')
+    if budget_mode not in {'preserve', 'new_allowance'}:
+        raise ValueError('budget_mode must be preserve or new_allowance')
+    from coder_policy7_evidence import DURABLE_LIMITS, EVIDENCE_VERSION
     if job.get('policy_version', 1) >= 7 and job.get('stop_limit') in DURABLE_LIMITS:
         raise ValueError(job.get('blocker') or 'Retained repair limits prevent further progress on this request')
+    from coder_presentation import nothing_to_continue, NOTHING_TO_CONTINUE
+    if nothing_to_continue(job):
+        raise ValueError(NOTHING_TO_CONTINUE)
     if job["state"] not in (("blocked", "waiting_for_input", "ready_for_review", "cancelled") if job.get('policy_version', 1) >= 7 else ("blocked", "waiting_for_input", "ready_for_review")):
         raise ValueError("Only a blocked workflow can be continued")
     if job.get('candidate_artifact'):
@@ -312,11 +385,24 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
         if job.get('inherited') and job['brief'].get('scope_version') != 1:
             changes.update(resume_state='planning', acceptance=None, review=None, audit_checks=[], audit_attempts=0,
                            last_valid_audit='', audit_error='', visual_review={'status': 'pending'})
+        elif job.get('resume_state') == 'packaging' and (job.get('verification_summary') or {}).get('evidence_version') != EVIDENCE_VERSION:
+            # Accepted by an older gate: _deliver refuses that summary, so keeping the verdict re-entered packaging on
+            # every Continue and the owner had no candidate to Accept. Recheck and judge it under the current gate.
+            changes.update(resume_state='checking', acceptance=None, review=None, visual_review={'status': 'pending'})
         elif job.get('verification_version') != 3 and job.get('resume_state') in {
                 'checking', 'auditing', 'reviewing', 'accepting', 'visual_review', 'packaging', 'candidate_packaging'}:
             changes.update(resume_state='checking', acceptance=None, review=None, visual_review={'status': 'pending'})
-    job = await store.save(job_id, state="queued", event="resume", allowance=job.get("allowance", 1) + 1,
-                           calls_used=0, seconds_used=0, worker_operation="", operation_key="", blocker="", attempt=0, acceptance_attempt=0,
+    new_allowance = budget_mode == 'new_allowance'
+    if modern and job.get('engine_behavior_version', 0) >= 1:
+        changes.update(recovery_failure=None, failed_checkpoint=None)
+    budget = dict(allowance=job.get('allowance', 1) + int(new_allowance),
+                  calls_used=0 if new_allowance else job.get('calls_used', 0),
+                  seconds_used=0 if new_allowance else job.get('seconds_used', 0),
+                  previous_allowances_calls=job.get('previous_allowances_calls', 0) + (job.get('calls_used', 0) if new_allowance else 0),
+                  previous_allowances_seconds=job.get('previous_allowances_seconds', 0) + (job.get('seconds_used', 0) if new_allowance else 0),
+                  last_resume_budget_mode=budget_mode)
+    job = await store.save(job_id, state="queued", event="resume", **budget,
+                           worker_operation="", operation_key="", blocker="", attempt=job.get('attempt', 0) if modern else 0, acceptance_attempt=job.get('acceptance_attempt', 0) if modern else 0,
                            plan_errors=[], visual_attempt=0, probe_corrections=0, probe_diagnoses=[], failure=None,
                            resume_after_inspect=("" if job.get("resume_state") in {"queued", "inspecting"} else changes.get("resume_state", job.get("resume_state", "planning"))), **changes)
     previous = _RUNNERS.get(job_id)
@@ -396,7 +482,8 @@ async def route_tool(name, args, conversation_id, events):
             project_id = ""
         job = await create(conversation_id, task, mode, project_id, key=key,
                            visual_review=options.get("visual_review", args.get("visual_review")),
-                           visual_model=options.get("visual_model"))
+                           visual_model=options.get("visual_model"),
+                           source_pointer="accepted" if options.get("source_pointer") == "accepted" else "")
         origin = next((m for m in reversed((conv or {}).get('messages', [])) if m.get('role') == 'assistant'), {})
         job = await store.save(job["id"], chat_request_key=key, origin_message_id=origin.get('id'))
         await events.emit(conversation_id, "tool_start", {"tool": name, "workflow_id": job["id"], "status": "Daedalus job started"})
@@ -442,7 +529,9 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                                operation_key=operation_key, operation_kind=kind, operation_accounted=False, worker_event_cursor=0,
                                call_limit=settings["daedalus_model_calls"])
     await store.start_attempt(job, job["worker_operation"], kind)
-    payload = {"kind": kind, "request_key": operation_key, "task": job["user_task"],
+    payload = {"kind": kind, "engine": job.get('engine', 'legacy'),
+               'engine_behavior_version': job.get('engine_behavior_version', 0), 'model_digest': job.get('model_digest', ''),
+               "request_key": operation_key, "task": job["user_task"], "mode": job.get("mode", ""),
                "original_task": job["user_task"], "source_project_id": job.get("source_project_id", "") if job.get("policy_version",1)>=2 else job.get("source_project_id") or job["project_id"],
                "source_job_id":job.get("source_job_id",""), "source_revision_id":job.get("source_revision_id",""),
                "model": job["model"], "ollama_url": config.OLLAMA_URL,
@@ -466,25 +555,32 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
         payload["model"] = stage_model
     if kind == "inspect" and job.get("policy_version",1)>=2 and job.get("source_job_id"):
         source = await store.get(job["source_job_id"])
-        artifact = (source or {}).get("artifact") or {}
+        from db.coder_promotion import candidate_for
+        artifact = candidate_for(source or {}, job.get("source_revision_id", "")) or {}
         path = Path(artifact.get("storage_path", ""))
         expected = artifact.get("sha256", "")
         if not path.is_file() or len(expected) != 64:
-            raise ValueError("Accepted source archive is unavailable; restore the artifact before editing this project")
-        source_url = config.OPENHANDS_URL.rstrip("/") + f"/jobs/{job['id']}/source/{expected}"
-        present = await _worker_request(job["id"], "GET", source_url, timeout=15)
-        if present.status_code == 404:
-            async def chunks():
-                with path.open("rb") as source_file:
-                    while chunk := source_file.read(1024 * 1024):
-                        yield chunk
-            # A failed upload blocks safely; Continue opens a fresh stream.
-            uploaded = await _HTTP.put(source_url, content=chunks(),timeout=120,params={
-                "upload_mb":settings["daedalus_upload_mb"],"extracted_mb":settings["daedalus_extracted_mb"],"free_mb":settings["daedalus_min_free_mb"]})
-            uploaded.raise_for_status()
-        else:
-            present.raise_for_status()
-        payload["source_archive_sha256"] = expected
+            if (source or {}).get('engine', 'legacy') != job.get('engine', 'legacy'):
+                raise ValueError('An immutable source archive is required when moving a project between engines')
+            if job.get("source_pointer") == "accepted" and not (source or {}).get("candidate_history") and not (source or {}).get("candidate_artifact"):
+                raise ValueError("Accepted source archive is unavailable; restore the artifact before editing this project")
+            # No local archive for this exact revision: the worker archives it from the source job's repository.
+            expected = ""
+        if expected:
+            source_url = worker_base(job) + f"/jobs/{job['id']}/source/{expected}"
+            present = await _worker_request(job["id"], "GET", source_url, timeout=15)
+            if present.status_code == 404:
+                async def chunks():
+                    with path.open("rb") as source_file:
+                        while chunk := source_file.read(1024 * 1024):
+                            yield chunk
+                # A failed upload blocks safely; Continue opens a fresh stream.
+                uploaded = await _HTTP.put(source_url, content=chunks(),timeout=120,params={
+                    "upload_mb":settings["daedalus_upload_mb"],"extracted_mb":settings["daedalus_extracted_mb"],"free_mb":settings["daedalus_min_free_mb"]})
+                uploaded.raise_for_status()
+            else:
+                present.raise_for_status()
+            payload["source_archive_sha256"] = expected
     response = await _worker_request(job["id"], "POST", worker_url(job), json=payload, timeout=30)
     response.raise_for_status()
     started = time.monotonic()
@@ -501,6 +597,9 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
         progress.raise_for_status()
         batch = progress.json()
         if batch:
+            identity = next((e['data'] for e in batch if e['type'] == 'model_identity'), None)
+            if identity:
+                await store.save(job['id'], model_digest=identity['digest'], model_identity=identity)
             context = next((e["data"]["context"] for e in reversed(batch) if e.get("data", {}).get("context")), current.get("context"))
             timeline = list(current.get("browser_timeline",[]))
             verification_events = list(current.get('verification_events',[]))
@@ -519,7 +618,8 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
             if len(batch) >= 100:
                 continue  # Drain persisted evidence before completing the operation.
             break
-        if not deadline_exhausted and time.monotonic() - started > seconds:
+        preparation = settings.get('daedalus_preparation_seconds', 600) if job.get('engine') == 'openhands159' else 0
+        if not deadline_exhausted and time.monotonic() - started > seconds + preparation:
             deadline_exhausted = True
             await store.save(job["id"], event="allowance_exhausted", blocker="Execution allowance exhausted; waiting for the worker to stop at its checkpoint")
             await _worker_request(job["id"], "POST", worker_url(job) + "/cancel", timeout=15)
@@ -533,12 +633,20 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
         await store.record_revision(job["id"], result["snapshot"])
     if operation["status"] != "succeeded" or deadline_exhausted:
         changes = {}
+        if job.get('engine') == 'openhands159' and kind == 'code' and 'hook_denials' in result:
+            changes['repair_round'] = max(job.get('repair_round', 0), min(2, result['hook_denials']))
+            if job.get('engine_behavior_version', 0) >= 1 and changes['repair_round'] >= 2:
+                changes['stop_limit'] = 'application_repairs'
         if result.get("snapshot"):
             changes["revision_id"] = result["snapshot"]["revision"]
+            if job.get('engine_behavior_version', 0) >= 1 and kind == 'code':
+                changes['inventory'] = result.get('inventory', job.get('inventory', {}))
+                changes['failed_checkpoint'] = {'operation_id': job['worker_operation'],
+                    'revision_id': result['snapshot']['revision'], 'inventory': result.get('inventory', {})}
         if result.get("checks"):
             changes["checks"] = result["checks"]
         if result.get('failure'):
-            changes['failure']=result['failure']
+            changes['failure']={**result['failure'], **({'checkpoint_error':result['checkpoint_error']} if result.get('checkpoint_error') else {})}
         if changes:
             await store.save(job["id"], **changes)
         if deadline_exhausted:
@@ -547,7 +655,10 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                 (result.get('failure') or {}).get('category') in {'response_format', 'verification_response', 'invalid_probe'}
                 or 'Inspection repeated identical evidence' in result.get('error', '')):
             raise ValueError(result.get('error') or 'Independent review could not resolve its checks')
-        raise RuntimeError(result.get("error") or f"Worker operation {operation['status']}")
+        detail = result.get("error") or f"Worker operation {operation['status']}"
+        if result.get('checkpoint_error'):
+            detail += '. Checkpoint could not be saved: ' + result['checkpoint_error']
+        raise RuntimeError(detail)
     return result, await store.get(job["id"])
 
 
@@ -578,8 +689,8 @@ async def _deliver(job, result, *, candidate=False):
     accepted = job.get("acceptance") or {}
     if job.get('policy_version', 1) >= 7 and not candidate:
         summary = job.get('verification_summary') or {}
-        if summary.get('evidence_version') != 3 or not summary.get('accepted') or any(c.get('status') != 'passed' for c in summary.get('criteria', [])):
-            raise ValueError('Policy 7 publication requires current trusted criterion evidence; recheck this revision')
+        if summary.get('evidence_version') != 4 or not summary.get('accepted') or summary.get('revision_id') != job['revision_id']:
+            raise ValueError('Automatic completion requires confirmed acceptance examples that passed on this revision; recheck it')
     if result['revision_id'] != job['revision_id'] or (not candidate and (not accepted.get('accepted') or accepted.get('revision_id') != job['revision_id'])):
         raise ValueError("Artifact revision does not match accepted revision")
     artifact_id = "artifact-" + hashlib.sha256(f"{job['id']}:{job['revision_id']}".encode()).hexdigest()[:24]
@@ -626,7 +737,9 @@ async def _deliver(job, result, *, candidate=False):
                 "parent_artifact_id":job.get("parent_artifact_id",""),"source_revision_id":job.get("source_revision_id",""),
                 "requirements":job.get("requirements",[]),"visual_review":job.get("visual_review",{}),
                 **({'verification_summary':job.get('verification_summary',{}), 'run_instructions':job.get('verification',{}).get('profiles',[]),
-                    'runnable':runnable(job) if job.get('policy_version', 1) >= 7 else any(c.get('execution_succeeded') for c in job.get('checks',[])), 'delivery_status':'review_candidate'} if candidate else {})})
+                    'runnable':runnable(job) if job.get('policy_version', 1) >= 7 else any(c.get('execution_succeeded') for c in job.get('checks',[])), 'delivery_status':'review_candidate',
+                    'checks_passed': bool((job.get('verification_summary') or {}).get('checks_passed')),
+                    'exercised': bool((job.get('verification_summary') or {}).get('exercised'))} if candidate else ({'accepted_by': 'examples'} if job.get('policy_version', 1) >= 7 else {}))})
         if not artifact:
             raise RuntimeError("Artifact registration failed")
     except BaseException:
@@ -655,6 +768,12 @@ async def run(job_id):
                     continue
                 return
             state = job["state"]
+            if job.get('engine') == 'openhands159':
+                import sys
+                from coder_engine_controller import step
+                if await step(job, sys.modules[__name__]):
+                    return
+                continue
             if job.get('policy_version', 1) >= 6:
                 import sys
                 if job.get('policy_version', 1) >= 7:
@@ -843,17 +962,43 @@ async def run(job_id):
     except Exception as error:
         job = await store.get(job_id)
         if job and job["state"] not in store.TERMINAL and not job.get("cancel_requested"):
+            if job.get('engine') == 'openhands159' and job.get('engine_behavior_version', 0) >= 1:
+                import sys
+                from coder_engine_recovery import recover_candidate
+                if await recover_candidate(job, sys.modules[__name__], error):
+                    return
+                job = await store.get(job_id)
             # Spent model calls are a bounded endpoint as well: packaging the checkpoint needs none.
             out_of_calls = (job.get('policy_version', 1) >= 7 and 'model-call allowance' in str(error).lower()
                             and job.get('revision_id') and job['state'] in {'coding', 'checking'})
+            if job.get('engine') == 'openhands159' and out_of_calls:
+                import sys
+                from coder_engine_controller import step
+                from coder_engine_ops import summarize
+                summary = summarize(job.get('checks', []), job['revision_id'])
+                summary.update(checks_passed=False, accepted=False, incomplete_reason=str(error))
+                job = await store.save(job_id, state='candidate_packaging', verification_summary=summary,
+                    acceptance=None, delivery_status='review_candidate', blocker=str(error),
+                    stop_limit='model_calls', resume_state='checking')
+                try:
+                    await step(job, sys.modules[__name__])
+                    return
+                except InterruptedError:
+                    raise
+                except Exception as packaging_error:
+                    error = packaging_error
+                    job = await store.get(job_id)
+                    if not job:
+                        return
             if job.get('policy_version', 1) >= 6 and job.get('brief') and (out_of_calls or isinstance(error, ValueError) and job['state'] in {'reviewing', 'accepting', 'auditing'}
                     or job.get('policy_version', 1) >= 7 and 'model-call allowance' in str(error).lower() and job['state'] in {'reviewing', 'accepting', 'auditing', 'visual_review'}):
                 # Invalid/ambiguous review output has a bounded endpoint too.
                 import sys
                 if job.get('policy_version', 1) >= 7:
                     from coder_policy7_controller import step
-                    from coder_policy7_evidence import acceptance
-                    summary = acceptance(job['brief']['outcomes'], job.get('checks', []), {}, job['revision_id'])
+                    from coder_policy7_evidence import acceptance, baseline_test_ids
+                    from coder_scope import effective_task
+                    summary = acceptance(job['brief']['outcomes'], job.get('checks', []), {}, job['revision_id'], request=effective_task(job), baseline_tests=baseline_test_ids(job))
                     job = await store.save(job_id, state='candidate_packaging', verification_summary=summary,
                         acceptance=None, delivery_status='review_candidate', blocker=str(error),
                         stop_limit='model_calls' if 'model-call allowance' in str(error).lower() else job.get('stop_limit', ''),

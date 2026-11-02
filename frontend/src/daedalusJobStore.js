@@ -14,6 +14,8 @@ async function watch(entry,signal){
   while(!signal.aborted){
     try{
       const response=await fetch(entry.key,{signal});
+      // A deleted job or conversation never comes back: stop polling instead of retrying forever.
+      if(response.status===404){publish(entry,{connection:'gone',error:'This job no longer exists.'});return;}
       if(!response.ok)throw new Error('Progress connection unavailable');
       const job=await response.json();
       if(signal.aborted)return;
@@ -50,13 +52,25 @@ export function useDaedalusJob(workflow){
     return ()=>{entry.listeners.delete(listener);if(!entry.listeners.size){entry.controller?.abort();entry.controller=null;}};
   },[entry]);
   const snapshot=useSyncExternalStore(subscribe,()=>entry.snapshot);
-  const action=async(name,visual='unchanged',clarification='')=>{
+  const action=async(name,visual='unchanged',clarification='',budgetMode='preserve')=>{
     if(entry.snapshot.busy)return;
     publish(entry,{busy:true,error:''});
     try{
-      const response=await fetch(userScopedUrl(`/api/coder/workflows/${workflow.id}/${name}`),{
-        method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name==='resume'?resumeJobBody(entry.job,visual,clarification):{})});
-      const job=await response.json();if(!response.ok)throw new Error(job.detail||'Unable to update this job');
+      let job;
+      if(name==='accept'){
+        // Accept promotes this exact revision on the project, then the job snapshot reflects it.
+        const revision=entry.job.presentation?.actions?.accept?.revision_id;
+        const accepted=await fetch(userScopedUrl(`/api/coder/projects/${entry.job.project_id}/accept`),{
+          method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision_id:revision})});
+        const result=await accepted.json();if(!accepted.ok)throw new Error(result.detail||'Unable to accept this build');
+        // The composer watches only a few jobs; tell it directly, before the refresh GET can fail, that a pointer moved.
+        window.dispatchEvent(new CustomEvent('daedalus-project-changed',{detail:{project_id:entry.job.project_id}}));
+        const response=await fetch(entry.key);job=await response.json();if(!response.ok)throw new Error(job.detail||'Unable to refresh this job');
+      }else{
+        const response=await fetch(userScopedUrl(`/api/coder/workflows/${workflow.id}/${name}`),{
+          method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name==='resume'?resumeJobBody(entry.job,visual,clarification,budgetMode):{})});
+        job=await response.json();if(!response.ok)throw new Error(job.detail||'Unable to update this job');
+      }
       entry.job=job;entry.sequence=Math.max(entry.sequence,job.event_sequence||0);
       publish(entry,{job,connection:'connected'});
       entry.controller?.abort();entry.controller=null;

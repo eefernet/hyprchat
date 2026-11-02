@@ -19,6 +19,8 @@ LIMIT = 8
 ECOSYSTEM_MANIFESTS = {'npm': ('package.json',), 'node': ('package.json',), 'npx': ('package.json',), 'vitest': ('package.json',),
     'jest': ('package.json',), 'python': ('requirements.txt', 'pyproject.toml'), 'python3': ('requirements.txt', 'pyproject.toml'),
     'pytest': ('requirements.txt', 'pyproject.toml'), 'pip': ('requirements.txt', 'pyproject.toml'), 'mvn': ('pom.xml',),
+    # `java -jar target/x.jar` fails on packaging (<finalName>) at least as often as on code: M0 baseline 2026-10-28.
+    'java': ('pom.xml', 'build.gradle', 'build.gradle.kts'),
     'gradle': ('build.gradle', 'build.gradle.kts'), 'gradlew': ('build.gradle', 'build.gradle.kts'), 'cargo': ('Cargo.toml',),
     'go': ('go.mod',), 'cmake': ('CMakeLists.txt',), 'ctest': ('CMakeLists.txt',), 'make': ('Makefile', 'CMakeLists.txt'), 'dotnet': ()}
 
@@ -99,11 +101,17 @@ def repair_targets(job, defects):
     # so one documentation gap does not queue every source file for a rewrite.
     planned = [p for batch in job['brief']['batches'] for p in batch.get('files', [])]
     is_test = lambda p: any('test' in part.lower() or 'spec' in part.lower() for part in p.split('/'))
-    is_doc = lambda p: p.lower().endswith(('.md', '.rst', '.txt'))
+    outcomes = {o.get('id'): o for o in job['brief'].get('outcomes', []) if isinstance(o, dict)}
     for defect in defects:
         kind = str(defect.get('id', '')).rsplit(':', 1)[-1] if defect.get('outcome') else ''
         if kind == 'documentation':
-            paths.extend([p for p in planned if is_doc(p)] or ['README.md'])
+            # Only planned files the documentation gate counts for this component (evidence_matches): a planned
+            # docs/server-api.md never documents `server`, and two rounds spent on it ended in a durable limit.
+            from coder_policy7_evidence import documentation_home, is_documentation, within
+            outcome = defect['outcome'] if isinstance(defect['outcome'], dict) else outcomes.get(defect['outcome'], {})
+            component = outcome.get('component', '.') or '.'
+            paths.extend([p for p in planned if is_documentation(p) and (within(p, component) or
+                          within(component, str(Path(p).parent)))] or [documentation_home(component)])
         elif kind == 'tests':
             paths.extend(p for p in planned if is_test(p) or p.endswith('.daedalus.json'))
         elif kind == 'review':

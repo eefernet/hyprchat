@@ -66,10 +66,12 @@ def test_outcome_coverage_is_bound_to_exact_revision_and_check():
              'coverage_observed': True, 'origin': 'independent', 'outcomes': ['o1'],
              'evidence_types': ['behavior'], 'execution_succeeded': True, 'source_bindings': [{'path': 'app.py', 'sha256': 'a'*64}]}
     assert not acceptance(outcomes, [check], verdict, 'current')['accepted']
-    assert not acceptance(outcomes[:1], [check], verdict, 'different')['accepted']
+    stale = acceptance(outcomes[:1], [check], verdict, 'different')
+    assert not stale['accepted'] and not stale['checks_ok']   # evidence is bound to the exact revision
     summary = acceptance(outcomes[:1], [check], verdict, 'current')
-    assert not summary['accepted']  # generated audit cannot supply trusted behavior coverage
-    assert summary['outcomes'][0]['missing_evidence'] == ['behavior']
+    # A generated audit and a reviewer saying "passed" neither complete a job nor count as exercising it.
+    assert not summary['accepted'] and not summary['checks_passed'] and not summary['exercised']
+    assert summary['outcomes'][0]['missing_evidence'] == []
 
 
 def test_draft_obligations_cannot_disappear_from_new_brief():

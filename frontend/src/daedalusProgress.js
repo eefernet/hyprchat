@@ -97,7 +97,7 @@ export function checkSummary(job={}){
     const advisory=!check.passed&&['lint','typecheck'].includes(check.phase)&&!check.is_test;
     const label=check.id==='audit-metadata'?'Independent audit':check.id.startsWith('audit-')?'Independent audit check':
       check.id.startsWith('protected:')?`Unchanged: ${check.id.slice(10)}`:check.id.startsWith('interface:')?`Requested ${check.id.slice(10)}`:
-      check.id.startsWith('page:')?'Page loads without script errors':check.id==='immutable-source'?'Checks must not edit source':check.id==='execution-contract'?'Project run configuration':
+      check.id.startsWith('page:')?'Page loads without script errors':check.id.startsWith('documentation:')?'Requested documentation present':check.id==='immutable-source'?'Checks must not edit source':check.id==='execution-contract'?'Project run configuration':
       `${CHECK_LABEL[check.phase]||check.id}${scope(check)?` (${scope(check)})`:''}`;
     return {id:check.id,label,command:check.command||'',passed:!!check.passed,advisory,tests:check.test_count??null,
       headline:check.passed?'':headline(check),check};
@@ -117,9 +117,24 @@ export function outcomeExplanation(job={}){
   const outcomes=planOutcomes(job),checks=checkSummary(job);
   const open=outcomes.filter(row=>row.status!=='passed');
   const openText=open.slice(0,4).map(row=>`${row.id} ${row.status==='failed'?'failed review':row.missing.length?`needs ${row.missing.join(' + ')} evidence`:'not verified'}`).join('; ');
+  const kind=job.accepted_by||job.acceptance?.kind||job.artifact?.metadata?.accepted_by||'';
+  if(state==='completed'&&job.artifact&&kind==='user')return {tone:'good',title:'Complete',
+    text:'You accepted this exact revision. Later edits start from the latest build; this version stays downloadable.'};
+  if(state==='completed'&&job.artifact&&kind==='examples'){
+    const count=job.verification_summary?.confirmed_examples||0;
+    return {tone:'good',title:'Complete',text:`Every acceptance example you confirmed passed (${count}), along with the build and its tests. They cover only those cases.`};
+  }
   if(state==='completed')return job.artifact?{tone:'good',title:'Accepted',
       text:`Every requested outcome was verified by executed checks${outcomes.length?` (${outcomes.length} outcome${outcomes.length===1?'':'s'}, ${checks.passed} checks passed)`:''}.`}:
     {tone:'neutral',title:job.answer?'Answered':'Finished',text:job.answer?'':'The job finished without publishing a revision.'};
+  const summary=job.verification_summary||{};
+  const uiGap=job.ui_contract_version&&(summary.criteria||[]).some(c=>c.status!=='passed');
+  if(state==='ready_for_review'&&summary.rolled_back)return {tone:'warn',title:'Change rolled back',
+    text:clip(job.blocker,420)||'A change broke tests that passed before, so the last version that kept them passing was restored for review.'};
+  if(state==='ready_for_review'&&!summary.incomplete_reason&&!uiGap&&(summary.checks_passed||job.candidate_artifact?.metadata?.checks_passed))return {tone:'good',title:'Checks passed — please review',
+    text:`The build${checks.passed?` and ${checks.passed} check${checks.passed===1?'':'s'}`:''} passed on this revision. Download it and try it, then Accept it or ask for changes in the chat.`};
+  if(state==='ready_for_review'&&summary.checks_ok&&summary.exercised===false)return {tone:'warn',title:'Built, not exercised',
+    text:'It builds and nothing failed, but no test or requested command ran the program. Try it yourself before you Accept it, or ask for tests in the chat.'};
   if(state==='ready_for_review'){
     const why=LIMIT_TEXT[job.stop_limit]||clip(job.blocker,180)||'not every outcome could be verified';
     return {tone:'warn',title:job.candidate_artifact?.metadata?.runnable?'Ready for your review':'Build incomplete',

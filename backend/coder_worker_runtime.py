@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from contextlib import contextmanager
 import hashlib
 import json
@@ -207,6 +208,11 @@ def reconcile(store, operation_id):
         # Allow the startup handshake to store its PID before calling it lost.
         if time.time() - (operation.get("started") or time.time()) > 10 and not _alive(operation):
             result = {"error":"Worker interrupted; inspect checkpoint before continuation", "unverified_changes":operation["kind"] == "code"}
+            if operation['payload'].get('engine') == 'openhands159':
+                from coder_engine_resources import failure
+                result.update(failure(operation['payload'].get('_resource_cgroup')) or {})
+                result['failure'] = {'category': result.get('failure_category', 'worker_interrupted'),
+                                     'stage': operation['kind'], 'next_action': 'Inspect the retained checkpoint and resume with the existing allowance.'}
             with store.connect() as db:
                 db.execute("UPDATE operations SET status='interrupted',ended=?,result=? WHERE id=? AND status IN ('running','starting','cancelling')",
                            (time.time(),json.dumps(result),operation_id))
@@ -219,8 +225,20 @@ def _boundary(store, operation_id, *, model_call=False):
     if operation["cancel_requested"]:
         raise InterruptedError("Cancellation requested")
     payload = operation["payload"]
-    if time.time() - operation["started"] >= payload["seconds_remaining"]:
+    now = time.time()
+    preparing = max(0, now - payload.get('_preparation_active_started', now))
+    if payload.get('_preparation_deadline') and now >= payload['_preparation_deadline']:
+        raise TimeoutError('Environment preparation allowance exhausted')
+    if now - payload.get('_active_started', operation["started"]) - preparing >= payload["seconds_remaining"]:
         raise TimeoutError("Execution allowance exhausted; continue from the checkpoint")
+    if payload.get('engine') == 'openhands159' and now - payload.get('_usage_checkpoint', {}).get('at', 0) >= 1:
+        checkpoint = {'at': now, 'active_seconds': max(0, now - payload.get('_active_started', operation['started']) - preparing)}
+        with store.connect() as connection:
+            connection.execute("UPDATE operations SET payload=json_set(payload,'$._usage_checkpoint',json(?)) WHERE id=?",
+                               (json.dumps(checkpoint), operation_id))
+    if payload.get('engine') == 'openhands159' and now - getattr(store, '_storage_checked_at', 0) >= 30:
+        store._storage_checked_at = now
+        enforce_storage(store, payload)
     if model_call:
         with store.connect() as db:
             cursor = db.execute("UPDATE operations SET calls=calls+1 WHERE id=? AND calls<? AND cancel_requested=0",
@@ -712,9 +730,13 @@ def storage_usage(root):
 
 
 def enforce_storage(store, payload):
+    store._storage_checked_at = time.time()
     limit = payload["settings"]["daedalus_storage_mb"] * 1024 * 1024
+    if payload.get('engine') == 'openhands159':
+        from coder_engine_cache import collect
+        collect(store, limit_bytes=limit, reserve_bytes=payload['settings'].get('daedalus_min_free_mb', 0)*1024*1024)
     if storage_usage(store.root) > limit:
-        raise ValueError("Worker storage allowance exceeded. Increase storage in Settings or remove archived jobs.")
+        raise ValueError("Worker storage allowance exceeded by retained data or active caches. Increase storage in Settings or remove archived jobs.")
     if shutil.disk_usage(store.root).free < payload["settings"].get("daedalus_min_free_mb",0)*1024*1024:
         raise ValueError("Worker free disk space is below the configured reserve; free space before continuing")
 
@@ -742,12 +764,64 @@ def execute(store, operation_id):
     store.update(operation_id, status="running")
     result, status = {}, "succeeded"
     alarm = threading.current_thread() is threading.main_thread()
+    modern = payload.get('engine') == 'openhands159'
+    if modern:
+        payload = {**payload, '_usage_checkpoint': {'at': time.time(), 'active_seconds': 0}}
+        store.update(operation_id, payload=payload)
+        from coder_engine_resources import enter_operation
+        try:
+            group = enter_operation(operation_id)
+            if group:
+                payload = {**payload, '_resource_cgroup': group}
+                store.update(operation_id, payload=payload)
+                store.event(operation_id, 'resource_limits', cgroup=group, memory_bytes=3*1024**3, tasks=256)
+        except Exception as error:
+            store.update(operation_id, status='blocked', result={'error': str(error),
+                'failure_category': 'resource_preparation', 'stage': 'preparation'}, ended=time.time())
+            return
+    if modern and kind == 'code':
+        # Loading the model is bounded independently and never consumes coding time.
+        preparation_start = time.time()
+        store.update(operation_id, payload={**store.get(operation_id)['payload'],
+            '_preparation_active_started': preparation_start,
+            '_preparation_deadline': preparation_start + payload['settings'].get('daedalus_preparation_seconds', 600)})
+        preparation_alarm = None
+        try:
+            if alarm:
+                def preparation_expired(signum, frame):
+                    raise TimeoutError('Model preparation allowance exhausted')
+                preparation_alarm = signal.signal(signal.SIGALRM, preparation_expired)
+                signal.setitimer(signal.ITIMER_REAL, payload['settings'].get('daedalus_preparation_seconds', 600))
+            from coder_engine_ops import prepare
+            prepare(store, operation_id)
+        except Exception as error:
+            payload = {**store.get(operation_id)['payload'], '_preparation_seconds': time.time() - preparation_start}
+            payload.pop('_preparation_active_started', None); payload.pop('_preparation_deadline', None)
+            status = 'cancelled' if store.get(operation_id)['cancel_requested'] else 'blocked'
+            store.update(operation_id, status=status, payload=payload,
+                result={'error': str(error), 'failure_category': 'environment', 'stage': 'preparation'}, ended=time.time())
+            store.event(operation_id, 'finished', status=status, stage='preparation', error=str(error))
+            return
+        finally:
+            if preparation_alarm is not None:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, preparation_alarm)
+        payload = {**store.get(operation_id)['payload'], '_active_started': time.time(),
+                   '_preparation_seconds': time.time() - preparation_start}
+        payload.pop('_preparation_active_started', None); payload.pop('_preparation_deadline', None)
+        store.update(operation_id, payload=payload)
     if alarm:
         def expired(signum, frame):
             raise TimeoutError("Execution allowance exhausted; continue from checkpoint")
         previous_alarm = signal.signal(signal.SIGALRM, expired)
-        signal.setitimer(signal.ITIMER_REAL, max(0.001, payload["seconds_remaining"] - (time.time() - operation["started"])))
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, payload["seconds_remaining"] + (payload['settings'].get('daedalus_preparation_seconds', 600) if modern else 0) - (time.time() - payload.get('_active_started', operation["started"]))))
+    from contextlib import ExitStack
+    cache_leases = ExitStack()
     try:
+        if modern:
+            from coder_engine_cache import lease, scope
+            cache_leases.enter_context(lease(store.root / 'project-environments' / scope(payload.get('project_id') or operation['job_id'])))
+            cache_leases.enter_context(lease(store.root / 'operation-caches' / operation_id))
         enforce_storage(store, payload)
         _boundary(store, operation_id)
         workspace = store.root / "jobs" / operation["job_id"] / "workspace"
@@ -773,6 +847,9 @@ def execute(store, operation_id):
                 staging.mkdir()
                 with tarfile.open(baseline_bundle) as bundle:
                     bundle.extractall(staging,filter="data")
+                # A review candidate's archive carries its "not accepted" report; it is never project source.
+                for report in staging.glob("DAEDALUS_REVIEW_*.json"):
+                    report.unlink()
                 baseline_bundle.unlink()
                 staging.rename(workspace)
             elif source_id:
@@ -836,6 +913,9 @@ def execute(store, operation_id):
                 result['verification'] = profiles(repository, payload.get('execution_commands'), payload.get('proposed_commands'))
             else:
                 result["verification"] = discover(repository)
+        elif modern and kind in {'code', 'check'}:
+            from coder_engine_ops import execute as engine_execute
+            result = engine_execute(store, operation_id, repository)
         elif kind in {'plan', 'verify', 'accept', 'code', 'check'} and payload.get('policy_version', 1) >= 7:
             from coder_policy7_ops import execute_operation
             result = execute_operation(store, operation_id, repository)
@@ -915,6 +995,11 @@ def execute(store, operation_id):
             output = store.root / "artifacts" / f"{'candidate-' if payload.get('candidate') else ''}{archive_owner}-{payload['revision_id']}.tar.gz"
             output.parent.mkdir(exist_ok=True)
             result = {**repository.archive(payload["revision_id"], output), "path": str(output), "revision_id": payload["revision_id"]}
+            if modern and payload.get('verified_outputs'):
+                from coder_engine_delivery import append_products
+                from coder_repository import file_hash
+                append_products(output, payload['verified_outputs'], payload['revision_id'], store.root)
+                result.update(sha256=file_hash(output), size=output.stat().st_size)
             if payload.get('candidate'):
                 import io
                 from coder_repository import file_hash
@@ -922,7 +1007,9 @@ def execute(store, operation_id):
                 name = f"DAEDALUS_REVIEW_{payload['revision_id']}.json"
                 report = json.dumps({'label':'Review candidate; not accepted', 'revision_id':payload['revision_id'],
                     'verification_summary':payload.get('verification_summary', {}),
-                    'run_instructions':payload.get('run_instructions', [])}, indent=2).encode()
+                    'run_instructions':payload.get('run_instructions', []),
+                    'build_products': [{k: row[k] for k in ('name', 'revision_id', 'sha256', 'size')}
+                                       for row in payload.get('verified_outputs', [])]}, indent=2).encode()
                 with tarfile.open(output) as source, tarfile.open(temporary, 'w:gz') as target:
                     for member in source:
                         if member.name == name:
@@ -946,20 +1033,50 @@ def execute(store, operation_id):
         # and every child process (dev servers, Chromium) would be left running.
         if (store.get(operation_id) or {}).get("pid") == os.getpid():
             stop_descendants()
+        cache_leases.close()
     if kind == "code" and "snapshot" not in result:
         try:
-            result["snapshot"] = operation_repo(store, operation).snapshot("Interrupted coding checkpoint", parent=payload.get("revision_id", ""))
-        except Exception:
-            pass
+            checkpoint_repo = operation_repo(store, operation)
+            if modern and payload.get('engine_behavior_version', 0) >= 1:
+                from coder_policy7_builder import sanitize_workspace
+                from coder_policy7_ops import restore_protected
+                sanitize_workspace(checkpoint_repo.root, checkpoint_repo.excludes)
+                result['protected_restored'] = restore_protected(checkpoint_repo,
+                    payload.get('baseline_revision') or payload.get('revision_id', ''), payload.get('protected_files', []))
+                result['inventory'] = checkpoint_repo.refresh()
+            result["snapshot"] = checkpoint_repo.snapshot("Interrupted coding checkpoint", parent=payload.get("revision_id", ""))
+        except Exception as checkpoint_error:
+            result['checkpoint_error'] = str(checkpoint_error)
+    if modern and kind == 'code' and payload.get('engine_behavior_version', 0) >= 1:
+        try:
+            from coder_engine_runtime import repair_count
+            path = store.root / 'agent-runtime' / operation['job_id'] / 'bookkeeping' / 'engine' / 'stop.json'
+            result['hook_denials'] = repair_count(path, payload.get('repair_round', 0))
+        except (ValueError, OSError) as repair_error:
+            result['hook_denials'] = 2  # Corrupt bookkeeping must not grant more repairs.
+            result['repair_recovery_error'] = str(repair_error)
     if status in {'blocked','failed'}:
         from coder_failures import classify_failure
         result['failure']=classify_failure(result.get('error','Operation failed'),kind,
             recovery_attempted=store.has_event(operation_id, 'tool_mode_fallback'))
+        if modern:
+            with store.connect() as connection:
+                event = connection.execute(
+                    "SELECT payload FROM events WHERE operation_id=? AND json_extract(payload,'$.type') IN ('model_failure','model_response') ORDER BY seq DESC LIMIT 1",
+                    (operation_id,)).fetchone()
+            record = json.loads(event['payload']) if event else {}
+            if record.get('type') == 'model_failure':
+                detail = record['data']
+                result['failure'].update(category=detail['category'], request_id=detail['request_id'],
+                    upstream_status=detail['upstream_status'], recovery_attempted=detail['attempt'] > 1,
+                    next_action='Inspect the inference request and termination reason before resuming the retained conversation.')
+                result['failure'].update({key: detail[key] for key in ('bridge_status', 'response_requirement', 'usage') if key in detail})
+                result['transport_failure'] = detail
     store.update(operation_id, status=status, result=result, ended=time.time())
     store.event(operation_id, "finished", status=status, result=result)
 
 
-def install_routes(app, projects_root):
+def install_routes(app, projects_root, *, engine=None):
     from fastapi import Body, HTTPException
     from fastapi.responses import FileResponse
     class LazyStore:
@@ -992,7 +1109,13 @@ def install_routes(app, projects_root):
                 async for chunk in request.stream():
                     size+=len(chunk)
                     if size>upload_mb*1024*1024: raise HTTPException(413,"Source archive too large")
-                    if shutil.disk_usage(store.root).free<len(chunk)+free_mb*1024*1024: raise HTTPException(507,"Insufficient worker disk space")
+                    required = len(chunk) + free_mb * 1024 * 1024
+                    if engine == 'openhands159' and shutil.disk_usage(store.root).free < required:
+                        from coder_engine_cache import collect
+                        await asyncio.to_thread(collect, store, required_bytes=len(chunk),
+                                                reserve_bytes=free_mb * 1024 * 1024)
+                    if shutil.disk_usage(store.root).free < required:
+                        raise HTTPException(507,"Insufficient worker disk space")
                     hasher.update(chunk); output.write(chunk)
             if hasher.hexdigest()!=checksum: raise HTTPException(422,"Source checksum mismatch")
             with tarfile.open(temporary) as archive:
@@ -1026,6 +1149,8 @@ def install_routes(app, projects_root):
     def start_operation(job_id: str, operation_id: str, body: dict = Body(...)):
         try:
             payload = {**body, "projects_root": str(projects_root)}
+            if engine and payload.get('engine') != engine:
+                raise ValueError('This worker accepts only ' + engine + ' jobs')
             for key in ("seconds_remaining", "calls_remaining", "settings"):
                 if key not in payload:
                     raise ValueError(f"Missing {key}")

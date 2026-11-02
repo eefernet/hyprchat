@@ -383,7 +383,9 @@ def test_candidate_publication_rejects_stale_head(monkeypatch,tmp_path):
                         verification_summary={'revision_id':'c'*40,'accepted':False})
         connection=await db.get_db()
         try:
-            await connection.execute('UPDATE coding_projects SET accepted_revision_id=? WHERE id=?',('d'*40,job['project_id']))
+            # Another job delivered to this project's working version meanwhile: this candidate is stale.
+            # (An Accept moving only the accepted version would not make a new build's candidate stale.)
+            await connection.execute('UPDATE coding_projects SET working_job_id=?,working_revision_id=? WHERE id=?',('cw3-other','d'*40,job['project_id']))
             await connection.commit()
         finally: await connection.close()
         with pytest.raises(ValueError,match='head changed'):

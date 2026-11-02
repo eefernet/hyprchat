@@ -29,8 +29,17 @@ from coder_profiles import discover, environment_key, validate_command
 from coder_repository import safe_relative, file_hash
 
 
-def contract(repository, explicit=None):
+def contract(repository, explicit=None, *, managed_dependencies=False):
     result = discover(repository, explicit)
+    if managed_dependencies:
+        # Project tests must run against their declared package version, not
+        # whichever Playwright happens to be installed in the controller.
+        for row in result['checks']:
+            if row.get('command', '').startswith('"$DAEDALUS_AUDIT_PYTHON" '):
+                row['command'] = row['command'].replace('"$DAEDALUS_AUDIT_PYTHON"', '.venv/bin/python', 1)
+        for profile in result['profiles']:
+            for phase, commands in profile['commands'].items():
+                profile['commands'][phase] = [command.replace('"$DAEDALUS_AUDIT_PYTHON"', '.venv/bin/python', 1) for command in commands]
     path = repository.root / '.daedalus-run.json'
     # A zero-byte manifest is an editor placeholder, not a (broken) configuration.
     extension = json.loads(path.read_text()) if path.exists() and path.read_text().strip() else {}
@@ -113,6 +122,10 @@ def sandbox_paths(root, env):
             readonly.append(Path(name))
     cache = env.get('DAEDALUS_ENVIRONMENT_ROOT')
     if cache:
+        browsers = Path(cache) / 'browsers'
+        if browsers.is_dir():
+            env['PLAYWRIGHT_BROWSERS_PATH'] = str(browsers)
+            readonly.append(browsers)
         cache = Path(cache).resolve()
         for directory, dirs, _ in os.walk(root):
             for name in list(dirs):
@@ -131,6 +144,8 @@ def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=N
     from coder_worker_runtime import _boundary
     operation = _boundary(store, op_id)
     deadline = time.monotonic() + operation['payload']['settings']['daedalus_command_seconds']
+    if operation['payload'].get('_preparation_deadline'):
+        deadline = min(deadline, time.monotonic() + operation['payload']['_preparation_deadline'] - time.time())
     from coder_sandbox import Sandbox
     root = Path(env.get('DAEDALUS_PROJECT_ROOT', cwd))
     audit = Path(env.get('DAEDALUS_AUDIT_DIR', root))
@@ -141,7 +156,7 @@ def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=N
     urls = [v for k, v in env.items() if k.startswith('DAEDALUS_') and k.endswith('_URL')]
     with log.open('w') as output, Sandbox(['bash', '-c', command], cwd=cwd,
             writable=writes, readonly=sandbox_paths(root, env), environment=env,
-            network_urls=urls, runtime=log.parent / 'runtime') as box:
+            network_urls=urls, runtime=(store.root / 'operation-caches' / op_id / log.stem) if operation['payload'].get('engine') == 'openhands159' else log.parent / 'runtime') as box:
         args = box.args
         if process_trace is not None:
             from coder_process_evidence import trace_command
@@ -207,7 +222,25 @@ def runtime_data_path(root, path):
 
 
 def prepare_environment(store, op_id, root, profile, project_id, env, folder):
+    from coder_engine_cache import lease, scope
+    cache = store.root / 'project-environments' / scope(project_id)
+    with ExitStack() as lifetime:
+        lifetime.enter_context(lease(cache))
+        payload = store.get(op_id)['payload']
+        if payload.get('engine') == 'openhands159' and not payload.get('_preparation_active_started'):
+            from coder_engine_environment import preparation
+            lifetime.enter_context(preparation(store, op_id))
+        return _prepare_environment(store, op_id, root, profile, project_id, env, folder)
+
+
+def _prepare_environment(store, op_id, root, profile, project_id, env, folder):
     """Same cache for editing/checks/follow-ups; editable installs always refresh."""
+    env.setdefault('DAEDALUS_ENVIRONMENT_ROOT', str(store.root / 'project-environments' / hashlib.sha256(project_id.encode()).hexdigest()))
+    modern = store.get(op_id)['payload'].get('engine') == 'openhands159'
+    if modern:
+        browser_cache = Path(env['DAEDALUS_ENVIRONMENT_ROOT']) / 'browsers'
+        browser_cache.mkdir(parents=True, exist_ok=True)
+        env.update(PLAYWRIGHT_BROWSERS_PATH=str(browser_cache), PLAYWRIGHT_SKIP_BROWSER_GC='1')
     env = dict(env)
     audit_dir = Path(env.get('DAEDALUS_AUDIT_DIR', folder / 'setup-audit')); audit_dir.mkdir(parents=True, exist_ok=True)
     env.setdefault('DAEDALUS_AUDIT_DIR', str(audit_dir))
@@ -225,12 +258,17 @@ def prepare_environment(store, op_id, root, profile, project_id, env, folder):
         if command.startswith('python3 -m venv .venv'):
             if not (cache / '.venv').exists():
                 try:
+                    payload = store.get(op_id)['payload']
+                    limit = payload['settings']['daedalus_command_seconds']
+                    if payload.get('_preparation_deadline'):
+                        limit = max(.001, min(limit, payload['_preparation_deadline'] - time.time()))
                     subprocess.run(['python3', '-m', 'venv', str(cache / '.venv')], check=True, capture_output=True,
-                                   timeout=store.get(op_id)['payload']['settings']['daedalus_command_seconds'])
+                                   timeout=limit)
                 except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as error:
                     # The sandbox could not create an environment: a failed setup row, not a failed operation.
                     shutil.rmtree(cache / '.venv', ignore_errors=True)
-                    rows.append({'id': profile['cwd'] + ':setup:' + str(i), 'phase': 'setup', 'command': original, 'passed': False,
+                    rows.append({'id': profile['cwd'] + ':setup:' + str(i), 'cwd': profile['cwd'], 'origin': 'project',
+                        'phase': 'setup', 'command': original, 'passed': False,
                         'exit_code': 124 if isinstance(error, subprocess.TimeoutExpired) else 1, 'environment_reused': False,
                         'toolchains': versions, 'log_tail': 'Could not create the Python environment: ' + str(error)[:500],
                         'environment_fault': True})
@@ -254,18 +292,53 @@ def prepare_environment(store, op_id, root, profile, project_id, env, folder):
         tail = log.read_text(errors='replace')[-4000:] if log.exists() else 'Dependency environment reused'
         if stalled:
             tail = (tail + '\nThe setup command did not finish within the command time limit.').strip()
-        row = {'id': profile['cwd'] + ':setup:' + str(i), 'phase': 'setup', 'command': original,
+        # The package is named: a failed setup in mdtoc/ must not read as the root's (coder_required_tests).
+        row = {'id': profile['cwd'] + ':setup:' + str(i), 'cwd': profile['cwd'], 'origin': 'project', 'phase': 'setup', 'command': original,
             'passed': code == 0, 'exit_code': code, 'environment_reused': reusable, 'toolchains': versions,
             'log': str(log), 'log_tail': tail, 'environment_fault': stalled or code == 127 or bool(re.search(
-                'ENOTFOUND|EAI_AGAIN|Temporary failure|Network is unreachable|Connection refused', tail, re.I))}
+                r'\bENOTFOUND\b|\bEAI_AGAIN\b|Temporary failure|Network is unreachable|Connection refused', tail, re.I))}
         rows.append(row)
         if code:
             break
         for name in ('.venv', 'node_modules', 'vendor'):
             target = cwd / name
             if target.is_dir() and not target.is_symlink() and not (cache / name).exists():
-                shutil.copytree(target, cache / name, symlinks=True)
+                if modern:
+                    target.rename(cache / name)
+                    target.symlink_to(cache / name, target_is_directory=True)
+                else:
+                    shutil.copytree(target, cache / name, symlinks=True)
         marker.write_text(json.dumps({'command': original, 'toolchains': versions}))
+    if modern and all(row['passed'] for row in rows):
+        from coder_engine_environment import prepare_browsers
+        rows.extend(prepare_browsers(store, op_id, root, cwd, cache, env, folder))
+    if modern:
+        ready = cache / 'environment-ready.json'
+        if all(row['passed'] for row in rows):
+            ready.write_text(json.dumps({'key': key, 'prepared_at': time.time()}))
+        else:
+            ready.unlink(missing_ok=True)
+    return rows
+
+
+def prepare_application(store, op_id, repository, project_id, env, folder):
+    """Provision and build a fresh launch copy using the declared project commands."""
+    payload = store.get(op_id)['payload']
+    profile = contract(repository, payload.get('execution_commands'), managed_dependencies=payload.get('engine') == 'openhands159')
+    rows = []
+    for package in profile['profiles']:
+        rows.extend(prepare_environment(store, op_id, repository.root, package, project_id, env, folder))
+    if any(not row['passed'] for row in rows): return rows
+    for index, check in enumerate(profile['checks']):
+        if check.get('phase') != 'build': continue
+        log = folder / f'launch-build-{index}.log'
+        try:
+            code = execute(store, op_id, check['command'], safe_relative(repository.root, check.get('cwd', '.')),
+                           env, log, writable=[repository.root, folder])
+        except CommandTimeout: code = 124
+        rows.append({**check, 'passed': code == 0, 'exit_code': code,
+                     'log_tail': log.read_text(errors='replace')[-4000:] if log.exists() else 'Build produced no log'})
+        if code: break
     return rows
 
 
@@ -498,10 +571,11 @@ def failure_class(row, baseline=()):
     return 'application_defect'
 
 
-def run_revision(store, op_id, repository, profile, *, project_id, audit_source=None, checks=None):
+def run_revision(store, op_id, repository, profile, *, project_id, audit_source=None, checks=None, attempt=''):
     operation = store.get(op_id)
     payload = operation['payload']
-    folder = store.root / 'execution' / op_id
+    # A re-run of the same operation (a flaky required test) gets its own evidence folder.
+    folder = store.root / 'execution' / (op_id + ('-' + attempt if attempt else ''))
     folder.mkdir(parents=True, exist_ok=True)
     root, audit = folder / 'project', folder / 'audit'
     if root.exists():
@@ -517,12 +591,16 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
     # Do not resolve paths for every standard-library/pip/pytest execution line.
     trace = PYTHON_TRACE.replace("if event == 'line':", "if event == 'line' and frame.f_code.co_filename.startswith((str(root), str(audit))):")
     from coder_assertion_outcomes import PYTHON_OUTCOMES, NODE_OUTCOMES
-    (instrumentation / 'sitecustomize.py').write_text(trace + PYTHON_OUTCOMES)
+    from coder_test_ids import PYTEST_PLUGIN, UNITTEST_RECORDER, collect as collect_test_ids
+    (instrumentation / 'sitecustomize.py').write_text(trace + PYTHON_OUTCOMES + UNITTEST_RECORDER)
+    (instrumentation / 'daedalus_test_ids.py').write_text(PYTEST_PLUGIN)
     (instrumentation / 'assertion-outcomes.cjs').write_text(NODE_OUTCOMES)
     evidence = folder / 'bindings'; evidence.mkdir()
     env = command_env(root, audit, evidence, instrumentation)
     env['NODE_OPTIONS'] = '--require=' + str(instrumentation / 'assertion-outcomes.cjs')
     env['DAEDALUS_ENVIRONMENT_ROOT'] = str(store.root / 'project-environments' / hashlib.sha256(project_id.encode()).hexdigest())
+    if payload.get('engine') == 'openhands159':
+        env['DAEDALUS_LOOPBACK_ENDPOINTS'] = '1'
     excludes = tuple(payload['settings']['daedalus_exclude_dirs'])
     # Native builds generate sources (obj/*.AssemblyInfo.cs, CMakeFiles/*CompilerId.c): those are
     # build output, not a check mutating the application.
@@ -549,6 +627,9 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         check_env = {**env, 'DAEDALUS_PROVENANCE': str(local_evidence), 'NODE_V8_COVERAGE': str(local_evidence)}
         if not c.get('is_test') and c.get('origin') != 'independent':
             check_env = uninstrumented(check_env)
+        elif c.get('is_test') and c.get('origin') != 'independent':
+            # Project tests report which named tests ran (coder_test_ids); audits do not need it.
+            check_env.update(DAEDALUS_TEST_IDS='1', PYTEST_PLUGINS='daedalus_test_ids')
         cwd = safe_relative(root, c.get('cwd', '.'))
         if c.get('kind') == 'file':
             path = safe_relative(root, c['path'])
@@ -671,6 +752,8 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         if assertion_failures:
             row.update(passed=False, failure_kind='assertion_failure', assertion_failures=assertion_failures,
                        reason='An assertion failed, even though the program may have caught its exception.')
+        if c.get('is_test') and c.get('origin') != 'independent':
+            row['test_ids'] = collect_test_ids(c.get('test_runner') or command, log, cwd, local_evidence, starts, root=root)
         row['evidence_version'] = 3
         row['execution_succeeded'] = not assertion_failures and code == 0 and (c.get('phase') == 'launch' or observed and bool(actual or network))
         if code == 0 and not assertion_failures and observed and c.get('is_test') and c.get('evidence_types', ['behavior']) != ['documentation'] and not actual and not network:
@@ -689,6 +772,7 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
             from coder_policy7_evidence import blocking
             if blocking(rows[-1]):
                 ready_packages.discard(c.get('cwd', '.'))
+    stopped = False   # a main-copy service did not start: no package ran its tests
     if ready_packages:
         definitions = [service for service in profile['services'] if service.get('cwd', '.') in ready_packages]
         if definitions and not payload.get('baseline') and not payload.get('preflight'):
@@ -705,7 +789,8 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
             env = service_env
             rows.extend(launches)
             from coder_policy7_evidence import blocking
-            if not any(blocking(r) for r in launches if r.get('phase') != 'visual'):
+            stopped = any(blocking(r) for r in launches if r.get('phase') != 'visual')
+            if not stopped:
                 for c in commands:
                     if c.get('kind') != 'file' and c.get('cwd', '.') in ready_packages and (c.get('phase') == 'test' or c.get('is_test')):
                         check(c)
@@ -729,11 +814,17 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         baseline = payload.get('baseline_checks', payload.get('baseline', []))
         if not isinstance(baseline, list):
             baseline = []
-        row.update(evidence_version=3, revision_id=payload['revision_id'], execution_id=f'{op_id}:{i}',
+        row.update(evidence_version=3, revision_id=payload['revision_id'], execution_id=f'{op_id}{"-" + attempt if attempt else ""}:{i}',
                    classification=row.get('classification') or failure_class(row, baseline))
         store.event(op_id, 'check', check=row)
     result = {'revision_id': payload['revision_id'], 'checks': rows,
               'ui_required': any(r.get('id', '').startswith('page:') for r in rows),
-              'passed': bool(rows) and all(r['passed'] for r in rows), 'workspace': str(root), 'audit': str(audit)}
+              'passed': bool(rows) and all(r['passed'] for r in rows), 'workspace': str(root), 'audit': str(audit),
+              # Packages whose tests never ran ('*': none did): their required tests are the build gate's, not lost.
+              # Guessed from the rows instead, a probe-copy guard row or a setup row without its cwd misled it.
+              # An invalid .daedalus.json voids every package's configured commands, and drops a package only it
+              # named from the profiles altogether, so it is '*' too (the row itself fails as a prerequisite).
+              'untested': sorted({p['cwd'] for p in profile['profiles']} - ready_packages)
+                          + (['*'] if stopped or any(c.get('id') == 'execution-config' for c in profile['checks']) else [])}
     (folder / 'result.json').write_text(json.dumps(result, indent=2))
     return result

@@ -26,28 +26,110 @@ def require_local_model(url, model, timeout=15):
     return details
 
 
-def ensure_context(url, model, policy, timeout, requests_client=None):
+def resident(entry):
+    """Whether a loaded model sits wholly in GPU memory (Ollama /api/ps: size_vram == size)."""
+    return bool(entry) and (entry.get('size_vram') or 0) >= (entry.get('size') or 0) > 0
+
+
+SETTLE_SECONDS, CONFIRM_SECONDS = 10, 3   # ensure_context pacing; module-level so tests can shrink the real path
+
+
+def ensure_context(url, model, policy, timeout, requests_client=None, settle=None, attempts=6, confirm=None):
+    """Load ``model`` at the policy's context, wholly on the GPUs.
+
+    Live 2026-10-27: the planning model stayed resident (keep_alive 10m) when the coder loaded at 65,536 context,
+    so 1.6 GiB of the coder landed in host memory and every token waited on 64 CPU threads in an 8-core container:
+    0.5 tok/s instead of ~140, and a whole job allowance spent on timed-out calls. A model that does not fit beside
+    the others now evicts them and loads alone; a model that cannot fit even alone fails visibly.
+
+    Live 2026-10-28: ``/api/ps`` reported size_vram == size for the first second after the load and only then
+    settled to the spilled figure, so one read passed a spilled model. The figure is read again ``confirm``
+    seconds later and must agree before it counts. The same day: Ollama 0.35 accepts ``keep_alive: 0`` in 2 ms
+    and ignores it while that runner has a request in flight (it only bumps expires_at), so an unload is only
+    trusted once the entry is gone from ``/api/ps``; a runner that stays busy past ``timeout`` is reported as
+    busy, not as a model that cannot fit.
+
+    Live 2026-10-28 (cw3-13fb755c): a child behind the supervisor's inference bridge (coder_sandbox_agent.model_bridge)
+    sees ``/api/ps`` filtered to its own runner and cannot unload any other model, so its eviction loop unloaded ITSELF
+    six times beside the still-resident planning model and raised a false "does not fit". Eviction is therefore the
+    supervisor's job: the bridge runs this function against upstream Ollama before it forwards a warm load, and the
+    child's own call only confirms residency (its loop still protects the direct, non-bridged callers). An upstream
+    ``{'error': ...}`` on the load is surfaced verbatim so the bridge's reason reaches the child.
+    """
     import requests
     requests = requests_client or requests
+    settle = SETTLE_SECONDS if settle is None else settle
+    confirm = CONFIRM_SECONDS if confirm is None else confirm
     names = {model, model + ':latest'}
-    def loaded():
+    def models():
         response = requests.get(url + '/api/ps', timeout=min(15, timeout))
         response.raise_for_status()
-        return next((m for m in response.json().get('models', []) if m.get('name') in names or m.get('model') in names), None)
-    current = loaded()
-    if current and current.get('context_length') == policy.num_ctx:
-        return
-    if current:
-        response = requests.post(url + '/api/generate', json={'model':model,'keep_alive':0}, timeout=timeout)
+        return response.json().get('models', [])
+    def mine(entry):
+        return entry.get('name') in names or entry.get('model') in names
+    def loaded(settled=False):
+        """The model's /api/ps entry; ``settled`` re-reads after the runner has placed its buffers."""
+        entry = next((m for m in models() if mine(m)), None)
+        if settled and entry and resident(entry):
+            time.sleep(confirm)
+            entry = next((m for m in models() if mine(m)), None)
+        return entry
+    def unload(name):
+        response = requests.post(url + '/api/generate', json={'model':name,'keep_alive':0}, timeout=timeout)
         response.raise_for_status()
-    response = requests.post(url + '/api/generate', json={'model':model,'prompt':'','stream':False,
-        'options':{'num_ctx':policy.num_ctx},'keep_alive':'10m'}, timeout=timeout)
-    response.raise_for_status()
-    if response.json().get('error'):
-        raise ValueError(response.json()['error'])
-    current = loaded()
+    def gone(names_to_free, deadline):
+        """Ask every named runner to unload and wait until /api/ps no longer lists them; False if one stays busy."""
+        while True:
+            for name in names_to_free:
+                unload(name)
+            time.sleep(min(settle, max(0, deadline - time.monotonic())))
+            still = [m for m in models() if (m.get('name') or m.get('model')) in names_to_free]
+            if not still:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+    def load():
+        response = requests.post(url + '/api/generate', json={'model':model,'prompt':'','stream':False,
+            'options':{'num_ctx':policy.num_ctx},'keep_alive':'10m'}, timeout=timeout)
+        if getattr(response, 'status_code', 200) >= 400:
+            try: error = response.json().get('error')
+            except ValueError: error = None
+            if error:
+                raise ValueError(error)   # the bridge's reason, not a bare "400 Client Error"
+        response.raise_for_status()
+        if response.json().get('error'):
+            raise ValueError(response.json()['error'])
+    current = loaded(settled=True)
+    if current and current.get('context_length') == policy.num_ctx and resident(current):
+        return
+    deadline = time.monotonic() + max(settle, timeout - 60)
+    busy = False
+    if current and not gone([model], deadline):
+        busy = True   # a reload would be a no-op on the runner that could not be freed
+    else:
+        load()
+        current = loaded(settled=True)
+    for _ in range(attempts):
+        if busy:
+            break
+        if not current or current.get('context_length') != policy.num_ctx or resident(current):
+            break
+        # Free the GPUs for this model: every loaded runner, this one included, must really be gone before the
+        # reload, or Ollama answers the reload as a no-op on the spilled runner.
+        occupants = [m.get('name') or m.get('model') for m in models()]
+        if not gone(occupants, deadline):
+            busy = True
+            break
+        load()
+        current = loaded(settled=True)
+    if busy:
+        raise ValueError(f'{model} is spilled to the CPU and Ollama will not unload a runner that is still answering a request; '
+                         'waited for the GPUs to free up until this stage ran out of time. Try again once the other jobs finish.')
     if not current or current.get('context_length') != policy.num_ctx:
         raise ValueError(f'Ollama did not allocate the configured {policy.num_ctx} context. Adjust Settings or runtime memory.')
+    if not resident(current):
+        raise ValueError(f'{model} does not fit in GPU memory at {policy.num_ctx} context even after freeing the other loaded '
+                         'models; part of it would run on the CPU at a fraction of the speed. Lower the Daedalus context in Settings.')
 
 
 def local_chat(store, operation_id, role, messages, *, temperature=0.2, model=None, schema=None):

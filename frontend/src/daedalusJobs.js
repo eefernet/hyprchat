@@ -9,7 +9,13 @@ export function backgroundJob(workflows=[]){
 
 export function jobStatusLabel(job){
   if(job.state==='completed')return job.artifact&&job.artifact_status==='delivered'?'Complete':job.answer?'Review complete':'Needs attention';
-  if(job.state==='ready_for_review')return job.candidate_artifact?.metadata?.runnable?'Ready for review':'Build incomplete';
+  if(job.state==='ready_for_review'){
+    if(job.verification_summary?.incomplete_reason)return 'Build incomplete — please review';
+    if(job.verification_summary?.rolled_back)return 'Ready for review';
+    if(job.verification_summary?.checks_passed||job.candidate_artifact?.metadata?.checks_passed)return 'Checks passed — please review';
+    if(job.verification_summary?.checks_ok&&job.verification_summary.exercised===false)return 'Built, not exercised';
+    return job.candidate_artifact?.metadata?.runnable?'Ready for review':'Build incomplete';
+  }
   if(job.state==='coding')return job.repair_round>0?`Repairing · attempt ${job.repair_round} of 2`:'Building';
   return ({queued:'Planning',inspecting:'Planning',baselining:'Checking',planning:'Planning',
     checking:'Checking',auditing:'Checking',reviewing:'Reviewing',accepting:'Reviewing',visual_review:'Reviewing',
@@ -23,7 +29,7 @@ export function isDaedalusPersona(conversation,pending=null){
 }
 export function codingRequestFields(options,conversation,pending=null){
   if(!isDaedalusPersona(conversation,pending))return {};
-  return Object.fromEntries(Object.entries(options||{}).filter(([key])=>['daedalus_new_project','daedalus_project_id','daedalus_visual_review'].includes(key)));
+  return Object.fromEntries(Object.entries(options||{}).filter(([key])=>['daedalus_new_project','daedalus_project_id','daedalus_visual_review','daedalus_source_pointer'].includes(key)));
 }
 export function workflowIds(metadata={},events=[]){
   return [...new Set([...(metadata.workflow_ids||[]),...(metadata.saved_events||[]).concat(events).map(e=>e.data?.workflow_id)].filter(Boolean))];
@@ -49,6 +55,12 @@ export function continueReason(job){
   if(job.state==='cancelled'&&(job.policy_version||1)<7)return 'This older workflow cannot resume after Stop. Start a new request from its saved project.';
   return job.presentation?.actions?.resume?.disabled_reason||(durableLimits.has(job.stop_limit)?(job.blocker||'Retained limits prevent further progress on this request.'):'');
 }
+export function needsMoreAllowance(job){
+  if((job.engine_behavior_version||0)<1)return true;
+  return ['model_calls','job_seconds'].includes(job.stop_limit)||
+    ['call_limit','time_limit','budget_exhausted'].includes(job.failure?.category)||
+    /(?:Model-call|Execution) allowance exhausted/.test(job.blocker||'');
+}
 // The chat Stop button stops work that is RUNNING. A parked job (blocked, ready for review) has nothing
 // to stop; cancelling it turned a saved candidate into "Stopped" and lost its place for Continue.
 export function cancellableWorkflowIds(workflows=[],events=[],conversationId=null){
@@ -66,16 +78,19 @@ export function elapsedLabel(seconds){
 }
 export function timestamp(value){return typeof value==='number'?value*1000:Date.parse(value?.endsWith('Z')||/[+-]\d\d:\d\d$/.test(value||'')?value:`${value||''}Z`);}
 
-export function resumeJobBody(job,visual='unchanged',clarification=''){
+export function resumeJobBody(job,visual='unchanged',clarification='',budgetMode='preserve'){
   return {...(visual!=='unchanged'?{visual_review:visual==='on'}:{}),
+    ...(job.engine==='openhands159'?{budget_mode:budgetMode}:{}),
     ...(job.scope_question&&clarification.trim()?{clarification:clarification.trim()}:{}),
     ...(job.candidate_artifact?{candidate_revision:job.candidate_artifact.metadata?.revision_id}: {})};
 }
 
 export function jobBlockerMessage(value){
   const message=String(value||'');
-  if(message.includes('Model-call allowance exhausted'))return 'The model-call allowance is used up. Continue from checkpoint for another allowance, or adjust it in Settings → Daedalus.';
-  if(message.includes('Execution allowance exhausted'))return 'The execution allowance is used up. Continue from checkpoint for more time, or adjust it in Settings → Daedalus.';
+  if(message.includes('missing_required_tool'))return 'The model did not issue the required tool call. Review the saved work and failure details.';
+  if(message.includes('output_limit')||message.includes('configured output allowance'))return 'The model could not finish a response within its output limit. Review the saved checkpoint; extra job allowance does not increase that response limit.';
+  if(message.includes('Model-call allowance exhausted'))return 'The model-call allowance is used up. Choose an additional allowance to continue, or adjust it in Settings → Daedalus.';
+  if(message.includes('Execution allowance exhausted'))return 'The execution allowance is used up. Choose an additional allowance for more time, or adjust it in Settings → Daedalus.';
   if(/schema|validation|JSON|parse|ValueError|Traceback/i.test(message))return 'A check could not be completed. Open details for the diagnostic and saved checkpoint.';
   return message.split('\n\nConversation logs are stored at:')[0];
 }

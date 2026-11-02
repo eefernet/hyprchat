@@ -6,6 +6,16 @@ import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary,outcomeExplanati
 // Trimmed snapshots of real jobs from the 2026-09-18/19 evaluation runs.
 const jobs=JSON.parse(readFileSync(new URL('./daedalusProgress.fixtures.json',import.meta.url)));
 
+test('unverified and failed UI contracts cannot inherit a green artifact badge',()=>{
+  for(const status of ['failed','unverified']){
+    const job={state:'ready_for_review',ui_contract_version:1,
+      candidate_artifact:{metadata:{runnable:true,checks_passed:true}},
+      verification_summary:{checks_ok:true,exercised:true,checks_passed:false,criteria:[{id:'ui',status}]}};
+    assert.equal(outcomeExplanation(job).tone,'warn');
+    assert.equal(outcomeExplanation(job).title,'Ready for your review');
+  }
+});
+
 test('an accepted build shows every stage done, every outcome passed and a plain acceptance',()=>{
   const job=jobs.accepted_java;
   assert.deepEqual(stageRail(job).map(s=>s.state),Array(6).fill('done'));
@@ -74,4 +84,22 @@ test('a job with stage progress shows its phase on the strip and the card', () =
   assert.equal(loopLabel(job),'Phase 1/4 · foundation · Agent builder · pass 1 of 6 · Repair 1 of 2');
   assert.equal(loopLabel({state:'completed',artifact:{},stage_progress:{phase:4,of:4,label:'delivery'}}),'');
   assert.equal(loopLabel({state:'checking'}),'');
+});
+
+test('passing checks, an unexercised build and the two completion kinds explain themselves',()=>{
+  const ready={state:'ready_for_review',candidate_artifact:{metadata:{runnable:true}},checks:[{id:'test',phase:'test',passed:true}]};
+  const passed=outcomeExplanation({...ready,verification_summary:{checks_passed:true}});
+  assert.equal(passed.title,'Checks passed — please review');assert.match(passed.text,/Accept it or ask for changes/);
+  assert.equal(outcomeExplanation({...ready,verification_summary:{checks_ok:true,exercised:false}}).title,'Built, not exercised');
+  const done={state:'completed',artifact:{id:'a'}};
+  assert.match(outcomeExplanation({...done,accepted_by:'user'}).text,/You accepted this exact revision/);
+  assert.match(outcomeExplanation({...done,acceptance:{kind:'examples'},verification_summary:{confirmed_examples:3}}).text,/confirmed passed \(3\)/);
+});
+
+test('a rolled-back change explains the rollback instead of a generic limit',()=>{
+  const job={state:'ready_for_review',stop_limit:'application_repairs',candidate_artifact:{metadata:{runnable:true}},
+    blocker:'The change broke tests that passed before: test_total (failed). The last version that kept them passing was restored for review.',
+    verification_summary:{rolled_back:true,checks_passed:false}};
+  const banner=outcomeExplanation(job);
+  assert.equal(banner.title,'Change rolled back');assert.match(banner.text,/test_total \(failed\)/);
 });

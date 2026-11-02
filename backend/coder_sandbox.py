@@ -85,7 +85,7 @@ def clean_environment(environment):
              'HOME', 'TMPDIR', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE',
              'VIRTUAL_ENV', 'JAVA_HOME', 'DOTNET_ROOT', 'RUSTUP_HOME', 'CARGO_HOME',
              'GOCACHE', 'GOPATH', 'GOMODCACHE', 'DOTNET_CLI_HOME', 'DOTNET_NOLOGO',
-             'DOTNET_CLI_TELEMETRY_OPTOUT', 'PLAYWRIGHT_BROWSERS_PATH', 'NODE_V8_COVERAGE',
+             'DOTNET_CLI_TELEMETRY_OPTOUT', 'PLAYWRIGHT_BROWSERS_PATH', 'PLAYWRIGHT_SKIP_BROWSER_GC', 'NODE_V8_COVERAGE',
              'NODE_OPTIONS', 'APP_DB_PATH', 'DATABASE_URL', 'DB_PATH', 'OLLAMA_API_BASE',
              'AIDER_ANALYTICS_DISABLE', 'LITELLM_LOCAL_MODEL_COST_MAP', 'ALLOW_SHORT_CONTEXT_WINDOWS'}
     return {k: str(v) for k, v in environment.items() if k in names or k.startswith('DAEDALUS_')}
@@ -97,6 +97,7 @@ def toolchain_mounts(command):
              '/bin', '/sbin', '/lib', '/lib64', '/etc/alternatives', '/etc/ssl/certs',
              '/etc/ca-certificates', '/etc/ld.so.cache', '/etc/nsswitch.conf', '/etc/resolv.conf',
              '/etc/hosts', '/etc/passwd', '/etc/group', '/etc/localtime',
+             '/etc/dbus-1', '/etc/fonts', '/etc/X11',
              '/etc/maven/m2.conf', '/etc/maven/logging',
              '/root/.cargo/bin', '/root/.rustup/toolchains', '/root/.rustup/settings.toml',
              '/root/.dotnet', '/root/.cache/ms-playwright']
@@ -127,7 +128,7 @@ class Sandbox(AbstractContextManager):
     of them. Runtime/cache directories are distinct from those trusted stores.
     """
     def __init__(self, command, *, cwd, writable=(), readonly=(), environment=None,
-                 network_urls=(), listen_port=None, runtime=None):
+                 network_urls=(), listen_port=None, runtime=None, short_tmp=False):
         self.command = list(command)
         self.cwd = Path(cwd).absolute()
         self.writable = [Path(p).absolute() for p in writable]
@@ -136,14 +137,17 @@ class Sandbox(AbstractContextManager):
         self.urls = list(dict.fromkeys(network_urls))
         self.listen_port = listen_port
         self.runtime = Path(runtime).absolute() if runtime else None
+        self.short_tmp = short_tmp
         self.servers = []
         self.temporary = None
+        self.cache_lease = None
 
     def translate_url(self, value):
         for i, original in enumerate(self.urls):
             target = urlsplit(original)
             if value.startswith(original.rstrip('/')):
-                alias = urlunsplit((target.scheme, f'upstream-{i}.invalid:{target.port}', target.path, '', ''))
+                host = '127.0.0.1' if self.environment.get('DAEDALUS_LOOPBACK_ENDPOINTS') == '1' else f'upstream-{i}.invalid'
+                alias = urlunsplit((target.scheme, f'{host}:{target.port}', target.path, '', ''))
                 return alias.rstrip('/') + value[len(original.rstrip('/')):]
         return value
 
@@ -157,6 +161,11 @@ class Sandbox(AbstractContextManager):
     def _enter(self):
         if sys.platform != 'linux' or not shutil.which('bwrap'):
             raise IsolationUnavailable('Project execution requires Linux bubblewrap with user and network namespaces')
+        cache = self.environment.get('DAEDALUS_ENVIRONMENT_ROOT')
+        if cache:
+            from coder_engine_cache import lease
+            self.cache_lease = lease(cache)
+            self.cache_lease.__enter__()
         self.temporary = tempfile.TemporaryDirectory(prefix='daedalus-sandbox-')
         private = Path(self.temporary.name)
         ipc = private / 'ipc'; ipc.mkdir(mode=0o700)
@@ -199,16 +208,17 @@ class Sandbox(AbstractContextManager):
                         pass
             self.servers.append(start_server(TCPServer(('127.0.0.1', self.listen_port), Forward)))
         environment = {k: self.translate_url(v) for k, v in self.environment.items()}
-        environment.update(HOME=str(home), TMPDIR=str(tmp), PYTHONNOUSERSITE='1',
+        environment.update(HOME=str(home), TMPDIR='/tmp/daedalus' if self.short_tmp else str(tmp), PYTHONNOUSERSITE='1',
             PYTHONDONTWRITEBYTECODE='1', CARGO_HOME=str(home / '.cargo'), GOPATH=str(home / 'go'),
             GOMODCACHE=str(home / 'go/pkg/mod'), DOTNET_CLI_HOME=str(home / '.dotnet'),
             DOTNET_NOLOGO='1', DOTNET_CLI_TELEMETRY_OPTOUT='1',
             RUSTUP_HOME='/root/.rustup', DOTNET_ROOT='/root/.dotnet',
-            PLAYWRIGHT_BROWSERS_PATH='/root/.cache/ms-playwright',
+            PLAYWRIGHT_BROWSERS_PATH=environment.get('PLAYWRIGHT_BROWSERS_PATH', '/root/.cache/ms-playwright'),
             PIP_REQUIRE_VIRTUALENV='true')
         spec = private / 'launch.json'
         spec.write_text(json.dumps({'command': self.command, 'cwd': str(self.cwd), 'environment': environment,
-                                    'ipc': str(ipc), 'listen_port': self.listen_port}))
+                                    'ipc': str(ipc), 'listen_port': self.listen_port,
+                                    'loopback_endpoints': list(endpoints) if self.environment.get('DAEDALUS_LOOPBACK_ENDPOINTS') == '1' else []}))
         module = Path(__file__).resolve()
         mounts = [*toolchain_mounts(self.command), module, spec, *self.readonly, self.cwd]
         args = ['bwrap', '--unshare-user', '--unshare-pid', '--unshare-net', '--unshare-ipc',
@@ -225,6 +235,11 @@ class Sandbox(AbstractContextManager):
             if not path.exists():
                 raise ValueError('Sandbox writable path does not exist: ' + str(path))
             args.extend(['--bind', str(path), str(path)])
+        if self.short_tmp:
+            # Chromium/DBus use Unix sockets beneath TMPDIR (108-byte limit).
+            # Keep their path short inside this private namespace while the
+            # backing files remain in the controller's disk-backed leased cache.
+            args.extend(['--bind', str(tmp), '/tmp/daedalus'])
         self.args = [*args, '--chdir', str(self.cwd), '--', '/usr/bin/python3', str(module), '--child', str(spec)]
         self.env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
         return self
@@ -234,6 +249,9 @@ class Sandbox(AbstractContextManager):
             server.shutdown(); server.server_close(); thread.join(timeout=2)
         if self.temporary:
             self.temporary.cleanup()
+        if self.cache_lease:
+            self.cache_lease.__exit__(*exception)
+            self.cache_lease = None
 
 
 def child_main(spec):
@@ -294,6 +312,26 @@ def child_main(spec):
 
     proxy = ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
     start_server(proxy)
+    # These listeners exist only inside the child's network namespace. Each
+    # tunnels one supervisor-granted endpoint through the existing capability
+    # gateway; no other host loopback service becomes reachable. Keeping the
+    # browser origin on loopback preserves Fetch Metadata and secure-context
+    # behavior that an http://*.invalid proxy alias loses.
+    forwarded_ports = set()
+    for host, port in config.get('loopback_endpoints', []):
+        if port in forwarded_ports:
+            continue
+        def forwarder(target_host, target_port):
+            class Endpoint(socketserver.BaseRequestHandler):
+                def handle(self):
+                    try:
+                        with connect(target_host, target_port) as remote:
+                            relay(self.request, remote)
+                    except OSError:
+                        pass
+            return Endpoint
+        start_server(TCPServer(('127.0.0.1', port), forwarder(host, port)))
+        forwarded_ports.add(port)
     if config.get('listen_port'):
         class Reverse(socketserver.BaseRequestHandler):
             def handle(self):

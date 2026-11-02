@@ -214,7 +214,14 @@ async def delete_all_artifacts_ep():
     deleted_artifacts = 0
     deleted_files = 0
     removed_attachments = 0
+    # A coding project's working or accepted version is its only restorable copy: never bulk-deleted.
+    from db.coder_promotion import pinned_artifact_ids
+    pinned = await pinned_artifact_ids()
+    kept = 0
     for artifact in targets:
+        if artifact.get("id") in pinned:
+            kept += 1
+            continue
         result = await delete_artifact_row_and_file(artifact)
         if result["deleted"]:
             deleted_artifacts += 1
@@ -236,6 +243,7 @@ async def delete_all_artifacts_ep():
         "deleted": deleted_artifacts,
         "deleted_files": deleted_files,
         "removed_attachments": removed_attachments,
+        "kept_project_versions": kept,
     }
 
 
@@ -244,6 +252,9 @@ async def delete_artifact_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
+    from db.coder_promotion import pinned_artifact_ids
+    if artifact_id in await pinned_artifact_ids():
+        raise HTTPException(409, "This archive is a coding project's current or accepted version; it cannot be deleted")
     result = await delete_artifact_row_and_file(artifact)
     if not result["deleted"]:
         raise HTTPException(404, "Artifact not found")

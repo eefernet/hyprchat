@@ -39,6 +39,7 @@ const payload=(values,exclusions)=>({
   ...Object.fromEntries(fields.map(([key])=>[key,Number(values[key])])),
   aider_num_ctx:0,
   daedalus_v3_enabled:!!values.daedalus_v3_enabled,
+  daedalus_engine:values.daedalus_engine||'legacy',
   daedalus_visual_review:!!values.daedalus_visual_review,
   daedalus_policy7_edits:!!values.daedalus_policy7_edits,
   daedalus_policy7_builds:!!values.daedalus_policy7_builds,
@@ -116,6 +117,13 @@ export default function DaedalusSettings({t,font,onSaved}){
   const persistent=!!values.daedalus_v3_enabled;
   return <div className="ds-root" style={vars}>
     <Section title="Workflow" hint="How new coding jobs run. Jobs already in progress keep the workflow they started with.">
+      <label className="ds-field"><span className="ds-label">Coding engine</span>
+        <span className="ds-control"><select aria-label="Daedalus engine" disabled={!persistent} value={values.daedalus_engine||'legacy'} onChange={e=>set('daedalus_engine',e.target.value)}>
+          <option value="legacy">Current engine</option>
+          <option value="openhands159">OpenHands 1.59 (experimental)</option>
+        </select></span>
+        <span className="ds-help">New projects use this engine. Existing jobs and project follow-ups retain their engine.</span>
+      </label>
       <div className="ds-toggles">
         <Toggle label="Persistent jobs" chip="Experimental" checked={persistent} onChange={value=>set('daedalus_v3_enabled',value)}
           description="New coding jobs run in the background with checkpoints, Stop and Continue, and recovery after a restart."/>

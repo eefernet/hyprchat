@@ -54,6 +54,8 @@ async def migrate(connection=None):
             WHERE COALESCE(accepted_job_id,'')='' AND EXISTS
             (SELECT 1 FROM coder_workflows WHERE id=openhands_project_id AND workflow_version=3 AND state='completed'
              AND json_extract(job_json,'$.acceptance.accepted')=1)""")
+        from db.coder_promotion import migrate as migrate_versions
+        await migrate_versions(connection)
         await connection.commit()
     finally:
         if owned:
@@ -83,10 +85,12 @@ async def get(workflow_id):
 
 async def create(conversation_id, task, mode, project_id, model, key, *,
                  source_job_id="", source_revision_id="", source_project_id="", policy_version=1,
-                 visual_policy=None, request_options=None, parent_artifact_id="", inherited=None):
+                 visual_policy=None, request_options=None, parent_artifact_id="", inherited=None, source_pointer="", engine="legacy"):
     owner = db.current_user_id()
     identity = "cw3-" + hashlib.sha256(f"{owner}:{conversation_id}:{key}".encode()).hexdigest()[:24]
     body = dict(task=task, mode=mode, project_id=project_id, model=model)
+    if engine != 'legacy':
+        body['engine'] = engine
     if request_options:
         body["options"] = request_options
     fingerprint = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
@@ -99,9 +103,20 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
         rows = await connection.execute_fetchall("SELECT * FROM coder_workflows WHERE id=?", (identity,))
         if rows:
             result = _decode(rows[0])
-            if result.get("request_fingerprint") != fingerprint:
+            same = result.get('request_fingerprint') == fingerprint
+            if (not same and engine == 'openhands159' and result.get('engine_behavior_version', 0) == 0
+                    and (request_options or {}).get('engine_behavior_version') == 1):
+                # A retried creation after upgrading must return its original
+                # job, without enabling new behavior or weakening other fields.
+                options = {k:v for k,v in request_options.items() if k != 'engine_behavior_version'}
+                variants = [options, {**options, 'engine_behavior_version':0}]
+                same = any(result.get('request_fingerprint') == hashlib.sha256(
+                    json.dumps({**body, 'options': old}, sort_keys=True).encode()).hexdigest() for old in variants)
+            if not same:
                 raise ValueError("Idempotency key was already used for another request")
             return result
+        # What later fences compare against: working as this job found it, and the promotion log's last id.
+        start = {"working_job_at_start": "", "working_revision_at_start": ""}
         if policy_version >= 2:
             if mode == "build_from_prompt":
                 if project_id:
@@ -114,27 +129,48 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
                 projects = await connection.execute_fetchall("SELECT * FROM coding_projects WHERE id=? AND user_id=?", (project_id, owner))
                 if not projects:
                     raise LookupError("Project not found")
-                head = projects[0]["accepted_revision_id"] or ""
+                project = dict(projects[0])
+                # A pointer whose job went with a deleted conversation (an older database) failed the fence below on
+                # every retry. Re-pointed as deletion does now; a request that read the old pointer is told to retry.
+                from db.coder_promotion import repoint
+                if await repoint(connection, owner, project_id):
+                    project = dict((await connection.execute_fetchall("SELECT * FROM coding_projects WHERE id=?", (project_id,)))[0])
+                # Fence on the pointer this request read: a follow-up from the working version must not start
+                # from a revision another job has since replaced (accepted-pointer jobs keep the old rule).
+                from db.coder_promotion import pointer_column
+                head = project[pointer_column(source_pointer or "accepted") + "_revision_id"] or ""
                 if head and head != source_revision_id:
                     raise ValueError("Project changed while the request was starting; retry using its current revision")
+                start.update(working_job_at_start=project["working_job_id"] or "", working_revision_at_start=project["working_revision_id"] or "")
+            baseline = await connection.execute_fetchall(
+                "SELECT COALESCE(MAX(id),0) AS id FROM coding_project_promotions WHERE project_id=?", (project_id,))
+            start["promotion_baseline_id"] = baseline[0]["id"]
             if mode != "ask_uploaded_project":
                 await _assert_project_idle(connection, project_id)
             await connection.execute("UPDATE conversations SET active_coding_project_id=? WHERE id=? AND user_id=?", (project_id, conversation_id, owner))
-        job = {"model": model, "request_fingerprint": fingerprint, "milestones": [],
+        job = {"model": model, "engine": engine, "engine_version": '1.59.0' if engine == 'openhands159' else '1.11.4',
+               "request_fingerprint": fingerprint, "milestones": [],
                "source_job_id":source_job_id, "source_revision_id":source_revision_id, "source_project_id":source_project_id,
+               "source_pointer": source_pointer or ("working" if mode == "build_from_prompt" else "accepted"),
                "milestone_index": 0, "calls_used": 0, "seconds_used": 0,
                "allowance": 1, "revision_id": "", "baseline_revision": "", "worker_operation": "",
                "operation_sequence": 0, "blocker": "", "checks": [], "artifact": None}
         if policy_version >= 2:
             job.update(policy_version=policy_version, visual_policy=visual_policy or {"enabled":False,"model":""},
-                       parent_artifact_id=parent_artifact_id, requirements=[], visual_review={"status":"pending"})
+                       parent_artifact_id=parent_artifact_id, requirements=[], visual_review={"status":"pending"}, **start)
         if policy_version >= 6:
             job.update(candidate_artifact=None, delivery_status='building', verification_summary=None,
                 repair_round=0, check_corrections=0, recovery_used=False,
                 execution_commands=(request_options or {}).get('execution_commands', {}),
+                ui_checks=(request_options or {}).get('ui_checks', []),
                 protected_files=(request_options or {}).get('protected_files', []))
         if policy_version >= 7:
             job['inherited'] = inherited or []
+        if engine == 'openhands159' and (request_options or {}).get('ui_contract_version'):
+            for field in ('ui_contract_version', 'ui_contract', 'ui_contract_context'):
+                job[field] = request_options[field]
+        if engine == 'openhands159':
+            job['engine_behavior_version'] = (request_options or {}).get('engine_behavior_version', 0)
         await connection.execute(
             "INSERT INTO coder_workflows(id,conversation_id,project_id,mode,state,user_task,workflow_version,job_json,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,3,?,?,?)", (identity, conversation_id, project_id, mode, "queued", task, json.dumps(job), now(), now()))
@@ -199,9 +235,9 @@ async def save(workflow_id, *, state=None, event="updated", **changes):
                     raise ValueError('Candidate revision changed before continuation')
         if event == "resume" and payload.get("policy_version", 1) >= 2:
             await _assert_project_idle(connection, row["project_id"], workflow_id)
-            heads = await connection.execute_fetchall("SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?", (row["project_id"], db.current_user_id()))
-            if not heads or (heads[0][0] or "") != payload.get("source_revision_id", ""):
-                raise ValueError("The project has a newer accepted revision; start a new edit instead of resuming stale work")
+            from db.coder_promotion import assert_fresh
+            await assert_fresh(connection, row["project_id"], workflow_id, payload,
+                               "The project has a newer version; start a new edit instead of resuming stale work")
         if state and state != row['state'] or changes.get('activity') and changes['activity'] != payload.get('activity'):
             changes['meaningful_update_at'] = now()
         payload.update(changes)
@@ -334,15 +370,14 @@ async def finish_artifact(workflow_id, revision_id, **artifact_fields):
         if job["state"] != "packaging" or job["revision_id"] != revision_id or acceptance.get("revision_id") != revision_id or acceptance.get("accepted") is not True:
             raise ValueError("Delivery requires Acceptance for the current revision")
         if job.get('policy_version', 1) >= 7:
+            # Automatic completion needs current confirmed examples that all passed (evidence version 4).
             summary = job.get('verification_summary') or {}
-            if summary.get('evidence_version') != 3 or summary.get('revision_id') != revision_id or not summary.get('accepted'):
-                raise ValueError('Policy 7 delivery requires current trusted verification evidence')
-            if any(c.get('status') != 'passed' for c in summary.get('criteria', [])):
-                raise ValueError('Unverified behavior cannot advance the accepted project head')
+            if summary.get('evidence_version') != 4 or summary.get('revision_id') != revision_id or not summary.get('accepted'):
+                raise ValueError('Policy 7 delivery requires current confirmed acceptance examples that passed')
         if job.get("policy_version",1) >= 2:
-            heads = await connection.execute_fetchall("SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?", (job["project_id"], db.current_user_id()))
-            if not heads or (heads[0][0] or "") != job.get("source_revision_id", ""):
-                raise ValueError("Project head changed; this revision cannot replace newer accepted work")
+            from db.coder_promotion import assert_fresh
+            await assert_fresh(connection, job["project_id"], workflow_id, job,
+                               "Project head changed; this revision cannot replace newer work")
         artifact = await db.add_artifact(_connection=connection, conversation_id=job["conversation_id"], workflow_id=workflow_id, **artifact_fields)
         if not artifact:
             raise ValueError("Artifact registration failed")
@@ -352,13 +387,22 @@ async def finish_artifact(workflow_id, revision_id, **artifact_fields):
             payload['delivery_status'] = 'accepted'
         project_id = job["project_id"] or workflow_id
         prior = await connection.execute_fetchall("SELECT * FROM coding_projects WHERE id=? AND user_id=?", (project_id,db.current_user_id()))
-        if prior:
-            await connection.execute("UPDATE coding_projects SET openhands_project_id=?,accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=?,updated_at=? WHERE id=? AND user_id=?",
+        from db.coder_promotion import JOB_OR_UPLOAD, advance_working, record_promotion, user_promoted_since
+        # An automatic promotion never replaces a version the owner accepted after this job started.
+        keep_user_choice = bool(prior) and await user_promoted_since(connection, project_id, job)
+        if keep_user_choice:
+            payload['accepted_pointer'] = 'kept_user_promotion'
+        elif prior:
+            await connection.execute(f"UPDATE coding_projects SET openhands_project_id={JOB_OR_UPLOAD},accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=?,updated_at=? WHERE id=? AND user_id=?",
                                      (workflow_id,workflow_id,revision_id,artifact["id"],now(),project_id,db.current_user_id()))
         else:
             await connection.execute("INSERT INTO coding_projects(id,user_id,name,description,language,file_manifest,last_plan,conversation_id,openhands_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                                      (project_id,db.current_user_id(),"Daedalus project",job["user_task"],"","[]","",job["conversation_id"],workflow_id,now(),now()))
             await connection.execute("UPDATE coding_projects SET accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=? WHERE id=?", (workflow_id,revision_id,artifact["id"],project_id))
+        await advance_working(connection, project_id, workflow_id, revision_id, artifact["id"])
+        if not keep_user_choice:
+            await record_promotion(connection, project_id, workflow_id, revision_id, artifact["id"],
+                                   "examples" if job.get('policy_version', 1) >= 7 else "controller")
         await connection.execute("UPDATE conversations SET active_coding_project_id=? WHERE id=? AND user_id=?", (project_id,job["conversation_id"],db.current_user_id()))
         await connection.execute("UPDATE coder_workflows SET state='completed',project_id=?,job_json=?,artifact_status='delivered',updated_at=? WHERE id=?",
                                  (project_id,json.dumps(payload),now(),workflow_id))
@@ -389,15 +433,15 @@ async def finish_candidate(workflow_id, revision_id, **artifact_fields):
         summary = job.get('verification_summary') or {}
         if summary.get('revision_id') != revision_id or summary.get('accepted'):
             raise ValueError('Candidate needs an unaccepted verification summary for this revision')
-        heads = await connection.execute_fetchall('SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?',
-                                                  (job['project_id'], db.current_user_id()))
-        if not heads or (heads[0][0] or '') != job.get('source_revision_id', ''):
-            raise ValueError('Project head changed; this candidate is stale')
+        from db.coder_promotion import assert_fresh, advance_working
+        await assert_fresh(connection, job['project_id'], workflow_id, job, 'Project head changed; this candidate is stale')
         artifact = await db.add_artifact(_connection=connection, conversation_id=job['conversation_id'], workflow_id=workflow_id, **artifact_fields)
         if not artifact:
             raise ValueError('Candidate registration failed')
         payload = json.loads(rows[0]['job_json'])
         payload.update(candidate_artifact=artifact, delivery_status='review_candidate')
+        # The working version is what a follow-up edit starts from; the accepted version is untouched.
+        await advance_working(connection, job['project_id'], workflow_id, revision_id, artifact['id'])
         await connection.execute("UPDATE coder_workflows SET state='ready_for_review',job_json=?,artifact_status='not_ready',updated_at=? WHERE id=?",
                                  (json.dumps(payload), now(), workflow_id))
         await _event(connection, workflow_id, 'candidate_delivered', {'state':'ready_for_review', 'candidate_artifact':artifact,
@@ -422,8 +466,8 @@ async def account_operation(workflow_id, operation_id, kind, operation):
             raise LookupError('Workflow not found')
         payload = json.loads(rows[0]['job_json'])
         if payload.get('worker_operation') == operation_id and not payload.get('operation_accounted'):
-            begun = operation.get('started') or operation.get('ended') or 0
-            elapsed = max(0, (operation.get('ended') or begun) - begun)
+            from context_policy import operation_active_seconds
+            elapsed = operation_active_seconds(operation)
             usage = [r for r in payload.get('stage_usage', []) if r['operation_id'] != operation_id]
             usage.append({'operation_id': operation_id, 'stage': kind, 'seconds': elapsed,
                           'calls': operation.get('calls', 0), 'status': operation['status']})

@@ -29,11 +29,19 @@ DEFAULTS = {
         "compaction": 8192, "extraction": 8192, "image": 4096,
     },
     "daedalus_v3_enabled": False,
+    "daedalus_engine": "legacy",
+    "daedalus_preparation_seconds": 600,
     "daedalus_visual_review": False,
     # Uploaded-project repairs and edits use the evidence-gated policy 7; new builds keep the default policy.
     "daedalus_policy7_edits": False,
     # New projects: agent-loop builder behind the policy-7 evidence gate (measured 9/16 accepted, 0 false acceptances).
     "daedalus_policy7_builds": False,
+    # The model-written audit and per-outcome reviewer: off by default. They cost about a third of every job's
+    # model calls and no longer decide acceptance (that is the checks, the confirmed examples and the owner).
+    "daedalus_independent_review": False,
+    # The SDK builder's stop hook runs the build and tests when the agent says it is done and hands failures
+    # straight back inside the same session (up to three times per job).
+    "daedalus_stop_hook": True,
     "daedalus_visual_model": "",
     "daedalus_visual_batch_size": 2,
     "daedalus_image_tokens": 2048,
@@ -131,11 +139,16 @@ def validate_patch(patch: dict, current: dict) -> dict:
             if not math.isfinite(number) or not 0 < number < 100:
                 raise ValueError(f"{key} must be between 0 and 100")
             clean[key] = number
+        elif key == "daedalus_engine":
+            if value not in ('legacy', 'openhands159'):
+                raise ValueError('Unknown Daedalus engine')
+            clean[key] = value
         elif key == "daedalus_compaction":
             if value not in ("inherit", "on", "off"):
                 raise ValueError("daedalus_compaction must be inherit, on, or off")
             clean[key] = value
-        elif key in ("daedalus_v3_enabled", "daedalus_visual_review", "daedalus_policy7_edits", "daedalus_policy7_builds"):
+        elif key in ("daedalus_v3_enabled", "daedalus_visual_review", "daedalus_policy7_edits", "daedalus_policy7_builds",
+                     "daedalus_independent_review", "daedalus_stop_hook"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")
             clean[key] = value
@@ -228,9 +241,21 @@ def resolve(role="builder", settings: dict | None = None) -> ContextPolicy:
 def operation_settings(payload):
     """Old persisted operations retain their pre-policy-3 output behavior."""
     settings = payload["settings"]
-    if payload.get("policy_version", 1) < 3:
+    if payload.get("engine") != "openhands159" and payload.get("policy_version", 1) < 3:
         return {**settings, "daedalus_role_outputs": {}, "daedalus_role_thinking": {}}
     return settings
+
+
+def operation_active_seconds(operation):
+    """Do not bill a lost worker's downtime as application execution."""
+    payload = operation.get('payload', {})
+    checkpoint = payload.get('_usage_checkpoint')
+    if payload.get('engine') == 'openhands159' and operation.get('status') == 'interrupted' and checkpoint:
+        return max(0, float(checkpoint['active_seconds']))
+    begun = operation.get('started') or operation.get('ended') or 0
+    ended = operation.get('ended') or begun
+    preparing = max(0, ended - payload['_preparation_active_started']) if payload.get('_preparation_active_started') else 0
+    return max(0, ended - begun - payload.get('_preparation_seconds', 0) - preparing)
 
 
 def thinking_options(role, payload, details):

@@ -6,8 +6,10 @@ failed. Another build shipped an empty .NET solution: `dotnet test` exited 0 wit
 visible from the request alone, so the controller runs each requested command once with generated fixture
 input on the built execution copy, and reads the solution file. A failing row is an application defect the
 repair receives first; a passing row proves nothing about behavior, carries no outcome and is never
-acceptance evidence. Anything the probe cannot derive (an unknown placeholder, a program it cannot locate)
-is skipped, never failed.
+acceptance evidence. Anything the probe cannot derive (an unknown placeholder, an ambiguous application) is
+skipped, never failed. A program the request clearly invokes (`./wordcount ...`, or the subject of "prints")
+but the build did not deliver under that name fails as a foundation defect (review M1a: crate `b64` for
+`base64tool encode hello` produced no row at all, and the project's own tests alone gave "Checks passed").
 
 sweep3 (2026-09-26) showed the exit-0 rule was too weak: a Node TOC tool printed NOTHING and passed, another
 listed the `# not a heading` that lives inside a fenced code block of the controller's own Markdown fixture
@@ -23,6 +25,7 @@ import inspect
 import os
 import re
 import shlex
+import shutil
 from pathlib import Path
 
 RUNNERS = {'python3', 'python', 'node', 'go', 'cargo', 'dotnet', 'java', 'ruby', 'php', 'deno', 'bun'}
@@ -33,6 +36,9 @@ EXCLUDED_SUB = {('go', 'build'), ('go', 'test'), ('go', 'mod'), ('go', 'vet'), (
                 ('dotnet', 'restore'), ('dotnet', 'new'), ('python3', '-m'), ('python', '-m'), ('node', '--test'),
                 ('python3', '-c'), ('python', '-c')}
 PLACEHOLDER = re.compile(r'<([^<>\n]{1,40})>')
+# A usage line, not an invocation: bare SHOUTING placeholders (FILE, COMMAND, ARGS...), [optional] parts, `|` alternatives.
+# M0 baseline 2026-10-28: `java -jar target/isbn.jar COMMAND ISBN` was run literally and failed even on a correct jar.
+USAGE_TEMPLATE = re.compile(r'(?<![\w./-])(?:[A-Z][A-Z0-9_]{2,}(?:\.\.\.)?|\[[^\]\n]{1,60}\])(?![\w./-])|\s\|\s')
 TEST_SDK = re.compile(r'Microsoft\.NET\.Test\.Sdk|xunit|nunit|MSTest', re.I)
 TEST_ATTRIBUTE = re.compile(r'\[(?:Fact|Theory|Test|TestMethod|TestCase)\b')
 SOURCE_SUFFIXES = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.rs', '.java', '.cs', '.c', '.cpp', '.rb', '.php'}
@@ -75,6 +81,14 @@ MISSING_RULE = re.compile(r'\b(?:missing|nonexistent|non-existent|non-existing|u
                           r'(?P<what>file|path|input|argument|filename)s?\b.*?' + EXIT, re.I | re.S)
 STDERR = re.compile(r'\bstderr\b|\berror\b', re.I)
 VALUED_FLAG = re.compile(r'`(--[a-z][a-z0-9-]{1,40})\s+(?:<([^<>\n]{1,40})>|([A-Z]{1,3}|[a-z]))`')
+BINARY_DIRS = ['build', 'target/debug', 'bin', 'out', 'dist']
+# Wording around a backticked span that makes it an invocation of the delivered program, or an output literal.
+INVOKED_AFTER = re.compile(r'(?:\b(?:run|runs|running|ran|invoke[sd]?|invoking|execute[sd]?|executing)'
+                           r'(?:\s+(?:it|the\s+(?:tool|program|command|cli|binary|app)))?(?:\s+as)?|\bcalled\s+as|\busage)\s*:?\s*$', re.I)
+SUBJECT_OF = re.compile(r'^\s*(?:(?:should|must|will|then|also)\s+)?(?:prints?|outputs?|exits?|returns?|writes?|displays?|shows?|'
+                        r'emits?|reports?|produces?|reads?|fails?)\b', re.I)
+OUTPUT_LITERAL = re.compile(r'(?:\b(?:prints?|printing|printed|outputs?|displays?|shows?|emits?|writes?|returns?|yields?)|\boutput\s+(?:is|was|reads))'
+                            r'(?:\s+(?:exactly|only|just|like|as|the\s+line|a\s+line))*\s*:?\s*$', re.I)
 
 
 def sentences(task):
@@ -143,6 +157,8 @@ def requested_commands(task):
             continue  # a bare program or file name, not an invocation
         if not (starts_program or starts_placeholder):
             continue
+        if any(USAGE_TEMPLATE.search(token) for token in tokens[1:]) and not placeholders:
+            continue  # usage template: nothing a fixture could stand in for
         seen.add(text)
         specs.append({'excerpt': text, 'tokens': tokens, 'application': starts_placeholder})
     return specs
@@ -300,6 +316,13 @@ def _launch_in(profile, root, spec, strict=False):
         prefix = application_launcher(root, {'cargo'})
         rest = tokens[tokens.index('--') + 1:] if '--' in tokens else []
         return prefix + rest if prefix else None
+    if first == 'java' and '-jar' in tokens and tokens.index('-jar') + 1 < len(tokens):
+        # The request names the jar (`java -jar target/ledger.jar`); a Maven build without <finalName> produces
+        # target/ledger-1.0-SNAPSHOT.jar instead, and the probe must fail naming that, not run blind.
+        jar = tokens[tokens.index('-jar') + 1]
+        if not (root / jar).is_file():
+            return None
+        return tokens
     if first in RUNNERS:
         script = next((t for t in tokens[1:] if not t.startswith('-') and Path(t).suffix.lower() in SCRIPT_SUFFIXES), None)
         if strict and script and not (root / script).is_file():
@@ -307,10 +330,102 @@ def _launch_in(profile, root, spec, strict=False):
         return tokens
     if first.startswith('./'):
         return tokens if (root / first[2:]).exists() else None
-    binaries = [p for p in _executables(root, ['build', 'target/debug', 'bin', 'out', 'dist']) if p.name == first]
+    binaries = [p for p in _executables(root, BINARY_DIRS) if p.name == first]
     if binaries:
         return [str(binaries[0]), *tokens[1:]]
+    # A Node CLI is packaged as package.json "bin" (`mdtoc` -> bin/mdtoc.js); run the mapped script, never fail it.
+    import json
+    try:
+        manifest = json.loads((root / 'package.json').read_text(errors='replace'))
+    except (OSError, ValueError):
+        manifest = None
+    bins = manifest.get('bin') if isinstance(manifest, dict) else None
+    if isinstance(bins, str):
+        bins = {str(manifest.get('name') or '').rsplit('/', 1)[-1]: bins}   # "@scope/mdtoc" installs `mdtoc`
+    mapped = bins.get(first) if isinstance(bins, dict) else None
+    if isinstance(mapped, str) and mapped.strip():
+        script = os.path.normpath(mapped.strip())
+        if not os.path.isabs(script) and not script.startswith('..') and (root / script).is_file():
+            return ['node', Path(script).as_posix(), *tokens[1:]]
     return None
+
+
+def invokes_program(task, spec):
+    """The span is run as the delivered program: `./x`, the subject of "prints/exits/...", or after "run"/"usage"/
+    "called as". Never a span after "prints"/"output is": that is an output literal (`hello world`), not a program."""
+    first = spec['tokens'][0]
+    for match in re.finditer(r'`\s*' + re.escape(spec['excerpt']) + r'\s*`', task or ''):
+        before, after = task[:match.start()], task[match.end():]
+        if OUTPUT_LITERAL.search(before):
+            continue
+        if first.startswith('./') or INVOKED_AFTER.search(before) or SUBJECT_OF.match(after):
+            return True
+    return False
+
+
+def missing_program_row(op_id, root, profile, task, spec, n, fixtures, revision_id):
+    """A failing probe:command:<n> when launcher() found no program for a requested invocation, or None. Skipped: an
+    application or `cargo/dotnet run` spec (ambiguous launcher), a build-tool wrapper, a span that is not an invocation,
+    a bare name when nothing was built (the build rows own that) or when it is an installed tool, an unknown placeholder.
+    Source scripts under bin/ are not build output: counting an executable bin/mdtoc.js made the row depend on its mode."""
+    root = Path(root)
+    tokens = spec['tokens']
+    first = tokens[0]
+    if first == 'java' and '-jar' in tokens and tokens.index('-jar') + 1 < len(tokens):
+        return missing_jar_row(op_id, root, task, spec, n, fixtures, revision_id)
+    if spec['application'] or first in RUNNERS or Path(first).name in EXCLUDED_FIRST or not invokes_program(task, spec):
+        return None
+    bases = package_roots(profile, root)
+    built = sorted(p.relative_to(root).as_posix() for base in bases for p in _executables(base, BINARY_DIRS)
+                   if p.suffix.lower() not in SCRIPT_SUFFIXES | {'.sh'})
+    if not first.startswith('./'):
+        path = os.pathsep.join([str(base / '.venv' / 'bin') for base in bases] + [os.environ.get('PATH', '')])
+        if not built or shutil.which(first, path=path):
+            return None
+    rendered, description = render(tokens, fixtures)
+    if rendered is None:
+        return None
+    where = 'at that path from the project root' if first.startswith('./') else 'in ' + ', '.join(d + '/' for d in BINARY_DIRS)
+    produced = '; the build produced ' + ', '.join(built[:3]) if built else ''
+    command = shlex.join(rendered)
+    reason = (f'Diagnostic probe (never acceptance evidence): the request says `{spec["excerpt"]}` but the requested program `{first}` '
+              f'was not found {where} after the build{produced}. Deliver it under exactly that name/path, so `{command}` runs as written '
+              'and exits 0 for valid input.')
+    return _row(f'probe:command:{n}', op_id, revision_id, passed=False, command=command, code=None,
+                stdout=f'not run: the requested program `{first}` was not found {where}{produced}', stderr='',
+                excerpt=spec['excerpt'], description=description, expected=f'a program `{first}` {where}',
+                actual=f'not found{produced}', reason=reason)
+
+
+def built_jars(root):
+    """Jars a Maven/Gradle build produced, relative to the project root (no sources/javadoc jars)."""
+    root = Path(root)
+    found = [p for base in (root, *[d for d in root.iterdir() if d.is_dir() and not d.name.startswith('.')])
+             for p in [*base.glob('target/*.jar'), *base.glob('build/libs/*.jar')] if p.is_file()
+             and not p.name.endswith(('-sources.jar', '-javadoc.jar', '-tests.jar'))]
+    return sorted(p.relative_to(root).as_posix() for p in found)
+
+
+def missing_jar_row(op_id, root, task, spec, n, fixtures, revision_id):
+    """A failing probe:command:<n> when the jar the request names was not built: the row names the jar the build
+    did produce and owns pom.xml, so the repair adds <finalName> (or the Gradle archiveFileName) instead of touching
+    Java sources. 10 of 12 M0 baseline Java builds (2026-10-28) failed only on this."""
+    tokens = spec['tokens']
+    jar = tokens[tokens.index('-jar') + 1]
+    rendered, description = render(tokens, fixtures)
+    command = shlex.join(rendered) if rendered else spec['excerpt']
+    produced = built_jars(root)
+    built = ('; the build produced ' + ', '.join(produced[:4])) if produced else '; the build produced no jar'
+    gradle = any(p.startswith('build/libs/') or '/build/libs/' in p for p in produced) or (Path(root) / 'build.gradle').exists() or (Path(root) / 'build.gradle.kts').exists()
+    fix = ('set `archiveFileName` in build.gradle' if gradle else
+           f'add `<build><finalName>{Path(jar).stem}</finalName></build>` to pom.xml')
+    reason = (f'Diagnostic probe (never acceptance evidence): the request runs `{spec["excerpt"]}`, but `{jar}` does not exist after '
+              f'the build{built}. Deliver the jar under exactly that path: {fix}. Do not change the Java sources for this.')
+    row = _row(f'probe:command:{n}', op_id, revision_id, passed=False, command=command, code=None,
+               stdout=f'not run: `{jar}` was not built{built}', stderr='', excerpt=spec['excerpt'], description=description or 'no input',
+               expected=f'the jar at `{jar}`', actual=f'not built{built}', reason=reason)
+    row['owning_files'] = ['build.gradle.kts' if (Path(root) / 'build.gradle.kts').exists() else 'build.gradle' if gradle else 'pom.xml']
+    return row
 
 
 def _run(execute, store, op_id, root, argv, project_id, log, stderr_path, cwd='.'):
@@ -519,8 +634,9 @@ def _flag_rows(execute, store, op_id, root, task, argv, n, fixtures, folder, rev
 
 
 def command_rows(store, op_id, root, profile, task, revision_id, *, project_id, runner=None):
-    """probe:command:<n> rows for the requested invocations that could be derived and located, followed by the
-    negative rows (probe:invalid:<n>:<k>, probe:missing:<n>) the request wording promises."""
+    """probe:command:<n> rows for the requested invocations that could be derived and located (or a failing one when
+    the requested program was not delivered under its name), followed by the negative rows (probe:invalid:<n>:<k>,
+    probe:missing:<n>) the request wording promises."""
     from coder_project_runtime import run_probe
     from coder_policy7_phases import layer
     rows = []
@@ -532,6 +648,9 @@ def command_rows(store, op_id, root, profile, task, revision_id, *, project_id, 
     for n, spec in enumerate(requested_commands(task), 1):
         argv = launcher(profile, root, spec)
         if not argv:
+            missing = missing_program_row(op_id, root, profile, task, spec, n, fixtures, revision_id)
+            if missing:
+                rows.append(missing)
             continue
         rendered, description = render(argv, fixtures)
         if rendered is None:

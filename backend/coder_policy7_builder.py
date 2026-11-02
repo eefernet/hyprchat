@@ -26,6 +26,32 @@ def key_error_lines(defects, limit=14):
     return list(dict.fromkeys(lines))[:limit]
 
 
+def stated_behaviour(job, limit=12):
+    """Exit codes, error cases and exact invocations the request states, one line each, for the builder task.
+
+    The probes run these literally after the build (`probe:command:*`, `probe:invalid:*`, `probe:missing:*`), so the
+    builder should see them as rules rather than infer them from prose. Nothing is invented: only sentences with an
+    exit-code promise or a backticked invocation."""
+    from coder_request_probes import requested_commands, sentences, wording_rules, EXIT
+    import re
+    from coder_scope import effective_task
+    task = effective_task(job)
+    lines = []
+    for rule in wording_rules(task):
+        code = 'a non-zero code' if rule['code'] is None else f'code {rule["code"]}'
+        where = ' with a message on stderr' if rule['stderr_required'] else ''
+        lines.append(f'{rule["kind"]} {rule["what"]}: exit with {code}{where}')
+    exit_rule = re.compile(EXIT, re.I)
+    for sentence in sentences(task):
+        if exit_rule.search(sentence) and not any(rule['sentence'] == sentence for rule in wording_rules(task)):
+            lines.append(sentence.strip())
+    for spec in requested_commands(task):
+        lines.append(f'`{spec["excerpt"]}` must run exactly as written' + (
+            f' (the jar at `{spec["tokens"][spec["tokens"].index("-jar") + 1]}` must exist after the build: set <finalName> in pom.xml)'
+            if spec['tokens'][0] == 'java' and '-jar' in spec['tokens'] and spec['tokens'].index('-jar') + 1 < len(spec['tokens']) else ''))
+    return list(dict.fromkeys(line[:300] for line in lines))[:limit]
+
+
 def guidance(job):
     from coder_policy7 import EXECUTION_HELP
     text = ('Existing user tests are protected: ' + ', '.join(job.get('baseline_test_files', [])) + '. Add new tests in new files.\n' if job.get('baseline_test_files') else '')
@@ -40,6 +66,10 @@ def guidance(job):
              'nothing: keep using tools until all files exist and the tests pass, then call finish. '
              'Build and run the project and its tests yourself with the terminal before finishing; fix what fails. '
              'Keep the layout minimal: only files this project needs, one copy of each, no scratch or duplicate sources.\n')
+    stated = stated_behaviour(job)
+    if stated and not job.get('repair_round'):
+        text += ('\nSTATED BEHAVIOUR the controller checks literally (M0 baseline: most Python failures were these):\n' +
+                 '\n'.join('- ' + line for line in stated) + '\n')
     if job.get('build_continuations'):
         text += ('\nCONTINUE: your previous run stopped at a partial checkpoint. The files you already wrote are in the project. '
                  'Write the REMAINING files from the brief (application, tests, README), then build and run the tests. '
@@ -201,6 +231,8 @@ def sdk_build(store, operation_id, repository, job, payload, *, runner=None):
               'log_tail': error or outcome.get('incomplete_reason', ''), 'summary': f'{len(changed)} files changed',
               'allowance_spent': spent, 'stalled': stalled, 'agent_finished': bool(outcome.get('agent_finished')), 'execution_status': outcome.get('execution_status', ''),
               'session_id': outcome.get('session_id', ''), 'events': outcome.get('events', 0), 'removed': removed,
-              'skeleton_applied': bool(skeleton_applied), 'input_budget': over_budget}
+              'skeleton_applied': bool(skeleton_applied), 'input_budget': over_budget,
+              'hook_denials': outcome.get('hook_denials', 0), 'hook_nudges': outcome.get('hook_nudges', 0),
+              'hook_denied_unresolved': bool(outcome.get('hook_denied_unresolved'))}
     store.event(operation_id, 'builder_returned', **{k: v for k, v in result.items() if k != 'source_hashes'})
     return result

@@ -105,6 +105,11 @@ def edit_transition(job, result):
                  'build_continuations': 0}
         if category == 'no_op' or changed and (result.get('agent_finished') or continued >= MAX_BUILD_CONTINUATIONS):
             return check
+        if result.get('hook_denied_unresolved'):
+            # The agent called finish, the stop hook found failures, and the turn ceiling came before another finish:
+            # the work is done as far as the agent knows. The checks route those failures; another "write the
+            # remaining files" pass would not.
+            return check
         if result.get('input_budget') and changed:
             # A saturated session overflowed AFTER real work (verify-kanban 2026-09-25: 14 calls, app.js written):
             # verify that checkpoint; the next round starts a fresh session with a bounded prompt.
@@ -240,15 +245,60 @@ def execute_operation(store, operation_id, repository):
             audit_source=Path(job['audit_dir']) if payload.get('audit') else None,
             checks=job.get('audit_checks') if payload.get('audit') else None)
         result['execution_profile'] = profile
-        if not payload.get('audit') and not payload.get('baseline') and not payload.get('preflight'):
+        from coder_required_tests import grow, judged, passing, regressions, rerun_packages
+        if payload.get('baseline'):
+            # An edit keeps every test that passes on the revision it starts from.
+            result['required_tests'] = passing(result['checks'], placeholder_test_hashes(job))
+            # Every id the baseline ran, passed or failed: an inherited test that failed at baseline and passes after the
+            # edit is a repair, never the NEW test a request asked for (review 2026-10-28).
+            from coder_required_tests import observed
+            result['baseline_observed'] = sorted(observed(result['checks'], placeholder_test_hashes(job)))
+        elif not payload.get('audit') and not payload.get('preflight'):
+            required = job.get('required_tests') or []
+            superseded = superseded_tests(job, required)
+            lost = regressions(required, result['checks'], superseded, result.get('untested'))
+            if rerun_packages(lost):
+                rerun_flaky(store, operation_id, repository, profile, payload, result, rerun_packages(lost))
+                lost = regressions(required, result['checks'], superseded, result.get('untested'))
             regressed = repair_regressions(job, result['checks'], tree_hashes(repository.root, repository.excludes))
             regressed.extend(missing_repair_deliverables(job, repository))
-            if regressed:
-                result['repair_regression'] = {'failed_revision': payload['revision_id'], 'checks': result['checks'], 'regressed': regressed}
-                result['restored_snapshot'] = restore_repair(repository, job['repair_checkpoint'], payload['revision_id'])
+            regressed.extend('test:' + row['id'] for row in lost)
+            # A lost named test goes back to the last eligible revision, which by construction keeps every required
+            # test; a broken suite or a deleted deliverable goes back to the repair checkpoint, as before.
+            suites = [name for name in regressed if not name.startswith('test:')]
+            target = (job.get('repair_checkpoint') if suites and job.get('repair_checkpoint')
+                      else job.get('eligible_revision') or job.get('repair_checkpoint'))
+            if regressed and target and target != payload['revision_id'] and not verified_checkpoint(job, target):
+                # cw3-59371f48 (2026-10-28): the near-empty revision a Continue resumed on was the repair checkpoint
+                # (repair_checks=[]), and a missing README rolled a built, tested project back onto that empty tree,
+                # twice. An unverified target is never restored; the failures take the eligibility/decide() path.
+                store.event(operation_id, 'rollback_skipped', reason='The rollback target is not a verified checkpoint',
+                            target=target, regressed=regressed)
+                target = None
+            if regressed and target and target != payload['revision_id']:
+                result['repair_regression'] = {'failed_revision': payload['revision_id'], 'checks': result['checks'],
+                                               'regressed': regressed, 'lost_tests': lost}
+                result['restored_snapshot'] = restore_repair(repository, target, payload['revision_id'])
                 # The controller may repair again from the restored tree; its targets must reflect THAT tree.
                 result['source_hashes'] = tree_hashes(repository.root, repository.excludes)
                 return result
+            # Eligible: no required test was lost or fails as a parent, and every package holding one ran its tests.
+            from coder_required_tests import failing_parents
+            result['eligible'] = not lost and not failing_parents(required, result['checks'], superseded) and judged(required, result['checks'])
+            result['lost_tests'] = lost
+            result['superseded_tests'] = sorted(set(superseded) & set(required))
+            # Nothing becomes required while skeleton placeholder files are unreplaced: compiled rows carry no
+            # traced test files, so their placeholder tests cannot be told apart by hash.
+            spec = job.get('skeleton') or {}
+            unreplaced = False
+            if spec.get('applied') and spec.get('id'):
+                from coder_skeletons import unchanged_placeholders
+                try:
+                    unreplaced = bool(unchanged_placeholders(Path(result['workspace']), spec))
+                except (KeyError, OSError):
+                    unreplaced = False
+            result['required_tests'] = (grow(required, result['checks'], placeholder_test_hashes(job))
+                                        if result['eligible'] and not unreplaced else required)
         if not payload.get('baseline') and not payload.get('preflight'):
             import hashlib
             from coder_repository import file_hash, safe_relative
@@ -317,11 +367,33 @@ def execute_operation(store, operation_id, repository):
                 row['repair_demonstrated'] = repair_demonstrated(row, old)
                 row['test_origin'] = ('baseline_user_unchanged' if old and row.get('test_files') and row['test_files'] == old.get('test_files')
                                       else 'current_builder' if row.get('origin') == 'project' else 'generated_audit')
-            # Absent documentation is an application defect, never an audit fault.
+            # Absent documentation is an application defect, never an audit fault. Only files evidence_matches accepts
+            # count (the component's own docs or an enclosing package's): a root docs/setup.md bound into the row of
+            # component `server` made it unmatchable, so a documented server parked as an audit gap on every Continue.
+            from pathlib import PurePosixPath
             from coder_policy7 import documented
+            from coder_policy7_evidence import is_documentation, within
             packages = [p.get('cwd', '.') for p in profile.get('profiles', []) if isinstance(p, dict)]
+            def doc_evidence(root, component):
+                return [name for name in documented(root, component, packages) if is_documentation(name)
+                        and (within(name, component) or within(component, str(PurePosixPath(name).parent)))]
             result['missing_deliverables'] = [o['id'] for o in job.get('brief', {}).get('outcomes', [])
-                if 'documentation' in o.get('evidence_types', []) and not documented(repository.root, o.get('component', '.'), packages)]
+                if 'documentation' in o.get('evidence_types', []) and not doc_evidence(repository.root, o.get('component', '.'))]
+            if not payload.get('audit'):
+                # Delivered documentation is a controller-owned file check on the exact revision, so a requested
+                # README counts without a model-written audit (independent review is off by default).
+                from coder_repository import file_hash, safe_relative
+                copy = Path(result['workspace'])
+                for o in job.get('brief', {}).get('outcomes', []):
+                    if 'documentation' not in o.get('evidence_types', []):
+                        continue
+                    files = doc_evidence(copy, o.get('component', '.'))
+                    if files:
+                        result['checks'].append({'id': 'documentation:' + o['id'], 'kind': 'file', 'origin': 'controller',
+                            'passed': True, 'classification': 'passed', 'outcomes': [o['id']], 'evidence_types': ['documentation'],
+                            'file_bindings': [{'path': name, 'sha256': file_hash(safe_relative(copy, name))} for name in files],
+                            'revision_id': payload['revision_id'], 'execution_id': operation_id + ':documentation:' + o['id'],
+                            'cwd': '.'})
         return result
     raise ValueError('Unsupported policy-7 operation: ' + kind)
 
@@ -552,7 +624,7 @@ class Operations:
 
     def review(self, op):
         from coder_policy7 import json_object
-        from coder_policy7_evidence import acceptance, normalize_verdict, blocking
+        from coder_policy7_evidence import acceptance, normalize_verdict, blocking, baseline_test_ids
         policy = resolve('reviewer', self.job['settings'])
         outcomes = self.job['brief']['outcomes']
         checks = [{k: c.get(k) for k in ('id', 'passed', 'classification', 'command', 'log_tail', 'outcomes',
@@ -573,7 +645,7 @@ class Operations:
             'in the current request; cite their outcome IDs in diagnoses[].outcomes. Otherwise leave them as existing failures. '
             'A passing check is insufficient if it copies application logic or checks another component. '
             'advisory_checks are informational lint/typecheck or optional visual skips. Never diagnose them as blocking defects.\n')
-        gaps = acceptance(outcomes, self.job['checks'], {}, self.job['revision_id'])['outcomes']
+        gaps = acceptance(outcomes, self.job['checks'], {}, self.job['revision_id'], request=self.job.get('task', ''), baseline_tests=baseline_test_ids(self.job))['outcomes']
         current = {c['id']: c.get('passed') for c in self.job['checks']}
         baseline = self.job.get('baseline_checks', self.job.get('baseline', []))
         data = {'original_request': self.job['task'], 'outcomes': outcomes, 'checks': checks,
@@ -627,7 +699,8 @@ class Operations:
             failing = {name for c in self.job['checks'] if blocking(c) for name in c.get('outcomes') or []}
             unscoped = any(blocking(c) and not c.get('outcomes') for c in self.job['checks'])
             disputed = [row['id'] for row, gap in zip(verdict['outcomes'], gaps) if row['status'] != 'passed'
-                        and not gap['missing_evidence'] and row['id'] not in failing]
+                        and not gap['missing_evidence'] and 'behavior' not in gap.get('evidence_types', [])
+                        and row['id'] not in failing]
             if disputed and not unscoped and not challenged:
                 challenged = True
                 correction = ('\nRe-examine outcomes ' + ', '.join(disputed) + '. Every required check for them PASSED against '
@@ -719,6 +792,30 @@ def repair_regressions(job, current, source_hashes=None):
             and retained_suite_regression(old, checks.get(old['id']), placeholders, source_hashes)]
 
 
+def verified_rows(checks):
+    """At least one PASSED project row: the only record that a revision holds a project that built or tested."""
+    return any(isinstance(c, dict) and c.get('passed') and c.get('origin', 'project') == 'project' for c in checks or [])
+
+
+def verified_checkpoint(job, target):
+    """Whether a rollback may restore ``target``: a recorded revision with a passed project row.
+
+    The repair checkpoint speaks through ``repair_checks``; the eligible revision through ``eligible_checks`` or,
+    when the worker payload carries only the set, a non-empty ``required_tests`` (the set grows only from tests
+    that passed on an eligible revision, so it is itself that record). The starting tree of a new build never
+    qualifies: live cw3-59371f48 restored it over a real project.
+    """
+    if not target:
+        return False
+    if target == job.get('baseline_revision') and job.get('mode') == 'build_from_prompt':
+        return False
+    if target == job.get('repair_checkpoint'):
+        return verified_rows(job.get('repair_checks'))
+    if target == job.get('eligible_revision'):
+        return verified_rows(job.get('eligible_checks')) or bool(job.get('required_tests'))
+    return False
+
+
 def missing_repair_deliverables(job, repository):
     """Protect named delivered files and still-required documentation during repair.
 
@@ -745,9 +842,10 @@ def retained_deliverables(job):
     named = [name for name in known if re.search(r'(?<![\w./-])' + re.escape(name) + r'(?![\w./-])', text)]
     docs = [o.get('component', '.') for o in job.get('brief', {}).get('outcomes', [])
             if 'documentation' in o.get('evidence_types', [])]
-    # Only preserve documentation that was present before this repair.
+    # Only preserve documentation that was present before this repair. Only a documentation outcome can say so:
+    # behaviour/test outcomes never miss documentation, and they marked '.' documented in cw3-59371f48 (no README).
     documented = {o.get('component', '.') for o in (job.get('verification_summary') or {}).get('outcomes', [])
-                  if 'documentation' not in o.get('missing_evidence', [])}
+                  if 'documentation' in o.get('evidence_types', []) and 'documentation' not in o.get('missing_evidence', [])}
     return {'repair_deliverables': named, 'repair_documentation': [c for c in docs if c in documented]}
 
 
@@ -765,6 +863,71 @@ def restore_repair(repository, checkpoint, failed_revision):
     if restored['revision'] != checkpoint:
         raise ValueError('Repair rollback did not reproduce the saved checkpoint')
     return restored
+
+
+def authorizes_test_changes(task):
+    """The request explicitly allows changing the existing tests ("update the tests", "rewrite the unit tests")."""
+    import re
+    pattern = r'\b(?:edit|modify|update|rewrite|remove|delete|replace|fix)\s+(?:the\s+)?(?:existing\s+)?(?:unit\s+)?tests?\b'
+    return any(not re.search(r"(?:not|never|don't)\s*$", task[max(0, m.start() - 20):m.start()], re.I)
+               for m in re.finditer(pattern, task, re.I))
+
+
+def superseded_tests(job, required):
+    """Inherited required tests this request allows to change, never silently: tests in files it authorizes editing.
+
+    Only tests inherited from the source revision can be superseded; tests that started passing during
+    this job are always kept.
+    """
+    from coder_required_tests import file_of
+    from coder_scope import effective_task
+    inherited = set(job.get('baseline_required') or []) & set(required)
+    if not inherited:
+        return []
+    if authorizes_test_changes(effective_task(job)):
+        return sorted(inherited)
+    names = {b['path'] for row in job.get('baseline_checks', []) for b in row.get('test_files', []) if isinstance(b, dict)}
+    authorized = names - set(job.get('baseline_test_files') or [])
+    return sorted(name for name in inherited if file_of(name) in authorized)
+
+
+def rerun_flaky(store, operation_id, repository, profile, payload, result, packages):
+    """Run the test commands of these packages once more; a required test that passes again was flaky, not lost."""
+    from coder_project_runtime import run_revision
+    wanted = [c for c in profile.get('checks', []) if (c.get('phase') == 'test' or c.get('is_test'))
+              and c.get('origin', 'project') == 'project' and (c.get('cwd') or '.') in packages]
+    if not wanted:
+        return
+    try:
+        again = run_revision(store, operation_id, repository, profile, project_id=payload['project_id'], checks=wanted, attempt='rerun')
+    except Exception as error:   # the first result stands: a lost test still counts as lost
+        store.event(operation_id, 'required_tests_rerun', packages=packages, error=str(error)[:300])
+        return
+    fresh = {row['id']: row for row in again['checks'] if row.get('is_test')}
+    recovered = []
+    for index, row in enumerate(result['checks']):
+        repeat = fresh.get(row.get('id'))
+        if not repeat or not row.get('is_test') or row.get('passed'):
+            continue
+        first = {'exit_code': row.get('exit_code'), 'log_tail': (row.get('log_tail') or '')[-1500:]}
+        if repeat.get('passed'):
+            result['checks'][index] = {**repeat, 'flaky': True, 'first_attempt': first}
+            recovered.append(row['id'])
+            continue
+        # Still failing overall: keep this row, but credit named tests (and parents, which pass only with their own
+        # body and every test under them) that passed the second time, else failing_parents keeps judging the first run.
+        old, again_ids = row.get('test_ids') or {}, repeat.get('test_ids') or {}
+        ids, aggs = dict(old.get('ids') or {}), dict(old.get('aggregates') or {})
+        flaky = [name for name, outcome in ids.items() if outcome == 'failed' and (again_ids.get('ids') or {}).get(name) == 'passed']
+        flaky_aggs = [name for name, outcome in aggs.items()
+                      if outcome == 'failed' and (again_ids.get('aggregates') or {}).get(name) == 'passed']
+        if flaky or flaky_aggs:
+            ids.update({name: 'passed' for name in flaky}); aggs.update({name: 'passed' for name in flaky_aggs})
+            test_ids = {**old, 'ids': ids, **({'aggregates': aggs} if flaky_aggs else {})}
+            result['checks'][index] = {**row, 'test_ids': test_ids, 'flaky_tests': flaky,
+                                       **({'flaky_aggregates': flaky_aggs} if flaky_aggs else {})}
+            recovered.append(row['id'])
+    store.event(operation_id, 'required_tests_rerun', packages=packages, recovered=recovered)
 
 
 def baseline_test_files(job):

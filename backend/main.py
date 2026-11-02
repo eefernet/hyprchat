@@ -670,6 +670,8 @@ class ChatRequest(BaseModel):
     daedalus_new_project: bool = False
     daedalus_visual_review: Optional[bool] = None
     daedalus_visual_model: Optional[str] = None
+    # "accepted": edit from the accepted version instead of the latest build.
+    daedalus_source_pointer: str = ""
     # Continue a length-truncated assistant message: id of the existing
     # assistant row to resume. messages[] must end with that partial assistant
     # message; no new stub row is created and the frontend PATCHes the
@@ -942,7 +944,8 @@ async def chat_stream(req: ChatRequest):
         token = db.set_current_user_id(user_id)
         import coder_jobs
         coding_token = coder_jobs.REQUEST_OPTIONS.set({"project_id":req.daedalus_project_id,
-            "new_project":req.daedalus_new_project,"visual_review":req.daedalus_visual_review,"visual_model":req.daedalus_visual_model})
+            "new_project":req.daedalus_new_project,"visual_review":req.daedalus_visual_review,"visual_model":req.daedalus_visual_model,
+            "source_pointer":req.daedalus_source_pointer})
         try:
             async for chunk in chat_stream_generate(
                 req,
@@ -2091,6 +2094,8 @@ async def delete_all_conversations():
             "DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
             (user_id,),
         )
+        # Daedalus jobs cascade with their conversations; project pointers naming them must not dangle.
+        await db.release_working_pointers(conn, user_id)
         await conn.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
         await conn.commit()
     finally:

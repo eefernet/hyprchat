@@ -217,17 +217,20 @@ def _run_coder_local(store, operation_id, repository):
     mode_path.parent.mkdir(parents=True,exist_ok=True)
     try: saved_mode=json.loads(mode_path.read_text())
     except (OSError,ValueError): saved_mode={}
-    if payload.get('policy_version', 1) >= 6 and saved_mode.get('mode') in {'native', 'text'}:
+    # Only a definitive capability probe may record text mode. Two narrating replies or one malformed call used
+    # to persist text mode per model digest (ledger 2026-10-25: all three demotions were narration), which put
+    # most models on the SDK's larger text protocol for every later job.
+    trusted = saved_mode.get('mode') == 'native' or (saved_mode.get('mode') == 'text' and saved_mode.get('source') == 'probe')
+    if payload.get('policy_version', 1) >= 6 and trusted:
         native = saved_mode['mode'] == 'native'
     else:
         native = worker._check_tool_support(url, req.model, num_ctx=req.num_ctx, num_predict=req.num_predict,
                                             on_call=lambda: _boundary(store, operation_id, model_call=True))
         if payload.get('policy_version', 1) >= 6 and tool_mode_is_definitive(worker, url, req.model, native):
             temporary = mode_path.with_suffix('.tmp')
-            temporary.write_text(json.dumps({'mode':'native' if native else 'text'})); temporary.replace(mode_path)
+            temporary.write_text(json.dumps({'mode':'native' if native else 'text', 'source': 'probe'})); temporary.replace(mode_path)
+    store.event(operation_id, 'tool_mode', mode='native' if native else 'text', saved=bool(trusted))
     llm, agent = worker._make_llm_and_agent(req, url, native)
-    if payload.get('policy_version',1)>=3 and saved_mode.get('model')==req.model and saved_mode.get('mode')=='text':
-        llm.native_tool_calling=False
     if payload.get("policy_version",1)>=2 and payload.get("ui_required"):
         from coder_browser_tool import install
         install(agent,store,operation_id,repository)
@@ -277,6 +280,43 @@ def _run_coder_local(store, operation_id, repository):
 
     from coder_context import ContextWindow, StallGuard
     window = ContextWindow(window_state, save_window)
+
+    # Stop hook (whole-project builds only): the SDK runs coder_stop_hook when the agent tries to stop.
+    hook_path = store.root / 'jobs' / operation['job_id'] / 'stop-hook.json'
+    use_hook = bool(payload.get('builder_until_finish') and payload.get('policy_version', 1) >= 7
+                    and payload['settings'].get('daedalus_stop_hook', True))
+    hook_seconds = min(900, 60 + 2 * int(payload['settings'].get('daedalus_command_seconds', 300)))
+
+    def hook_state(**changes):
+        if not use_hook:
+            return
+        try:
+            current = json.loads(hook_path.read_text())
+        except (OSError, ValueError):
+            current = {}
+        current.update(changes)
+        temporary = hook_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(current)); temporary.replace(hook_path)
+        return current
+
+    denials_before = 0
+    if use_hook:
+        import coder_stop_hook
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        telemetry = store.root.parent / 'telemetry' / (operation_id + '.jsonl') if store.root.name == 'bookkeeping' else None
+        # Denials and nudges are budgeted per JOB, so they survive between operations; the rest is per operation.
+        start = hook_state(root=str(repository.root), inventory=str(store.root / 'jobs' / operation['job_id'] / 'hook-inventory'),
+                   excludes=list(payload['settings']['daedalus_exclude_dirs']), execution_commands=(payload.get('policy7_job') or {}).get('execution_commands') or {},
+                   turns=0, turn_limit=int(payload['settings']['daedalus_attempt_turns']), finish_seen=False,
+                   command_seconds=int(payload['settings'].get('daedalus_command_seconds', 300)), hook_seconds=hook_seconds,
+                   operation_id=operation_id, telemetry=str(telemetry) if telemetry else '')
+        denials_before = int(start.get('denials') or 0)
+        # Dependency environments as prepared for this operation; a package whose key moves is left to the controller.
+        try:
+            keys = coder_stop_hook.environment_keys(start)
+        except Exception:
+            keys = {}   # unknown: every prepared package counts as changed
+        hook_state(environment_keys=keys)
     # Only whole-project builds are guarded: inspecting many files is normal for a scoped repair.
     guard = StallGuard() if payload.get('builder_until_finish') else None
 
@@ -307,9 +347,7 @@ def _run_coder_local(store, operation_id, repository):
             # This boundary precedes SDK tool dispatch. No arguments from the
             # rejected response are executed, and earlier actions are not replayed.
             self.native_tool_calling=False
-            temporary=mode_path.with_suffix('.tmp')
-            temporary.write_text(json.dumps({'model':req.model,'mode':'text'}));temporary.replace(mode_path)
-            store.event(operation_id,'tool_mode_fallback',reason='Malformed native tool response before execution',recovery_attempted=True)
+            store.event(operation_id,'tool_mode_fallback',reason='Malformed native tool response before execution',recovery_attempted=True,persisted=False)
             return original_completion(self,messages,tools=tools,**kwargs)
 
     def transport(self, *, messages, **kwargs):
@@ -350,14 +388,11 @@ def _run_coder_local(store, operation_id, repository):
         if count:
             store.event(operation_id, "text_tool_fallback", count=count)
         narration_streak = native_narration_streak(response, kwargs.get("tools"), self.native_tool_calling, narration_streak)
-        if narration_streak >= 2:
-            # Use the SDK's established text protocol on the next request.
-            # This is local to this operation, not a permanent model demotion.
-            self.native_tool_calling = False
-            if payload.get('policy_version', 1) >= 6:
-                temporary = mode_path.with_suffix('.tmp')
-                temporary.write_text(json.dumps({'mode':'text'})); temporary.replace(mode_path)
-            store.event(operation_id, "tool_mode_fallback", reason="Repeated native requests returned narration without tool calls")
+        if narration_streak:
+            # A reply without a tool call ends the SDK run; the stop hook or the finish driver answers it with one
+            # "act or finish" message. Switching this session to the text protocol is never the answer.
+            store.event(operation_id, "narration_turn", streak=narration_streak)
+        hook_state(turns=inference_turns)
         usage = dict(response.usage) if getattr(response,"usage",None) else {}
         store.event(operation_id, "usage", usage=usage)
         window.observe(raw_estimate, usage.get("prompt_tokens") or 0)
@@ -380,14 +415,23 @@ def _run_coder_local(store, operation_id, repository):
         events.append(data)
         if guard:
             guard.record(data)
+        if data.get("kind") == "ActionEvent" and (data.get("tool_name") == "finish" or (data.get("action") or {}).get("kind") == "FinishAction"):
+            hook_state(finish_seen=True)
 
     conversation = None
     try:
         session_id = uuid.uuid5(uuid.NAMESPACE_URL, operation["job_id"] + ":" + payload.get("milestone_id", "code"))
+        hooks = {}
+        if use_hook:
+            import shlex, sys
+            from openhands.sdk.hooks import HookConfig, HookDefinition, HookMatcher
+            command = ' '.join(shlex.quote(part) for part in (sys.executable, str(Path(coder_stop_hook.__file__).resolve()), str(hook_path)))
+            # Hooks are not persisted with the conversation: pass them on every construction, resumes included.
+            hooks['hook_config'] = HookConfig(stop=[HookMatcher(matcher='*', hooks=[HookDefinition(command=command, timeout=hook_seconds)])])
         conversation = worker._Conversation(agent=agent, workspace=str(repository.root),
             persistence_dir=str(store.root / "sessions"), conversation_id=session_id,
             callbacks=[on_event], max_iteration_per_run=req.max_rounds, stuck_detection=True,
-            visualizer=None, delete_on_close=False)
+            visualizer=None, delete_on_close=False, **hooks)
         evidence = payload.get("evidence", {})
         evidence_path = store.root/"jobs"/operation["job_id"]/f"{operation_id}-evidence.json"
         evidence_path.write_text(json.dumps(evidence))
@@ -420,7 +464,12 @@ def _run_coder_local(store, operation_id, repository):
             finished = drive_to_finish(conversation, events, lambda:inference_turns,
                                        lambda:store.get(operation_id)["payload"]["settings"]["daedalus_attempt_turns"])
         state = str(conversation.state.execution_status)
-        return {"agent_finished": finished, "execution_status": state,
+        try:
+            hook_summary = json.loads(hook_path.read_text()) if use_hook else {}
+        except (OSError, ValueError):
+            hook_summary = {}
+        from coder_stop_hook import outcome
+        return {"agent_finished": finished, "execution_status": state, **outcome(hook_summary, denials_before, finished),
                 "incomplete_reason":"" if finished else 'Builder returned a checkpoint for controller verification.' if payload.get('policy_version',1)>=6 else "The Builder has not called finish. Complete the next action with a tool, then call finish when the milestone is done.",
                 "session_id": str(session_id), "events": len(events)}
     finally:

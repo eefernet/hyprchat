@@ -217,11 +217,18 @@ def outcome(value, index):
         if re.search(r'/api\b|\b(?:rest|http|json|web)\s+api\b|\bapi\s+(?:tests?|endpoints?|routes?|checks?|regression)\b', text):
             interfaces.add('api')
     return {'id': f'o{index + 1}', 'text': row['text'], 'evidence_types': sorted(kinds),
-            'component': component, 'test_interfaces': sorted(interfaces), **({'waived': sorted(waived)} if waived else {})}
+            'component': component, 'test_interfaces': sorted(interfaces), **({'waived': sorted(waived)} if waived else {}),
+            **({'inherited': True} if row.get('inherited') else {})}
 
 
 def within(path, component):
     return component == '.' or path == component or path.startswith(component.rstrip('/') + '/')
+
+
+def documentation_home(component):
+    """Where missing documentation for a component goes: its own README (the evidence rule accepts
+    files inside the component or an enclosing folder, so a root docs/ folder never counts for `server`)."""
+    return 'README.md' if component in ('.', '') else component.rstrip('/') + '/README.md'
 
 
 def repair_demonstrated(row, old):
@@ -341,43 +348,130 @@ def blocking(check):
     return not (check.get('origin') == 'project' and check.get('phase') in ADVISORY_PHASES and not check.get('is_test'))
 
 
-def acceptance(outcomes, checks, verdict, revision, request=None, history=()):
-    from coder_criteria import EVIDENCE_VERSION, criteria
-    obligations = criteria(request, outcomes, history)
-    reported = {o.get('id'): o for o in verdict.get('outcomes', [])}
-    rows = []
+EVIDENCE_VERSION = 4
+
+
+def exercised(row):
+    """A passing row that actually ran the program: a test whose runner executed tests, a command the
+    request names, or an acceptance example the owner confirmed. A build alone exercises nothing."""
+    if not row.get('passed'):
+        return False
+    ident = str(row.get('id') or '')
+    if ident.startswith(('probe:command:', 'example:')):
+        return True
+    return bool(row.get('is_test') and row.get('origin', 'project') == 'project' and
+                (row.get('coverage_observed') or (row.get('test_count') or 0) > 0))
+
+
+# The request asks for tests to be ADDED. Judged clause by clause (split at . ; ! ? and newlines): the clause must hold a
+# verb of creation or delivery (add, write, create, include, introduce, cover, extend, ship, provide ...) and a "test(s)"
+# NOUN that is neither an adjective ("test suite", "test-mode", "test database", "tests/ directory") nor preservation or
+# execution wording ("run the tests", "keep the test suite green", "all tests ... pass", "the existing tests unchanged",
+# "tests should keep passing"); a negated clause ("don't add tests", "without new tests") never counts. Adversarial reviews
+# 2026-10-28: the first regex let a verb anywhere bind to a far "tests" (false demands on uploaded-project edits), the
+# second demanded the verb next to the noun and missed "Add a --json flag with tests." / "and corresponding tests".
+CREATION_VERB = re.compile(r"\b(?:add|adds|adding|added|write|writes|writing|written|create|creates|creating|created|include|includes|"
+                           r"including|introduce|introduces|introducing|cover|covers|covering|extend|extends|extending|expand|expands|"
+                           r"ship|ships|deliver|delivers|provide|provides|accompan\w+)\b", re.I)
+TEST_NOUN = re.compile(r"\b(?:unit\s+|regression\s+|integration\s+|smoke\s+|pytest\s+|junit\s+)?tests?(?:\s+cases?)?\b(?![-/\w])", re.I)
+NOT_A_TEST_NOUN = re.compile(r"^\s*(?:suite|suites|mode|command|commands|database|db|harness|runner|runners|results?|directory|directories|folder|folders|"
+                             r"data|fixtures?|files?|scripts?|environments?|servers?|users?|accounts?|keys?|flags?|options?|coverage|report|reports|"
+                             r"plan|plans|strateg\w+|infrastructure|setup|configs?|configuration)\b", re.I)
+PRESERVED_BEFORE = re.compile(r"\b(?:run|runs|running|rerun|execute|executing|keep|keeps|keeping|break|breaks|breaking|existing|current|update|"
+                              r"updating|updates|fix|fixing|all|every|each|without|no|skip|skipping|disable|disabling|pass|passes|passing)\b"
+                              r"(?:\s+\w+){0,2}\s*$", re.I)
+PRESERVED_AFTER = re.compile(r"^\s*(?:\(?\s*including\b|must|should|still|continue|continues|keep|keeps|pass|passes|passing|are|is|remain|remains|"
+                             r"already|green|unchanged|intact|untouched|in\s+(?:the\s+)?ci\b|in\s+the\s+pipeline)", re.I)
+NEGATED_CLAUSE = re.compile(r"\b(?:don'?t|do\s+not|no\s+need\s+to|never|without|not)\s+(?:\w+\s+){0,2}(?:add|adding|write|writing|create|creating|include|including|introduce|new)\b", re.I)
+NEW_TESTS_PHRASE = re.compile(r"\bnew\s+(?:unit\s+|regression\s+|integration\s+)?tests?\b(?![-/\w])", re.I)   # "needs new tests": the noun phrase itself asks
+EXTENDED_SUITE = re.compile(r"\b(?:extend|extends|extending|expand|expands|grow|grows|cover|covers|covering)\b(?:\s+\w+){0,2}\s+the\s+test\s+suite\b", re.I)
+
+
+def requests_new_tests(text):
+    """Whether the REQUEST's own wording asks for tests to be added (not merely kept passing or run)."""
+    for clause in re.split(r"[.;!?\n]+", str(text or '')):
+        if not (CREATION_VERB.search(clause) or NEW_TESTS_PHRASE.search(clause)) or NEGATED_CLAUSE.search(clause):
+            continue
+        if EXTENDED_SUITE.search(clause):
+            return True
+        for match in TEST_NOUN.finditer(clause):
+            before, after = clause[:match.start()], clause[match.end():]
+            if NOT_A_TEST_NOUN.match(after) or PRESERVED_BEFORE.search(before) or PRESERVED_AFTER.match(after):
+                continue
+            return True
+    return False
+
+
+def baseline_test_ids(job):
+    """The edit's baseline test ids for the new-test demand: every id the baseline ran (``baseline_observed``), falling back
+    to the passing set (``baseline_required``) for jobs baselined before the observed set existed; None for new builds."""
+    if job.get('baseline_observed') is not None:
+        return job['baseline_observed']
+    return job.get('baseline_required')
+
+
+def new_passing_test(check, baseline_tests):
+    """Whether a project test row ran a passing test the edit's baseline did not have (keys as coder_required_tests)."""
+    from coder_required_tests import key
+    ids = (check.get('test_ids') or {}).get('ids') or {}
+    return any(result == 'passed' and key(check, ident) not in baseline_tests for ident, result in ids.items())
+
+
+def acceptance(outcomes, checks, verdict, revision, request=None, history=(), baseline_tests=None):
+    """Deterministic acceptance over the checks of one revision; no model verdict participates.
+
+    ``checks_passed``: every check ran on this revision, nothing blocking failed, every requested
+    deliverable (tests, documentation, preserved files) has its evidence, and something exercised the
+    program. ``accepted`` additionally needs confirmed acceptance examples, all passing: only those
+    complete a job automatically. Otherwise a passing build is a "Checks passed - please review" candidate
+    and the owner's Accept completes it. ``request``/``history`` stay for callers; wording is not a gate.
+
+    ``baseline_tests`` (an edit job's ``baseline_required`` keys) makes a ``tests`` outcome need a passing test the
+    baseline did not have, but only when the outcome is not inherited from the parent brief AND the request's own
+    wording asks for tests to be added (``requests_new_tests``; a caller passing no ``request`` keeps the demand).
+    Uploaded-project edits inherit nothing, so "all existing tests must still pass" would otherwise demand a brand-new
+    test id. The inherited suite satisfied "add tests for the new option" in live job cw3-13fb755c with no new test
+    written. Runners that report no test identities (jest/vitest/npm wrappers) are not filtered.
+    """
+    reported = {o.get('id'): o for o in (verdict or {}).get('outcomes', [])}
     requirements = [{**outcome(original, index), 'id': original['id']} for index, original in enumerate(outcomes)]
-    for requirement in requirements:
-        executions, missing = [], []
+    checks_ok = bool(checks) and all(c.get('revision_id') == revision for c in checks) and not any(blocking(c) for c in checks)
+    rows = []
+    for requirement, original in zip(requirements, outcomes):
+        executions, missing, notes = [], [], []
         solo = len(behavior_peers(requirement, requirements)) == 1
         for kind in requirement['evidence_types']:
-            matches = [c for c in checks if evidence_matches(c, requirement, kind, revision, solo)]
             if kind == 'behavior':
-                # Generated audits and an unmapped user suite cannot prove a request clause.
-                matches = []
+                continue  # behaviour is judged by the checks themselves, never by a per-outcome model verdict
+            matches = [c for c in checks if evidence_matches(c, requirement, kind, revision, solo)]
             if kind == 'tests':
                 interfaces = {value for c in matches for value in c.get('test_interfaces', [])}
                 if set(requirement.get('test_interfaces', [])) - interfaces:
                     matches = []
+                demanded = (baseline_tests is not None and not original.get('inherited') and
+                            (request is None or requests_new_tests(request)))
+                if matches and demanded and any((c.get('test_ids') or {}).get('ids') for c in matches):
+                    # Runners that report no identities (jest/vitest/npm wrappers) cannot show a new test; their rows
+                    # keep today's standing instead of being filtered out beside an id-bearing package.
+                    baseline = set(baseline_tests)
+                    matches = [c for c in matches if not (c.get('test_ids') or {}).get('ids') or new_passing_test(c, baseline)]
+                    if not matches:
+                        notes.append('The delivered tests are all inherited from the version this edit started from; '
+                                     'no new test covers this outcome: ' + requirement['text'])
             executions.extend(c['execution_id'] for c in matches)
             if not matches:
                 missing.append(kind)
-        report = reported.get(requirement['id'], {})
-        status = report.get('status', 'unverified')
-        if status == 'passed' and missing:
-            status = 'unverified'
+        status = 'passed' if checks_ok and not missing else 'unverified'
         rows.append({**requirement, 'status': status, 'missing_evidence': missing,
-            'executions': sorted(set(executions)),
-            'trust_origin': None if 'behavior' in requirement['evidence_types'] else 'executed_deliverable_check',
-            'reason': ('Trusted independent behavioral verification is required; generated audits are diagnostic.'
-                       if 'behavior' in missing else report.get('reason', 'Independent review incomplete'))})
-    # Scope is established per outcome by executed evidence plus the reviewer's
-    # status; an explicit scope_complete=false still withholds acceptance.
-    accepted = (not obligations and bool(rows) and verdict.get('scope_complete') is not False and
-                all(r['status'] == 'passed' for r in rows) and bool(checks) and
-                all(c.get('revision_id') == revision for c in checks) and
-                not any(blocking(c) for c in checks))
-    return {'accepted': accepted, 'evidence_version': EVIDENCE_VERSION, 'criteria': obligations,
+            'executions': sorted(set(executions)), 'reviewer_note': reported.get(requirement['id'], {}).get('reason', ''),
+            **({'missing_new_test': True} if notes else {}),
+            'reason': '' if status == 'passed' else (notes[0] if notes else 'Missing ' + ', '.join(missing) if missing else 'A blocking check failed')})
+    ran = any(exercised(c) for c in checks if c.get('revision_id') == revision)
+    checks_passed = checks_ok and ran and all(not r['missing_evidence'] for r in rows)
+    examples = [c for c in checks if str(c.get('id') or '').startswith('example:')]
+    accepted = bool(checks_passed and examples and all(c.get('passed') and c.get('revision_id') == revision for c in examples))
+    return {'accepted': accepted, 'evidence_version': EVIDENCE_VERSION, 'checks_passed': checks_passed,
+        'checks_ok': checks_ok, 'exercised': ran, 'confirmed_examples': len(examples),
         'revision_id': revision, 'outcomes': rows, 'checks': checks,
         'advisory': [c['id'] for c in checks if not c.get('passed') and not blocking(c)],
         **{name: [r['id'] for r in rows if r['status'] == status]
@@ -396,8 +490,67 @@ def failure_signature(checks):
     return hashlib.sha256(json.dumps(sorted(rows), sort_keys=True).encode()).hexdigest()
 
 
-def decide(job, summary, verdict):
-    """Diagnose all failures before choosing an action; budgets are durable."""
+REPAIR_WORDING = re.compile(r'\b(?:fix|repair|failing|fails|broken|bug)\b|\bmake\b[^.]{0,80}\bpass', re.I)
+
+
+def baseline_failure_in_scope(check, job):
+    """With no reviewer, whether a test that already failed before the edit is the one the request asks to fix.
+
+    Only project tests of an existing project, and only when the request names the failing test: its id, function
+    or file, or its subject (test_divide -> "divide", test_calc.py -> "calc") together with repair wording ("Fix the
+    divide bug"). Repair wording alone promoted every unrelated baseline failure: "Fix the --json flag" spent both
+    rounds on a network test. Other baseline failures stay out of scope and park the job without spending repair
+    rounds, as a reviewer that did not diagnose them would.
+
+    Files come only from evidence that ties them to a FAILING test. A whole-suite row traces every test file it ran,
+    so the row's test_files let "Fix the report command" (test_report.py passes) promote a failing test_net.py. A
+    traced file counts when a failing id names it (unittest "tests.test_calc.Case.test", node TAP "file > suite >
+    test"), when the runner's failure lines name it and no id failed (a pytest collection error, jest), or when it
+    is the row's only test module (conftest.py and helpers do not count). A cargo unit test's "src/main.rs::" names
+    the source file hosting it, which requests name for new work, so only a test-like file name counts on its own.
+    """
+    if check.get('origin', 'project') != 'project' or not check.get('is_test') or job.get('mode') == 'build_from_prompt':
+        return False
+    task = str(job.get('user_task') or job.get('task') or '')
+    failing = [name for name, outcome in ((check.get('test_ids') or {}).get('ids') or {}).items() if outcome != 'passed']
+    plain = [re.sub(r'\[.*$', '', name) for name in failing]   # pytest parameters are not part of the subject
+    paths = {PurePosixPath(name.split('::')[0]) for name in plain if '::' in name}
+    traced = {PurePosixPath(b['path']) for b in check.get('test_files') or [] if isinstance(b, dict) and b.get('path')}
+    def same(path, ref):   # a runner names files from its own cwd or rootdir, the trace from the project root
+        a, b = path.as_posix(), ref.removeprefix('./')
+        return a == b or a.endswith('/' + b) or b.endswith('/' + a)
+    def modules(path):   # tests/test_calc.py -> "tests.test_calc", "test_calc" (unittest discover -s tests)
+        parts = path.with_suffix('').parts
+        return {'.'.join(parts[i:]) for i in range(len(parts))}
+    paths |= {p for p in traced for name in plain if any(name == m or name.startswith(m + '.') for m in modules(p))
+              or (' > ' in name and same(p, name.split(' > ')[0]))}
+    if not failing:   # pytest collection errors and jest failures as the runner itself reports them
+        lines = r'ERROR collecting (\S+)|^ERROR (\S+?\.py)\b|^FAILED (\S+?)::|^[ \t]*FAIL[ \t]+(\S+)'
+        logged = {''.join(g) for g in re.findall(lines, str(check.get('log_tail') or ''), re.M)}
+        paths |= {p for p in traced if any(same(p, ref) for ref in logged)}
+    lone = {p for p in traced if re.search(r'^test_.*\.py$|_test\.\w+$|\.(?:test|spec)\.\w+$', p.name)} or traced
+    if not paths and len(lone) == 1:
+        paths = lone   # ids without a file part (node spec "suite > name"): the only test module holds the failure
+    names = {part for name in failing for part in (name, re.split(r'::|\.|\s>\s', name)[-1]) if len(part) > 3}
+    # A Go package ("calc::TestDivide") is a subject, not a file name; neither is a cargo unit test's source file.
+    testlike = {p for p in paths if p in traced or any('test' in s.lower() or 'spec' in s.lower() for s in p.parts)}
+    files = {p.name for p in testlike if p.suffix}
+    if any(re.search(r'(?<![\w.])' + re.escape(name) + r'(?![\w])', task) for name in names | files):
+        return True
+    def stem(text):
+        return re.sub(r'^test_?|_?test$', '', text, flags=re.I)
+    stems = {stem(re.split(r'::|\.|\s>\s', name)[-1]) for name in plain}
+    stems |= {stem(p.stem) for p in paths}
+    return bool(REPAIR_WORDING.search(task)) and any(
+        re.search(r'(?<![\w.])' + re.escape(s) + r'(?![\w])', task, re.I) for s in stems if len(s) > 3)
+
+
+def decide(job, summary, verdict, review=True):
+    """Diagnose all failures before choosing an action; budgets are durable.
+
+    ``review=False`` (the default Settings, no model audit or reviewer): nothing can dispute or re-author an
+    audit, so those branches are skipped and spent repair rounds end the request with their durable limit.
+    """
     checks = job.get('checks', [])
     failed = [c for c in checks if blocking(c)]
     diagnoses = {d.get('check_id'): d for d in verdict.get('diagnoses', [])}
@@ -418,6 +571,9 @@ def decide(job, summary, verdict):
             known = {o['id'] for o in summary['outcomes']}
             if diagnosis == 'application_defect' and references and references <= known:
                 defects.append(check)
+            elif not review and not diagnosis and baseline_failure_in_scope(check, job):
+                defects.append({**check, 'reason': check.get('reason') or 'This test already failed before the change and the '
+                                'request asks for it to pass. Find the cause in the application and fix it; do not weaken the test.'})
             else:
                 existing.append(check)
         elif category == 'environment':
@@ -454,8 +610,9 @@ def decide(job, summary, verdict):
                 if available:
                     # Failed tests already have their own grounded diagnosis.
                     if all(c.get('passed') for c in available):
-                        defects.append({'id': row['id'] + ':tests', 'classification': 'application_defect',
-                            'reason': 'Delivered tests lack the requested interface coverage or application provenance', 'outcome': row})
+                        reason = (row['reason'].rstrip('. ') + '. Add a new test for it to the project suite.' if row.get('missing_new_test')
+                                  else 'Delivered tests lack the requested interface coverage or application provenance')
+                        defects.append({'id': row['id'] + ':tests', 'classification': 'application_defect', 'reason': reason, 'outcome': row})
                 elif discovered:
                     if not environments and not failed:
                         unexecuted.append(row)
@@ -463,8 +620,10 @@ def decide(job, summary, verdict):
                     defects.append({'id': row['id'] + ':tests', 'classification': 'application_defect',
                                     'reason': 'Requested executable project tests are missing', 'outcome': row})
             elif kind == 'documentation' and row['id'] in job.get('missing_deliverables', []):
+                component = row.get('component', '.') or '.'
+                where = '' if component == '.' else f' (only files inside {component}/ or directly in a folder enclosing it count; a docs/ folder beside it does not)'
                 defects.append({'id': row['id'] + ':documentation', 'classification': 'application_defect',
-                                'reason': 'Requested documentation is missing', 'outcome': row})
+                                'reason': 'Requested documentation is missing: add ' + documentation_home(component) + where, 'outcome': row})
             elif kind not in {'preservation', 'behavior'}:
                 audit_faults.append({'id': row['id'] + ':' + kind, 'reason': 'Independent coverage is missing'})
     # The reviewer may fail an outcome whose checks all pass (thin documentation, a gap the
@@ -485,13 +644,13 @@ def decide(job, summary, verdict):
         # judged before the repair cap and without demanding an identical failure signature; both caps still bound it.
         disputed = bool(job.get('unchanged_source') or job.get('editor_stopped') or
                         (patch.get('category') == 'no_op' and patch.get('agent_finished')))
-        if disputed and all(d.get('origin') == 'independent' for d in defects) and job.get('audit_corrections', 0) < MAX_AUDIT_CORRECTIONS:
+        if review and disputed and all(d.get('origin') == 'independent' for d in defects) and job.get('audit_corrections', 0) < MAX_AUDIT_CORRECTIONS:
             return {'action': 'audit', 'feedback': [{'id': d['id'], 'reason': 'The application repair found nothing to change for this '
                 'failing audit check. Re-read the application source AND the fixture/input this audit wrote, compare with the '
                 "application's actual output, and fix the audit itself (expected value, URL path, selector).",
                 'log_tail': (d.get('log_tail') or '')[-600:]} for d in defects]}
         history = job.get('failed_result_history', [])
-        if len(history) >= 2 and history[-2:] == [signature, signature] and not job.get('no_progress_diagnosed') and job.get('audit_corrections', 0) < MAX_AUDIT_CORRECTIONS:
+        if review and len(history) >= 2 and history[-2:] == [signature, signature] and not job.get('no_progress_diagnosed') and job.get('audit_corrections', 0) < MAX_AUDIT_CORRECTIONS:
             return {'action': 'audit', 'no_progress_diagnosis': True, 'feedback': [{'id': d['id'],
                 'reason': 'The same failed result recurred three times without reducing failures. Diagnose against the exact authorized request and retained expected/actual values. Do not change application behavior to satisfy a wrong generated expectation or weaken user-owned tests. Preserve both audit versions.',
                 'log_tail': (d.get('log_tail') or '')[-1200:]} for d in defects]}
@@ -512,6 +671,8 @@ def decide(job, summary, verdict):
         return {'action': 'repair', 'feedback': defects, 'signature': signature}
     if unexecuted:
         return {'action': 'execute', 'reason': 'Execute the delivered tests against this revision.'}
+    if audit_faults and not review:
+        return {'action': 'candidate', 'reason': 'Ready for review: some requested evidence needs a human look.'}
     if audit_faults:
         if job.get('audit_corrections', 0) >= MAX_AUDIT_CORRECTIONS:
             return {'action': 'candidate', 'reason': 'Both audit correction attempts were used; independent evidence is incomplete.', 'limit': 'audit_corrections'}
@@ -520,4 +681,4 @@ def decide(job, summary, verdict):
         return {'action': 'candidate', 'reason': 'The execution environment needs attention; application repairs were not exhausted.'}
     if existing:
         return {'action': 'candidate', 'reason': 'Existing baseline failures remain outside the confirmed repair scope.'}
-    return {'action': 'candidate', 'reason': 'Ready for review: requested behavior lacks trusted criterion-specific verification. Generated audits cannot authorize acceptance.'}
+    return {'action': 'candidate', 'reason': 'Ready for review: the checks need attention that another repair round cannot give.'}

@@ -567,7 +567,7 @@ def test_a_follow_up_edit_inherits_the_upload_test_command(monkeypatch, tmp_path
         parent = await store.create('conversation', 'fix it', 'build_from_prompt', '', 'coder:local', 'parent', policy_version=7,
                                     request_options={'execution_commands': commands, 'protected_files': []})
         await store.save(parent['id'], state='packaging', revision_id='a' * 40, acceptance={'accepted': True, 'revision_id': 'a' * 40},
-                         verification_summary={'accepted': True, 'revision_id': 'a' * 40, 'evidence_version': 3, 'criteria': []})
+                         verification_summary={'accepted': True, 'revision_id': 'a' * 40, 'evidence_version': 4})
         await store.finish_artifact(parent['id'], 'a' * 40, artifact_id='art', filename='a.tar.gz', url='/a', kind='archive', status='accepted', metadata={})
         project_id = (await store.get(parent['id']))['project_id']
         child = await controller.create('conversation', 'add --json', mode='edit_project', project_id=project_id, model='coder:local', key='child')

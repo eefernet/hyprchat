@@ -1,10 +1,11 @@
 import React,{useEffect,useState,useRef} from 'react';
 import {API,userScopedUrl} from '../session.js';
-import {terminalJobStates,jobBlockerMessage,jobStatusLabel,jobActivity,continueReason,elapsedLabel,timestamp} from '../daedalusJobs.js';
+import {terminalJobStates,jobBlockerMessage,jobStatusLabel,jobActivity,continueReason,needsMoreAllowance,elapsedLabel,timestamp} from '../daedalusJobs.js';
 import {loopLabel,nowLine,outcomeExplanation} from '../daedalusProgress.js';
 import {useDaedalusJob} from '../daedalusJobStore.js';
 import {StageRail,ResultBanner,PlanSection,ChecksSection} from './DaedalusPlanPanel.jsx';
 import './daedalusJob.css';
+import DaedalusPreview from './DaedalusPreview.jsx';
 
 export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compact=false}){
   const {job,connection,error,busy,action}=useDaedalusJob(workflow);
@@ -25,9 +26,14 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const calls=(job.calls_used||0)+(job.operation_calls||0);
   const facts=[job.model,`${elapsedLabel(elapsed)} elapsed`,job.call_limit?`${calls} of ${job.call_limit} model calls`:`${calls} model call${calls===1?'':'s'}`,job.inventory?.files?`${job.inventory.files} files`:''].filter(Boolean).join(' · ');
   const artifact=job.artifact||job.candidate_artifact;
-  const controls=<>{active?<button style={button} disabled={busy||job.state==='cancelling'} onClick={()=>action('cancel')}>{job.state==='cancelling'?'Stopping…':'Stop'}</button>:resumable?<button style={button} disabled={busy||!!disabledReason||!!job.scope_question&&!clarification.trim()} title={disabledReason} onClick={()=>action('resume',resumeVisual,clarification)}>Continue</button>:null}</>;
+  const accept=job.presentation?.actions?.accept,detail=job.presentation?.detail||'';
+  const label=detail?`${status} · ${detail}`:status;
+  const controls=<>{active?<button style={button} disabled={busy||job.state==='cancelling'} onClick={()=>action('cancel')}>{job.state==='cancelling'?'Stopping…':'Stop'}</button>:resumable&&!(accept?.enabled&&disabledReason)?<button style={button} disabled={busy||!!disabledReason||!!job.scope_question&&!clarification.trim()} title={disabledReason} onClick={()=>action('resume',resumeVisual,clarification)}>{job.engine==='openhands159'?'Resume':'Continue'}</button>:null}{!active&&resumable&&job.engine==='openhands159'&&needsMoreAllowance(job)&&!disabledReason&&<button style={button} disabled={busy||!!job.scope_question&&!clarification.trim()} onClick={()=>action('resume',resumeVisual,clarification,'new_allowance')}>Continue with more allowance</button>}</>;
   const downloads=<>{artifact&&<a style={button} href={userScopedUrl(`/api/artifacts/${artifact.id}/download`)} download>{job.artifact?'Download accepted project':'Download candidate'}</a>}
-    {!artifact&&resumable&&job.revision_id&&<a style={button} href={userScopedUrl(`/api/coder/workflows/${job.id}/checkpoint`)} download>Download checkpoint</a>}</>;
+    {!artifact&&resumable&&job.revision_id&&<a style={button} href={userScopedUrl(`/api/coder/workflows/${job.id}/checkpoint`)} download>Download checkpoint</a>}
+    {accept?.enabled&&job.project_id&&<button style={{...button,borderColor:t.acc,color:t.acc}} disabled={busy} title="Mark this exact revision as the project's accepted version" onClick={()=>action('accept')}>Accept this build</button>}</>;
+  // A fixed list of what passing checks do not cover, so "checks passed" is never read as "verified".
+  const unverified=job.presentation?.not_verified?<details className="dp-section"><summary>Not verified by Daedalus</summary><p className="dp-muted">{job.presentation.not_verified}</p></details>:null;
   const evidence=check=><><CheckEvidence jobId={job.id} check={check} button={button}/><BrowserEvidence jobId={job.id} check={check} button={button}/></>;
   const progress=<>
     <StageRail job={job}/>
@@ -40,31 +46,33 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   </>;
   if(compact)return <>
     <section className="dj-card dj-strip" aria-label="Background coding job" style={vars}>
-      <div className="dj-heading"><strong>{name}</strong><span role="status" aria-live="polite" className="dj-state"><span aria-hidden="true" className={active&&connection==='connected'&&job.state!=='cancelling'?'dj-dot dj-active':'dj-dot'}/>{status}{loopLabel(job)?` · ${loopLabel(job)}`:''}</span>
+      <div className="dj-heading"><strong>{name}</strong><span role="status" aria-live="polite" className="dj-state"><span aria-hidden="true" className={active&&connection==='connected'&&job.state!=='cancelling'?'dj-dot dj-active':'dj-dot'}/>{label}{loopLabel(job)?` · ${loopLabel(job)}`:''}</span>
         <span className="dj-actions"><button style={button} onClick={()=>setDetails(true)}>View details</button>{controls}</span></div>
       {error&&<p role="alert">{error}</p>}
     </section>{renderDialog()}</>;
   return <>
     <section className="dj-card" aria-label="Daedalus coding job" style={vars}>
-      <div className="dj-heading"><strong>{name}</strong><span role="status" aria-live="polite" className="dj-state"><span aria-hidden="true" className={active&&connection==='connected'&&job.state!=='cancelling'?'dj-dot dj-active':'dj-dot'}/>{status}</span></div>
+      <div className="dj-heading"><strong>{name}</strong><span role="status" aria-live="polite" className="dj-state"><span aria-hidden="true" className={active&&connection==='connected'&&job.state!=='cancelling'?'dj-dot dj-active':'dj-dot'}/>{label}</span></div>
       <p className="dp-facts">{facts}</p>
       {progress}
       {job.answer&&<div className="dp-answer">{md?md(job.answer):job.answer}</div>}
       <PlanSection job={job} defaultOpen={job.state!=='completed'}/>
       <ChecksSection job={job} renderEvidence={evidence}/>
+      {unverified}
       <div className="dj-actions" style={{marginTop:12}}><span style={{display:'flex',gap:8,flexWrap:'wrap'}}><button style={button} onClick={()=>setDetails(true)}>View details</button>{downloads}</span>{controls}</div>
       {error&&<p role="alert">{error}</p>}
     </section>{renderDialog()}</>;
 
   function renderDialog(){return <dialog ref={dialog} className="dj-dialog" aria-label={`${name} details`} style={vars} onCancel={()=>setDetails(false)} onClose={()=>{setDetails(false);opener.current?.focus();}}>
       <header className="dj-heading"><strong>{name}</strong><button style={button} onClick={()=>setDetails(false)} aria-label="Close job details">Close</button></header>
-      <nav className="dj-tabs" aria-label="Job detail sections">{['Overview','Checks','Files & logs','History'].map(label=><button key={label} style={button} aria-pressed={tab===label} onClick={()=>setTab(label)}>{label}</button>)}</nav>
+      <nav className="dj-tabs" aria-label="Job detail sections">{['Overview','Checks','Files & logs','History',...(job.engine==='openhands159'&&artifact?['Preview']:[])].map(label=><button key={label} style={button} aria-pressed={tab===label} onClick={()=>setTab(label)}>{label}</button>)}</nav>
       {details&&<div className="dj-content">
         {tab==='Overview'&&<>
-          <h2>{status}</h2><p className="dp-facts">{facts}{job.context?` · ${Number(job.context.num_ctx).toLocaleString()} context`:''}</p>
+          <h2>{label}</h2><p className="dp-facts">{facts}{job.context?` · ${Number(job.context.num_ctx).toLocaleString()} context`:''}</p>
           {progress}
           {job.answer&&<p>{job.answer}</p>}
           <PlanSection job={job}/>
+          {unverified}
           <div className="dj-download">{downloads}{artifact&&onOpenArtifact&&<button style={button} onClick={()=>onOpenArtifact(artifact.id)}>Artifact details</button>}</div>
           {(job.candidate_artifact?.metadata?.run_instructions||[]).map(profile=><div key={profile.cwd}><h3>Run from {profile.cwd}</h3><pre>{[...(profile.commands?.setup||[]),...(profile.commands?.build||[]),...(profile.commands?.test||[]),profile.launch?.replaceAll('{port}','8000')].filter(Boolean).join('\n')}</pre></div>)}
           {resumable&&<><label>Visual review when continuing <select value={resumeVisual} onChange={e=>setResumeVisual(e.target.value)} style={button}><option value="unchanged">Keep setting</option><option value="on">Enable</option><option value="off">Disable</option></select></label><p className="dp-muted">{disabledReason||'Continue uses this exact saved candidate revision.'}</p>{controls}</>}
@@ -75,10 +83,12 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
         {tab==='Checks'&&<>
           <h2>Checks on this revision</h2>
           {!job.checks?.length&&<p>No checks have completed yet.</p>}
+          {!!job.required_tests?.length&&<p className="dp-muted">{job.required_tests.length} named test{job.required_tests.length===1?'':'s'} passed earlier and must keep passing; a change that breaks, skips or removes one is rolled back.</p>}
+          {!!job.superseded_tests?.length&&<details className="dp-section"><summary>Tests your request allowed to change ({job.superseded_tests.length})</summary><ul>{job.superseded_tests.map(name=><li key={name}><code>{name.split('::').slice(1).join('::')}</code></li>)}</ul></details>}
           <ChecksSection job={job} renderEvidence={evidence}/>
           {!!job.verification_summary?.criteria?.length&&<details className="dp-section"><summary>Independent verification of requirements</summary>
-            <p>Passing generated audits do not prove every requested behavior. Requirements below need independent verification before automatic acceptance.</p>
-            {job.verification_summary.criteria.map(criterion=><div className="dj-row" key={criterion.id}><strong>{criterion.status==='passed'?'Verified':'Needs verification'}</strong><p>{criterion.request_excerpt}</p></div>)}
+            <p>These observations cover the stated requirements at this revision. Other behavior still needs your review.</p>
+            {job.verification_summary.criteria.map(criterion=><div className="dj-row" key={criterion.id}><strong>{criterion.status==='passed'?'Verified':criterion.status==='failed'?'Failed':'Needs verification'}</strong><p>{criterion.request_excerpt}</p>{criterion.reason&&<pre>{criterion.reason}</pre>}</div>)}
           </details>}
           {!!job.checks?.length&&<details className="dp-section"><summary>Every check with its log</summary>
             {(job.checks||[]).map((check,index)=><div className="dj-row" key={`${check.id}-${index}`}><strong>{check.passed?'✓':'✗'} {check.id}</strong><p>{check.classification|| (check.passed?'Passed':'Needs attention')}{check.test_count!=null&&` · ${check.test_count} tests`}</p><pre>{check.log_tail||check.error||check.summary||check.command}</pre>{evidence(check)}</div>)}</details>}
@@ -88,6 +98,7 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
           {(job.checks||[]).filter(c=>c.log).map((check,index)=><div className="dj-row" key={index}><p>{check.id}</p><CheckEvidence jobId={job.id} check={check} button={button}/></div>)}
           <details><summary>Model responses and recovery evidence</summary><pre>{JSON.stringify({plan:job.plan_text,patch:job.last_patch&&{...job.last_patch,source_hashes:undefined},recovery:job.verification_events,knowledge:job.knowledge_sources},null,2)}</pre></details>
         </>}
+        {tab==='Preview'&&job.engine==='openhands159'&&artifact&&<DaedalusPreview job={job} button={button}/>}
         {tab==='History'&&<><h2>History</h2>{job.project_id&&<ProjectHistory projectId={job.project_id} refreshKey={job.state} button={button}/>}
           {!!job.brief?.requirement_history?.length&&<details><summary>Requirement changes</summary>{job.brief.requirement_history.map(row=><p key={row.parent_id}><strong>{row.action}</strong>: {row.parent_outcome.text}{row.request_quote&&<> — “{row.request_quote}”</>}</p>)}</details>}
           {(job.scope_clarifications||[]).map((row,index)=><p key={`clarification-${index}`}>Clarification: {row.text}</p>)}

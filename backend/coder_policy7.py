@@ -20,7 +20,7 @@ from coder_inference import local_chat
 from coder_patch_runtime import edit, tree_hashes, select_files
 from coder_project_runtime import contract, run_revision
 from coder_profiles import python_test_kind, validate_command
-from coder_policy7_evidence import outcome, acceptance, decide, is_documentation
+from coder_policy7_evidence import outcome, acceptance, decide, is_documentation, baseline_test_ids
 from coder_repository import Repository, safe_relative, file_hash
 from coder_worker_runtime import WorkerStore
 from context_policy import DEFAULTS, resolve, estimate_tokens
@@ -106,15 +106,18 @@ def make_brief(answer, original, inherited=()):
     batches = split
     from coder_scope import reconcile, VERSION as SCOPE_VERSION
     retained, history = reconcile(answer, original, inherited)
+    def identity(item):
+        # A retained parent outcome (already marked inherited by an earlier brief) and the planner's restatement
+        # of the same text are one requirement: the inherited flag is provenance, not identity.
+        return json.dumps({k: v for k, v in outcome(item, 0).items() if k != 'inherited'}, sort_keys=True)
     texts, positions = [], {}
     for item in [*retained, *outcomes]:
-        identity = json.dumps(outcome(item, 0), sort_keys=True)
-        if identity not in positions:
-            positions[identity] = len(texts)
+        if identity(item) not in positions:
+            positions[identity(item)] = len(texts)
             texts.append(item)
     for row in history:
         items = [row['parent_outcome']] if row['action'] == 'retain' else [outcomes[i - 1] for i in row['replacement_outcomes']]
-        row['active_outcome_ids'] = [f'o{positions[json.dumps(outcome(item, 0), sort_keys=True)]+1}' for item in items]
+        row['active_outcome_ids'] = [f'o{positions[identity(item)]+1}' for item in items]
     required = outcome(original, 0)
     # The request decides which deliverables are gated: a planner that adds "tests" to an app whose
     # user asked for none would make acceptance demand files nobody requested.
@@ -125,6 +128,9 @@ def make_brief(answer, original, inherited=()):
         dropped = [kind for kind in unrequested if kind not in named]
         return item if item in retained or isinstance(item, str) or not dropped else {**item, 'waived': dropped}
     texts = [waive(item) for item in texts]
+    # Outcomes carried over from the parent brief are marked: acceptance lets the inherited suite satisfy
+    # them, while a "tests" outcome the follow-up ADDED needs a test the baseline did not have.
+    texts = [{**(item if isinstance(item, dict) else {'text': item}), 'inherited': True} if item in retained else item for item in texts]
     represented = {kind for item in texts for kind in outcome(item, 0)['evidence_types']}
     for kind in set(required['evidence_types']) & {'documentation', 'tests'} - represented:
         texts.append({'text': 'Deliver the requested ' + kind, 'evidence_types': [kind],
@@ -724,7 +730,7 @@ class Experiment(Operations):
                 self.transition('auditing', **result, audit_correction_pending=False)
         elif state == 'reviewing':
             verdict = self.operation('accept', self.review)
-            summary = acceptance(job['brief']['outcomes'], job['checks'], verdict, job['revision_id'])
+            summary = acceptance(job['brief']['outcomes'], job['checks'], verdict, job['revision_id'], request=job.get('task', ''), baseline_tests=baseline_test_ids(job))
             self.save(verification_summary=summary, review=verdict)
             if summary['accepted']:
                 self.transition('accepted')

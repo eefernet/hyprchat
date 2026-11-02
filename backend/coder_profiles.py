@@ -19,8 +19,36 @@ from coder_repository import safe_relative
 MANIFESTS = {'package.json', 'pyproject.toml', 'requirements.txt', 'setup.py',
              'Cargo.toml', 'go.mod', 'pom.xml', 'build.gradle', 'build.gradle.kts',
              'CMakeLists.txt', 'Makefile', 'composer.json', 'Gemfile', '.daedalus.json'}
+# By exact name: a substring match made `clock.py` or `block.js` a manifest, so editing source looked like a
+# dependency change (a cache miss, and the stop hook skipped that package's checks).
+LOCKFILES = {'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb',
+             'poetry.lock', 'Pipfile', 'Pipfile.lock', 'uv.lock', 'composer.lock', 'Gemfile.lock', 'Cargo.lock',
+             'go.sum', 'packages.lock.json'}
 NODE_SERVERS = {'express', 'fastify', 'koa', 'hapi', '@hapi/hapi', 'restify'}
 PHASES = ('setup', 'build', 'lint', 'typecheck', 'test', 'launch')
+# `npm test`, `npm run test:unit -- --reporter tap`, `yarn test`, `pnpm run check`: one package script, wrapped.
+SCRIPT_CALL = re.compile(r'\s*(npm|yarn|pnpm)(\s+run(?:-script)?)?\s+([\w:.@/-]+)(?:\s+--(?=\s|$))?\s*([^&|;<>`$]*)')
+NPM_SHORTCUTS = {'t': 'test', 'tst': 'test', 'test': 'test', 'start': 'start', 'stop': 'stop', 'restart': 'restart'}
+
+
+def script_runner(command, scripts, depth=4):
+    """The script a package-manager wrapper finally runs, so test ids are parsed for the real runner.
+
+    A `npm test` override in .daedalus.json, or a script that only calls another one (`"test": "npm run
+    test:unit"`), names no runner of its own and would lose every required test (coder_test_ids._runner).
+    Anything but a bare wrapper of a known script comes back unchanged.
+    """
+    for _ in range(depth):
+        match = SCRIPT_CALL.fullmatch(command) if isinstance(command, str) else None
+        if not match:
+            break
+        manager, run, name, extra = match.groups()
+        if manager == 'npm' and not run:
+            name = NPM_SHORTCUTS.get(name)
+        if not isinstance(scripts.get(name), str):
+            break
+        command = ' '.join(part for part in (scripts[name].strip(), extra.strip()) if part)
+    return command
 
 
 def validate_commands(value):
@@ -131,7 +159,7 @@ def discover(repository, explicit=None, proposals=None):
         own = sorted(p for p in paths if Path(p).is_relative_to(Path(package)) and not any(
             other != package and Path(other).is_relative_to(Path(package)) and
             Path(p).is_relative_to(Path(other)) for other in packages))
-        commands, runners, toolchains = {}, {}, []
+        commands, runners, toolchains, node_scripts = {}, {}, [], {}
         launch = None
         def add(phase, command, runner=''):
             commands.setdefault(phase, []).append(command)
@@ -149,6 +177,7 @@ def discover(repository, explicit=None, proposals=None):
                 manifest = {}
                 scripts = {}
                 add('build', 'python3 -m json.tool package.json')
+            node_scripts = scripts
             manager = 'pnpm' if (root / 'pnpm-lock.yaml').exists() else 'yarn' if (root / 'yarn.lock').exists() else 'npm'
             toolchains.append(manager)
             install = f'{manager} install --frozen-lockfile' if manager != 'npm' else 'npm ci' if (root / 'package-lock.json').exists() else 'npm install --package-lock=false'
@@ -204,6 +233,10 @@ def discover(repository, explicit=None, proposals=None):
         if (root / 'pom.xml').exists():
             # Classes must exist in the fresh execution copy before a read-only audit launches them.
             toolchains.append('mvn'); add('build', 'mvn -q -DskipTests package'); add('test', 'mvn test')
+        if any(p.endswith('.java') for p in own) and not any((root / name).exists() for name in ('pom.xml', 'build.gradle', 'build.gradle.kts', 'Makefile')):
+            toolchains += ['javac', 'java']
+            sources = [shlex.quote(str(Path(p).relative_to(package))) for p in own if p.endswith('.java')]
+            add('build', 'mkdir -p build/classes && javac -d build/classes ' + ' '.join(sources))
         if (root / 'build.gradle').exists() or (root / 'build.gradle.kts').exists():
             gradle = './gradlew' if (root / 'gradlew').exists() else 'gradle'
             toolchains.append('java'); add('build', gradle + ' -q classes'); add('test', gradle + ' test')
@@ -216,7 +249,8 @@ def discover(repository, explicit=None, proposals=None):
             # `dotnet test` on the application project reports zero tests and would fail the gate.
             texts = ''.join((root / name).read_text(errors='replace') for name in dotnet if not name.endswith('.sln'))
             if target.strip("'\"").endswith('.sln') or re.search(r'Microsoft\.NET\.Test\.Sdk|xunit|nunit|MSTest', texts, re.I):
-                add('test', f'dotnet test {target} --no-build')
+                # Normal console verbosity prints one line per test, which is how test identities are read.
+                add('test', f'dotnet test {target} --no-build --logger "console;verbosity=normal"')
         if (root / 'CMakeLists.txt').exists():
             toolchains += ['cmake', 'ctest']
             add('setup', 'cmake -S . -B build'); add('build', 'cmake --build build'); add('test', 'ctest --test-dir build --output-on-failure')
@@ -275,7 +309,7 @@ def discover(repository, explicit=None, proposals=None):
             for i, command in enumerate(commands.get(phase, [])):
                 checks.append({'id': f'{package}:{phase}:{i}', 'cwd': package, 'command': command,
                                'phase': phase, 'origin': 'project', 'command_origin': origins[phase],
-                               'setup': phase == 'setup', 'is_test': phase == 'test', 'test_runner': runners.get(command, command)})
+                               'setup': phase == 'setup', 'is_test': phase == 'test', 'test_runner': script_runner(runners.get(command, command), node_scripts)})
         if launch and '{port}' in launch:
             web.append(package)
             checks.append({'id': f'{package}:launch', 'cwd': package, 'kind': 'browser', 'phase': 'launch',
@@ -283,16 +317,46 @@ def discover(repository, explicit=None, proposals=None):
         elif launch:
             checks.append({'id':f'{package}:launch', 'cwd':package, 'command':launch, 'phase':'launch', 'origin':'project'})
     if config_error:
-        checks.append({'id': 'execution-config', 'command': 'exit 1', 'error': config_error, 'origin': 'project'})
+        # The reason reaches the builder's prerequisite feedback, which never shows 'error' (or this empty log).
+        checks.append({'id': 'execution-config', 'cwd': '.', 'command': 'exit 1', 'error': config_error, 'origin': 'project',
+                       'reason': 'Invalid .daedalus.json, so none of its commands ran: ' + config_error})
     return {'profiles': profiles, 'checks': checks, 'packages': sorted(packages), 'web_packages': web}
 
 
+def setup_inputs(root, profile):
+    """{relative path: sha256} of the files in this package its setup commands name.
+
+    `pip install -r requirements-lock.txt` or `-c constraints.txt` match no manifest name, so an edited
+    dependency list reused the stale cached environment; matching 'lock' anywhere in a name instead made
+    clock.py a manifest. A file the setup really reads is keyed whatever it is called.
+    """
+    base, found = root.resolve(), {}
+    for command in profile.get('commands', {}).get('setup', []):
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = command.split()
+        for word in words:
+            # `-r x` names x as the next word; `--requirement=x` and `-rx` carry it inside this one.
+            inner = word.partition('=')[2] if word.startswith('--') else word[2:] if word[:2] in ('-r', '-c') else ''
+            for name in {word, inner} - {''}:
+                try:
+                    path = (root / name).resolve()
+                    if path.is_file() and path.is_relative_to(base):
+                        found[path.relative_to(base).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+                except (OSError, ValueError):
+                    continue
+    return found
+
+
 def environment_key(root, profile):
-    """Dependency cache identity includes manifests, lockfiles and tool versions."""
+    """Dependency cache identity includes manifests, lockfiles, the files setup installs from, and tool versions."""
     manifests = {}
     for path in root.iterdir():
-        if path.is_file() and (path.name in MANIFESTS or 'lock' in path.name.lower() or path.suffix in {'.csproj', '.fsproj', '.sln'}):
+        if path.is_file() and (path.name in MANIFESTS or path.name in LOCKFILES or path.suffix in {'.lock', '.csproj', '.fsproj', '.sln'}):
             manifests[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    # Same name, same bytes for a top-level manifest the setup also names: standard setups keep their key.
+    manifests.update(setup_inputs(root, profile))
     versions = {}
     for tool in profile.get('toolchains', []):
         try:

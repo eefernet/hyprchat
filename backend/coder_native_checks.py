@@ -292,7 +292,7 @@ def run_checks(store, operation_id, repository, payload):
                     coverage_observed=observed, source_bindings=bindings,
                     execution_succeeded=code == 0 and (observed or check.get('phase') == 'launch'),
                     environment_fault=code == 127 or bool(check.get('setup') and re.search(
-                        r'Temporary failure|EAI_AGAIN|ENOTFOUND|Connection refused|Network is unreachable|'
+                        r'Temporary failure|\bEAI_AGAIN\b|\bENOTFOUND\b|Connection refused|Network is unreachable|'
                         r'No CMAKE_\w+_COMPILER|Could not find compiler|NETSDK1045|No Java runtime present', tail, re.I)),
                     log=str(log), log_tail=tail[-4000:], log_bytes=log.stat().st_size)
                 if check.get('is_test') and not observed:

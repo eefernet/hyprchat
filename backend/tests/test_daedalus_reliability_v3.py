@@ -18,13 +18,11 @@ def test_generated_audits_cannot_accept_unproved_tie_break():
                'execution_succeeded': True, 'source_bindings': [{'path': 'app.py'}]}]
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
     summary = acceptance(outcomes, checks, verdict, 'r')
-    assert not summary['accepted']
-    assert summary['evidence_version'] == 3
-    assert len(summary['criteria']) == 2
-    assert all(c['status'] == 'unverified' for c in summary['criteria'])
+    # A generated audit and a reviewer verdict alone never complete a job or count as exercising it.
+    assert not summary['accepted'] and not summary['checks_passed'] and not summary['exercised']
+    assert summary['evidence_version'] == 4 and 'criteria' not in summary
     decision = decide({'checks': checks}, summary, verdict)
     assert decision['action'] == 'candidate'
-    assert 'trusted' in decision['reason']
 
 
 @pytest.mark.parametrize('row,expected', [
@@ -77,8 +75,8 @@ def test_rollback_candidate_keeps_exact_request_and_retained_parent_lineage():
     asyncio.run(step(job, controller))
     summary = saved['verification_summary']
     assert saved['state'] == 'candidate_packaging' and not summary['accepted']
-    assert any(c['owner'] == 'request' and c['request_excerpt'] == 'Keep the quoted user behavior' for c in summary['criteria'])
-    assert next(c for c in summary['criteria'] if c['owner'] == 'active')['parent_ids'] == ['parent']
+    # The rolled-back candidate still reports the retained outcome it was judged against.
+    assert [o['id'] for o in summary['outcomes']] == ['active'] and saved['revision_id'] == 'before'
 
 
 @pytest.mark.parametrize('repair_round', [0, 1])
@@ -344,10 +342,15 @@ def test_repaired_project_keeps_revision_and_reaches_pending_audit(tmp_path):
         saved.update(changes)
         return {**job, **changes}
     async def record(*args): pass
-    controller = SimpleNamespace(store=SimpleNamespace(save=save, record_check=record), _operate=operate)
+    review = SimpleNamespace(runtime_settings=lambda: {'daedalus_independent_review': True})
+    controller = SimpleNamespace(store=SimpleNamespace(save=save, record_check=record), _operate=operate, context_policy=review)
     asyncio.run(step(job, controller))
     assert saved['state'] == 'auditing'
     assert 'verification_summary' not in saved  # No stale audit is counted as current proof.
+    # With the model audit off (the default) the same repaired revision goes straight to the deterministic gate.
+    saved.clear()
+    asyncio.run(step(job, SimpleNamespace(store=SimpleNamespace(save=save, record_check=record), _operate=operate)))
+    assert saved['state'] == 'accepting' and 'verification_summary' not in saved
 
 
 def test_each_defect_retains_an_application_owner():

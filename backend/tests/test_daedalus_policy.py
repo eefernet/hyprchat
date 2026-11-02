@@ -36,7 +36,7 @@ def test_project_follows_accepted_head_and_fences_old_jobs(monkeypatch,tmp_path)
         assert build["project_id"].startswith("cp-") and build["project_id"]!=build["id"]
         assert not build["visual_policy"]["enabled"]
         assert build["visual_policy"]["model_inherited"]
-        with pytest.raises(ValueError,match="no accepted revision"):
+        with pytest.raises(ValueError,match="no delivered build"):
             await controller.create("conversation","Change it",mode="edit_project",model="coder:local")
         await store.save(build["id"],state="packaging",revision_id="a"*40,acceptance={"accepted":True,"revision_id":"a"*40})
         artifact=await store.finish_artifact(build["id"],"a"*40,artifact_id="first",filename="first.tar.gz",kind="archive",url="/first",status="accepted")
@@ -52,7 +52,7 @@ def test_project_follows_accepted_head_and_fences_old_jobs(monkeypatch,tmp_path)
         newer=await controller.create("conversation","Add multiply",mode="edit_project",model="coder:local",key="three")
         await store.save(newer["id"],state="packaging",revision_id="b"*40,acceptance={"accepted":True,"revision_id":"b"*40})
         await store.finish_artifact(newer["id"],"b"*40,artifact_id="next",filename="next.tar.gz",kind="archive",url="/next",status="accepted")
-        with pytest.raises(ValueError,match="newer accepted revision"):
+        with pytest.raises(ValueError,match="newer version"):
             await controller.resume(edit["id"])
         assert (await db.get_coding_project_by_conv("second"))["accepted_revision_id"]=="b"*40
         assert (await store.get(build["id"]))["artifact"]["id"]=="first"

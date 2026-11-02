@@ -21,18 +21,23 @@ def test_recorded_false_acceptance_cannot_replace_delivered_tests_with_app_audit
     outcomes = make_brief({'outcomes': ['README and executable tests'], 'batches': [{'task': 'Build'}]}, 'Build')['outcomes']
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
     result = acceptance(outcomes, [evidence()], verdict, 'revision')
-    assert not result['accepted']
-    assert set(result['outcomes'][0]['missing_evidence']) == {'behavior', 'documentation', 'tests'}
+    assert not result['accepted'] and not result['checks_passed']
+    assert set(result['outcomes'][0]['missing_evidence']) == {'documentation', 'tests'}
 
 
 def test_tests_must_be_delivered_executed_current_and_component_specific():
     outcomes = [{'id': 'o1', 'text': 'Backend tests', 'component': 'backend', 'evidence_types': ['tests']}]
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
     check = evidence(origin='project', is_test=True, cwd='backend', test_files=[{'path': 'backend/test_app.py', 'sha256': 'b'*64}])
-    assert acceptance(outcomes, [check], verdict, 'revision')['accepted']
+    passing = acceptance(outcomes, [check], verdict, 'revision')
+    # Checks pass; only confirmed acceptance examples (or the owner's Accept) complete a job.
+    assert passing['checks_passed'] and not passing['accepted']
     for delta in ({'revision_id': 'old'}, {'cwd': 'frontend'}, {'test_files': []},
                   {'coverage_observed': False}, {'origin': 'independent'}, {'execution_succeeded': False}):
-        assert not acceptance(outcomes, [{**check, **delta}], verdict, 'revision')['accepted']
+        assert not acceptance(outcomes, [{**check, **delta}], verdict, 'revision')['checks_passed']
+    example = {'id': 'example:1', 'origin': 'user', 'passed': True, 'revision_id': 'revision', 'execution_id': 'op:e'}
+    assert acceptance(outcomes, [check, example], verdict, 'revision')['accepted']
+    assert not acceptance(outcomes, [check, {**example, 'passed': False}], verdict, 'revision')['accepted']
 
 
 def test_empty_documentation_cannot_satisfy_a_documentation_check(tmp_path):
@@ -283,8 +288,8 @@ def test_python_http_audit_uses_managed_node_service_without_importing_javascrip
     assert check['service_bindings'][0]['revision_id'] == store.get('check')['payload']['revision_id']
 
 @pytest.mark.skipif(not shutil.which('bwrap'), reason='Codebox audit sandbox')
-@pytest.mark.parametrize('partial_edit',[False,True])
-def test_persistent_policy7_controller_runs_worker_operations_and_publishes_exact_revision(monkeypatch,tmp_path,partial_edit):
+@pytest.mark.parametrize('partial_edit,review',[(False,True),(True,True),(False,False)])
+def test_persistent_policy7_controller_runs_worker_operations_and_publishes_exact_revision(monkeypatch,tmp_path,partial_edit,review):
     import asyncio,hashlib,time
     import coder_inference,coder_jobs,config
     import coder_policy7_ops as ops
@@ -294,6 +299,8 @@ def test_persistent_policy7_controller_runs_worker_operations_and_publishes_exac
     from context_policy import DEFAULTS
     from tests.test_daedalus_policy6 import setup
     setup(monkeypatch,tmp_path)
+    # The model-written audit and reviewer run only behind daedalus_independent_review (default off, plan 2026-10-26).
+    monkeypatch.setattr(config,'CONTEXT_SETTINGS',{**config.CONTEXT_SETTINGS,'daedalus_independent_review':review})
     monkeypatch.setattr(coder_jobs,'POLICY_VERSION',7)
     monkeypatch.setattr(coder_inference,'require_local_model',lambda *a,**k:{})
     worker=WorkerStore(tmp_path/'worker');order=[]
@@ -357,9 +364,14 @@ def test_persistent_policy7_controller_runs_worker_operations_and_publishes_exac
         assert all(c['revision_id']==saved['revision_id'] for c in saved['checks'])
         assert hashlib.sha256(Path(saved['candidate_artifact']['storage_path']).read_bytes()).hexdigest()==saved['candidate_artifact']['sha256']
         # A partial checkpoint (agent not finished) earns a continuation before any check runs.
-        assert order==['inspect','plan','code',*(['check','code'] if partial_edit else []),'check','verify','check','accept','package']
+        if review:
+            assert order==['inspect','plan','code',*(['check','code'] if partial_edit else []),'check','verify','check','accept','package']
+        else:
+            # No audit, no reviewer call: the project's own checks decide, and a missing README check routes to a repair.
+            assert order[:3]==['inspect','plan','code'] and order[-1]=='package'
+            assert 'verify' not in order and 'accept' not in order, order
         assert saved['builder']=='sdk' and saved['last_patch']['builder']=='sdk' and len(edits)==(2 if partial_edit else 1)
-        assert not saved.get('editor_stopped') and saved['repair_round']==0
+        assert not saved.get('editor_stopped') and (saved['repair_round']==0 or not review)
     asyncio.run(scenario())
 
 
@@ -597,9 +609,9 @@ def test_followup_repairs_target_the_defect_and_root_readme_documents_subpackage
     outcomes = [{'id': 'o1', 'text': 'Filter docs', 'evidence_types': ['documentation'], 'component': 'public'}]
     check = evidence(evidence_types=['documentation'], file_bindings=[{'path': 'README.md', 'sha256': 'a'*64}])
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
-    assert acceptance(outcomes, [check], verdict, 'revision')['accepted']
+    assert acceptance(outcomes, [check], verdict, 'revision')['outcomes'][0]['missing_evidence'] == []
     other = {**check, 'file_bindings': [{'path': 'backend/README.md', 'sha256': 'a'*64}]}
-    assert not acceptance(outcomes, [other], verdict, 'revision')['accepted']
+    assert acceptance(outcomes, [other], verdict, 'revision')['outcomes'][0]['missing_evidence'] == ['documentation']
 
 
 def test_requested_controls_are_checked_by_the_controller_not_the_models_own_tests(tmp_path):
@@ -779,9 +791,13 @@ def test_hybrid_builder_adapts_agent_results_and_is_only_used_for_new_projects(t
     assert crashed['category'] == 'environment' and 'output limit' in crashed['log_tail']
     assert key_error_lines(job['repair_feedback']) == ['src/main.c:4:5: error: unknown type name foo']
     assert 'ctest' in guidance({'repair_round': 0}) and 'REPAIR ROUND' not in guidance({'repair_round': 0})
-    import coder_policy7_controller
-    source = Path(coder_policy7_controller.__file__).read_text()
-    assert "builder = 'sdk' if job['mode'] == 'build_from_prompt' else 'aider'" in source
+    # New builds and follow-ups of projects Daedalus built get the agent loop; uploads keep Aider.
+    from coder_policy7_controller import builder_for
+    assert builder_for({'mode': 'build_from_prompt'}) == 'sdk'
+    assert builder_for({'mode': 'edit_project', 'project_id': 'cp-abc', 'source_job_id': 'cw3-abc'}) == 'sdk'
+    assert builder_for({'mode': 'edit_project', 'project_id': 'proj-1', 'source_job_id': ''}) == 'aider'
+    # The second edit of an uploaded project starts from a cw3 job but stays with the editor it was measured with.
+    assert builder_for({'mode': 'edit_project', 'project_id': 'proj-1', 'source_job_id': 'cw3-upload-fix'}) == 'aider'
 
 
 def test_repairs_target_the_file_the_failure_names_and_only_its_own_manifest():
@@ -1039,8 +1055,9 @@ def test_a_repaired_user_test_proves_a_single_outcome_job_only():
            {'id': 'o2', 'text': 'A --json flag prints JSON', 'evidence_types': ['behavior'], 'component': '.'}]
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}, {'id': 'o2', 'status': 'passed'}]}
     result = acceptance(two, [repaired], verdict, 'revision')
-    assert not result['accepted'] and [o['missing_evidence'] for o in result['outcomes']] == [['behavior'], ['behavior']]
-    # Independent evidence per outcome still accepts the same job.
+    # The repaired test exercises the program, so checks pass; nothing completes without the owner or examples.
+    assert result['checks_passed'] and not result['accepted']
+    assert [o['missing_evidence'] for o in result['outcomes']] == [[], []]
     audits = [evidence(id='audit-1', outcomes=['o1']), evidence(id='audit-2', execution_id='op:2', outcomes=['o2'])]
     assert not acceptance(two, [repaired, *audits], verdict, 'revision')['accepted']
     # A documentation outcome beside the single behavior outcome does not disturb the credit.
@@ -1048,11 +1065,10 @@ def test_a_repaired_user_test_proves_a_single_outcome_job_only():
     docs = [two[0], {'id': 'o2', 'text': 'README explains usage', 'evidence_types': ['documentation'], 'component': '.'}]
     assert not needs_behavior_audit(docs, [repaired]) and needs_behavior_audit(two, [repaired])
     assert needs_behavior_audit(docs, []) and not needs_behavior_audit([docs[1]], [])
-    # Separate packages are separate claims: a backend repair does not cover the frontend outcome.
+    # Separate packages: a backend repair alone never completes the job; the owner reviews the frontend claim.
     split = [{**two[0], 'component': 'backend'}, {**two[1], 'component': 'frontend'}]
     backend = {**repaired, 'source_bindings': [{'path': 'backend/app.py', 'sha256': 'a' * 64}]}
-    rows = acceptance(split, [backend], verdict, 'revision')['outcomes']
-    assert [o['missing_evidence'] for o in rows] == [['behavior'], ['behavior']]
+    assert not acceptance(split, [backend], verdict, 'revision')['accepted']
 
 
 def test_docs_and_testing_wording_keeps_the_deliverable_gates():
@@ -1303,8 +1319,10 @@ def test_plain_text_data_files_are_not_documentation_and_the_gate_checks_it_too(
     outcomes = [{'id': 'o1', 'text': 'README explains usage', 'evidence_types': ['documentation'], 'component': '.'}]
     verdict = {'scope_complete': True, 'outcomes': [{'id': 'o1', 'status': 'passed'}]}
     claim = evidence(kind='file', evidence_types=['documentation'], file_bindings=[{'path': 'words.txt', 'sha256': 'a' * 64}])
-    assert not acceptance(outcomes, [claim], verdict, 'revision')['accepted']
-    assert acceptance(outcomes, [{**claim, 'file_bindings': [{'path': 'README.md', 'sha256': 'a' * 64}]}], verdict, 'revision')['accepted']
+    ran = {'id': '.:test:0', 'origin': 'project', 'is_test': True, 'passed': True, 'coverage_observed': True,
+           'revision_id': 'revision', 'execution_id': 'op:t'}
+    assert not acceptance(outcomes, [claim, ran], verdict, 'revision')['checks_passed']
+    assert acceptance(outcomes, [{**claim, 'file_bindings': [{'path': 'README.md', 'sha256': 'a' * 64}]}, ran], verdict, 'revision')['checks_passed']
 
 
 def test_make_is_not_a_compiled_test_runner_and_newer_dotnet_summaries_count():

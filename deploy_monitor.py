@@ -77,7 +77,8 @@ WORKER_SHARED.update({'backend/'+name+'.py' for name in (
     'coder_process_evidence', 'coder_scope', 'coder_policy7_visual',
     'coder_sandbox', 'coder_sandbox_agent', 'coder_sandbox_call', 'coder_sandbox_legacy',
     'coder_assertion_outcomes', 'coder_criteria', 'coder_generated',
-    'coder_policy7_phases', 'coder_request_probes', 'coder_workflow_guard', 'coder_repair_packet', 'coder_skeletons', 'coder_policy7_prompt')})
+    'coder_policy7_phases', 'coder_request_probes', 'coder_workflow_guard', 'coder_repair_packet', 'coder_skeletons', 'coder_policy7_prompt',
+    'coder_stop_hook', 'coder_test_ids', 'coder_required_tests')})
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
@@ -102,7 +103,9 @@ WATCHED = {
     "backend/coder_native_checks.py": ("Native Checks", REMOTE_BACKEND, True),
     "backend/coder_review.py": ("Independent Review", REMOTE_BACKEND, True),
     "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
+    "backend/db/coder_promotion.py": ("Coding Project Versions", REMOTE_DB, True),
     "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
+    "backend/routes/coder_promotion.py": ("Coding Versions API", REMOTE_ROUTES, True),
     **{path:("Coding Worker", REMOTE_OPENHANDS_WORKER, False) for path in WORKER_FILES},
     "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),

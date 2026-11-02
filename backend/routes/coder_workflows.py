@@ -29,6 +29,8 @@ class CreateWorkflow(BaseModel):
     visual_model: str | None = None
     execution_commands: dict | None = None
     protected_files: list[str] | None = None
+    engine: str = ''
+    ui_checks: list[dict] | None = None
 
 
 @router.post("/api/coder/workflows", status_code=202)
@@ -38,7 +40,8 @@ async def create_workflow(request: CreateWorkflow):
         return await coder_jobs.create(body.get("conversation_id", ""), body.get("task", ""),
             body.get("mode", "build_from_prompt"), body.get("project_id", ""),
             body.get("model", ""), body.get("idempotency_key", ""), visual_review=request.visual_review, visual_model=request.visual_model,
-            execution_commands=request.execution_commands, protected_files=request.protected_files)
+            execution_commands=request.execution_commands, protected_files=request.protected_files, engine=request.engine,
+            ui_checks=request.ui_checks)
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -48,7 +51,7 @@ async def create_workflow(request: CreateWorkflow):
 @router.post("/api/coder/workflows/{workflow_id}/resume")
 async def resume_workflow(workflow_id: str, body: dict = Body(default={})):
     try:
-        return await coder_jobs.resume(workflow_id,visual_review=body.get("visual_review"),visual_model=body.get("visual_model"),candidate_revision=body.get('candidate_revision'),clarification=body.get('clarification'))
+        return await coder_jobs.resume(workflow_id,visual_review=body.get("visual_review"),visual_model=body.get("visual_model"),candidate_revision=body.get('candidate_revision'),clarification=body.get('clarification'),budget_mode=body.get('budget_mode'))
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -142,7 +145,7 @@ async def evidence(workflow_id: str, identity: str):
     import re
     if not re.fullmatch(r"[a-f0-9]{64}",identity): raise HTTPException(404,"Evidence not found")
     # The worker checks that this opaque reference belongs to the owned job.
-    return await stream_worker_file(config.OPENHANDS_URL.rstrip("/")+f"/jobs/{workflow_id}/evidence/{identity}",
+    return await stream_worker_file(coder_jobs.worker_base(job)+f"/jobs/{workflow_id}/evidence/{identity}",
         "application/octet-stream")
 
 

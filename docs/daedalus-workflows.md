@@ -2,6 +2,12 @@
 
 The new workflow is experimental and opt-in under **Settings → Daedalus → Use the new persistent Daedalus workflow for new jobs**. It has not passed its local-model quality evaluation; review generated changes and test coverage before use. It uses installed local Ollama models. Existing workflows retain their original execution path when the flag changes. The original Architect/Builder, Aider, and marker-format Fixer implementations remain available through the legacy path.
 
+An isolated [OpenHands 1.59 engine](daedalus-openhands159.md) adds a single SDK
+conversation, bounded verification repairs and Linux GUI previews. It has its
+own dependency lock and qualification campaign. Selecting it for a new job does
+not migrate existing jobs or replace the current worker. Its rollout remains
+gated by the documented evaluation results.
+
 ## Running a job
 
 Choose the coding models in the existing model settings, configure the Daedalus context window, then request a build or upload a project and describe the desired change. Uploading prepares the project; it does not independently authorize edits. Source questions use the read-only Q&A mode.
