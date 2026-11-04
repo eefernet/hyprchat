@@ -42,20 +42,11 @@ def collect(root, *, reserve=10*GIB):
     usage = shutil.disk_usage(root)
     pressured = usage.used/usage.total >= .8
     if not pressured and usage.free >= reserve: return removed
-    candidates = []
-    for store in (root/'state').glob('*'):
-        if store.is_symlink() or not store.is_dir(): continue
-        pinned=set()
-        for record in (store/'previews').glob('*/session.json'):
-            try:
-                session=json.loads(record.read_text())
-                if session.get('lifecycle')=='pinned' and session.get('status')!='deleted':
-                    pinned.update(Path(value).resolve() for value in session.get('cache_roots',[]))
-            except (OSError,ValueError): continue
-        for category in ('project-environments','operation-caches'):
-            parent = store/category
-            if parent.is_dir() and not parent.is_symlink():
-                candidates.extend(p for p in parent.iterdir() if p.is_dir() and not p.is_symlink() and p.resolve() not in pinned)
+    from hephaestus_inventory import discover, resource_path
+    from hephaestus_maintenance import references, candidates as eligible_resources
+    registry=discover(root);refs=references(root,registry)
+    rows,_=eligible_resources(root,registry,refs,measure=False)
+    candidates=[resource_path(root,row['path']) for row in rows if row['kind']=='cache' and row['eligible']]
     for path in sorted(candidates, key=lambda p:p.stat().st_mtime):
         usage = shutil.disk_usage(root)
         if usage.free >= reserve and (not pressured or usage.used/usage.total <= .7): break
@@ -68,27 +59,10 @@ def collect(root, *, reserve=10*GIB):
 
 
 def maintenance(root):
-    """Expire completed generic scratch, then apply pressure-based cache collection."""
-    from coder_engine_cache import lease
-    root=Path(root).resolve(); removed=[]; cutoff=time.time()-86400
-    # Root/project files, revisions, artifacts and pinned application data are excluded.
-    for workspace in (root/'projects').glob('*'):
-        if workspace.is_symlink() or not workspace.is_dir(): continue
-        try:
-            with lease(workspace,exclusive=True,blocking=False):
-                for path in (workspace/'tmp/codebox_workspace').glob('*'):
-                    if path.is_dir() and not path.is_symlink() and path.stat().st_mtime<cutoff:
-                        shutil.rmtree(path);removed.append(str(path.relative_to(root)))
-        except (BlockingIOError,FileNotFoundError): continue
-    removed.extend(collect(root))
-    usage=shutil.disk_usage(root)
-    if usage.free<10*GIB or usage.used/usage.total>=.8:
-        # Docker itself protects layers in use; retained releases keep their tagged images.
-        subprocess.run(['docker','builder','prune','-f','--filter','until=24h','--keep-storage','4GB'],
-                       capture_output=True,timeout=90,check=True)
-        subprocess.run(['docker','image','prune','-f','--filter','until=24h'],
-                       capture_output=True,timeout=90,check=True)
-    return removed
+    """All scheduled cleanup uses the same registry, reference checks and receipts."""
+    from hephaestus_maintenance import automatic, recover
+    recover(root)
+    return automatic(root)
 
 
 def require_space(root, required=0):
@@ -113,4 +87,7 @@ def quota_root(root, path):
 
 
 if __name__=='__main__':
-    print(json.dumps({'removed':maintenance(os.environ.get('HEPHAESTUS_ROOT','/srv/hephaestus'))}))
+    from hephaestus_maintenance import automatic, recover
+    root=os.environ.get('HEPHAESTUS_ROOT','/srv/hephaestus')
+    recover(root)
+    automatic(root)

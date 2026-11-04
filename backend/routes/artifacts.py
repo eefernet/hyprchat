@@ -559,7 +559,7 @@ async def _fork_artifact_scoped(artifact_id,artifact):
         raise HTTPException(404, "Artifact file is missing")
     size = os.path.getsize(filepath)
     if size > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Codebox copy limit")
+        raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Hephaestus copy limit")
 
     def _read_b64():
         with open(filepath, "rb") as f:
@@ -573,7 +573,7 @@ async def _fork_artifact_scoped(artifact_id,artifact):
         r = await route_context().http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 60}, timeout=70)
         data = r.json()
         if r.status_code >= 400 or data.get("exit_code", 0) != 0:
-            raise HTTPException(502, data.get("stderr") or "Codebox copy failed")
+            raise HTTPException(502, data.get("stderr") or "Hephaestus copy failed")
         result = {
             "artifact_id": artifact_id,
             "path": remote_path,
@@ -585,14 +585,14 @@ async def _fork_artifact_scoped(artifact_id,artifact):
         await db.add_artifact_event(
             artifact_id,
             "forked_to_codebox",
-            f"Copied to Codebox at {remote_path}",
+            f"Copied to Hephaestus at {remote_path}",
             {"path": remote_path, "project_path": result["project_path"], "size_bytes": size},
         )
         return result
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Codebox copy failed: {e}")
+        raise HTTPException(502, f"Hephaestus copy failed: {e}")
 
 
 @router.post("/api/artifacts/{artifact_id}/revise")

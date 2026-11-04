@@ -56,7 +56,11 @@ def test_server_persisted_settings_use_guarded_persistence():
     ]
 
     for storage_key, setting_key in expected_pairs:
-        assert f'persistServerSetting("{storage_key}","{setting_key}"' in html
+        from context_policy import RETIRED_SETTINGS
+        if setting_key in RETIRED_SETTINGS:
+            assert f'persistServerSetting("{storage_key}","{setting_key}"' not in html
+        else:
+            assert f'persistServerSetting("{storage_key}","{setting_key}"' in html
 
     assert 'fetch(`${api}/api/settings`' in sync
     assert 'localStorage.setItem("hc-num-ctx",String(numCtx));fetch(`${API}/api/settings`' not in html
@@ -84,7 +88,11 @@ def test_settings_fetch_hydrates_server_values_without_echo_patch():
     ]
 
     for key in hydrated_keys:
-        assert f'hydrateServerSetting("{key}"' in html
+        from context_policy import RETIRED_SETTINGS
+        if key in RETIRED_SETTINGS:
+            assert f'hydrateServerSetting("{key}"' not in html
+        else:
+            assert f'hydrateServerSetting("{key}"' in html
 
     assert "catch(()=>{settingsLoadedRef.current=true;})" in html
 

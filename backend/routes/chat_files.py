@@ -1,7 +1,7 @@
 """Chat data-file staging routes.
 
 Uploaded data files (CSV/Excel/JSON) from the chat composer are pushed into
-the Codebox sandbox at /root/chat_files/{conversation_id}/{upload_id}/{filename} so the
+the Hephaestus sandbox at /root/chat_files/{conversation_id}/{upload_id}/{filename} so the
 always-available execute_code tool can read the FULL file from disk. The
 composer then references the sandbox path in the prompt instead of inlining
 (and truncating) the file's text — which forced the model to re-type the data

@@ -4,6 +4,47 @@ import sqlite3
 import uuid
 
 
+async def execution_storage_status(http, base_url: str, owner: str) -> dict:
+    """Read VM capacity without exposing worker metadata or invoking cleanup."""
+    import httpx
+    from hephaestus_scope import headers
+
+    if not os.environ.get("HEPHAESTUS_TOKEN") or not base_url:
+        return {"status": "not_configured", "message": "Hephaestus storage status is not configured. Check Connections."}
+    if not owner:
+        return {"status": "unavailable", "message": "Sign in to view Hephaestus storage."}
+    try:
+        response = await http.get(
+            base_url.rstrip("/") + "/status", timeout=5,
+            headers=headers(owner, project="storage-status"), follow_redirects=False,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or data.get("runtime") != "hephaestus":
+            return {"status": "unavailable", "message": "The execution endpoint did not identify itself as Hephaestus. Check Connections."}
+        disk = data.get("disk", {})
+        if not isinstance(disk, dict):
+            raise ValueError("Invalid disk summary")
+        total, used, free = (disk.get(key) for key in ("total", "used", "free"))
+        if any(type(value) is not int for value in (total, used, free)) or not (
+            total > 0 and 0 <= used <= total and 0 <= free <= total and used + free <= total
+        ):
+            raise ValueError("Invalid disk capacity")
+        result={"status": "ok", "runtime": "hephaestus", "disk": {"total": total, "used": used, "free": free}}
+        if data.get('storage_version') == 1:
+            result['storage']=await vm_request(http,base_url,owner,'/storage')
+            await sync_vm_retirements(result['storage'].get('operations',[]))
+        return result
+    except httpx.TimeoutException:
+        return {"status": "unavailable", "message": "Hephaestus took too long to respond. Local files are still available. Retry in a moment."}
+    except httpx.HTTPStatusError as error:
+        return {"status": "unavailable", "message": f"Hephaestus storage status is unavailable (HTTP {error.response.status_code}). Check Connections."}
+    except httpx.RequestError:
+        return {"status": "unavailable", "message": "Cannot reach Hephaestus. Local files are still available. Check Connections."}
+    except (ValueError, TypeError):
+        return {"status": "unavailable", "message": "Hephaestus returned an unreadable disk summary. Retry or check the VM service."}
+
+
 READONLY_STORAGE_PATTERNS = (
     "readonly database",
     "read-only database",
@@ -169,3 +210,98 @@ def runtime_storage_status(database_path: str, chroma_dir: str) -> dict:
         "rag_chroma": rag_chroma,
         "error": "; ".join(e for e in errors if e),
     }
+
+
+async def vm_request(http, base_url, owner, path, body=None):
+    from hephaestus_scope import headers
+    request_headers=headers(owner, project='storage-maintenance', maintenance='storage-admin')
+    if not request_headers:raise ValueError('Hephaestus maintenance is not configured')
+    response=await http.request('POST' if body is not None else 'GET',base_url.rstrip('/')+path,
+        json=body,headers=request_headers,timeout=120,follow_redirects=False)
+    response.raise_for_status()
+    return response.json()
+
+
+async def archive_test_evidence(http, base_url, owner='default'):
+    """Stream evidence to durable app storage and verify every archived member."""
+    import asyncio
+    import hashlib
+    import tarfile
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import config
+    from hephaestus_scope import headers
+    records=(await vm_request(http,base_url,owner,'/storage/archives',{}))['archives']
+    destination=Path(config.DATA_DIR)/'evaluation-archives/hephaestus'/ (datetime.now(timezone.utc).strftime('%Y-%m-%d')+'-storage-cleanup')
+    destination.mkdir(parents=True,exist_ok=True,mode=0o700)
+    for record in records:
+        import shutil
+        if shutil.disk_usage(destination).free < record['bytes'] + 1024**3:
+            raise OSError('Not enough HyprChat disk space to preserve the test evidence; VM cleanup remains blocked')
+        if not __import__('re').fullmatch('[a-f0-9]{32}',record['id']):raise ValueError('Invalid evidence identity')
+        target=destination/(record['id']+'.tar.gz');partial=target.with_suffix('.pending')
+        if not target.exists():
+            digest=hashlib.sha256();size=0
+            try:
+                async with http.stream('GET',base_url.rstrip('/')+'/storage/archive/'+record['id'],
+                    headers=headers(owner,project='storage-maintenance',maintenance='storage-admin'),timeout=120) as response:
+                    response.raise_for_status()
+                    with partial.open('wb') as out:
+                        async for chunk in response.aiter_bytes():
+                            size+=len(chunk)
+                            if size>record['bytes']:raise ValueError('Evidence archive size changed')
+                            out.write(chunk);digest.update(chunk)
+                        out.flush();os.fsync(out.fileno())
+                if size!=record['bytes'] or digest.hexdigest()!=record['sha256']:raise ValueError('Evidence archive checksum mismatch')
+                partial.chmod(0o600);partial.replace(target)
+            finally:partial.unlink(missing_ok=True)
+        def verify():
+            import json
+            digest=hashlib.sha256()
+            with target.open('rb') as handle:
+                for chunk in iter(lambda:handle.read(1024**2),b''):digest.update(chunk)
+            if digest.hexdigest()!=record['sha256']:raise ValueError('Saved evidence checksum mismatch')
+            with tarfile.open(target) as archive:
+                manifest=json.load(archive.extractfile('manifest.json'))
+                for row in manifest['files']:
+                    digest=hashlib.sha256()
+                    with archive.extractfile('evidence/'+row['path']) as handle:
+                        for chunk in iter(lambda:handle.read(1024**2),b''):digest.update(chunk)
+                    if digest.hexdigest()!=row['sha256']:raise ValueError('Evidence member checksum mismatch')
+            receipt={**record,'archive':str(target),'verified':True}
+            target.with_suffix('.json').write_text(json.dumps(receipt,indent=2))
+        await asyncio.to_thread(verify)
+        await vm_request(http,base_url,owner,'/storage/archive/'+record['id']+'/ack',
+                         {'sha256':record['sha256'],'destination':str(target)})
+    return len(records)
+
+
+async def sync_vm_retirements(operations):
+    import json
+    from pathlib import Path
+    import config
+    import database as db
+    completed=[op for op in operations if op.get('mode')=='reset' and op.get('status') in {'completed','blocked'} and op.get('retired_jobs')]
+    if not completed:return
+    registry=Path(config.DATA_DIR)/'retired-worker-workspaces.json'
+    receipt=json.loads(registry.read_text()) if registry.exists() else {'projects':[],'jobs':[]}
+    completed=[op for op in completed if op['id'] not in receipt.get('operations',[])]
+    if not completed:return
+    connection=await db.get_db()
+    try:
+        await connection.execute('BEGIN IMMEDIATE')
+        for operation in completed:
+            for job_id in operation['retired_jobs']:
+                rows=await connection.execute_fetchall('SELECT job_json,project_id FROM coder_workflows WHERE id=?',(job_id,))
+                for row in rows:
+                    job=json.loads(row['job_json'] or '{}');job.update(worker_workspace_available=False,
+                        worker_workspace_reason='The VM project data was explicitly reset. Restore the saved archive to continue.')
+                    await connection.execute('UPDATE coder_workflows SET job_json=? WHERE id=?',(json.dumps(job),job_id))
+                    projects=await connection.execute_fetchall('SELECT id,user_id,openhands_project_id FROM coding_projects WHERE id=?',(row['project_id'],))
+                    for project in projects:
+                        value=dict(project)
+                        if value not in receipt['projects']:receipt['projects'].append(value)
+        receipt['operations']=sorted(set(receipt.get('operations',[]))|{op['id'] for op in completed})
+        tmp=registry.with_suffix('.pending');tmp.write_text(json.dumps(receipt));tmp.chmod(0o600)
+        await connection.commit();tmp.replace(registry)
+    finally:await connection.close()

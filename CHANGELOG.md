@@ -1,6 +1,9 @@
 <details open>
 <summary>Unreleased — UI refresh</summary>
 
+- **Simpler Daedalus settings** — one coding engine handles planning, building and repairs on Hephaestus. Choose a chat model and a coding model; older job history remains readable.
+- **Consistent service names** — Hephaestus now appears in Service Monitor and project actions, with existing uptime history preserved.
+
 - **A clearer interface** — refined sidebar, headings, theme previews, and shared surfaces, while keeping the familiar composer and existing animated backgrounds.
 - **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
 - **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.

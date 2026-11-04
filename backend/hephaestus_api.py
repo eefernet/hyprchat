@@ -11,7 +11,7 @@ import time
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from hephaestus_languages import LANGUAGES
 from hephaestus_scope import key, verify, scope
@@ -32,7 +32,12 @@ async def authenticated_scope(request: Request, call_next):
     token = _scope.set(metadata)
     try:
         with scope(**{k:v for k,v in metadata.items() if k not in {'issued','nonce'}}):
-            return await call_next(request)
+            if request.url.path.startswith('/storage') or (request.method=='GET' and request.url.path=='/status'):
+                return await call_next(request)
+            from hephaestus_inventory import lock
+            try:
+                with lock(ROOT,'admission',exclusive=False,blocking=False):return await call_next(request)
+            except BlockingIOError:return JSONResponse({'detail':'VM maintenance is in progress; retry shortly'},status_code=503)
     finally: _scope.reset(token)
 
 
@@ -41,6 +46,9 @@ def workspace():
     if _scope.get().get('workspace_available')=='false':
         raise HTTPException(409,'This workspace was discarded when Codebox retired. Start from a retained artifact or upload its source.')
     identity = key(_scope.get())
+    from hephaestus_inventory import read,control
+    if identity in read(control(ROOT)/'retired-jobs.json',{'workspaces':[]}).get('workspaces',[]):
+        raise HTTPException(409,'This VM workspace was deliberately removed. Upload saved source as a new project to continue.')
     path = ROOT/'projects'/identity
     if not path.exists():
         require_space(ROOT)
@@ -144,8 +152,62 @@ def languages():
 def status():
     import shutil
     usage = shutil.disk_usage(ROOT)
-    return {'runtime':'hephaestus','disk':{'total':usage.total,'used':usage.used,'free':usage.free},
+    return {'runtime':'hephaestus','storage_version':1,'disk':{'total':usage.total,'used':usage.used,'free':usage.free},
             'running_jobs':sum(owner==key(_scope.get()) for owner,_ in _processes), 'languages':languages()}
+
+
+def maintenance_admin():
+    if _scope.get().get('maintenance') != 'storage-admin':
+        raise HTTPException(403, 'Signed administrator maintenance scope required')
+
+
+@app.get('/storage')
+def storage_status():
+    maintenance_admin()
+    from hephaestus_maintenance import status
+    return status(ROOT)
+
+
+@app.post('/storage/preview')
+def storage_preview(body: dict):
+    maintenance_admin()
+    from hephaestus_maintenance import preview, public_plan
+    return public_plan(preview(ROOT, body.get('mode', 'safe')))
+
+
+@app.post('/storage/cleanup')
+def storage_cleanup(body: dict):
+    maintenance_admin()
+    from hephaestus_maintenance import start
+    try:return start(ROOT, body.get('preview_id'), body.get('operation_id'), body.get('confirmation', ''))
+    except (ValueError, BlockingIOError) as error:raise HTTPException(409, str(error))
+
+
+@app.post('/storage/archives')
+def storage_archives():
+    maintenance_admin()
+    from hephaestus_maintenance import prepare_archives
+    return {'archives': prepare_archives(ROOT)}
+
+
+@app.get('/storage/archive/{identity}')
+def storage_archive(identity: str):
+    maintenance_admin()
+    if not re.fullmatch('[a-f0-9]{32}', identity):raise HTTPException(404)
+    from hephaestus_inventory import control, read
+    path=control(ROOT)/'evidence-outbox'/(identity+'.tar.gz')
+    if not path.is_file():raise HTTPException(404)
+    record=read(path.with_name(identity+'.json'))
+    return FileResponse(path, media_type='application/gzip', headers={'X-Content-SHA256':record['sha256']})
+
+
+@app.post('/storage/archive/{identity}/ack')
+def storage_archive_ack(identity: str, body: dict):
+    maintenance_admin()
+    if not re.fullmatch('[a-f0-9]{32}', identity):raise HTTPException(404)
+    from hephaestus_maintenance import acknowledge_archive
+    try:return acknowledge_archive(ROOT, identity, body.get('sha256'), body.get('destination', ''))
+    except ValueError as error:raise HTTPException(409,str(error))
 
 
 @app.post('/command')

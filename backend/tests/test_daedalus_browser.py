@@ -148,39 +148,6 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
 
 
 @pytest.mark.skipif(os.environ.get('DAEDALUS_BROWSER_TEST')!='1', reason='Opt-in Chromium integration test')
-def test_slow_preview_startup_is_not_an_application_failure(tmp_path):
-    import shlex
-    import sys
-    from coder_checks import browser_check
-    (tmp_path/'index.html').write_text('<!doctype html><title>Ready</title><h1>Loaded</h1>')
-    evidence=tmp_path/'evidence';evidence.mkdir()
-    program='import time,http.server; time.sleep(2); http.server.ThreadingHTTPServer(("127.0.0.1", {port}),http.server.SimpleHTTPRequestHandler).serve_forever()'
-    check={'server_command':shlex.quote(sys.executable)+' -c '+shlex.quote(program),
-           'path':'/','steps':[{'action':'text','selector':'h1','value':'Loaded'}]}
-    result=browser_check(tmp_path,check,evidence,15)
-    assert result['passed'] and result['title']=='Ready'
-    assert result['failed_requests']==[] and result['console_errors']==[]
-    assert Path(result['screenshot']).is_file()
-
-
-@pytest.mark.skipif(os.environ.get('DAEDALUS_BROWSER_TEST')!='1', reason='Opt-in Chromium integration test')
-@pytest.mark.parametrize('step',[
-    {'action':'visible','selector':'#missing'},
-    {'action':'visible','selector':'h1','value':'Wrong content'},
-])
-def test_browser_assertions_use_the_configured_step_allowance(tmp_path,step):
-    from playwright.sync_api import TimeoutError as BrowserTimeout
-    from coder_checks import browser_check
-    (tmp_path/'index.html').write_text('<!doctype html><h1>Actual content</h1>')
-    evidence=tmp_path/'evidence';evidence.mkdir()
-    check={'server_command':'python3 -m http.server {port} --bind 127.0.0.1','path':'/','steps':[step]}
-    started=time.monotonic()
-    with pytest.raises((BrowserTimeout,AssertionError)):
-        browser_check(tmp_path,check,evidence,30,step_timeout=1)
-    assert time.monotonic()-started<8
-
-
-@pytest.mark.skipif(os.environ.get('DAEDALUS_BROWSER_TEST')!='1', reason='Opt-in Chromium integration test')
 def test_browser_deletion_and_empty_text_assertions_reject_remaining_content():
     from playwright.sync_api import sync_playwright
     from coder_browser import interact

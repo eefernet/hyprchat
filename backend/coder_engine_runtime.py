@@ -82,7 +82,10 @@ def run(store, operation_id, repository):
     tools = [Tool(name=EngineToolSet.name, params={'output_directory': str(store.root / 'tool-output'),
                                                  'max_chars': min(16000, policy.input_budget // 2),
                                                  'command_seconds': settings['daedalus_command_seconds']}),
-             Tool(name=UITool.name, params={'directory': str(store.root / 'tool-output')}),
+             Tool(name=UITool.name, params={'directory': str(store.root / 'tool-output'), 'preflight': {
+                 'version': payload.get('ui_preflight_version', 0), 'root': str(repository.root),
+                 'operation_id': operation_id, 'commands': payload.get('execution_commands'),
+                 'timeout': settings['daedalus_command_seconds']}}),
              Tool(name=PrepareEnvironmentTool.name, params={'url': payload['ollama_url'],
                  'timeout': settings['daedalus_preparation_seconds'] + 10})]
     if payload.get('progress_version') == 1:
@@ -99,6 +102,8 @@ def run(store, operation_id, repository):
              'command_seconds': settings['daedalus_command_seconds'],
              'execution_commands': payload.get('execution_commands') or {},
              'plan_finalization_version': payload.get('plan_finalization_version', 0),
+             'ui_preflight_version': payload.get('ui_preflight_version', 0),
+             'ui_directory': str(store.root / 'tool-output'),
              'bridge_url': payload['ollama_url']}
     if previous.get('operation_id') == operation_id and previous.get('finalizing'):
         state.update({k: previous[k] for k in ('finalizing', 'passed', 'finish_seen') if k in previous})
@@ -165,7 +170,12 @@ def run(store, operation_id, repository):
             '[{"action":"click","selector":"<button selector>"},'
             '{"action":"text","selector":"<result selector>","equals":"<expected text>"}]}. '
             'Set toolkit to qt, gtk, or swing to match the application. The launch field is named command, never launch. '
-            'For Python/Node browser scripts declare Playwright dependencies. During controller verification, '
+            'For Python/Node browser scripts declare Playwright dependencies and use that package with normal chromium.launch() browser resolution. '
+            'Never hardcode executablePath or a Hephaestus/controller browser path. Document npx playwright install chromium '
+            '(or python -m playwright install chromium) for a downloaded project. Use prepare_environment after dependency changes; '
+            'only a successful result supplies a usable environment. Once preparation succeeds, matching Chromium is already installed; '
+            'run tests without running the browser installer inside this worker, whose shared browser cache is read-only. '
+            'During controller verification, '
             'navigate to the injected DAEDALUS_APP_URL for a static web project, or '
             'DAEDALUS_<SERVICE_ID>_URL for a declared service. Read that environment variable before starting '
             'a local fallback server; use the fallback only when the variable is absent. '
@@ -194,6 +204,15 @@ def run(store, operation_id, repository):
         task += '\n\nEnvironment preparation feedback:\n' + payload['builder_guidance']
     if payload.get('progress_version') == 1:
         task += '\nAfter inspection, publish a short implementation plan with task_tracker (plan), then continue automatically. Update task status as you work, and reconcile every task status before Finish, including after repairs. Mark done only for completed work; leave incomplete work unresolved. Task status is progress, not independent verification.'
+    if payload.get('ui_preflight_version') == 1:
+        task += ('\nFor browser/desktop projects, create .daedalus-ui.json alongside the implementation, not after Finish. '
+                 'Inspect actual controls and use the UI tool action check_flows before Finish, after manifest edits, and after repairs. '
+                 'This replays every flow with clean application state. Resolve every reported flow failure before finishing. '
+                 'Put assertions on text for displayed results or value for inputs; observe reads the whole interface and cannot target an element. '
+                 'Do not guess validation messages. When the user specifies exact wording, retain it and fix the application. '
+                 'When only a visible error is requested, choose consistent application/test wording after exercising the real control. '
+                 'Never replace a literal user expectation with observed wrong output, remove unrelated assertions, or weaken a test to make it pass. '
+                 'Normal Finish also preflights UI flows within the same allowance and two-repair limit; its results are diagnostic, not final verification.')
     if payload.get('engine_behavior_version', 0) >= 1:
         task = task.replace('click, fill, press, text, observe, or reload.', 'click, fill, press, text, value, observe, or reload.')
         task += ('\nEvery coding turn must use a declared tool, including finish for completion. Keep edits and diagnostics small. '

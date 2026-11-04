@@ -87,7 +87,7 @@ print(json.dumps(result))
 @pytest.mark.skipif(not shutil.which('bwrap'), reason='Linux Codebox isolation integration')
 def test_cancellation_stops_background_descendants(tmp_path):
     import time
-    from coder_patch_runtime import stop_process
+    from coder_execution_utils import stop_process
     heartbeat = tmp_path / 'heartbeat'
     code = "import pathlib,time\np=pathlib.Path(" + repr(str(heartbeat)) + ")\nwhile True:\n p.write_text(str(time.time_ns()))\n time.sleep(.03)\n"
     launcher = 'import subprocess,time\nsubprocess.Popen(["/usr/bin/python3","-c",' + repr(code) + '], start_new_session=True)\ntime.sleep(60)'

@@ -7,8 +7,17 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 MAX_REPAIRS = 2
+
+
+def reject_failures(state, failures):
+    state['passed'] = False
+    if state['denials'] < MAX_REPAIRS:
+        state['denials'] += 1
+        return True, '\n'.join(failures)[:7000]
+    return False, 'The two repair cycles are exhausted. Fresh verification will report the remaining failures.'
 
 
 def checklist_reminder(state):
@@ -32,6 +41,7 @@ def defer_verification(state, reason):
 
 
 def evaluate(state):
+    deadline = time.monotonic() + state.get('command_seconds', 60)
     if not state.get('finish_seen'):
         state['nudges'] += 1
         return state['nudges'] <= 2, 'Use a tool to continue the work, or call finish when implementation and checks are done.'
@@ -48,7 +58,18 @@ def evaluate(state):
         repository = Repository(root, Path(temporary) / 'inventory', DEFAULTS['daedalus_exclude_dirs'])
         inventory = repository.refresh()
         failures = [] if inventory['files'] else ['The project contains no deliverable files.']
+        from coder_engine_delivery import portability_checks
+        failures.extend(row['reason'] for row in portability_checks(repository, 'working'))
         profile = discover(repository, state.get('execution_commands'))
+        ui_spec = None
+        if state.get('ui_preflight_version') == 1:
+            from coder_ui_preflight import inspect, emit
+            from coder_ui_checks import UIFlowValidationError
+            try:
+                ui_spec = inspect(root, Path(state['ui_directory']) / 'ui-preflight', state.get('execution_commands'))
+            except UIFlowValidationError as error:
+                failures.append('UI flow manifest errors:\n' + str(error))
+                emit(state['ui_directory'], state['operation_id'], 'failed', passed=False, diagnostic_only=True, errors=error.errors)
         cache_root = os.environ.get('DAEDALUS_ENVIRONMENT_ROOT')
         if cache_root:
             from coder_profiles import environment_key
@@ -59,6 +80,7 @@ def evaluate(state):
                 from coder_prepared_environment import is_ready
                 ready = is_ready(cache_root, safe_relative(root, package['cwd']), key, os.environ.get('DAEDALUS_PREPARATION_OPERATION')) if os.environ.get('DAEDALUS_RUNTIME_POLICY') == '1' else (Path(cache_root) / key / 'environment-ready.json').is_file()
                 if not ready:
+                    if failures: return reject_failures(state, failures)
                     return defer_verification(state, 'Declared dependencies changed or preparation failed; defer to controller-owned preparation without consuming a code-repair cycle.')
         for check in profile['checks']:
             if check.get('phase') not in {'build', 'test', 'tests', 'lint', 'typecheck'} and not check.get('is_test'):
@@ -68,18 +90,19 @@ def evaluate(state):
                 # New files can introduce a profile after the child's preflight.
                 # Missing controller dependencies are not defects to ask the model
                 # to repair. Final checks provision their own fresh environment.
+                if failures: return reject_failures(state, failures)
                 return defer_verification(state, 'Environment preparation is required; defer checks to the independent runner.')
             with tempfile.TemporaryFile() as log:
                 process = subprocess.Popen(['bash', '-c', check['command']], cwd=cwd,
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 try:
-                    code = process.wait(timeout=state['command_seconds'])
+                    code = process.wait(timeout=max(.1, deadline-time.monotonic()) if state.get('ui_preflight_version') == 1 else state['command_seconds'])
                 except subprocess.TimeoutExpired:
-                    from coder_patch_runtime import stop_process
+                    from coder_execution_utils import stop_process
                     stop_process(process)
                     code = -1
                 finally:
-                    from coder_patch_runtime import stop_process
+                    from coder_execution_utils import stop_process
                     stop_process(process)
                 log.seek(0, 2); length = log.tell(); log.seek(max(0, length - 2500))
                 tail = log.read().decode(errors='replace')
@@ -88,14 +111,22 @@ def evaluate(state):
                 diagnostic = classify(code, tail, phase=check.get('phase', 'test'), managed_paths=[root / '.venv', root / 'node_modules', root / 'vendor'])
                 if diagnostic:
                     state['environment_failure'] = diagnostic
+                    if failures: return reject_failures(state, failures)
                     return defer_verification(state, 'Environment checks failed; defer to controller preparation without spending a code repair.')
                 failures.append(f"{check['id']}: {check['command']} exited {code}\n{tail}")
+        if ui_spec and ui_spec['flows']:
+            from coder_ui_preflight import run
+            result = run(root, state['ui_directory'], state['operation_id'], commands=state.get('execution_commands'),
+                         timeout=max(.1, deadline - time.monotonic()))
+            state['ui_preflight'] = result
+            if result['status'] == 'deferred':
+                if failures: return reject_failures(state, failures)
+                return defer_verification(state, 'UI preflight needs controller environment preparation. ' + result.get('reason', json.dumps(result.get('flows', []))[:3000]))
+            if not result['passed']:
+                failures.append('UI preflight failures (diagnostic; do not change literal user expectations):\n' + json.dumps(result, ensure_ascii=False)[:6000])
         state['passed'] = not failures
         if failures:
-            if state['denials'] < MAX_REPAIRS:
-                state['denials'] += 1
-                return True, '\n'.join(failures)[:7000]
-            return False, 'The two repair cycles are exhausted. Fresh verification will report the remaining failures.'
+            return reject_failures(state, failures)
         return checklist_reminder(state)
 
 

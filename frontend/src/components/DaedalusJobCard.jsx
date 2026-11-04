@@ -5,6 +5,7 @@ import {loopLabel,nowLine,outcomeExplanation,fileActivity} from '../daedalusProg
 import {useDaedalusJob} from '../daedalusJobStore.js';
 import {StageRail,ResultBanner,PlanSection,ChecksSection} from './DaedalusPlanPanel.jsx';
 import './daedalusJob.css';
+import {checkOutcome} from '../daedalusCheckOutcomes.js';
 import DaedalusPreview from './DaedalusPreview.jsx';
 
 export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compact=false}){
@@ -95,7 +96,7 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
               <p>{criterion.request_excerpt}</p>{criterion.reason&&<pre>{criterion.reason}</pre>}</div>)}
           </details>}
           {!!job.checks?.length&&<details className="dp-section"><summary>Every check with its log</summary>
-            {(job.checks||[]).map((check,index)=><div className="dj-row" key={`${check.id}-${index}`}><strong>{check.passed?'✓':'✗'} {check.id}</strong><p>{check.classification|| (check.passed?'Passed':'Needs attention')}{check.test_count!=null&&` · ${check.test_count} tests`}</p><pre>{check.log_tail||check.error||check.summary||check.command}</pre>{evidence(check)}</div>)}</details>}
+            {(job.checks||[]).map((check,index)=><div className="dj-row" key={`${check.id}-${index}`}><strong>{checkOutcome(check)==='passed'?'✓':checkOutcome(check)==='failed'?'✗':'?'} {check.id}</strong><p>{({passed:'Passed',failed:'Failed',advisory:'Advisory',skipped:'Skipped',unverified:'Unverified'})[checkOutcome(check)]}{check.classification&&` · ${check.classification}`}{check.test_count!=null&&` · ${check.test_count} tests`}</p><pre>{check.reason||check.log_tail||check.error||check.summary||check.command}</pre>{(check.lost_tests?.length>0||check.diagnostic)&&<details><summary>Diagnostic</summary><pre>{JSON.stringify({baseline_revision:check.baseline_revision,candidate_revision:check.revision_id,lost_tests:check.lost_tests,preparation:check.diagnostic},null,2)}</pre></details>}{evidence(check)}</div>)}</details>}
           {job.visual_review?.status&&<p>AI visual review: {job.visual_review.status} {job.visual_review.reason}</p>}
         </>}
         {tab==='Files & logs'&&<><h2>Files & logs</h2>{job.workspace?<ProjectEvidence jobId={job.id} changedAt={job.progress?.files_changed_at} t={t} font={font}/>:<p>Project files will appear after the first checkpoint.</p>}

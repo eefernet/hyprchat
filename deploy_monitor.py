@@ -8,6 +8,7 @@ Saves server config after first setup so you never re-enter IPs.
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import shlex
 import shutil
@@ -43,9 +44,7 @@ REMOTE_DB = REMOTE_BACKEND + "db/"
 REMOTE_ROUTES = REMOTE_BACKEND + "routes/"
 REMOTE_TOOLING = REMOTE_BACKEND + "tooling/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
-REMOTE_OPENHANDS_WORKER = "/opt/openhands-worker/"
-REMOTE_AIDER_VENV = REMOTE_OPENHANDS_WORKER + "aider-venv"
-REMOTE_DOCUMENT_WORKER = "/opt/hyprchat-documents/"
+REMOTE_HEPHAESTUS = "/srv/hephaestus/releases/"
 # The live HyprChat service runs from a staged release since 2026-10-20
 # (/opt/hyprchat/.releases/<stamp>/, created by scripts/staged_release.py; the
 # unit drop-in zz-hyprchat-release.conf points WorkingDirectory/ExecStart at it).
@@ -61,52 +60,33 @@ DOCUMENT_WORKER_FILES = {"backend/document_worker.py", "backend/document_runtime
 DOCUMENT_SHARED = {"backend/document_formats.py"}
 SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
 
-WORKER_FILES = {
-    "backend/openhands_worker.py", "backend/coder_worker_runtime.py", "backend/coder_sdk_runtime.py",
-    "backend/coder_checks.py", "backend/worker-requirements.txt",
-    "backend/coder_browser.py", "backend/coder_browser_tool.py", "backend/coder_visual.py", "backend/coder_evidence.py",
-    "backend/coder_context.py",
-}
-# coder_inference is imported by coder_policy7_ops at module level, which the HyprChat-side controller loads too.
-WORKER_SHARED = {"backend/context_policy.py", "backend/coder_inference.py", "backend/coder_verification.py", "backend/coder_contracts.py", "backend/coder_failures.py", "backend/coder_api_probe.py", "backend/coder_browser_schema.py"}
-WORKER_SHARED.update({'backend/'+name+'.py' for name in ('coder_file_probe','coder_check_schema','coder_contracts_v5','coder_response_recovery')})
-WORKER_SHARED.update({'backend/'+name+'.py' for name in ('coder_profiles','coder_native_checks','coder_review','coder_repository')})
-WORKER_SHARED.update({'backend/'+name+'.py' for name in (
-    'coder_policy7', 'coder_policy7_ops', 'coder_policy7_evidence', 'coder_patch_runtime', 'coder_project_runtime',
-    'coder_policy7_builder', 'coder_audit_hygiene', 'coder_page_guard', 'coder_frontend_guard',
-    'coder_process_evidence', 'coder_scope', 'coder_policy7_visual',
-    'coder_sandbox', 'coder_sandbox_agent', 'coder_sandbox_call', 'coder_sandbox_legacy',
-    'coder_assertion_outcomes', 'coder_criteria', 'coder_generated',
-    'coder_policy7_phases', 'coder_request_probes', 'coder_workflow_guard', 'coder_repair_packet', 'coder_skeletons', 'coder_policy7_prompt',
-    'coder_stop_hook', 'coder_test_ids', 'coder_required_tests', 'hephaestus_scope', 'hephaestus_client')})
+# Execution source is deployed only as a complete, tested Hephaestus release.
+WORKER_FILES = {str(p) for p in Path('backend').glob('coder_*.py') if p.stem not in {'coder_jobs','coder_presentation'}}
+WORKER_FILES.update(str(p) for p in Path('backend').glob('hephaestus_*.py'))
+WORKER_FILES.update({'backend/engine-runtime.lock.txt', 'backend/engine-requirements.lock.txt'})
+WORKER_SHARED = {'backend/context_policy.py'}
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
 WATCHED = {
-    **{path:("Document Worker", REMOTE_DOCUMENT_WORKER, False) for path in DOCUMENT_WORKER_FILES},
+    **{path:("Document Worker", REMOTE_HEPHAESTUS, False) for path in DOCUMENT_WORKER_FILES},
     **{path:("Coding Verification", REMOTE_BACKEND, True) for path in WORKER_SHARED},
     "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
     "backend/coder_verification.py": ("Coding Verification", REMOTE_BACKEND, True),
-    "backend/coder_contracts.py": ("Coding Contracts", REMOTE_BACKEND, True),
-    "backend/coder_api_probe.py": ("API Probe Contract", REMOTE_BACKEND, True),
     "backend/coder_browser_schema.py": ("Browser Contract", REMOTE_BACKEND, True),
-    "backend/coder_probe_audit.py": ("Verification Audit", REMOTE_BACKEND, True),
     "backend/coder_failures.py": ("Coding Failures", REMOTE_BACKEND, True),
     "backend/coding_search.py": ("Coding Search Context", REMOTE_BACKEND, True),
     "backend/seed_kb/seed_coder_kb.py": ("Coder Docs Seeder", REMOTE_BACKEND + "seed_kb/", False),
     "backend/seed_kb/coder_sources.py": ("Coder Docs Sources", REMOTE_BACKEND + "seed_kb/", False),
     "backend/coder_jobs.py": ("Coding Controller", REMOTE_BACKEND, True),
-    "backend/coder_loop.py": ("Coding Loop", REMOTE_BACKEND, True),
-    "backend/coder_policy7_controller.py": ("Coding Policy 7 Controller", REMOTE_BACKEND, True),
     "backend/coder_presentation.py": ("Coding Presentation", REMOTE_BACKEND, True),
     "backend/coder_profiles.py": ("Execution Profiles", REMOTE_BACKEND, True),
     "backend/coder_native_checks.py": ("Native Checks", REMOTE_BACKEND, True),
-    "backend/coder_review.py": ("Independent Review", REMOTE_BACKEND, True),
     "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
     "backend/db/coder_promotion.py": ("Coding Project Versions", REMOTE_DB, True),
     "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
     "backend/routes/coder_promotion.py": ("Coding Versions API", REMOTE_ROUTES, True),
-    **{path:("Coding Worker", REMOTE_OPENHANDS_WORKER, False) for path in WORKER_FILES},
+    **{path:("Coding Worker", REMOTE_HEPHAESTUS, False) for path in WORKER_FILES},
     "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
     "frontend/src/components/DaedalusRequestOptions.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
@@ -177,8 +157,6 @@ WATCHED = {
     "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
     "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
-    "backend/tooling/workflow_gate.py": ("Workflow Gate",  REMOTE_TOOLING,            True),
-    "backend/tooling/gate_decisions.py": ("Gate Decisions", REMOTE_TOOLING,           True),
     "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
     "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
     "backend/provider_tools.py":    ("Provider Tools",   REMOTE_BACKEND,            True),
@@ -212,15 +190,8 @@ WATCHED = {
     "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
     "backend/hf_compat.py":         ("HF Compat",        REMOTE_BACKEND,            True),
     "backend/hyprfit.py":           ("HyprFit",          REMOTE_BACKEND,            True),
-    "backend/openhands_worker.py":  ("OpenHands Worker", REMOTE_OPENHANDS_WORKER,   False),
     "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
     "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),
-    "backend/agents/architect.py":      ("Architect Agent",    REMOTE_AGENTS, True),
-    "backend/agents/reviewer.py":       ("Reviewer Agent",     REMOTE_AGENTS, True),
-    "backend/agents/acceptance.py":     ("Acceptance Agent",   REMOTE_AGENTS, True),
-    "backend/agents/fixer.py":          ("Fixer Agent",        REMOTE_AGENTS, True),
-    "backend/agents/aider_fixer.py":    ("Aider Fixer",        REMOTE_AGENTS, True),
-    "backend/agents/project_qa.py":     ("ProjectQA Agent",    REMOTE_AGENTS, True),
     "backend/agents/project_indexer.py":("Project Indexer",    REMOTE_AGENTS, True),
     "backend/agents/language_adapters.py":("Language Adapters", REMOTE_AGENTS, True),
     "backend/agents/assistant.py":      ("Assistant Agent",    REMOTE_AGENTS, True),
@@ -288,6 +259,8 @@ WATCHED = {
 # + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
+    "frontend/src/serviceLabels.js",
+    "frontend/src/components/HephaestusStorage.jsx",
     # UI motion/surface refresh (2026-10): new modules plus files that were missing.
     "frontend/src/ui.css", "frontend/src/surfaces.css", "frontend/src/motion.css",
     "frontend/src/elevation.js", "frontend/src/usePresence.js", "frontend/src/useNewKeys.js",
@@ -520,7 +493,7 @@ def setup_servers():
         default_user=hypr_def.get("user", "root"),
         default_pass=hypr_def.get("pass") or hypr_def.get("password", ""))
 
-    print(f"  {BLD}{M}Hephaestus / Codebox Server{RST} {DIM}(sandbox execution){RST}")
+    print(f"  {BLD}{M}Hephaestus Docker VM{RST} {DIM}(sandbox execution){RST}")
     cb = {**cb_def, **prompt_server("",
         default_ip=cb_def.get("ip") or cb_def.get("host", ""),
         default_user=cb_def.get("user", "root"),
@@ -682,8 +655,7 @@ def _default_env_text(codebox_ip, searxng_ip=""):
         "PORT=8000",
         "DEBUG=false",
         f"CODEBOX_URL=http://{codebox_ip}:8585",
-        f"OPENHANDS_URL=http://{codebox_ip}:8586",
-        f"AIDER_WORKER_URL=http://{codebox_ip}:8586",
+        f"DAEDALUS_ENGINE_URL=http://{codebox_ip}:8587",
         f"SEARXNG_URL={searxng_url}",
         "HYPRCHAT_OUTBOUND_PROXY=",
         "COMFYUI_URL=",
@@ -890,100 +862,18 @@ def _run_first_time_searxng_setup(cfg):
             print(f"  {Y}!{RST} HyprChat restart check failed: {(restart_err or restart_out)[:300]}")
 
 
-def _codebox_host_ready(cb):
-    cmd = (
-        "test -d /opt/openhands-worker && "
-        "test -d /root/projects && "
-        "python3 -c 'import fastapi, uvicorn, pydantic' >/dev/null 2>&1"
-    )
-    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
 
 
-def _bootstrap_codebox_host(cb):
-    if cb.get("runtime") == "hephaestus":
-        return False, "", "Provision Hephaestus with scripts/create-hephaestus-vm.sh and its locked runtime installer; host pip bootstrap is disabled."
-    cmd = (
-        "set -u\n"
-        "if command -v apt-get >/dev/null 2>&1; then\n"
-        "  apt-get update -qq >/dev/null 2>&1 || true\n"
-        "  apt-get install -y -qq python3-pip python3-venv curl git strace bubblewrap >/dev/null 2>&1 || true\n"
-        "fi\n"
-        "mkdir -p /opt/openhands-worker /root/projects /tmp/hyprchat-aider\n"
-        "python3 -m pip install --break-system-packages -q -U "
-        "fastapi 'uvicorn[standard]' pydantic requests >/tmp/hyprchat-worker-pip.log 2>&1 || "
-        "python3 -m pip install --user -q -U fastapi 'uvicorn[standard]' pydantic requests "
-        ">>/tmp/hyprchat-worker-pip.log 2>&1\n"
-    )
-    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=300)
 
 
-def _ensure_codebox_sandbox_tools(cb):
-    """Daedalus runs project code under bubblewrap and traces audits with strace.
-
-    Checked separately from _codebox_host_ready: a host bootstrapped before the
-    sandbox existed passes that check and would never receive these two tools.
-    """
-    cmd = (
-        "command -v bwrap >/dev/null 2>&1 && command -v strace >/dev/null 2>&1 && exit 0\n"
-        "command -v apt-get >/dev/null 2>&1 || { echo 'SANDBOX_TOOLS_MISSING: install bubblewrap and strace manually'; exit 1; }\n"
-        "apt-get update -qq >/dev/null 2>&1 || true\n"
-        "apt-get install -y -qq strace bubblewrap >/dev/null 2>&1\n"
-        "command -v bwrap >/dev/null 2>&1 && command -v strace >/dev/null 2>&1 || "
-        "{ echo 'SANDBOX_TOOLS_MISSING: apt-get install strace bubblewrap failed'; exit 1; }\n"
-    )
-    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=180)
 
 
-def _ensure_openhands_worker_service(cb):
-    cmd = (
-        "set -u\n"
-        "if [ ! -f /etc/systemd/system/openhands-worker.service ]; then\n"
-        "cat > /etc/systemd/system/openhands-worker.service <<'EOF'\n"
-        "[Unit]\n"
-        "Description=HyprChat OpenHands Worker\n"
-        "After=network.target\n"
-        "\n"
-        "[Service]\n"
-        "Type=simple\n"
-        "WorkingDirectory=/opt/openhands-worker\n"
-        "Environment=PYTHONUNBUFFERED=1\n"
-        "ExecStart=/usr/bin/python3 /opt/openhands-worker/openhands_worker.py\n"
-        "Restart=always\n"
-        "RestartSec=5\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-        "EOF\n"
-        "fi\n"
-        # Toolchains the checks need but systemd's minimal PATH lacks. .NET installs under /root/.dotnet with
-        # PATH/DOTNET_ROOT only in .bashrc: production C# builds failed every setup step with
-        # `dotnet: command not found` (live run 2026-09-22) while the login-shell evaluator found it.
-        "if [ ! -f /etc/systemd/system/openhands-worker.service.d/toolchains.conf ]; then\n"
-        "mkdir -p /etc/systemd/system/openhands-worker.service.d\n"
-        "cat > /etc/systemd/system/openhands-worker.service.d/toolchains.conf <<'EOF'\n"
-        "[Service]\n"
-        "Environment=DOTNET_ROOT=/root/.dotnet\n"
-        "Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.dotnet:/root/.dotnet/tools\n"
-        "EOF\n"
-        "fi\n"
-        "systemctl daemon-reload\n"
-        "systemctl enable openhands-worker >/dev/null 2>&1 || true\n"
-    )
-    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=30)
 
 
 def _deploy_target(filepath, remote_dir, hypr, cb, root=HYPRCHAT_ROOT):
-    """Return (target_server, remote_dir) for a watched file.
-
-    HyprChat paths are rebased onto the active release root; Codebox paths are
-    fixed. The release's own tree is edited in place, which is the same thing a
-    frontend hotfix does; the next scripts/staged_release.py prepare simply
-    hashes the current tree as its baseline.
-    """
-    if filepath in DOCUMENT_WORKER_FILES:
-        return cb, REMOTE_DOCUMENT_WORKER
-    if filepath in WORKER_FILES:
-        return cb, REMOTE_OPENHANDS_WORKER
+    """Resolve application hotfix paths; runtime files require a full release."""
+    if filepath in DOCUMENT_WORKER_FILES | DOCUMENT_SHARED | WORKER_FILES | WORKER_SHARED:
+        raise ValueError("Hephaestus runtime changes require a tested immutable release")
     return hypr, _rebase(remote_dir, root)
 
 
@@ -999,52 +889,8 @@ def _ensure_remote_dir(target, remote_dir):
     return ok, err
 
 
-def _ensure_aider_worker_venv(cb):
-    """Install/check Aider on Codebox, where uploaded-project fixes run.
-
-    Aider's dependency set is not reliable on Python 3.13. Use uv to create a
-    dedicated Python 3.12 venv at the path the worker checks first.
-    """
-    venv = REMOTE_AIDER_VENV.rstrip("/")
-    aider = f"{venv}/bin/aider"
-    cmd = (
-        "set -u\n"
-        "log=/tmp/hyprchat-aider-install.log\n"
-        f"venv={shlex.quote(venv)}\n"
-        f"aider={shlex.quote(aider)}\n"
-        f"mkdir -p {shlex.quote(REMOTE_OPENHANDS_WORKER)}\n"
-        "if [ ! -x \"$aider\" ]; then\n"
-        "  rm -rf \"$venv\"\n"
-        "  : > \"$log\"\n"
-        "  python3 -m pip install --break-system-packages -U uv >>\"$log\" 2>&1 || "
-        "python3 -m pip install --user -U uv >>\"$log\" 2>&1\n"
-        "  uvbin=$(command -v uv || true)\n"
-        "  if [ -z \"$uvbin\" ] && [ -x /root/.local/bin/uv ]; then uvbin=/root/.local/bin/uv; fi\n"
-        "  if [ -z \"$uvbin\" ]; then\n"
-        "    echo 'uv install failed'\n"
-        "    tail -80 \"$log\" 2>/dev/null || true\n"
-        "    exit 1\n"
-        "  fi\n"
-        "  \"$uvbin\" python install 3.12 >>\"$log\" 2>&1\n"
-        "  \"$uvbin\" venv --seed --python 3.12 \"$venv\" >>\"$log\" 2>&1\n"
-        "  \"$venv/bin/python\" -m pip install -U pip setuptools wheel >>\"$log\" 2>&1\n"
-        "  \"$venv/bin/pip\" install -U aider-chat >>\"$log\" 2>&1\n"
-        "fi\n"
-        "if [ -x \"$aider\" ]; then\n"
-        "  \"$aider\" --version 2>&1\n"
-        "else\n"
-        "  echo 'Aider binary missing after install attempt'\n"
-        "  tail -80 \"$log\" 2>/dev/null || true\n"
-        "  exit 1\n"
-        "fi"
-    )
-    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=600)
 
 
-def _aider_worker_ready(cb):
-    aider = f"{REMOTE_AIDER_VENV.rstrip('/')}/bin/aider"
-    cmd = f"test -x {shlex.quote(aider)} && {shlex.quote(aider)} --version 2>&1"
-    return ssh_cmd(cb["ip"], cb["user"], cb["pass"], cmd, timeout=20)
 
 
 def _build_and_deploy_frontend(target, root=HYPRCHAT_ROOT):
@@ -1136,7 +982,7 @@ def deploy_changes(changed, cfg):
     pushed = {}  # filepath -> sha256 of the content actually sent
 
     cb = cfg["codebox"]
-    if cb.get("runtime") == "hephaestus" and any(path in WORKER_FILES | WORKER_SHARED | DOCUMENT_WORKER_FILES for path, _ in changed):
+    if any(path in WORKER_FILES | WORKER_SHARED | DOCUMENT_WORKER_FILES | DOCUMENT_SHARED for path, _ in changed):
         print("Hephaestus worker changes require a tested immutable runtime release; live worker file copies and pip installs are disabled.")
         return {}
     ensured_dirs = set()
@@ -1161,31 +1007,6 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} HyprChat host ready")
 
-    hephaestus = cb.get('runtime') == 'hephaestus'
-    cb_ready, _out, cb_err = (True, '', '') if hephaestus else _codebox_host_ready(cb)
-    cb_reachable = cb_ready
-    if not cb_ready:
-        ok, out, err = _bootstrap_codebox_host(cb)
-        cb_reachable = ok
-        if ok:
-            print(f"  {G}\u2713{RST} Codebox host bootstrapped")
-        else:
-            print(f"  {Y}!{RST} Codebox bootstrap warning: {(err or out or cb_err)[:300]}")
-    else:
-        print(f"  {G}\u2713{RST} Codebox host ready")
-
-    changed = list(changed)
-    if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
-        if cb_reachable:
-            ok, out, err = _ensure_codebox_sandbox_tools(cb)
-            if not ok and "SANDBOX_TOOLS_MISSING" in (out or ""):
-                print(f"  {Y}!{RST} Codebox is missing bubblewrap/strace; Daedalus jobs will fail as isolation unavailable: {out[:200]}")
-            elif not ok:
-                print(f"  {Y}!{RST} Could not verify bubblewrap/strace on Codebox: {(err or out)[:200]}")
-        present = {path for path, _ in changed}
-        for path in WORKER_FILES | WORKER_SHARED:
-            if path not in present:
-                changed.append((path,WATCHED[path]))
     # Phase 1 — stage: copy every backend file to <final>.deploy-tmp. Nothing
     # in the live tree changes until the whole batch has staged cleanly.
     frontend_built = False
@@ -1234,27 +1055,6 @@ def deploy_changes(changed, cfg):
         else:
             stage_failed.append((label, filepath, err, target))
 
-    if any(path in WORKER_FILES | WORKER_SHARED for path, _ in changed):
-        for filepath in WORKER_SHARED:
-            final = REMOTE_OPENHANDS_WORKER.rstrip("/") + "/" + os.path.basename(filepath)
-            ok, err = scp(filepath, cb["ip"], final + ".deploy-tmp", cb["user"], cb["pass"])
-            if ok:
-                staged.append({"filepath":filepath,"label":"Worker Context Policy","target":cb,
-                               "tmp":final+".deploy-tmp","final":final,"digest":file_digest(filepath),"restart_flag":False})
-            else:
-                stage_failed.append(("Worker Context Policy",filepath,err,cb))
-
-    if any(path in DOCUMENT_WORKER_FILES | DOCUMENT_SHARED for path, _ in changed):
-        dir_ok, dir_err = _ensure_remote_dir(cb, REMOTE_DOCUMENT_WORKER)
-        for filepath in DOCUMENT_SHARED:
-            final = REMOTE_DOCUMENT_WORKER + os.path.basename(filepath)
-            ok, err = scp(filepath, cb["ip"], final + ".deploy-tmp", cb["user"], cb["pass"]) if dir_ok else (False, dir_err)
-            if ok:
-                staged.append({"filepath":filepath,"label":"Document Formats","target":cb,
-                               "tmp":final+".deploy-tmp","final":final,"digest":file_digest(filepath),"restart_flag":False})
-            else:
-                stage_failed.append(("Document Formats", filepath, err, cb))
-
     if stage_failed:
         # Abort the whole backend batch: the live tree stays untouched,
         # staged tmp files are removed, and no digests are recorded so
@@ -1299,7 +1099,7 @@ def deploy_changes(changed, cfg):
     print()
     for label, filepath, ok, err, target in results:
         icon = f"{G}\u2713{RST}" if ok else f"{R}\u2717{RST}"
-        server_tag = f"{M}codebox{RST}" if target is cb else f"{C}hyprchat{RST}"
+        server_tag = f"{M}hephaestus{RST}" if target is cb else f"{C}hyprchat{RST}"
         print(f"  {icon}  {BLD}{label:18}{RST} {DIM}{filepath}{RST}  → {server_tag}")
         if err:
             print(f"       {R}{err}{RST}")
@@ -1355,51 +1155,6 @@ def deploy_changes(changed, cfg):
                 print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
                 _show_journal(hypr, "hyprchat")
 
-    worker_deployed = bool(set(pushed) & (WORKER_FILES | WORKER_SHARED))
-    aider_ready, aider_out, _ = (True, '', '') if hephaestus else _aider_worker_ready(cb)
-    if worker_deployed or not aider_ready:
-        print()
-        print(f"  {Y}\u25b6{RST} Checking Aider worker venv on Codebox...")
-        ok, out, err = _ensure_aider_worker_venv(cb)
-        if ok:
-            print(f"  {G}\u2713{RST} Aider ready: {out.splitlines()[-1] if out else 'installed'}")
-        else:
-            print(f"  {Y}!{RST} Aider install/check failed: {(err or out)[:300]}")
-            print(f"     {DIM}Worker will still run; /aider/health reports missing until this is fixed.{RST}")
-
-    if worker_deployed:
-        ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
-            "/root/venv/bin/python3 -m pip install -r /opt/openhands-worker/worker-requirements.txt > /tmp/daedalus-dependencies.log 2>&1 && "
-            "/root/venv/bin/python3 -m playwright install chromium --only-shell >> /tmp/daedalus-dependencies.log 2>&1", timeout=600)
-        if not ok:
-            print(f"  {R}Worker dependencies failed; service restart skipped. Inspect /tmp/daedalus-dependencies.log. Worker files will retry.{RST}")
-            for path in WORKER_FILES | WORKER_SHARED:
-                pushed.pop(path, None)
-            return pushed
-        print()
-        print(f"  {Y}\u25b6{RST} Ensuring OpenHands worker service...")
-        svc_ok, svc_out, svc_err = _ensure_openhands_worker_service(cb)
-        if svc_ok:
-            print(f"  {G}\u2713{RST} OpenHands worker service ready")
-        else:
-            print(f"  {Y}!{RST} Worker service setup failed: {(svc_err or svc_out)[:300]}")
-
-        print()
-        print(f"  {Y}\u25b6{RST} Restarting OpenHands worker on Codebox...")
-        ok, out, err = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
-            "systemctl restart openhands-worker 2>&1", timeout=30)
-        if ok:
-            time.sleep(3)
-            ok2, out2, _ = ssh_cmd(cb["ip"], cb["user"], cb["pass"],
-                "systemctl is-active openhands-worker 2>&1")
-            if ok2 and "active" in out2:
-                print(f"  {G}\u2713{RST} OpenHands worker running")
-            else:
-                print(f"  {Y}!{RST} Worker may not be active: {out2}")
-                _show_journal(cb, "openhands-worker")
-        else:
-            print(f"  {R}\u2717{RST} Worker restart failed: {err}")
-            _show_journal(cb, "openhands-worker")
 
     print()
     print(f"  {bar('═', G)}")
@@ -1433,7 +1188,7 @@ def draw_monitor(file_states, prev_times, cfg, last_event=""):
     if _LIVE_ROOT["checked"]:
         kind = "staged release" if _LIVE_ROOT["release"] else "legacy root"
         print(f"    {DIM}live {kind}: {_LIVE_ROOT['root']}{RST}")
-    print(f"  {M}\u25cf{RST} {BLD}{'Hephaestus' if cb.get('runtime') == 'hephaestus' else 'Codebox'}{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
+    print(f"  {M}\u25cf{RST} {BLD}Hephaestus{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
     sx = cfg.get("searxng")
     if _server_configured(sx):
         print(f"  {Y}\u25cf{RST} {BLD}SearXNG{RST}   {G}{sx['user']}@{sx['ip']}{RST}")
@@ -1536,7 +1291,7 @@ def main():
             f"{BLD}     HyprChat Deploy Monitor{RST}",
             "",
             f"  {C}HyprChat{RST}  {hypr['user']}@{hypr['ip']}",
-            f"  {M}{'Hephaestus' if cb.get('runtime') == 'hephaestus' else 'Codebox'}{RST}   {cb['user']}@{cb['ip']}",
+            f"  {M}Hephaestus{RST}   {cb['user']}@{cb['ip']}",
             *sx_lines,
             "",
             f"  {BLD}Enter{RST}  Start watching        ",

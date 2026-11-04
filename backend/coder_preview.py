@@ -281,7 +281,7 @@ def install_routes(app, store):
 
 def run(root, identity):
     from coder_sandbox import Sandbox
-    from coder_patch_runtime import stop_process
+    from coder_execution_utils import stop_process
     from coder_ui_session import free_port
     from coder_worker_runtime import WorkerStore
     from coder_repository import Repository

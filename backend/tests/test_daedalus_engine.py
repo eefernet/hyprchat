@@ -19,11 +19,12 @@ def test_engine_is_frozen_and_idempotency_cannot_change_it(monkeypatch, tmp_path
         modern = await coder_jobs.create('conversation', 'Build a calculator', model='local', key='engine', engine='openhands159')
         assert modern['engine_version'] == '1.59.0'
         assert coder_jobs.worker_url(modern).startswith('http://candidate:8587/')
-        with pytest.raises(ValueError, match='Idempotency'):
+        with pytest.raises(ValueError, match='retired'):
             await coder_jobs.create('conversation', 'Build a calculator', model='local', key='engine', engine='legacy')
         again = await jobs.get(modern['id'])
         assert again['engine'] == 'openhands159'
-        assert not coder_jobs.worker_url({'id': 'old', 'worker_operation': 'op'}).startswith('http://candidate')
+        with pytest.raises(ValueError, match='retired'):
+            coder_jobs.worker_url({'id': 'old', 'worker_operation': 'op'})
     asyncio.run(scenario())
 
 
@@ -31,7 +32,7 @@ def test_modern_engine_requires_explicit_worker_configuration(monkeypatch):
     monkeypatch.delenv('DAEDALUS_ENGINE_URL', raising=False)
     with pytest.raises(ValueError, match='not configured'):
         coder_jobs.worker_base({'engine': 'openhands159'})
-    with pytest.raises(ValueError, match='Unknown'):
+    with pytest.raises(ValueError, match='retired'):
         validate_patch({'daedalus_engine': 'whatever'}, DEFAULTS)
 
 

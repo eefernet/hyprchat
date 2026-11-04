@@ -23,7 +23,9 @@ def docx(text):
 def test_document_comparison_restore_and_stale_head_fence(env):
     async def run():
         original=await documents.store_file(docx('Original'), 'original.docx',conversation_id='conv-docs',role='original')
-        current=await documents.store_file(docx('Updated'), 'updated.docx',conversation_id='conv-docs',source=original,role='revision')
+        # ZIP timestamps differ between calls; compare to the exact uploaded bytes.
+        current_bytes=docx('Updated')
+        current=await documents.store_file(current_bytes, 'updated.docx',conversation_id='conv-docs',source=original,role='revision')
         comparison=await document_revisions.compare(current['id'],original['id'])
         assert '-Original' in comparison['diff'] and '+Updated' in comparison['diff']
         with pytest.raises(HTTPException) as error:await document_revisions.restore(current['id'],original['id'],'stale')
@@ -31,7 +33,7 @@ def test_document_comparison_restore_and_stale_head_fence(env):
         restored=await document_revisions.restore(current['id'],original['id'],current['sha256'])
         assert restored['id'] not in {current['id'],original['id']}
         assert restored['sha256']==original['sha256'] and restored['supersedes_artifact_id']==current['id']
-        assert (await documents.owned_source(current['id']))[1].read_bytes()==docx('Updated')
+        assert (await documents.owned_source(current['id']))[1].read_bytes()==current_bytes
         with pytest.raises(HTTPException) as stale:await document_revisions.restore(current['id'],original['id'],current['sha256'])
         assert stale.value.status_code==409
         user=await db.create_user('Other');token=db.set_current_user_id(user['id'])

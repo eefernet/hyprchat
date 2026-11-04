@@ -33,6 +33,7 @@ import {ActivityLabel,PlayfulStatusContext} from './components/hyprChatWidgets.j
 
 import React from 'react';
 import DaedalusSettings from './components/DaedalusSettings.jsx';
+import {serviceLabel} from './serviceLabels.js';
 import DaedalusRequestOptions from './components/DaedalusRequestOptions.jsx';
 import ComposerToolsMenu from './components/ComposerToolsMenu.jsx';
 import DocumentSettings from './components/DocumentSettings.jsx';
@@ -229,22 +230,10 @@ function HyprChat(){
   const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
-  const [architectModel,setArchitectModel]=useState(()=>{try{return localStorage.getItem("hc-architect-model")||"";}catch{return "";}});
-  const [reviewerModel, setReviewerModel] =useState(()=>{try{return localStorage.getItem("hc-reviewer-model") ||"";}catch{return "";}});
-  const [acceptanceModel,setAcceptanceModel]=useState(()=>{try{return localStorage.getItem("hc-acceptance-model")||"";}catch{return "";}});
-  const [builderModel,  setBuilderModel]  =useState(()=>{try{return localStorage.getItem("hc-builder-model")  ||"";}catch{return "";}});
-  const [fixerModel,    setFixerModel]    =useState(()=>{try{return localStorage.getItem("hc-fixer-model")    ||"";}catch{return "";}});
   const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
-  const [coderBotModelsOpen,setCoderBotModelsOpen]=useState(()=>{try{return localStorage.getItem("hc-coderbot-models-open")==="1";}catch{return false;}});
   const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"0");}catch{return 0;}});
   const [coderChatCtx,setCoderChatCtx]=useState(0);
   const [researchNumCtx,setResearchNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-research-num-ctx")||"40960");}catch{return 40960;}});
-  const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
-  const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
-  const [openhandsReasoningEffort,setOpenhandsReasoningEffort]=useState(()=>{try{return localStorage.getItem("hc-openhands-reasoning-effort")||"medium";}catch{return "medium";}});
-  const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
-  const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
-  const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
   const [openhandsDisableThinking,setOpenhandsDisableThinking]=useState(()=>{try{return localStorage.getItem("hc-openhands-disable-thinking")!=="false";}catch{return true;}});
   const [quickSearchMode,setQuickSearchMode]=useState(()=>{try{return localStorage.getItem("hc-quick-search-mode")||"balanced";}catch{return "balanced";}});
   const [ctxTokens,setCtxTokens]=useState(0);
@@ -465,22 +454,10 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
   // Coder Bot v2 per-agent overrides — sync each to localStorage + guarded PATCH /api/settings.
-  useEffect(()=>{persistServerSetting("hc-architect-model","architect_model",architectModel);},[architectModel]);
-  useEffect(()=>{persistServerSetting("hc-reviewer-model","reviewer_model",reviewerModel);},[reviewerModel]);
-  useEffect(()=>{persistServerSetting("hc-acceptance-model","acceptance_model",acceptanceModel);},[acceptanceModel]);
-  useEffect(()=>{persistServerSetting("hc-builder-model","builder_model",builderModel);},[builderModel]);
-  useEffect(()=>{persistServerSetting("hc-fixer-model","fixer_model",fixerModel);},[fixerModel]);
   useEffect(()=>{persistServerSetting("hc-qa-model","qa_model",qaModel);},[qaModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-coderbot-models-open",coderBotModelsOpen?"1":"0");}catch{}},[coderBotModelsOpen]);
   useEffect(()=>{persistServerSetting("hc-coder-num-ctx","openhands_num_ctx",coderNumCtx,String(coderNumCtx));},[coderNumCtx]);
   useEffect(()=>{persistServerSetting("hc-research-num-ctx","research_num_ctx",researchNumCtx,String(researchNumCtx));},[researchNumCtx]);
-  useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
-  useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
-  useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
   useEffect(()=>{persistServerSetting("hc-openhands-disable-thinking","openhands_disable_thinking",openhandsDisableThinking,String(openhandsDisableThinking));},[openhandsDisableThinking]);
-  useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
-  useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
-  useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
   useEffect(()=>{persistServerSetting("hc-quick-search-mode","quick_search_mode",quickSearchMode);},[quickSearchMode]);
   useEffect(()=>{persistServerSetting("hc-img-chat-ckpt","image_chat_checkpoint",imgChatCkpt);},[imgChatCkpt]);
   useEffect(()=>{persistServerSetting("hc-img-chat-res","image_chat_resolution",imgChatRes);},[imgChatRes]);
@@ -1732,23 +1709,12 @@ function HyprChat(){
       if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
       if(d.current_coder_model!=null)hydrateServerSetting("coder_model",setCoderModel,d.current_coder_model,coderModel);
-      if(d.current_architect_model!=null)hydrateServerSetting("architect_model",setArchitectModel,d.current_architect_model,architectModel);
-      if(d.current_reviewer_model!=null)hydrateServerSetting("reviewer_model",setReviewerModel,d.current_reviewer_model,reviewerModel);
-      if(d.current_acceptance_model!=null)hydrateServerSetting("acceptance_model",setAcceptanceModel,d.current_acceptance_model,acceptanceModel);
-      if(d.current_builder_model!=null)hydrateServerSetting("builder_model",setBuilderModel,d.current_builder_model,builderModel);
-      if(d.current_fixer_model!=null)hydrateServerSetting("fixer_model",setFixerModel,d.current_fixer_model,fixerModel);
       if(d.current_qa_model!=null)hydrateServerSetting("qa_model",setQaModel,d.current_qa_model,qaModel);
       if(d.current_workspace_model!=null)hydrateServerSetting("workspace_model",setWsModel,d.current_workspace_model,wsModel);
       if(d.resolved_contexts?.chat?.num_ctx)setCoderChatCtx(d.resolved_contexts.chat.num_ctx);
       if(d.openhands_num_ctx!=null)hydrateServerSetting("openhands_num_ctx",setCoderNumCtx,d.openhands_num_ctx,coderNumCtx);
       if(d.research_num_ctx!=null)hydrateServerSetting("research_num_ctx",setResearchNumCtx,d.research_num_ctx,researchNumCtx);
-      if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
-      if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
-      if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
       if(d.openhands_disable_thinking!=null)hydrateServerSetting("openhands_disable_thinking",setOpenhandsDisableThinking,d.openhands_disable_thinking,openhandsDisableThinking);
-      if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
-      if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
-      if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
       if(d.quick_search_mode)hydrateServerSetting("quick_search_mode",setQuickSearchMode,d.quick_search_mode,quickSearchMode);
       if(d.image_chat_checkpoint!=null)hydrateServerSetting("image_chat_checkpoint",setImgChatCkpt,d.image_chat_checkpoint,imgChatCkpt);
       if(d.image_chat_resolution)hydrateServerSetting("image_chat_resolution",setImgChatRes,d.image_chat_resolution,imgChatRes);
@@ -2851,11 +2817,6 @@ function HyprChat(){
     }));
     if(deletedSet.has(planningModel))setPlanningModel("");
     if(deletedSet.has(coderModel))setCoderModel("");
-    if(deletedSet.has(architectModel))setArchitectModel("");
-    if(deletedSet.has(reviewerModel))setReviewerModel("");
-    if(deletedSet.has(acceptanceModel))setAcceptanceModel("");
-    if(deletedSet.has(builderModel))setBuilderModel("");
-    if(deletedSet.has(fixerModel))setFixerModel("");
     if(deletedSet.has(qaModel))setQaModel("");
     if(deletedSet.has(wsModel))setWsModel(fallback);
     if(deletedSet.has(modelParamsOpen))setModelParamsOpen(null);
@@ -3336,7 +3297,7 @@ function HyprChat(){
       const useDocumentAssets=documentsEnabled&&(attachments.some(a=>a.type==="office")||(cv?.tool_ids||[]).includes("documents"))&&!ghostMode&&!isGhostConv(cv);
       // Route council chats to council sender
       if(cv?.is_council){prep.preparing=false;setPreparingSend("");await sendCouncil();return;}
-      // Stage data-file attachments (CSV/Excel/JSON) into the Codebox sandbox so
+      // Stage data-file attachments (CSV/Excel/JSON) into the Hephaestus workspace so
       // the model analyzes the FULL file via execute_code instead of a truncated
       // inline paste. Keep the whole draft if any attachment cannot be staged.
       if(hasDataFiles)setPreparingSend("Uploading attachments…");
@@ -3639,7 +3600,7 @@ function HyprChat(){
       }
       if(isData(file)){
         if(file.size>50*1024*1024){notify({type:"warning",text:"File skipped",detail:`${file.name} is larger than 50MB.`});continue;}
-        // Keep the raw File — staged into the Codebox sandbox at send time so
+        // Keep the raw File — staged into the Hephaestus workspace at send time so
         // execute_code can read the FULL file (no 20K-char inline truncation).
         newAttachments.push({name:file.name,file,type:"data",size:file.size});
         continue;
@@ -4195,11 +4156,6 @@ function HyprChat(){
       if(planningModel===m){setPlanningModel("");}
       if(coderModel===m){setCoderModel("");}
       // Coder Bot v2 per-agent overrides — clear if pinned to the deleted model
-      if(architectModel===m){setArchitectModel("");}
-      if(reviewerModel===m){setReviewerModel("");}
-      if(acceptanceModel===m){setAcceptanceModel("");}
-      if(builderModel===m){setBuilderModel("");}
-      if(fixerModel===m){setFixerModel("");}
       if(qaModel===m){setQaModel("");}
       // Clear workspace model if it was the deleted model
       if(wsModel===m){setWsModel(fallback);}
@@ -4776,7 +4732,7 @@ function HyprChat(){
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
-  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
+  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${serviceLabel(n)}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -4943,7 +4899,7 @@ function HyprChat(){
     ["appearance",<IC.Palette/>,"Appearance","Theme, font, and density"],
     ["rag",<IC.Database/>,"RAG Pipeline","Indexing and retrieval"],
     ["quotes",<IC.Chat/>,"Loading Quotes","Custom waiting text"],
-    ["cleanup",<IC.HardDrive/>,"Sandbox & Cleanup","Storage maintenance"],
+    ["cleanup",<IC.HardDrive/>,"Storage & Cleanup","Local files and execution VM"],
     ["danger",<IC.Alert/>,"Danger Zone","Destructive actions"],
     ["changelog",<IC.File/>,"Changelog","Release notes and updates"],
   ];
@@ -5157,7 +5113,7 @@ function HyprChat(){
         })}
       </div>}
       <div style={{padding:"7px 11px",borderTop:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-        {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n{health.comfyui!==undefined&&<> {svc("comfyui")}SD</>}{health.stt!==undefined&&<> {svc("stt")}STT</>}{health.tts!==undefined&&<> {svc("tts")}TTS</>}
+        {svc("ollama")}Ollama {svc("codebox")}Hephaestus {svc("searxng")}SX {svc("n8n")}n8n{health.comfyui!==undefined&&<> {svc("comfyui")}SD</>}{health.stt!==undefined&&<> {svc("stt")}STT</>}{health.tts!==undefined&&<> {svc("tts")}TTS</>}
       </div>
     </div>
 
@@ -7886,7 +7842,7 @@ function HyprChat(){
               <span style={{fontSize:"var(--hc-text-control)"}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:health.codebox?.runtime==="hephaestus"?"Hephaestus":"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label=serviceLabel(n);return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{s.response_ms}ms</span>}
@@ -7939,7 +7895,7 @@ function HyprChat(){
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,300px),1fr))",gap:12}}>
             {[
               ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
-              [health.codebox?.runtime==="hephaestus"?"Hephaestus":"Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
+              [serviceLabel("codebox"),codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
               ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.47:5678","External workflow automation"],
               ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.56:8888","Search and research backend"],
               ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://192.168.1.115:8188","Stable Diffusion image generation (optional)"],
@@ -8198,69 +8154,26 @@ function HyprChat(){
       </div>
 
       {/* TILE: Daedalus — all coder-agent-related settings live here.
-          Includes the umbrella Planning/Coder model pickers, the new collapsible
-          per-agent model overrides card, and OpenHands runtime knobs. */}
+          Includes chat and coding model choices plus current OpenHands runtime limits. */}
       <div className="hc-tab-pane" style={{display:settingsTab==="daedalus"?"block":"none"}}>
         {settingSection("Models",null,<>
-        {modelField({label:"Code Planning Model",icon:"🧠",value:planningModel,set:setPlanningModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated planning model",hint:"Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model."})}
-        {modelField({label:"Code Generator Model",icon:"🧬",value:coderModel,set:setCoderModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated coder model",hint:"Used by Builder + Fixer agents. Empty = uses the active chat model."})}
-
-        {/* Per-agent model overrides — collapsible advanced card.
-            Each picker defaults to "Inherits from <umbrella>" until clicked.
-            The reset button clears the override (returns to inheritance). */}
-        <div>
-          <div onClick={()=>setCoderBotModelsOpen(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",userSelect:"none"}}>
-            <span style={{fontSize:"var(--hc-text-control)"}}>🎛</span>
-            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,letterSpacing:.3}}>Per-Agent Model Overrides</span>
-            <span style={{flex:1}}/>
-            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
-          </div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Reviewer for verification, Acceptance, and ProjectQA. Fixer model overrides apply to legacy workflows.</div>
-
-          {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`,display:"flex",flexDirection:"column",gap:14}}>
-            {modelField({label:"📐 Architect Model",icon:"📐",value:architectModel,set:setArchitectModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Architect agent only"})}
-            {modelField({label:"🔍 Reviewer Model",icon:"🔍",value:reviewerModel,set:setReviewerModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Reviewer agent only"})}
-            {modelField({label:"✅ Acceptance Model",icon:"✅",value:acceptanceModel,set:setAcceptanceModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Acceptance agent only"})}
-            {modelField({label:"🏗 Builder Model",icon:"🏗",value:builderModel,set:setBuilderModel,inheritTitle:"Inherits from Coder Model",inheritDesc:"Click to override the Builder (OpenHands) agent only"})}
-            {modelField({label:"🛠 Fixer Model",icon:"🛠",value:fixerModel,set:setFixerModel,inheritTitle:"Inherits from Coder Model",inheritDesc:"Click to override the Fixer agent only"})}
-            {modelField({label:"❓ ProjectQA Model",icon:"❓",value:qaModel,set:setQaModel,inheritTitle:"Inherits from chat model",inheritDesc:"Click to override the ProjectQA agent only"})}
-          </div>}
-        </div>
-        </>,"Coder-agent routing and model inheritance.")}
-        {settingSection("Legacy Repair Engines",null,<>
-        {toggleField("OpenHands Enabled",openhandsEnabled,()=>setOpenhandsEnabled(!openhandsEnabled),openhandsEnabled?"On":"Off")}
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          {toggleField("Aider Enabled",aiderEnabled,()=>setAiderEnabled(!aiderEnabled),aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer")}
-          {modelField({label:"Aider/Fix Model",icon:"🛠",value:aiderModel,set:setAiderModel,activateValue:fixerModel||coderModel||models[0]||"",inheritTitle:"Inherits from Fixer/Coder Model",inheritDesc:"Click to pin the Aider edit model"})}
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.mut,cursor:"pointer"}}>
-            <input type="checkbox" checked={aiderAutoTest} onChange={e=>setAiderAutoTest(e.target.checked)} style={{accentColor:t.acc}}/>
-            Auto-run safe test command after Aider edits
-          </label>
-        </div>
-        </>,"These engine switches apply to legacy workflows. Persistent jobs use OpenHands for coding and repairs.")}
-
+          {modelField({label:"Daedalus chat model",icon:"🧠",value:planningModel,set:setPlanningModel,inheritTitle:"Same as chat model",inheritDesc:"Choose the model that handles your conversation",hint:"Handles your conversation and starts jobs. Planning and implementation use the Coding model below."})}
+          {modelField({label:"Coding model",icon:"🧬",value:coderModel,set:setCoderModel,inheritTitle:"Same as chat model",inheritDesc:"Choose a local coding model",hint:"OpenHands uses this model for planning, implementation, repairs and compaction. Empty = uses the conversation's model."})}
+          <details><summary style={{cursor:"pointer",color:t.text}}>Optional model overrides</summary>
+            <div style={{paddingTop:14}}>{modelField({label:"Project Q&A model",icon:"❓",value:qaModel,set:setQaModel,inheritTitle:"Inherits from Coding model",inheritDesc:"Choose a local model for read-only project questions"})}</div>
+          </details>
+        </>,"Models for the current Daedalus workflow.")}
         <DaedalusSettings t={t} font={font} onSaved={data=>{setCoderNumCtx(data.openhands_num_ctx);setCoderChatCtx(data.resolved_contexts?.chat?.num_ctx||0);}}/>
 
-        {settingSection("Builder Behavior",null,<>
-        <div>
-          <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
-          <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
-            <option value="low">Low — fastest, minimal think tokens</option>
-            <option value="medium">Medium — balanced (recommended for local Ollama)</option>
-            <option value="high">High — most thorough, slow on local models</option>
-          </select>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
-        </div>
-
+        {settingSection("Coding model thinking",null,<>
         <div>
           <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,cursor:"pointer"}}>
             <input type="checkbox" checked={openhandsDisableThinking} onChange={e=>setOpenhandsDisableThinking(e.target.checked)} style={{accentColor:t.acc}}/>
             Disable model thinking during builds
           </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>When a role’s thinking control is set to Inherit, request thinking off. Explicit role settings above take precedence; supported modes depend on the model.</div>
         </div>
-        {sliderField({label:"Legacy Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1,hint:"Legacy workflows only. Persistent jobs use Turns per coding attempt above."})}
-        </>,"How the Builder model reasons before each tool call. These save as you change them.")}
+        </>,"Default for inherited thinking settings. Saves as you change it.")}
       </div>
 
       {/* TILE: Appearance */}
@@ -8531,10 +8444,9 @@ function HyprChat(){
         </>,"Shown on the startup loading screen. Edit, remove, or add quotes below.")}
       </div>
 
-      {/* TILE: Sandbox & Cleanup */}
+      {/* TILE: Storage & Cleanup */}
       <div className="hc-tab-pane" style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none"}}>
-        <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
-        <SandboxSection t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
+        <SandboxSection active={settingsTab==="cleanup"} t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
       </div>
 
 	      {/* TILE: Danger Zone */}
@@ -8626,7 +8538,7 @@ function HyprChat(){
         return <div key={svc} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"14px 16px",marginBottom:14}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize"}}>{svc}</span>
+              <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text}}>{serviceLabel(svc)}</span>
               {isRL&&<span style={{padding:"3px 10px",borderRadius:"var(--hc-radius)",background:`${STATUS_DEGRADED}18`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:STATUS_DEGRADED}}>Still Operational, limited engine usage</span>}
             </div>
             <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:isRL?STATUS_DEGRADED:statusColor}}>{isRL?"Rate Limited":statusLabel}</div>

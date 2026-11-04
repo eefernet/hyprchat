@@ -488,7 +488,7 @@ class _Session:
 def workflow_rows(service, url, settings, task, prober=run_workflows):
     """Launch-phase rows: `interface:labels:<service>` when the request names labels/buttons, then one per
     requested workflow; [] when the request names neither."""
-    from coder_policy7_evidence import requested_interfaces
+    from coder_check_evidence import requested_interfaces
     steps = workflow_steps(task)
     wanted = requested_interfaces(task)
     names = {'labels': list(wanted.get('labels') or []), 'buttons': list(wanted.get('buttons') or []),

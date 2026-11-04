@@ -65,6 +65,14 @@ def public_connection(host, port):
     raise error or OSError('No usable dependency address')
 
 
+def network_failure(error, host, port):
+    category = ('network_policy' if isinstance(error, (ValueError, KeyError, TypeError)) else
+                'dns' if isinstance(error, socket.gaierror) else
+                'timeout' if isinstance(error, TimeoutError) else 'connection')
+    return {'source': 'sandbox_gateway', 'category': category, 'retryable': category != 'network_policy',
+            'host': str(host)[:253], 'port': port, 'detail': str(error)[:500]}
+
+
 class UnixServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
@@ -83,7 +91,7 @@ def start_server(server):
 def clean_environment(environment):
     """An allowlist, not a growing list of names of known secret providers."""
     names = {'PATH', 'LANG', 'LC_ALL', 'TZ', 'TERM', 'NO_COLOR', 'CI', 'PORT', 'HOST',
-             'HOME', 'TMPDIR', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE',
+             'HOME', 'TMPDIR', 'PIP_FIND_LINKS', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE',
              'VIRTUAL_ENV', 'JAVA_HOME', 'DOTNET_ROOT', 'RUSTUP_HOME', 'CARGO_HOME',
              'GOCACHE', 'GOPATH', 'GOMODCACHE', 'DOTNET_CLI_HOME', 'DOTNET_NOLOGO',
              'DOTNET_CLI_TELEMETRY_OPTOUT', 'PLAYWRIGHT_BROWSERS_PATH', 'PLAYWRIGHT_SKIP_BROWSER_GC', 'NODE_V8_COVERAGE',
@@ -130,7 +138,7 @@ class Sandbox(AbstractContextManager):
     """
     def __init__(self, command, *, cwd, writable=(), readonly=(), environment=None,
                  network_urls=(), listen_port=None, runtime=None, short_tmp=False,
-                 aliases=(), timeout=None, memory_mib=None, managed_application=False, process_trace=None, runtime_profile=None, resource_group=None, public_network=True):
+                 aliases=(), timeout=None, memory_mib=None, managed_application=False, process_trace=None, runtime_profile=None, resource_group=None, public_network=True, controller_browser=True):
         self.command = list(command)
         self.cwd = Path(cwd).absolute()
         from coder_mount_policy import private_paths
@@ -138,6 +146,9 @@ class Sandbox(AbstractContextManager):
         if environment and environment.get('DAEDALUS_RUNTIME_POLICY') == '1':
             self.writable += private_paths(environment)
         self.readonly = [Path(p).absolute() for p in readonly]
+        shared = Path(os.environ.get('HEPHAESTUS_ROOT', '/srv/hephaestus')) / 'caches/shared'
+        if os.environ.get('HEPHAESTUS_SHARED_CACHE') == '1' and shared.is_dir():
+            self.readonly.append(shared)
         self.environment = clean_environment(environment if environment is not None else {k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LC_ALL', 'TZ'}})
         self.urls = list(dict.fromkeys(network_urls))
         self.listen_port = listen_port
@@ -152,9 +163,12 @@ class Sandbox(AbstractContextManager):
         self.runtime_profile = runtime_profile
         self.resource_group = resource_group
         self.public_network = public_network
+        self.controller_browser = controller_browser
+        self.network_failures = []
         self.servers = []
         self.temporary = None
         self.cache_lease = None
+        self.shared_leases = []
         self.execution_identity = None
 
     def translate_url(self, value):
@@ -182,6 +196,28 @@ class Sandbox(AbstractContextManager):
             from coder_engine_cache import lease
             self.cache_lease = lease(cache)
             self.cache_lease.__enter__()
+        from hephaestus_inventory import managed_root, lock
+        managed=managed_root(self.cwd)
+        if managed and os.environ.get('HEPHAESTUS_SHARED_CACHE')=='1':
+            held=lock(managed,'shared-cache-readers',exclusive=False)
+            held.__enter__();self.shared_leases.append(held)
+            if cache:
+                # A long-lived coding container can prepare a new browser after
+                # launch. Only public validated binaries are shared here; its
+                # stable project browser directory contains controller links.
+                browsers = managed / 'caches/shared/browsers'
+                browsers.mkdir(parents=True, exist_ok=True)
+                self.readonly = [*self.readonly, browsers]
+        shared_root=Path(os.environ.get('HEPHAESTUS_ROOT','/srv/hephaestus'))/'caches/shared'
+        shared_values=[self.environment.get('PLAYWRIGHT_BROWSERS_PATH',''),*self.environment.get('PIP_FIND_LINKS','').split()]
+        for value in shared_values:
+            path=Path(value)
+            if value and path.is_absolute() and path.is_relative_to(shared_root) and path.exists():
+                from coder_engine_cache import lease
+                relative=path.relative_to(shared_root)
+                if len(relative.parts)>=2:
+                    held=lease(shared_root.joinpath(*relative.parts[:2]))
+                    held.__enter__();self.shared_leases.append(held)
         self.temporary = tempfile.TemporaryDirectory(prefix='daedalus-sandbox-')
         private = Path(self.temporary.name)
         ipc = private / 'ipc'; ipc.mkdir(mode=0o700)
@@ -198,6 +234,7 @@ class Sandbox(AbstractContextManager):
 
         class Gateway(socketserver.StreamRequestHandler):
             def handle(handler):
+                host, port = '', 0
                 try:
                     request = json.loads(handler.rfile.readline(16384))
                     host, port = request['host'], int(request['port'])
@@ -205,12 +242,17 @@ class Sandbox(AbstractContextManager):
                         remote = socket.create_connection(endpoints[(host, port)], timeout=30)
                     elif self.public_network:
                         remote = public_connection(host, port)
-                    else: raise OSError('Public network access is disabled for this operation')
+                    else: raise ValueError('Public network access is disabled for this operation')
                     handler.wfile.write(b'OK\n'); handler.wfile.flush()
                     with remote:
                         relay(handler.connection, remote)
-                except (OSError, ValueError, KeyError, TypeError):
-                    try: handler.wfile.write(b'DENIED\n')
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    # This record is produced by the trusted gateway, never by
+                    # interpreting an untrusted package/application stdout line.
+                    diagnostic = network_failure(error, host, port)
+                    self.network_failures.append(diagnostic)
+                    self.network_failures[:] = self.network_failures[-32:]
+                    try: handler.wfile.write(b'DENIED\n' if not diagnostic['retryable'] else b'UNAVAILABLE\n')
                     except OSError: pass
 
         self.servers.append(start_server(UnixServer(str(ipc / 'gateway.sock'), Gateway)))
@@ -233,6 +275,19 @@ class Sandbox(AbstractContextManager):
             PLAYWRIGHT_BROWSERS_PATH=environment.get('PLAYWRIGHT_BROWSERS_PATH', os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/root/.cache/ms-playwright')),
             DAEDALUS_CONTROLLER_BROWSERS_PATH=os.environ.get('DAEDALUS_CONTROLLER_BROWSERS_PATH', os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/root/.cache/ms-playwright')),
             PIP_REQUIRE_VIRTUALENV='true')
+        if not self.controller_browser:
+            environment.pop('DAEDALUS_CONTROLLER_BROWSERS_PATH', None)
+            browser_path = self.environment.get('PLAYWRIGHT_BROWSERS_PATH', '')
+            if browser_path and not Path(browser_path).is_relative_to('/srv/hephaestus/control/browsers'):
+                environment['PLAYWRIGHT_BROWSERS_PATH'] = browser_path
+            else:
+                environment.pop('PLAYWRIGHT_BROWSERS_PATH', None)
+        if docker:
+            # Readiness keys in the child must use the controller's pinned image
+            # identity, not a second set of executable --version strings.
+            profile_name = self.runtime_profile or os.environ.get('HEPHAESTUS_RUNTIME_PROFILE', 'core')
+            runtime_config = json.loads(Path('/etc/hephaestus/runtime.json').read_text())
+            environment['DAEDALUS_RUNTIME_IMAGE'] = runtime_config['profiles'][profile_name]['image']
         spec = private / 'launch.json'
         spec.write_text(json.dumps({'command': self.command, 'cwd': str(self.cwd), 'environment': environment,
                                     'ipc': str(ipc), 'listen_port': self.listen_port,
@@ -250,8 +305,8 @@ class Sandbox(AbstractContextManager):
             mounts = [{'source': str(p), 'target': str(p), 'writable': False} for p in reads if p.exists()]
             mounts += [{'source': str(p), 'target': str(p), 'writable': True} for p in writable]
             for key in ('PLAYWRIGHT_BROWSERS_PATH', 'DAEDALUS_CONTROLLER_BROWSERS_PATH'):
-                browsers=Path(environment[key])
-                if browsers.is_relative_to('/srv/hephaestus/control/browsers') and browsers.is_dir():
+                browsers=Path(environment.get(key, '/nonexistent-project-browser'))
+                if (browsers.is_relative_to('/srv/hephaestus/control/browsers') or browsers.is_relative_to('/srv/hephaestus/caches/shared/browsers')) and browsers.is_dir():
                     mounts.append({'source':str(browsers),'target':str(browsers),'writable':False})
             # SDK interpreters live in locked controller release virtualenvs.
             # Only those dependency prefixes are shared, never host /usr or /root.
@@ -295,6 +350,8 @@ class Sandbox(AbstractContextManager):
             mounts = [*toolchain_mounts(self.command), module, spec, *self.readonly]
             if not any(self.cwd == w or self.cwd.is_relative_to(w) for w in self.writable): mounts.append(self.cwd)
             policy_mounts(mounts, self.writable)
+        if not self.controller_browser:
+            mounts = [p for p in mounts if p != Path('/root/.cache/ms-playwright') and not p.is_relative_to('/srv/hephaestus/control/browsers')]
         args = ['bwrap', '--unshare-user', '--unshare-pid', '--unshare-net', '--unshare-ipc',
                 '--unshare-uts', '--new-session', '--die-with-parent', '--cap-drop', 'ALL',
                 '--tmpfs', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
@@ -339,6 +396,8 @@ class Sandbox(AbstractContextManager):
         if self.cache_lease:
             self.cache_lease.__exit__(*exception)
             self.cache_lease = None
+        for held in reversed(self.shared_leases):held.__exit__(*exception)
+        self.shared_leases=[]
         if stop_error: raise stop_error
 
 
@@ -435,8 +494,10 @@ def child_main(spec):
                     pass
         start_server(UnixServer(str(ipc / 'service.sock'), Reverse))
     environment = config['environment']
+    # Browser crashes must not put memory dumps in project source or downloads.
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     if environment.get('DAEDALUS_DOCUMENT_LIMITS')=='1':
-        import resource
         resource.setrlimit(resource.RLIMIT_FSIZE,(64*1024**2,64*1024**2))
         resource.setrlimit(resource.RLIMIT_NOFILE,(256,256))
     url = f'http://127.0.0.1:{proxy.server_port}'

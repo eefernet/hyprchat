@@ -1,7 +1,7 @@
 """Stage Hephaestus code, locked controller environments and immutable runtime images.
 
-This prepares the replacement on its temporary address. It never changes the
-HyprChat connection, engine selection, Codebox guest or accepted revisions.
+This installs the modern runtime with recoverable activation. It never changes
+HyprChat's connection, model settings, project revisions or guest identity.
 """
 import argparse
 import hashlib
@@ -13,6 +13,95 @@ import subprocess
 import sqlite3
 import urllib.request
 import fcntl
+import time
+import uuid
+
+
+def atomic_write(path, content, mode=0o600):
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.pending')
+    try:
+        with temporary.open('wb') as stream:
+            stream.write(content);stream.flush();os.fsync(stream.fileno())
+        temporary.chmod(mode);temporary.replace(path)
+        fd=os.open(path.parent,os.O_RDONLY)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+    finally:temporary.unlink(missing_ok=True)
+
+
+def recover_activation(journal):
+    """Restore the last runtime configuration after a failed/interrupted upgrade."""
+    journal=Path(journal)
+    if not journal.exists():return False
+    state=json.loads(journal.read_text())
+    if state['state']=='committed':journal.unlink();return False
+    for name in state['services']:run('systemctl','stop',name)
+    for item in state['files']:
+        target=Path(item['target'])
+        if item['backup']:
+            atomic_write(target,Path(item['backup']).read_bytes(),item['mode'])
+        else:target.unlink(missing_ok=True)
+    run('systemctl','daemon-reload')
+    for name in state['active_services']:run('systemctl','start',name)
+    state['state']='rolled_back'
+    atomic_write(Path(state['backup'])/'receipt.json',json.dumps(state,indent=2).encode())
+    journal.unlink()
+    return True
+
+
+def activate_files(pending, journal, services, validate):
+    """Publish only prepared configuration; retain source and rollback on failure."""
+    journal=Path(journal)
+    if recover_activation(journal):
+        raise RuntimeError('Recovered interrupted runtime activation; retry with a fresh drain check')
+    backup=journal.parent/('rollback-'+uuid.uuid4().hex)
+    backup.mkdir(parents=True,mode=0o700)
+    state={'state':'activating','backup':str(backup),'files':[],'services':list(services),
+           'active_services':[name for name in services if subprocess.run(
+               ['systemctl','is-active','--quiet',name]).returncode==0]}
+    for index,(target,_,_) in enumerate(pending):
+        target=Path(target)
+        if target.is_symlink():raise RuntimeError('Refusing to replace a symlinked runtime configuration: '+str(target))
+        saved=backup/str(index) if target.exists() else None
+        if saved:atomic_write(saved,target.read_bytes())
+        state['files'].append({'target':str(target),'backup':str(saved) if saved else None,
+                               'mode':target.stat().st_mode & 0o777 if saved else None})
+    atomic_write(journal,json.dumps(state).encode())
+    try:
+        for target,text,mode in pending:atomic_write(target,text.encode(),mode)
+        run('systemctl','daemon-reload')
+        for name in services:run('systemctl','restart',name)
+        validate()
+        state['state']='committed'
+        atomic_write(journal,json.dumps(state).encode())
+        atomic_write(backup/'receipt.json',json.dumps(state,indent=2).encode())
+        journal.unlink()
+    except BaseException:
+        recover_activation(journal)
+        raise
+
+
+def validate_services(release=None):
+    deadline=time.monotonic()+60
+    while True:
+        try:
+            if release:
+                for name in ('hephaestus-broker','hephaestus-api','hephaestus-modern'):
+                    active=output('systemctl','show',name,'-p','WorkingDirectory','--value')
+                    if active!=str(Path(release)/'backend'):
+                        raise RuntimeError('A service still points at a previous Hephaestus release: '+name)
+            for port in (8585,8587):
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/health',timeout=3) as response:
+                    if response.status!=200:raise RuntimeError('Hephaestus health check failed')
+                    health=json.load(response)
+                    if health.get('status')!='ok':raise RuntimeError('Hephaestus runtime is not ready')
+                    if port==8587 and (health.get('engine')!='openhands159' or health.get('sdk_version')!='1.59.0'):
+                        raise RuntimeError('Hephaestus coding runtime version does not match this release')
+            return
+        except Exception:
+            if time.monotonic()>=deadline:raise
+            time.sleep(1)
 
 
 def prepare_tokenizer(destination, backend, ollama):
@@ -49,10 +138,11 @@ def require_drained(root):
         with sqlite3.connect(database) as db:
             if db.execute("SELECT 1 FROM executions WHERE status IN ('queued','running','stop_unconfirmed') LIMIT 1").fetchone():
                 raise SystemExit('Release staged. Drain execution before activating a different runtime release.')
-    for database in (root/'state').glob('*/operations.sqlite3'):
-        with sqlite3.connect(database) as db:
-            if db.execute("SELECT 1 FROM operations WHERE status IN ('queued','starting','running','cancelling') LIMIT 1").fetchone():
-                raise SystemExit('Release staged. A worker operation is active, including its inference or preparation phase.')
+    import sys
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'backend'))
+    from hephaestus_inventory import discover, active_stores
+    if active_stores(root,discover(root)):
+        raise SystemExit('Release staged. A worker or document operation is active, including inference or preparation.')
     for path in (root/'projects').glob('*/root/hyprchat-documents/jobs/*/status.json'):
         if json.loads(path.read_text()).get('status') in {'queued','running'}:
             raise SystemExit('Release staged. Drain document jobs before activation.')
@@ -91,6 +181,8 @@ def main():
     except BlockingIOError: raise SystemExit('Another Hephaestus installation is already running')
     root=Path('/srv/hephaestus')
     if not os.path.ismount(root): raise SystemExit('The data disk is not mounted; run bootstrap first')
+    journal=root/'control/releases/activation.json'
+    if recover_activation(journal):raise SystemExit('Recovered interrupted activation. Review service health, then rerun installation.')
     files=[]
     for parent in ('backend','scripts/hephaestus'):
         files.extend(p for p in (args.source/parent).rglob('*') if p.is_file() and
@@ -136,20 +228,9 @@ def main():
         run('docker','build','--build-arg','BASE_IMAGE='+base_language_tag,'--build-arg','DOTNET_IMAGE='+images['dotnet8'],
             '-f',release/'scripts/hephaestus/Dockerfile.runtime-tools.core','-t',language_tag,release/'scripts/hephaestus')
     language_image=json.loads(output('docker','image','inspect',language_tag))[0]['Id']
-    if 'python312' not in images:
-        run('docker','pull','python:3.12.13-slim-trixie')
-        images['python312']=json.loads(output('docker','image','inspect','python:3.12.13-slim-trixie'))[0]['RepoDigests'][0]
-        write(image_lock,json.dumps(images,indent=2)+'\n')
-    aider_key=hashlib.sha256((language_image+images['python312']+manifest['scripts/hephaestus/Dockerfile.aider.core']+
-                              manifest['scripts/hephaestus/aider.lock.txt']).encode()).hexdigest()[:20]
-    aider_tag='hephaestus-aider:'+aider_key
-    if subprocess.run(['docker','image','inspect',aider_tag],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
-        run('docker','build','--build-arg','BASE_IMAGE='+language_tag,'--build-arg','PYTHON_IMAGE='+images['python312'],
-            '-f',release/'scripts/hephaestus/Dockerfile.aider.core','-t',aider_tag,release/'scripts/hephaestus')
-    aider_image=json.loads(output('docker','image','inspect',aider_tag))[0]['Id']
     environments={}
     browsers={}
-    for name,lock in [('legacy','worker-requirements.lock.txt'),('modern','engine-runtime.lock.txt'),('documents','document-requirements.lock.txt')]:
+    for name,lock in [('modern','engine-runtime.lock.txt'),('documents','document-requirements.lock.txt')]:
         fingerprint=hashlib.sha256((release/'backend'/lock).read_bytes()).hexdigest()
         destination=root/'control/environments'/fingerprint
         ready=destination/'ready.json'
@@ -173,6 +254,8 @@ def main():
             browsers[name]=str(cache)
     prepare_tokenizer(root/'control/tokenizer',release/'backend',args.ollama_url)
     require_drained(root)
+    pending=[]
+    def stage(path,text,mode=0o644):pending.append((Path(path),text,mode))
     config_path=Path('/etc/hephaestus/runtime.json')
     config=json.loads(config_path.read_text()) if config_path.exists() else {}
     config.update({'version':1,'profiles':{**config.get('profiles',{}),'core':{'image':image}},
@@ -182,29 +265,28 @@ def main():
     config['profiles']['core-'+image.split(':')[1][:20]]={'image':image}
     config['profiles']['languages']={'image':language_image}
     config['profiles']['languages-'+language_image.split(':')[1][:20]]={'image':language_image}
-    config['profiles']['aider']={'image':aider_image}
     config['roots']['readonly'].append(str(root/'control/tokenizer'))
     config['roots']['readonly'].append(str(root/'control/browsers'))
-    write(config_path,json.dumps(config,indent=2)+'\n',0o600)
+    config['roots']['readonly'].append(str(root/'caches/shared'))
+    for path in (root/'control/storage',root/'caches/shared'):
+        path.mkdir(parents=True,exist_ok=True,mode=0o755)
+    stage(config_path,json.dumps(config,indent=2)+'\n',0o600)
     token=Path('/etc/hephaestus/token')
     if not token.exists():
         import secrets
         write(token,secrets.token_hex(32)+'\n',0o600)
-    write('/etc/hephaestus/service.env','HEPHAESTUS_TOKEN='+token.read_text().strip()+'\n',0o600)
-    for name in ('legacy','modern','documents','generic'):
+    stage('/etc/hephaestus/service.env','HEPHAESTUS_TOKEN='+token.read_text().strip()+'\nHEPHAESTUS_SHARED_CACHE=1\n',0o600)
+    for name in ('modern','documents','generic'):
         (root/'state'/name).mkdir(parents=True,exist_ok=True)
         (root/'runs'/name).mkdir(parents=True,exist_ok=True)
     units={
         'hephaestus-broker':f'/usr/bin/python3 {release}/backend/hephaestus_runtime.py',
         'hephaestus-api':f'{environments["modern"]}/bin/python -m uvicorn hephaestus_api:app --host 0.0.0.0 --port 8585',
-        'hephaestus-legacy':f'{environments["legacy"]}/bin/python -m uvicorn openhands_worker:app --host 0.0.0.0 --port 8586',
         'hephaestus-modern':f'{environments["modern"]}/bin/python -m uvicorn coder_engine_worker:app --host 0.0.0.0 --port 8587',
     }
-    active_workers=[name for name in ('hephaestus-legacy','hephaestus-modern')
-                    if subprocess.run(['systemctl','is-active','--quiet',name]).returncode==0]
     for name,command in units.items():
         role=name.removeprefix('hephaestus-')
-        state_role=role if role in {'legacy','modern'} else 'generic'
+        state_role=role if role == 'modern' else 'generic'
         text=f'''[Unit]
 Description=Hephaestus {role}
 After=docker.service network-online.target{' hephaestus-broker.service' if role != 'broker' else ''}
@@ -233,9 +315,23 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 '''
-        write('/etc/systemd/system/'+name+'.service',text)
+        stage('/etc/systemd/system/'+name+'.service',text)
+        # Prior upgrades may have release drop-ins. Own the final override while
+        # preserving unrelated administrator limits and service configuration.
+        override='[Service]\n'+f'WorkingDirectory={release}/backend\nExecStart=\nExecStart={command}\n'
+        override+='\n'.join(line for line in text.splitlines() if line.startswith('Environment='))+'\n'
+        stage('/etc/systemd/system/'+name+'.service.d/zzzzzz-hephaestus-release.conf',override)
     write(release/'release.json',json.dumps({'source':manifest,'environments':environments,'browsers':browsers,'image':image,'languages_image':language_image,'id':identity},indent=2)+'\n')
-    write('/etc/systemd/system/hephaestus-cleanup.service',f'''[Unit]
+    # New installs protect their runtime; upgrades retain one verified rollback.
+    import sys
+    sys.path.insert(0,str(release/'backend'))
+    from hephaestus_inventory import control,lock
+    previous=Path('/etc/hephaestus/current-release')
+    retained=[str(release)]
+    if previous.exists() and Path(previous.read_text().strip(),'release.json').exists():
+        retained.append(previous.read_text().strip())
+    stage(control(root)/'retention.json',json.dumps({'version':1,'verified':True,'releases':list(dict.fromkeys(retained)),'images':[image,language_image]}),0o600)
+    stage('/etc/systemd/system/hephaestus-cleanup.service',f'''[Unit]
 Description=Lease-aware Hephaestus scratch and cache cleanup
 RequiresMountsFor=/srv/hephaestus
 [Service]
@@ -243,7 +339,7 @@ Type=oneshot
 ExecStart=/usr/bin/python3 {release}/backend/hephaestus_storage.py
 UMask=0077
 ''')
-    write('/etc/systemd/system/hephaestus-cleanup.timer','''[Unit]
+    stage('/etc/systemd/system/hephaestus-cleanup.timer','''[Unit]
 Description=Periodic Hephaestus storage maintenance
 [Timer]
 OnBootSec=10min
@@ -251,15 +347,14 @@ OnUnitActiveSec=10min
 [Install]
 WantedBy=timers.target
 ''')
-    run('systemctl','daemon-reload')
+    stage('/etc/hephaestus/current-release',str(release)+'\n')
+    services=('hephaestus-broker','hephaestus-api','hephaestus-modern')
+    with lock(root,'admission',blocking=False):
+        require_drained(root)
+        activate_files(pending,journal,services,lambda:validate_services(release))
+    for name in services:run('systemctl','enable',name)
     run('systemctl','enable','--now','hephaestus-cleanup.timer')
-    # Worker activation follows its own readiness checks. Only the broker and
-    # scoped execution API are started while compatibility qualification runs.
-    for name in ('hephaestus-broker','hephaestus-api',*active_workers):
-        run('systemctl','enable',name)
-        run('systemctl','restart',name)
-    write('/etc/hephaestus/current-release',str(release)+'\n')
-    print(json.dumps({'release':str(release),'image':image,'status':'staged; legacy/modern activation and migration gates pending'}))
+    print(json.dumps({'release':str(release),'image':image,'status':'modern runtime installed; application activation and compatibility checks required'}))
 
 
 if __name__=='__main__': main()

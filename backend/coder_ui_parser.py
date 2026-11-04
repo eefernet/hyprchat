@@ -1,7 +1,7 @@
 """Literal UI clauses, with quoted values kept out of syntax normalization."""
 import re
 
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 NEGATIVE = re.compile(r"\b(?:not|never|don['’]t|doesn['’]t|unless|except|if|when|until|otherwise|or)\b", re.I)
 META = re.compile(r'^(?:(?:run|rerun|execute|update|add|write|keep|preserve|do not remove)\s+(?:the\s+|existing\s+|unrelated\s+|regression\s+|all\s+)*(?:tests?|checks?|README|npm|server logic)\b|(?:verify|assert|confirm|report|deliver|publish)\b)', re.I)
 

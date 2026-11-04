@@ -1,4 +1,4 @@
-"""Codebox-backed utility tool handlers used by tools.exec_tool."""
+"""Hephaestus-backed utility tool handlers used by tools.exec_tool."""
 from __future__ import annotations
 
 import asyncio
@@ -360,7 +360,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
                 "status": f"FAILED (rejected): {command[:50]}",
                 "detail": json.dumps({"command": command, "error": _detail}),
             })
-            return f"ERROR: Codebox rejected the command ({_detail}). The command did not run."
+            return f"ERROR: Hephaestus rejected the command ({_detail}). The command did not run."
         result = r.json()
         stdout = _strip_ansi(result.get("stdout", "")).strip()
         stderr = _strip_ansi(result.get("stderr", "")).strip()
@@ -565,4 +565,4 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
             parts.append(f"```\n{output[:6000]}\n```")
         return "\n".join(parts)
 
-    raise ValueError(f"Unhandled Codebox tool: {name}")
+    raise ValueError(f"Unhandled Hephaestus tool: {name}")

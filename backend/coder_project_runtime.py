@@ -25,7 +25,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from coder_native_checks import PYTHON_TRACE, compiled_count, native_count, native_runner, provenance, report_count
-from coder_patch_runtime import tree_hashes, stop_process, readonly_command
+from coder_execution_utils import tree_hashes, stop_process, readonly_command
 from coder_profiles import discover, environment_key, validate_command
 from coder_repository import safe_relative, file_hash
 
@@ -156,7 +156,11 @@ def sandbox_paths(root, env):
             readonly.append(Path(name))
     cache = env.get('DAEDALUS_ENVIRONMENT_ROOT')
     if cache:
-        browsers = Path(cache) / 'browsers'
+        browsers = Path(env.get('PLAYWRIGHT_BROWSERS_PATH') or Path(cache) / 'browsers')
+        if not browsers.resolve().is_relative_to(Path(cache).resolve()):
+            from hephaestus_shared_cache import published_browser
+            if not published_browser(browsers):
+                raise ValueError('Project browser cache escapes its environment')
         if browsers.is_dir():
             env['PLAYWRIGHT_BROWSERS_PATH'] = str(browsers)
             readonly.append(browsers)
@@ -175,7 +179,7 @@ def sandbox_paths(root, env):
     return readonly
 
 
-def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=None):
+def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=None, network_diagnostics=None):
     from coder_worker_runtime import _boundary
     operation = _boundary(store, op_id)
     deadline = time.monotonic() + operation['payload']['settings']['daedalus_command_seconds']
@@ -192,7 +196,8 @@ def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=N
     with log.open('w') as output, Sandbox(['bash', '-c', command], cwd=cwd,
             writable=writes, readonly=sandbox_paths(root, env), environment=env,
             network_urls=urls, runtime=(store.root / 'operation-caches' / op_id / log.stem) if operation['payload'].get('engine') == 'openhands159' else log.parent / 'runtime',
-            process_trace=process_trace,timeout=max(.1,deadline-time.monotonic()),resource_group=op_id) as box:
+            process_trace=process_trace,timeout=max(.1,deadline-time.monotonic()),resource_group=op_id,
+            controller_browser=operation['payload'].get('engine') != 'openhands159') as box:
         args = box.args
         if process_trace is not None and os.environ.get('HEPHAESTUS_EXECUTOR')!='docker':
             from coder_process_evidence import trace_command
@@ -211,6 +216,11 @@ def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=N
                 time.sleep(.1)
         finally:
             stop_process(process)
+            if network_diagnostics is not None:
+                network_diagnostics.extend(box.network_failures)
+            if box.network_failures:
+                store.event(op_id, 'dependency_network_diagnostics', command=command[:1000], log=str(log),
+                            diagnostics=box.network_failures)
     return process.returncode
 
 
@@ -271,7 +281,13 @@ def prepare_environment(store, op_id, root, profile, project_id, env, folder):
             key, _ = environment_key(safe_relative(root, profile['cwd']), profile)
             try:
                 with publication_lock(cache / key):
-                    return _prepare_environment(store, op_id, root, profile, project_id, env, folder)
+                    for attempt in range(2):
+                        rows = _prepare_environment(store, op_id, root, profile, project_id, env, folder)
+                        faults = [r for r in rows if r.get('environment_fault')]
+                        if not faults or not all(r.get('diagnostic', {}).get('retryable') and
+                                r.get('diagnostic', {}).get('attempt', 2) < 2 for r in faults): break
+                        store.event(op_id, 'preparation_retry', diagnostics=[r['diagnostic'] for r in faults])
+                    return rows
             except OSError as error:
                 (cache / key / 'environment-ready.json').unlink(missing_ok=True)
                 diagnostic = failure(error).diagnostic
@@ -522,7 +538,7 @@ def services(store, op_id, root, definitions, environment, folder, *, probe=Fals
                 payload = store.get(op_id)['payload']
                 measurements = payload.get('visual_measurements', {})
                 if (payload.get('visual_policy', {}).get('enabled') or measurements) and not payload.get('baseline') and not payload.get('preflight'):
-                    from coder_policy7_visual import capture
+                    from coder_visual import capture
                     rows.append(capture(store, op_id, service, url, loaded.get('page_path', '/'), measurements.get(service['id'], [])))
             if loaded and loaded['passed']:
                 # Loading is not working: submit the page's own forms and fail on a rejected write (direct URL).
@@ -635,7 +651,7 @@ def failure_class(row, baseline=()):
         return 'unresolved'  # Assertion failures need a grounded per-check diagnosis.
     old = next((b for b in baseline if b.get('id') == row.get('id')), None)
     if old and not old.get('passed'):
-        from coder_policy7_evidence import failure_signature
+        from coder_check_evidence import failure_signature
         if failure_signature([{**old, 'classification': None}]) == failure_signature([{**row, 'classification': None}]):
             return 'existing_failure'
     return 'application_defect'
@@ -849,7 +865,7 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
             check(c)
         elif c.get('phase') != 'test' and not c.get('is_test') and c.get('cwd', '.') in ready_packages:
             check(c)
-            from coder_policy7_evidence import blocking
+            from coder_check_evidence import blocking
             if blocking(rows[-1]):
                 ready_packages.discard(c.get('cwd', '.'))
     stopped = False   # a main-copy service did not start: no package ran its tests
@@ -868,7 +884,7 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         with services(store, op_id, root, definitions, env, folder) as (service_env, launches):
             env = service_env
             rows.extend(launches)
-            from coder_policy7_evidence import blocking
+            from coder_check_evidence import blocking
             stopped = any(blocking(r) for r in launches if r.get('phase') != 'visual')
             if not stopped:
                 for c in commands:

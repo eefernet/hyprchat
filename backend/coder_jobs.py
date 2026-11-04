@@ -18,8 +18,15 @@ import config
 import context_policy
 import database as db
 from db import coder_jobs as store
-from coder_verification import digest, probe_checks
-from coder_loop import POLICY_VERSION
+from coder_verification import digest
+POLICY_VERSION = 7
+ENGINE = "openhands159"
+RETIRED_ENGINE = "This coding engine has been retired. Download retained source and start a new OpenHands 1.59 project."
+
+
+def require_modern(job):
+    if job.get("engine") != ENGINE:
+        raise ValueError(RETIRED_ENGINE)
 
 
 _RUNNERS = {}
@@ -45,7 +52,7 @@ def worker_base(job):
         if not value:
             raise ValueError('The isolated OpenHands 1.59 worker is not configured')
         return value.rstrip('/')
-    return config.OPENHANDS_URL.rstrip('/')
+    raise ValueError(RETIRED_ENGINE)
 
 
 def worker_url(job, operation=""):
@@ -76,7 +83,16 @@ def spawn(job_id, owner=None):
 
 async def recover():
     for row in await store.recoverable():
-        spawn(row["id"], row["user_id"])
+        token = db.set_current_user_id(row['user_id'])
+        try:
+            job = await store.get(row['id'])
+            if job and job.get('engine') != ENGINE:
+                await store.save(row['id'], state='blocked', blocker=RETIRED_ENGINE,
+                    failure={'category':'engine_retired','stage':job['state']})
+                continue
+            spawn(row['id'], row['user_id'])
+        finally:
+            db.reset_current_user_id(token)
 
 
 async def start():
@@ -139,8 +155,6 @@ def inherited_protection(source, requested):
 
 
 async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None, source_pointer="", engine="", ui_checks=None, original_request=None):
-    if not context_policy.runtime_settings()["daedalus_v3_enabled"]:
-        raise ValueError("Enable the new Daedalus workflow in Settings first")
     mode = "edit_project" if mode == "fix_uploaded_project" else mode
     if mode not in ("build_from_prompt", "edit_project", "ask_uploaded_project"):
         raise ValueError("Unknown workflow mode")
@@ -176,23 +190,18 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
         raise ValueError("Select a registered project")
     from coder_ui_checks import validate as validate_ui_checks
     ui_checks = validate_ui_checks(ui_checks if ui_checks is not None else (source or {}).get('ui_checks', []))
-    engine = engine or (source or {}).get('engine') or settings.get('daedalus_engine', 'legacy')
-    if engine not in {'legacy', 'openhands159'}:
-        raise ValueError('Unknown Daedalus engine')
-    if mode == 'ask_uploaded_project':
-        engine = 'legacy'  # Existing grounded Q&A retains its read-only workflow.
+    if engine and engine != ENGINE:
+        raise ValueError(RETIRED_ENGINE)
+    if source and source.get('engine') != ENGINE:
+        raise ValueError(RETIRED_ENGINE)
+    engine = ENGINE
     if engine == 'openhands159':
         worker_base({'engine': engine})
         # Explicit follow-up flows add coverage; they cannot silently remove
         # controller-owned regression interactions inherited from the source.
         ui_checks = validate_ui_checks(list({json.dumps(flow, sort_keys=True): flow
             for flow in [*(source or {}).get('ui_checks', []), *ui_checks]}.values()))
-    # Policy 7 qualified on repairs and edits first; from-scratch builds keep the default policy
-    # until they qualify too. Jobs keep the policy they were created with.
-    policy = 7 if POLICY_VERSION >= 7 or (mode == "edit_project" and settings.get("daedalus_policy7_edits")) or (
-        mode == "build_from_prompt" and settings.get("daedalus_policy7_builds")) else POLICY_VERSION
-    if engine == 'openhands159':
-        policy = 7  # Existing revision/publication storage; controller dispatch is engine-specific.
+    policy = POLICY_VERSION
     if policy >= 7 and source:
         protected_files = inherited_protection(source, protected_files)
     if source and not execution_commands.get('packages'):
@@ -200,8 +209,8 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
         # Live run 2026-09-22: without it, tests/check_ledger.py (not a test_*.py name) was never executed, both
         # outcomes demanded test evidence that could not exist, and a correct edit parked as "Build incomplete".
         execution_commands = validate_commands(source.get('execution_commands') or {})
-    conversation = await db.get_conversation(conversation_id) if mode == "ask_uploaded_project" else None
-    chosen_model = model or ((config.QA_MODEL or (conversation or {}).get("model")) if conversation is not None else None) or config.BUILDER_MODEL or config.CODER_MODEL
+    conversation = await db.get_conversation(conversation_id)
+    chosen_model = model or (config.QA_MODEL if mode == "ask_uploaded_project" else "") or config.CODER_MODEL or (conversation or {}).get("model")
     if not chosen_model or chosen_model.startswith(("openai:", "anthropic:", "custom:")) or chosen_model.endswith(("-cloud", ":cloud")):
         raise ValueError("Select an installed local coding model in Settings")
     # The queue consumer may see this row as soon as it commits. Persist the
@@ -213,7 +222,7 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
         literal_request = task if original_request is None else original_request
         from coder_ui_contract import VERSION, freeze, recipes, original_source
         contract_source = await original_source(source, store.get)
-        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'engine_behavior_version': 1, 'ui_contract_version': VERSION,
+        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'ui_preflight_version': 1, 'engine_behavior_version': 1, 'ui_contract_version': VERSION,
             'ui_contract': freeze(literal_request, contract_source, mode=mode, source_revision=source_revision),
             'ui_contract_context': recipes((source or {}).get('checks', [])) or (source or {}).get('ui_contract_context', [])}
     job = await store.create(conversation_id, task, mode, project_id, chosen_model, key or uuid.uuid4().hex,
@@ -272,6 +281,10 @@ async def resolve_source(project, requested=""):
 
 
 async def cancel(job_id):
+    job = await store.get(job_id)
+    if not job:
+        raise LookupError("Workflow not found")
+    require_modern(job)
     async with _DELIVERY:
         job = await store.request_cancel(job_id)
     if not job:
@@ -318,13 +331,14 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
     job = await store.get(job_id)
     if not job:
         raise LookupError("Workflow not found")
+    require_modern(job)
     if job.get('worker_workspace_available') is False:
         raise ValueError('This worker workspace was discarded during the Hephaestus migration. Download the retained artifact and start a new job to continue it.')
     modern = job.get('engine') == 'openhands159'
     budget_mode = budget_mode or ('preserve' if modern else 'new_allowance')
     if budget_mode not in {'preserve', 'new_allowance'}:
         raise ValueError('budget_mode must be preserve or new_allowance')
-    from coder_policy7_evidence import DURABLE_LIMITS, EVIDENCE_VERSION
+    from coder_check_evidence import DURABLE_LIMITS, EVIDENCE_VERSION
     if job.get('policy_version', 1) >= 7 and job.get('stop_limit') in DURABLE_LIMITS:
         raise ValueError(job.get('blocker') or 'Retained repair limits prevent further progress on this request')
     from coder_presentation import nothing_to_continue, NOTHING_TO_CONTINUE
@@ -365,7 +379,7 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
         if job.get('policy_version', 1) < 7 or not job.get('scope_question'):
             raise ValueError('This workflow is not waiting for a scope clarification')
         changes.update(scope_clarifications=[*job.get('scope_clarifications', []), {'text': clarification.strip(), 'at': store.now()}],
-                       resume_state='planning', scope_question='')
+                       resume_state='coding', scope_question='')
     if visual_review is not None or visual_model is not None:
         policy = dict(job.get("visual_policy") or {"enabled":False,"model":""})
         if visual_review is not None:
@@ -389,17 +403,6 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
             changes.pop('acceptance'); changes.pop('review')
         if job.get('candidate_artifact'):
             changes.update(candidate_history=[*job.get('candidate_history', []), job['candidate_artifact']], candidate_artifact=None)
-    if job.get('policy_version', 1) >= 7 and job.get('brief'):
-        if job.get('inherited') and job['brief'].get('scope_version') != 1:
-            changes.update(resume_state='planning', acceptance=None, review=None, audit_checks=[], audit_attempts=0,
-                           last_valid_audit='', audit_error='', visual_review={'status': 'pending'})
-        elif job.get('resume_state') == 'packaging' and (job.get('verification_summary') or {}).get('evidence_version') != EVIDENCE_VERSION:
-            # Accepted by an older gate: _deliver refuses that summary, so keeping the verdict re-entered packaging on
-            # every Continue and the owner had no candidate to Accept. Recheck and judge it under the current gate.
-            changes.update(resume_state='checking', acceptance=None, review=None, visual_review={'status': 'pending'})
-        elif job.get('verification_version') != 3 and job.get('resume_state') in {
-                'checking', 'auditing', 'reviewing', 'accepting', 'visual_review', 'packaging', 'candidate_packaging'}:
-            changes.update(resume_state='checking', acceptance=None, review=None, visual_review={'status': 'pending'})
     new_allowance = budget_mode == 'new_allowance'
     if modern and job.get('engine_behavior_version', 0) >= 1:
         changes.update(recovery_failure=None, failed_checkpoint=None)
@@ -412,7 +415,7 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
     job = await store.save(job_id, state="queued", event="resume", **budget,
                            worker_operation="", operation_key="", blocker="", attempt=job.get('attempt', 0) if modern else 0, acceptance_attempt=job.get('acceptance_attempt', 0) if modern else 0,
                            plan_errors=[], visual_attempt=0, probe_corrections=0, probe_diagnoses=[], failure=None,
-                           resume_after_inspect=("" if job.get("resume_state") in {"queued", "inspecting"} else changes.get("resume_state", job.get("resume_state", "planning"))), **changes)
+                           resume_after_inspect=("" if job.get("resume_state") in {"queued", "inspecting"} else changes.get("resume_state", job.get("resume_state", "coding"))), **changes)
     previous = _RUNNERS.get(job_id)
     if previous and not previous.done():
         owner = db.current_user_id()
@@ -447,29 +450,26 @@ async def _worker_request(job_id, method, url, **kwargs):
 
 
 async def uses_persistent_workflow(conversation_id):
-    latest = await db.get_latest_coder_workflow(conversation_id)
-    if latest and latest.get("workflow_version") == 3 and latest.get("state") in store.ACTIVE:
-        return True
-    if latest and latest.get("state") in {"planning","building","reviewing","fixing","accepting","running","queued","cancelling"}:
-        return False
-    return bool(context_policy.runtime_settings()["daedalus_v3_enabled"])
+    return True
 
 
 async def route_tool(name, args, conversation_id, events):
-    """Return None for legacy dispatch; never turn an inspection into editing."""
-    relevant = {"start_coder_workflow", "plan_project", "generate_code", "run_aider_fix", "ask_project",
+    """Route project work to modern jobs; never turn an inspection into editing."""
+    relevant = {"start_coder_workflow", "plan_project", "generate_code", "ask_project",
                 "get_coder_workflow", "cancel_coder_workflow", "run_review", "run_acceptance_review", "run_fixer",
                 "download_project", "download_file", "write_file", "run_shell", "execute_code"}
     if not conversation_id or name not in relevant:
         return None
     latest = await db.get_latest_coder_workflow(conversation_id)
     job = await store.get(latest["id"]) if latest and latest.get("workflow_version") == 3 else None
-    enabled = context_policy.runtime_settings()["daedalus_v3_enabled"]
-    if latest and latest.get("workflow_version") != 3 and latest.get("state") in {"planning","building","reviewing","fixing","accepting","running","queued","cancelling"}:
-        return None
-    starts = {"start_coder_workflow", "plan_project", "generate_code", "run_aider_fix", "ask_project"}
+    enabled = True
+    starts = {"start_coder_workflow", "plan_project", "generate_code", "ask_project"}
     if not job and (not enabled or name not in starts):
         return None
+    if name in {'run_aider_fix', 'run_review', 'run_acceptance_review', 'run_fixer'}:
+        return json.dumps({'error': 'Retired workflow tool. Use start_coder_workflow; its controller owns checks and repairs.'})
+    if job and job.get('engine') != ENGINE and name in starts:
+        return json.dumps({'error': RETIRED_ENGINE, 'workflow_id': job['id']})
     if name in starts:
         conv = await db.get_conversation(conversation_id)
         latest_user = next((m for m in reversed((conv or {}).get("messages", [])) if m.get("role") == "user"), {})
@@ -494,9 +494,9 @@ async def route_tool(name, args, conversation_id, events):
                            source_pointer="accepted" if options.get("source_pointer") == "accepted" else "")
         origin = next((m for m in reversed((conv or {}).get('messages', [])) if m.get('role') == 'assistant'), {})
         job = await store.save(job["id"], chat_request_key=key, origin_message_id=origin.get('id'))
-        await events.emit(conversation_id, "tool_start", {"tool": name, "workflow_id": job["id"], "status": "Daedalus job started"})
-        await events.emit(conversation_id, "tool_end", {"tool": name, "workflow_id": job["id"], "status": "Running in background; progress reconnects after refresh"})
-        return json.dumps({"workflow_id": job["id"], "state": job["state"], "message": "Job started in background. The job controller handles planning, coding, checks, and acceptance. Tell the user it has started; do not launch additional tools for this job."})
+        if events: await events.emit(conversation_id, "tool_start", {"tool": name, "workflow_id": job["id"], "status": "Daedalus job started"})
+        if events: await events.emit(conversation_id, "tool_end", {"tool": name, "workflow_id": job["id"], "status": "Running in background; progress reconnects after refresh"})
+        return json.dumps({"workflow_id": job["id"], "state": job["state"], "message": "Job started in background. The job controller handles planning, coding, checks, and candidate delivery for explicit owner acceptance. Tell the user it has started; do not launch additional tools for this job."})
     if not job:
         return None
     if name in {"cancel_coder_workflow", "get_coder_workflow"}:
@@ -514,12 +514,12 @@ async def route_tool(name, args, conversation_id, events):
     return None
 
 
-def verification_reserve(settings):
-    """Model calls a policy-7 build may not spend on coding: the audit and review still need them."""
-    return context_policy.coding_allocation(settings["daedalus_model_calls"], settings["daedalus_model_calls"])["verification_reserve"]
 
 
 async def _operate(job, kind, *, reserve_calls=0, **extra):
+    require_modern(job)
+    if kind not in {'inspect', 'code', 'check', 'package', 'qa'}:
+        raise ValueError('Retired worker operation: ' + str(kind))
     settings = context_policy.runtime_settings()
     seconds = settings["daedalus_job_seconds"] - job.get("seconds_used", 0)
     calls = settings["daedalus_model_calls"] - job.get("calls_used", 0) - reserve_calls
@@ -541,13 +541,14 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                'conversation_id':job.get('conversation_id',''), 'project_id':job.get('project_id',''),
                'progress_version': (job.get('progress') or {}).get('version', 0),
                'plan_finalization_version': job.get('plan_finalization_version', 0),
+               'ui_preflight_version': job.get('ui_preflight_version', 0),
                'deliverable_contract': job.get('deliverable_contract'),
                'engine_behavior_version': job.get('engine_behavior_version', 0), 'model_digest': job.get('model_digest', ''),
                "request_key": operation_key, "task": job["user_task"], "mode": job.get("mode", ""),
                "original_task": job["user_task"], "source_project_id": job.get("source_project_id", "") if job.get("policy_version",1)>=2 else job.get("source_project_id") or job["project_id"],
                "source_job_id":job.get("source_job_id",""), "source_revision_id":job.get("source_revision_id",""),
                "model": job["model"], "ollama_url": config.OLLAMA_URL,
-               "disable_thinking": config.OPENHANDS_DISABLE_THINKING, "reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
+               "disable_thinking": config.OPENHANDS_DISABLE_THINKING,
                "policy_version":job.get("policy_version",1), "requirements":job.get("requirements",[]),
                "ui_required":job.get("ui_required",False), "visual_policy":job.get("visual_policy",{}),
                "visual_review":job.get("visual_review",{}), "verification_plan":job.get("verification_plan",{}),
@@ -557,10 +558,7 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
     if job.get('policy_version', 1) >= 7:
         from coder_scope import effective_task
         payload.update(task=effective_task(job), original_task=effective_task(job))
-    stage_model = {"plan": config.ARCHITECT_MODEL or config.PLANNING_MODEL,
-                   "verify": config.REVIEWER_MODEL or config.ACCEPTANCE_MODEL or config.PLANNING_MODEL,
-                   "accept": config.ACCEPTANCE_MODEL or config.PLANNING_MODEL,
-                   "qa": config.QA_MODEL}.get(kind)
+    stage_model = config.QA_MODEL if kind == 'qa' else ''
     if stage_model:
         if stage_model.startswith(("openai:","anthropic:","custom:")) or stage_model.endswith(("-cloud", ":cloud")):
             raise ValueError(f"Select a local {kind} model in Settings")
@@ -676,30 +674,10 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
     return result, await store.get(job["id"])
 
 
-def _checks(milestones, discovered=None):
-    checks, seen = [], set()
-    for milestone in milestones:
-        requested = list(milestone.get("checks", []))
-        if discovered is not None:
-            for flow in milestone.get("browser_flows", []):
-                preview = next((item for item in discovered if item.get("kind") == "browser" and item.get("cwd", ".") == flow.get("cwd", ".")), None)
-                if not preview:
-                    raise ValueError(f"No preview server discovered for browser flow in {flow.get('cwd','.')}")
-                requested.append({**{k:v for k,v in preview.items() if k != "id"}, **flow, "kind":"browser", "server_command":preview["server_command"]})
-        for check in requested:
-            if not isinstance(check, dict) or not (check.get("command") or (check.get("kind") == "browser" and check.get("server_command"))):
-                raise ValueError("Each check needs an executable command or browser flow")
-            candidate = {**check, "cwd":check.get("cwd",".")}
-            key = json.dumps({k:v for k,v in candidate.items() if k not in {"id","origin"}},sort_keys=True)
-            if key not in seen:
-                seen.add(key)
-                candidate["id"] = check.get("id") or "check-" + hashlib.sha256(key.encode()).hexdigest()[:12]
-                checks.append(candidate)
-    return checks
 
 
 async def _deliver(job, result, *, candidate=False):
-    from coder_policy7_evidence import runnable
+    from coder_check_evidence import runnable
     accepted = job.get("acceptance") or {}
     if job.get('policy_version', 1) >= 7 and not candidate:
         summary = job.get('verification_summary') or {}
@@ -788,187 +766,13 @@ async def run(job_id):
                 if await step(job, sys.modules[__name__]):
                     return
                 continue
-            if job.get('policy_version', 1) >= 6:
-                import sys
-                if job.get('policy_version', 1) >= 7:
-                    from coder_policy7_controller import step
-                else:
-                    from coder_loop import step
-                if await step(job, sys.modules[__name__]):
-                    return
-                continue
-            if state in ("queued", "inspecting"):
-                job = await store.save(job_id, state="inspecting")
-                result, job = await _operate(job, "inspect")
-                next_state = job.get("resume_after_inspect") or ("baselining" if result["inventory"]["files"] and job["mode"] != "ask_uploaded_project" else "planning")
-                if job.get("revision_id") and result["snapshot"]["revision"] != job["revision_id"] and job.get("milestones"):
-                    next_state = "checking"
-                await store.save(job_id, state=next_state, inventory=result["inventory"],
-                                 baseline_revision=job.get("baseline_revision") or result["snapshot"]["revision"],
-                                 revision_id=result["snapshot"]["revision"], workspace=result["workspace"], verification=result.get("verification",{}), resume_after_inspect="")
-            elif state == "baselining":
-                checks = job.get("verification",{}).get("checks",[])
-                if checks:
-                    result, job = await _operate(job,"check",checks=checks,baseline=True)
-                    await store.record_check(job_id,job["worker_operation"],job["revision_id"],result)
-                    await store.save(job_id,state="blocked" if result.get("environment_fault") else "planning",
-                                     resume_state="baselining", baseline_checks=result["checks"],
-                                     blocker="Verification environment is unavailable; inspect dependency setup and command logs" if result.get("environment_fault") else "")
-                else:
-                    await store.save(job_id,state="planning",baseline_checks=[],baseline_note="No deterministic check command discovered")
-            elif state == "planning":
-                if job["mode"] == "ask_uploaded_project":
-                    result, job = await _operate(job, "qa")
-                    await store.save(job_id, state="completed", answer=result.get("answer", ""))
-                    return
-                evidence = {"inventory": job.get("inventory", {}), "verification":job.get("verification",{}), "baseline_checks":job.get("baseline_checks",[])}
-                if job.get("plan_feedback"):
-                    evidence["plan_feedback"] = job["plan_feedback"]
-                result, job = await _operate(job, "plan", evidence=evidence)
-                _checks(result["milestones"])
-                # Separate persisted operation boundary: the Architect has
-                # returned before any generate_code operation is dispatched.
-                await store.save(job_id, state="verifying" if job.get("policy_version",1)>=2 else "coding", event="plan_returned",
-                    milestones=result["milestones"], requirements=result.get("requirements",[]), ui_required=result.get("ui_required",False),
-                    milestone_index=0, attempt=0, blocker="")
-                await asyncio.sleep(0)
-            elif state == "verifying":
-                result, job = await _operate(job, "verify", evidence={"requirements":job["requirements"], "milestones":job["milestones"]})
-                await store.save(job_id,state="coding",verification_plan=result, verification_hash=digest(result))
-            elif state == "coding":
-                milestone = job["milestones"][job["milestone_index"]]
-                result, job = await _operate(job, "code", task=milestone["task"], milestone=milestone,
-                    milestone_id=str(job["milestone_index"]), evidence={"checks": job.get("checks", []), "issues": job.get("issues", []),
-                        **({'verification_audits':job.get('probe_audits',[])[-2:]} if job.get('policy_version',1)>=4 else {})})
-                await store.save(job_id, state="checking", revision_id=result["snapshot"]["revision"],
-                                 inventory=result["inventory"], verification=result.get("verification",{}), acceptance=None,
-                                 visual_review={"status":"pending"}, builder_finished=result["agent_finished"], builder_note=result.get("incomplete_reason", ""))
-            elif state == "checking":
-                # Re-run the accumulated milestone checks to catch regressions.
-                selected = job["milestones"][:job["milestone_index"] + 1]
-                try:
-                    checks = _checks([{"checks":job.get("verification",{}).get("checks",[])},*selected],discovered=job.get("verification",{}).get("checks",[]))
-                    if job.get("policy_version",1)>=2:
-                        if not job.get("ui_required"):
-                            checks = [c for c in checks if c.get("kind")!="browser"]
-                        covered = set().union(*(set(m["requirement_ids"]) for m in selected))
-                        for check in probe_checks(job["verification_plan"]["checks"]):
-                            if not set(check["requirement_ids"])<=covered: continue
-                            if check.get("kind")=="project_tests":
-                                tests=[c for c in job.get("verification",{}).get("checks",[]) if c.get("is_test")]
-                                if tests:
-                                    checks.extend({**c,"id":check["id"]+"-"+digest(c)[:12],"origin":"independent",
-                                        **({'execution_alias':c['id'],'execution_origin':'project_tests'} if job.get('policy_version',1)>=5 else {}),
-                                        "requirement_ids":check["requirement_ids"],"contract_hash":check["contract_hash"]} for c in tests)
-                                else:
-                                    checks.append({**check,"command":"printf 'Requested runnable project tests are missing. Add tests and a discoverable test command.\\n' >&2; exit 1"})
-                                continue
-                            if check.get("kind")=="browser":
-                                if not job.get("ui_required"): raise ValueError("Browser probes require a UI task")
-                                preview=next((c for c in job.get("verification",{}).get("checks",[]) if c.get("kind")=="browser" and c.get("cwd",".")==check.get("cwd",".")),None)
-                                if not preview: raise ValueError("No preview server discovered for independent browser probe")
-                                check={**check,"server_command":preview["server_command"]}
-                            checks.append(check)
-                except ValueError as error:
-                    # Plans are advisory. Return an incompatible verification
-                    # plan to the Architect with actual source evidence instead
-                    # of making Continue replay an impossible check forever.
-                    problem = str(error)
-                    previous = job.get("plan_errors", [])
-                    await store.save(job_id, state="blocked" if problem in previous else "planning",
-                        resume_state="planning", event="verification_plan_invalid",
-                        plan_errors=list(dict.fromkeys([*previous, problem])),
-                        plan_feedback={"error":problem,"previous_milestones":job["milestones"],
-                            "instruction":"Inspect the current project and correct its verification plan. Preserve the original requested behavior. Use browser flows only for requested browser behavior; do not add a web interface to a library or command-line project."},
-                        blocker=f"The verification plan does not match the project: {problem}. Continue to replan from this checkpoint." if problem in previous else "")
-                    continue
-                result, job = await _operate(job, "check", checks=checks)
-                await store.record_check(job_id, job["worker_operation"], job["revision_id"], result)
-                if result.get("environment_fault"):
-                    from coder_failures import classify_failure
-                    await store.save(job_id,state="blocked",resume_state="checking",blocker="Verification environment is unavailable; inspect dependency setup and command logs",checks=result["checks"],
-                        **({'failure':classify_failure('environment unavailable','checking')} if job.get('policy_version',1)>=4 else {}))
-                    continue
-                if not result["passed"]:
-                    independent = [c for c in result["checks"] if not c["passed"] and c.get("origin")=="independent"]
-                    # Diagnose executable evidence independently before asking the
-                    # Builder to contort correct code around a faulty probe.
-                    signature=digest({"checks":[c["id"] for c in independent],"plan":job.get("verification_hash")})
-                    if job.get('policy_version',1)>=4:
-                        from coder_probe_audit import audit_failures
-                        job,recheck=await audit_failures(job,result,_operate,store.save)
-                        if recheck: continue
-                    elif independent and signature not in job.get("probe_diagnoses",[]):
-                        job=await store.save(job_id,checks=result["checks"])
-                        prior=job["verification_plan"]
-                        diagnosis,job=await _operate(job,"verify",diagnose_probes=prior,
-                            evidence={"requirements":job["requirements"],"previous_probes":prior,"failed_checks":independent})
-                        revised=digest(diagnosis["checks"])!=digest(prior["checks"])
-                        attempts=job.get("probe_corrections",0)+int(revised)
-                        await store.save(job_id,state="blocked" if attempts>2 else "checking",resume_state="checking",
-                            checks=result["checks"],verification_plan=diagnosis,verification_hash=digest(diagnosis),probe_corrections=attempts,
-                            probe_diagnoses=[*job.get("probe_diagnoses",[]),signature,
-                                digest({"checks":[c["id"] for c in independent],"plan":digest(diagnosis)})],
-                            event="verification_diagnosed",blocker="Independent probes still require correction; inspect their recorded rationale before continuing" if attempts>2 else "")
-                        if revised: continue
-                    failures = {check["id"] for check in result["checks"] if not check["passed"]}
-                    previous_failures = set(job.get("failed_check_ids",[]))
-                    improved = bool(previous_failures) and failures < previous_failures
-                    attempts = 0 if improved else job.get("attempt", 0) + 1
-                    issues = [c for c in result["checks"] if not c["passed"]]
-                    if attempts >= 3:
-                        from coder_failures import classify_failure
-                        await store.save(job_id, state="blocked", resume_state="coding", blocker="Milestone still fails after verification and repair attempts", checks=result["checks"], issues=issues,
-                            **({'failure':classify_failure('test failed','checking',recovery_attempted=True)} if job.get('policy_version',1)>=4 else {}))
-                    else:
-                        # The third attempt receives an explicit diagnosis/replan
-                        # request; research remains optional and evidence-driven.
-                        if attempts == 2:
-                            issues.append({"summary": "Reassess the cause and implementation approach before the final repair attempt."})
-                        await store.save(job_id, state="coding", attempt=attempts, checks=result["checks"], issues=issues, failed_check_ids=sorted(failures))
-                elif job["milestone_index"] + 1 < len(job["milestones"]):
-                    await store.save(job_id, state="coding", milestone_index=job["milestone_index"] + 1, attempt=0, checks=result["checks"], issues=[])
-                else:
-                    # A finish-tool call is a model claim, not verification.
-                    # On the final milestone the independent Acceptance pass
-                    # can judge the tested revision even when the SDK used up
-                    # its attempt turns before emitting that specific call.
-                    await store.save(job_id, state="visual_review" if job.get("policy_version",1)>=2 else "accepting", checks=result["checks"], issues=[],
-                                     completion_basis="builder_finish" if job.get("builder_finished") else "independent_acceptance_required")
-            elif state == "visual_review":
-                result, job = await _operate(job,"visual",evidence={"checks":job["checks"]})
-                if result.get("status")!="passed" and not result.get("defects") and any(r["kind"]=="visual" for r in job.get("requirements",[])):
-                    await store.save(job_id,state="waiting_for_input",resume_state="visual_review",visual_review=result,
-                        blocker="The request explicitly requires visual verification. Enable a supported local vision model and continue; this requirement is still unverified.")
-                    continue
-                defects = result.get("defects",[])
-                attempts = job.get("visual_attempt",0) + bool(defects)
-                await store.save(job_id,state=("blocked" if attempts>=3 else "coding") if defects else "accepting",
-                    resume_state="coding",visual_review=result,visual_attempt=attempts,issues=defects,
-                    blocker="Visual checks still find concrete layout defects after repairs" if attempts>=3 else "")
-            elif state == "accepting":
-                result, job = await _operate(job, "accept", evidence={"milestones": job["milestones"], "checks": job["checks"], "revision_id": job["revision_id"]})
-                if result.get("accepted") is True and all(check["passed"] for check in job["checks"]):
-                    await store.save(job_id, state="packaging", acceptance=result)
-                else:
-                    attempts = job.get("acceptance_attempt",0) + 1
-                    await store.save(job_id, state="blocked" if attempts >= 3 else "coding", resume_state="coding", acceptance=result,
-                                     acceptance_attempt=attempts, issues=result.get("issues", []),
-                                     blocker=(result.get("summary") or "Acceptance found unmet requirements") if attempts >= 3 else "")
-            elif state == "packaging":
-                result, job = await _operate(job, "package")
-                artifact = await _deliver(job, result)
-                if _EVENTS:
-                    await _EVENTS.emit(job["conversation_id"], "file_ready", {**artifact, "workflow_id": job_id})
-                return
-            else:
-                raise ValueError(f"Unknown workflow state: {state}")
+            await store.save(job_id, state='blocked', blocker=RETIRED_ENGINE,
+                failure={'category':'engine_retired','stage':state})
+            return
     except asyncio.CancelledError:
         raise
     except InterruptedError:
-        # Keep the writer lease until the old worker acknowledges Stop. A
-        # queued job must not overtake an operation whose cancellation is
-        # still pending across a network interruption.
+        # Retain the writer lease until Stop is acknowledged.
         while await store.get(job_id):
             if (await cancel(job_id))["state"] in store.TERMINAL:
                 break
@@ -1000,34 +804,6 @@ async def run(job_id):
                 except InterruptedError:
                     raise
                 except Exception as packaging_error:
-                    error = packaging_error
-                    job = await store.get(job_id)
-                    if not job:
-                        return
-            if job.get('policy_version', 1) >= 6 and job.get('brief') and (out_of_calls or isinstance(error, ValueError) and job['state'] in {'reviewing', 'accepting', 'auditing'}
-                    or job.get('policy_version', 1) >= 7 and 'model-call allowance' in str(error).lower() and job['state'] in {'reviewing', 'accepting', 'auditing', 'visual_review'}):
-                # Invalid/ambiguous review output has a bounded endpoint too.
-                import sys
-                if job.get('policy_version', 1) >= 7:
-                    from coder_policy7_controller import step
-                    from coder_policy7_evidence import acceptance, baseline_test_ids
-                    from coder_scope import effective_task
-                    summary = acceptance(job['brief']['outcomes'], job.get('checks', []), {}, job['revision_id'], request=effective_task(job), baseline_tests=baseline_test_ids(job))
-                    job = await store.save(job_id, state='candidate_packaging', verification_summary=summary,
-                        acceptance=None, delivery_status='review_candidate', blocker=str(error),
-                        stop_limit='model_calls' if 'model-call allowance' in str(error).lower() else job.get('stop_limit', ''),
-                        resume_state='checking' if out_of_calls else 'accepting')
-                else:
-                    from coder_loop import candidate, step
-                    job = await candidate(job, store, str(error))
-                try:
-                    await step(job, sys.modules[__name__])
-                    return
-                except InterruptedError:
-                    raise
-                except Exception as packaging_error:
-                    # Every failure parks the job visibly. A narrower list let a failed worker package
-                    # operation (RuntimeError) escape with the job still recoverable: a silent respawn loop.
                     error = packaging_error
                     job = await store.get(job_id)
                     if not job:

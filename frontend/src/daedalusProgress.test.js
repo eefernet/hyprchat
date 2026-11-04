@@ -2,9 +2,32 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary,outcomeExplanation,nowLine,requestSummary,fileActivity} from './daedalusProgress.js';
+import {jobStatusLabel} from './daedalusJobs.js';
 
 // Trimmed snapshots of real jobs from the 2026-09-18/19 evaluation runs.
 const jobs=JSON.parse(readFileSync(new URL('./daedalusProgress.fixtures.json',import.meta.url)));
+
+test('modern runnable candidates with unverified requirements use revision evidence without upgrading checks',()=>{
+  const job={engine:'openhands159',state:'ready_for_review',revision_id:'current',ui_contract_version:1,
+    candidate_artifact:{id:'candidate'},verification_summary:{revision_id:'current',checks_ok:true,exercised:true,
+      checks_passed:false,failures:[],criteria:[{status:'unverified'}]}};
+  const original=JSON.stringify(job);
+  assert.equal(jobStatusLabel(job),'Ready for review');
+  assert.equal(outcomeExplanation(job).title,'Ready for your review');
+  assert.equal(outcomeExplanation(job).tone,'warn');
+  assert.equal(JSON.stringify(job),original);
+  for(const change of [{revision_id:'old'},{revision_id:null},{failures:[{id:'broken'}]},{checks_ok:false},{incomplete_reason:'Generation stopped'}]){
+    const invalid={...job,verification_summary:{...job.verification_summary,...change}};
+    assert.match(jobStatusLabel(invalid),/^Build incomplete/);
+    assert.equal(outcomeExplanation(invalid).title,'Build incomplete');
+  }
+  const unexercised={...job,verification_summary:{...job.verification_summary,exercised:false}};
+  assert.equal(jobStatusLabel(unexercised),'Built, not exercised');
+  assert.equal(outcomeExplanation(unexercised).title,'Built, not exercised');
+  const oldBadge={...job,candidate_artifact:{metadata:{checks_passed:true}}};
+  assert.equal(jobStatusLabel(oldBadge),'Ready for review');
+  assert.equal(outcomeExplanation(oldBadge).title,'Ready for your review');
+});
 
 test('unverified and failed UI contracts cannot inherit a green artifact badge',()=>{
   for(const status of ['failed','unverified']){
@@ -169,4 +192,11 @@ test('outcome categories are disjoint and only the latest current-revision row c
 test('advisory-only historical evidence does not turn Check green',()=>{
  const job={engine:'openhands159',state:'ready_for_review',revision_id:'r',verification_summary:{revision_id:'r',checks_passed:true},checks:[{id:'probe',revision_id:'r',passed:true,workflow_status:'advisory'}]};
  assert.equal(stageRail(job)[2].state,'unverified');assert.notEqual(outcomeExplanation(job).title,'Checks passed — please review');
+});
+
+test('UI preflight progress is diagnostic and never a delivered passing check',()=>{
+  const job={engine:'openhands159',state:'coding',progress:{version:1,current:{kind:'ui_preflight'},ui_preflight:{passed:true,diagnostic_only:true}},checks:[]};
+  assert.equal(nowLine(job),'Checking UI flows');
+  assert.equal(checkSummary(job).passed,0);
+  assert.equal(outcomeExplanation(job),null);
 });

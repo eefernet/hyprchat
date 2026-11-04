@@ -683,8 +683,7 @@ def detect_template_family(model_name: str) -> str:
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "list_files", "download_file", "download_project", "delete_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
-                       "run_tests", "lint_code", "resume_project", "run_review",
-                       "run_acceptance_review", "run_fixer", "run_aider_fix",
+                       "run_tests", "lint_code", "resume_project",
                        "start_coder_workflow", "get_coder_workflow",
                        "cancel_coder_workflow", "ask_project"}
 
@@ -745,8 +744,8 @@ _PHANTOM_CORRECTION = (
     "SYSTEM: You told the user you made changes (e.g. 'added', 'implemented', "
     "'created'), but you called NO tools this turn — so NOTHING was actually changed "
     "on disk. A real change to this project REQUIRES a tool call. Do ONE of these NOW:\n"
-    "  (a) call run_aider_fix(task='...') for the existing/uploaded project, or "
-    "generate_code/write_file for genuinely new files, to ACTUALLY make the change; or\n"
+    "  (a) call start_coder_workflow(task='...') for this project, or "
+    "write_file for a single standalone file, to ACTUALLY make the change; or\n"
     "  (b) if you cannot or should not change anything, tell the user plainly that you "
     "have NOT made any changes yet, and why.\n"
     "Do not claim work you did not perform."
@@ -797,35 +796,10 @@ _PLAN_PROJECT_AUTO_BUILD_MARKERS = (
 )
 
 
-def _plan_project_file_ref_count(tool_result: str) -> int:
-    text = tool_result or ""
-    return sum(
-        text.count(ext)
-        for ext in (".py", ".js", ".ts", ".html", ".go", ".rs")
-    )
 
 
-def _plan_project_should_nudge_generate_code(tool_result: str) -> bool:
-    """Only legacy/plain Architect plans need the chat-loop generate_code nudge."""
-    text = tool_result or ""
-    if len(text) <= 1000:
-        return False
-    lower = text.lower()
-    if any(marker.lower() in lower for marker in _PLAN_PROJECT_AUTO_BUILD_MARKERS):
-        return False
-    return _plan_project_file_ref_count(text) >= 3
 
 
-def _qa_run_qualifies(run: dict, stream_started_at: str) -> bool:
-    """True when a qa run can be streamed verbatim as this turn's answer:
-    succeeded, not a change request, has an answer, and was created by THIS
-    stream — a stale qa run from a previous turn must never be replayed."""
-    if (run.get("started_at") or "") < (stream_started_at or ""):
-        return False
-    env = run.get("result_envelope") or {}
-    return (run.get("status") == "succeeded"
-            and not env.get("looks_like_change_request")
-            and bool((env.get("answer") or "").strip()))
 
 
 def _next_action_from_blocked_result(tool_result: str) -> str:
@@ -850,69 +824,21 @@ def _next_action_from_blocked_result(tool_result: str) -> str:
     # Hard cap reached → summarize for the user instead of looping a tool.
     if "hard cap" in low or "ship as-is" in low or "ship anyway" in low:
         return "respond to the user: summarize changes, state the remaining issue, and ask whether to ship as-is"
-    if "run_aider_fix" in text:
-        return "run_aider_fix(...)"
-    if "run_review" in text:
-        return "run_review(...)"
-    if "run_fixer" in text and "do not call run_fixer" not in low:
-        return "run_fixer(...)"
-    return "respond to the user with the blocked state and ask for guidance"
+    return "respond with the saved job status; project execution is owned by the modern controller"
 
-
-async def _mark_latest_uploaded_workflow_blocked(conv_id: str) -> None:
-    if not conv_id:
-        return
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id)
-        if wf and wf.get("mode") == "fix_uploaded_project" and wf.get("state") != "blocked":
-            await db.update_coder_workflow(
-                wf.get("id", ""),
-                state="blocked",
-                active_run_id=wf.get("active_run_id") or "",
-                artifact_status="not_ready",
-            )
-    except Exception as e:
-        print(f"[CHAT] blocked-loop workflow update failed (non-fatal): {e}")
 
 
 async def _is_active_uploaded_manual_loop(conv_id: str, tool_names: list[str]) -> bool:
-    if not conv_id or not tool_names:
+    if not conv_id or not tool_names or not all(name in _UPLOAD_MANUAL_TOOLS for name in tool_names):
         return False
-    if not all((name or "") in _UPLOAD_MANUAL_TOOLS for name in tool_names):
-        return False
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id)
-    except Exception as e:
-        print(f"[CHAT] duplicate-loop workflow lookup failed (non-fatal): {e}")
-        return False
-    if not wf or wf.get("mode") != "fix_uploaded_project":
-        return False
-    return (wf.get("state") or "").lower() not in _TERMINAL_WORKFLOW_STATES
+    from db import coder_jobs as jobs
+    latest = await db.get_latest_coder_workflow(conv_id)
+    job = await jobs.get(latest['id']) if latest and latest.get('workflow_version') == 3 else None
+    return bool(job and job.get('engine') == 'openhands159' and job['state'] in jobs.ACTIVE)
 
 
 async def _next_uploaded_workflow_action(conv_id: str) -> str:
-    project_id = ""
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id) if conv_id else None
-        project_id = (wf or {}).get("project_id") or ""
-        runs = await db.get_runs_by_conversation(conv_id, limit=10) if conv_id else []
-    except Exception as e:
-        print(f"[CHAT] duplicate-loop next-action lookup failed (non-fatal): {e}")
-        runs = []
-    project_arg = f'project_id="{project_id}"' if project_id else "project_id=<active_project_id>"
-    latest = runs[0] if runs else {}
-    role = latest.get("role") or ""
-    run_id = latest.get("id") or ""
-    env = latest.get("result_envelope") or {}
-    env_status = (env.get("status") or "").lower()
-
-    if role == "aider.fix":
-        return f"run_review({project_arg})"
-    if role == "reviewer" and env_status == "clean":
-        return f"run_acceptance_review({project_arg})"
-    if role in {"reviewer", "acceptance"} and run_id:
-        return f'run_aider_fix(project_id="{project_id}", issue_run_id="{run_id}")' if project_id else f'run_aider_fix(issue_run_id="{run_id}")'
-    return f"run_review({project_arg})"
+    return "get_coder_workflow() to inspect progress; use Stop before requesting independent edits"
 
 
 async def _duplicate_manual_tool_summary(conv_id: str, tool_names: list[str]) -> str:
@@ -1249,6 +1175,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         req.model = _routed_model
         _routed_from_auto = _routed_model
 
+    if req.persona_id and config.PLANNING_MODEL:
+        routing_persona = next((c for c in await db.get_model_configs() if c['id'] == req.persona_id), None)
+        if routing_persona and _v2_name_match(routing_persona.get('name')):
+            req.model = config.PLANNING_MODEL
     _model_provider, _provider_model_name = model_providers.split_model_id(req.model)
     _is_cloud_provider = _model_provider in model_providers.CLOUD_PROVIDERS
 
@@ -1695,7 +1625,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             messages.append({"role":"system","content":"Active Daedalus project: "+json.dumps({
                 "project_id":_active_project["id"],"name":_active_project["name"],
                 "accepted_revision":_active_project.get("accepted_revision_id","")})+
-                ". Follow-up changes use this project's accepted revision with mode edit_project. Questions use ask_project. "
+                ". Follow-up changes use this project's working candidate with mode edit_project. Questions use ask_project. "
                 "Project IDs are registry identities, not filesystem paths. The controller owns workspaces and revisions."})
         else:
             messages.append({"role":"system","content":"No project is selected for this request. Start requested new work with mode build_from_prompt."})
@@ -1721,55 +1651,12 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 _ap_lines.append(f"  - {_f}")
             if len(_ap_files) > 25:
                 _ap_lines.append(f"  - ... and {len(_ap_files) - 25} more")
-        if _is_v2_persona:
-            _ap_lines.append(
-                "\n## How to handle this project\n"
-                f"**The project lives at `{_ap_path}` — already extracted on disk. "
-                f"NEVER mkdir a new directory. NEVER use the display name "
-                f"('{_active_project.get('name', '?')}') as a path. ALWAYS pass "
-                f"`{_ap_path}` to any tool that takes a project_dir or path.**\n\n"
-                "1. **For QUESTIONS** about the code (\"how does X work?\", \"walk me "
-                "through Y\", \"show me Z\", \"break down W line by line\", \"what does "
-                "this do?\"): your VERY FIRST tool call MUST be `ask_project(question='...')`. "
-                "Do NOT call list_files, read_file, search_files, run_review, run_shell, "
-                "or download_project. The ProjectQA agent reads the code, finds what's "
-                "relevant, and produces a grounded answer with file:line citations in "
-                "ONE round. Hand-rolling read_file across many files is the v1 "
-                "antipattern that wastes rounds.\n"
-                "2. **For CHANGE REQUESTS — DEFAULT TO write_file, NOT generate_code.** "
-                "Only call generate_code when the user is genuinely asking you to add "
-                "3+ NEW files or do a major refactor. For ALL of these, use read_file + "
-                "write_file:\n"
-                "   - User pastes 1–5 lines of code (\"the fix is `x.foo()`\", \"replace "
-                "Y with Z\", \"use this API call\") → read_file the relevant file(s) → "
-                "write_file with the change.\n"
-                "   - 1–3 file tweaks, bug fixes, refactors of an existing function, "
-                "additions of small features.\n"
-                "   - Anything where you'd touch fewer than ~3 files.\n"
-                f"   When you DO need generate_code, pass `project_id='{_ap_id}'` so the "
-                f"Builder amends in place instead of scaffolding fresh. NEVER pass a "
-                f"task description that says \"create a complete X\" or \"build a Y\" "
-                f"for a project that already exists — that triggers a scaffold rebuild "
-                f"and clobbers the existing code.\n"
-                "3. **For BUG REPORTS** (\"the tests are failing\", \"it crashes when "
-                f"...\"): call `run_review(project_dir='{_ap_path}')` first — the "
-                f"Reviewer runs the build/tests and tells you what's broken. If the "
-                f"reviewer comes back clean but the user still reports a runtime bug "
-                f"(crashes, UI not updating, error that compiles fine): read the "
-                f"relevant 1–3 files and write_file the targeted fix. Do NOT call "
-                f"generate_code for runtime bugs.\n"
-                "4. **Do NOT auto-package or download** the project unless the user "
-                "explicitly asks for the tarball/zip. They already uploaded it."
-            )
-        else:
-            # Ordinary code-capable path — keep the existing
-            # read_file -> write_file/generate_code flow outside Daedalus.
-            _ap_lines.append(
-                "\nIf the user reports a bug, error, or asks for changes to this project: "
-                "use read_file on the relevant files first to see the current code, then fix "
-                "with write_file (small changes) or generate_code with project_id="
-                f"'{_ap_id}' (large changes). Do NOT start a new project."
-            )
+        _ap_lines.append(
+            "\nIf the user reports a bug, error, or asks for changes to this project: "
+            "use read_file on the relevant files first to see the current code, then fix "
+            "with start_coder_workflow(mode=edit_project, project_id="
+            f"'{_ap_id}' (large changes). Do NOT start a new project."
+        )
         messages.append({"role": "system", "content": "\n".join(_ap_lines)})
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
@@ -1965,7 +1852,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             gateway = {"start_coder_workflow", "get_coder_workflow", "cancel_coder_workflow", "ask_project"}
             available_tool_names -= CODEAGENT_TOOLS_SET - gateway
             ollama_tools = [tool for tool in ollama_tools if tool.get("function",{}).get("name") in available_tool_names]
-            ollama_tools = [{**tool,"function":{**tool["function"],"description":"Start a persistent local coding job once. The controller handles planning, coding, checks, and Acceptance in the background. Questions use ask_uploaded_project and never authorize editing."}}
+            ollama_tools = [{**tool,"function":{**tool["function"],"description":"Start a persistent local coding job once. The controller handles planning, coding, checks, and candidate delivery in the background. Questions use ask_uploaded_project and never authorize editing."}}
                             if tool.get("function",{}).get("name") == "start_coder_workflow" else tool for tool in ollama_tools]
             for tool in ollama_tools:
                 if tool.get("function",{}).get("name")=="start_coder_workflow":
@@ -1978,8 +1865,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         "For source questions call ask_project or start_coder_workflow(mode=ask_uploaded_project); questions never authorize editing. "
                         "Report that the background job has started and end your reply. The progress card handles monitoring. "
                         "Use get_coder_workflow only for an explicit status question, and cancel_coder_workflow for Stop. "
-                        "The controller owns separate Architect and Builder model turns, verification, repair, and fresh Acceptance. "
-                        "Only the completed workflow's accepted artifact is a delivered result. Do not claim success from starting a job.")
+                        "One OpenHands 1.59 conversation handles planning, coding and repairs on Hephaestus. The controller verifies independently. "
+                        "Candidates are delivered for review, including clearly marked incomplete work. Only explicit owner acceptance promotes the exact reviewed revision. Do not claim success from starting a job.")
             messages.append({"role":"system","content":protocol})
 
     # Inject visualization hint for non-coder chats that have execute_code.
@@ -2058,67 +1945,15 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
     # Inject tool-use system prompt when full codeagent tools are available
     if _has_full_codeagent and not _persistent_coder:
-        tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"
-
-        if "generate_code" in available_tool_names:
-            if _is_v2_persona:
-                # Daedalus discipline: the Architect always runs first. Do NOT
-                # offer the "skip planning for simple builds" shortcut — the
-                # tools.py gate also blocks a fresh generate_code with no plan.
-                tool_sys += (
-                    "### PRIMARY WORKFLOW: plan_project THEN generate_code\n"
-                    "ALWAYS call plan_project first to produce the structured plan, then "
-                    "call generate_code to build it. Do NOT skip planning, even for builds "
-                    "that look simple. generate_code builds entire projects autonomously. "
-                    "For incomplete Builder results, call generate_code again with the "
-                    "same project_id and a task naming the missing files; do NOT switch "
-                    "to manual file tools unless the user explicitly asks for a manual "
-                    "fallback.\n\n"
-                )
-            else:
-                tool_sys += (
-                    "### PRIMARY WORKFLOW: plan_project or generate_code\n"
-                    "For simple, self-contained builds, you may skip plan_project and call "
-                    "generate_code directly with a COMPLETE task description. When you do "
-                    "that, include exactly one short visible sentence before the tool call: "
-                    "\"This is simple enough to build directly, so I'll skip a separate plan "
-                    "and start CodeAgent.\" For larger, ambiguous, multi-screen, or "
-                    "architecture-sensitive builds, call plan_project first, then "
-                    "generate_code. generate_code builds entire projects autonomously. "
-                    "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
-                )
-
-        if _is_v2_persona:
-            tool_sys += (
-                "### RULES\n"
-                "1. FIRST response MUST be a tool call: plan_project for a new build, "
-                "or generate_code when continuing a partial Builder result.\n"
-                "2. NEVER write code in chat text — use the Builder via generate_code "
-                "for project creation.\n"
-                "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
-                "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
-                "5. After Builder success: run_review, then acceptance, then delivery. STOP.\n\n"
-                "### AVOID\n"
-                "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
-                "- Do NOT use input() — no stdin available.\n"
-                "- Do NOT repeat failed commands without changing something.\n"
-            )
-        else:
-            tool_sys += (
-                "### RULES\n"
-                "1. FIRST response MUST be a tool call. Exception: for a simple direct "
-                "generate_code build, include the one-sentence skip-plan note and the "
-                "generate_code tool call in the same response.\n"
-                "2. NEVER write code in chat text — use execute_code, write_file, or generate_code.\n"
-                "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
-                "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
-                "5. After success: download_file/download_project, then summarize for user. STOP.\n\n"
-                "### AVOID\n"
-                "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
-                "- Do NOT use input() — no stdin available.\n"
-                "- Do NOT repeat failed commands without changing something.\n"
-            )
-
+        tool_sys = (
+            "\n\n## Coding tools\n"
+            "For a project build or edit, call start_coder_workflow once with the full user request. "
+            "For project questions use ask_project. The background controller owns planning, implementation, "
+            "verification and candidate delivery; owner acceptance is explicit. "
+            "For standalone calculations or small file tasks use execute_code, write_file and run_shell as appropriate. "
+            "Commands have no interactive stdin. Do not repeat an unchanged failing command. "
+            "Report only observed results and expose saved downloads after success."
+        )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += tool_sys
         else:
@@ -3108,7 +2943,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 # and near-duplicate checks. ask_project is also exempted
                 # because Q&A is naturally multi-turn (follow-up questions
                 # often share keywords/topics).
-                _LOOP_TOOLS = {"run_review", "run_acceptance_review", "run_fixer", "run_aider_fix", "ask_project"}
+                _LOOP_TOOLS = {"ask_project", "get_coder_workflow"}
                 _all_loop_tools = bool(_tc_names_dup) and all(
                     n in _LOOP_TOOLS for n in _tc_names_dup
                 )
@@ -3145,7 +2980,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     if _dup_break_count >= 2:
                         if await _is_active_uploaded_manual_loop(conv_id, _tc_names_dup):
                             print("[CHAT]   Repeated uploaded-project manual tool duplicate — stopping turn")
-                            await _mark_latest_uploaded_workflow_blocked(conv_id)
                             _dup_summary = await _duplicate_manual_tool_summary(conv_id, _tc_names_dup)
                             yield f"data: {json.dumps({'type': 'token', 'content': _dup_summary})}\n\n"
                             if _assistant_msg_id is not None:
@@ -3494,7 +3328,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
                         print(f"[CHAT]   Repeated BLOCKED tool result for {tool_name} — stopping turn")
-                        await _mark_latest_uploaded_workflow_blocked(conv_id)
                         _blocked_summary = await _blocked_tool_summary(conv_id, tool_name, tool_result)
                         yield f"data: {json.dumps({'type': 'token', 'content': _blocked_summary})}\n\n"
                         if _assistant_msg_id is not None:
@@ -3516,19 +3349,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         await events.emit(conv_id, "complete", {"status": "Complete (blocked)"})
                         yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'blocked': True})}\n\n"
                         return
-
-                    # After legacy/plain plan_project: nudge model to use generate_code
-                    # for large projects. Daedalus plan_project already hands off to
-                    # Builder/Review/Acceptance, so a second nudge would duplicate work.
-                    if tool_name == "plan_project" and _plan_project_should_nudge_generate_code(tool_result):
-                        _file_refs = _plan_project_file_ref_count(tool_result)
-                        messages.append({"role": "tool", "content": (
-                            "SYSTEM: This is a large project with multiple files. "
-                            "Use generate_code to build it — the coding agent will implement "
-                            "the entire plan autonomously. Pass the full task description and "
-                            "language. After it finishes, review the output, run tests, and deliver."
-                        )})
-                        print(f"[CHAT]   plan_project returned large plain plan ({_file_refs} file refs) — nudging to generate_code")
 
                     # Track generate_code failures — temporarily disable code-block-rescue
                     if tool_name == "generate_code" and tool_result.startswith("ERROR"):
@@ -3628,51 +3448,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             # Round-scoped: _futures only holds the LAST batch, so check the
             # names collected across every batch this round.
             _called_ask_project = "ask_project" in _round_tool_names
-            if _called_ask_project:
-                try:
-                    _qa_runs = await db.get_runs_by_conversation(conv_id, limit=10)
-                    for _qr in _qa_runs:
-                        if _qr.get("role") != "qa":
-                            continue
-                        # Only short-circuit when the QA succeeded AND wasn't a
-                        # change request AND belongs to this stream — without
-                        # the stream-start filter, a failed ask_project this
-                        # turn would replay the previous turn's stale answer.
-                        if _qa_run_qualifies(_qr, _stream_started_at):
-                            _qa_env = _qr.get("result_envelope") or {}
-                            _qa_answer = _qa_env["answer"]
-                            print(f"[CHAT]   QA short-circuit: streaming "
-                                  f"{len(_qa_answer)} chars from {_qr.get('id')}")
-                            for _i in range(0, len(_qa_answer), 8):
-                                yield f"data: {json.dumps({'type': 'token', 'content': _qa_answer[_i:_i+8]})}\n\n"
-                                await asyncio.sleep(0)
-                            if _assistant_msg_id is not None:
-                                try:
-                                    await db.save_chat_delivery(
-                                        _assistant_msg_id,
-                                        content=_qa_answer,
-                                        metadata={
-                                            "stream_started_at": _stream_started_at,
-                                            "in_progress": False,
-                                            "qa_short_circuit": True,
-                                            "qa_run_id": _qr.get("id"),
-                                            "has_full_product_build": False,
-                                        },
-                                    )
-                                except Exception as _pe:
-                                    print(f"[CHAT]   QA persist failed (non-fatal): {_pe}")
-                            await events.emit(conv_id, "complete", {"status": "Complete"})
-                            _done_payload = {
-                                "type": "done", "model": req.model,
-                                "message_id": _assistant_msg_id,
-                            }
-                            yield f"data: {json.dumps(_done_payload)}\n\n"
-                            return
-                        # Latest qa run didn't qualify — fall through to LLM
-                        break
-                except Exception as _qe:
-                    print(f"[CHAT]   QA short-circuit lookup failed (non-fatal): {_qe}")
-
             # ── Continuation nudge ──
             # When the model wrote visible prose before calling tool(s), that
             # prose is already shown to the user as part of THIS reply. Some

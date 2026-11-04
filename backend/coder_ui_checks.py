@@ -21,7 +21,7 @@ class UIObservationFailure(RuntimeError):
         self.details = details
 
 
-def validate(value, behavior_version=0):
+def _validate_legacy(value, behavior_version=0):
     if not isinstance(value, list) or len(value) > 12: raise ValueError('UI checks must be a list of at most twelve flows')
     for index, flow in enumerate(value):
         if not isinstance(flow, dict):
@@ -62,6 +62,115 @@ def validate(value, behavior_version=0):
     return value
 
 
+class UIFlowValidationError(ValueError):
+    def __init__(self, errors):
+        self.errors = errors[:64]
+        super().__init__('\n'.join(f"Flow {e.get('flow_index', '-')}, step {e.get('step_index', '-')}: {e['reason']}" for e in self.errors))
+
+
+def validate(value, behavior_version=0, *, preflight_version=0):
+    """One schema for early diagnostics and immutable-revision replay."""
+    if not preflight_version:
+        return _validate_legacy(value, behavior_version)
+    errors = []
+    def error(reason, flow=None, step=None):
+        errors.append({'category': 'ui_flow_schema', 'flow_index': flow, 'step_index': step, 'reason': reason})
+    if not isinstance(value, list) or len(value) > 12:
+        raise UIFlowValidationError([{'reason': 'UI checks must be an array of at most twelve flows.'}])
+    for i, flow in enumerate(value):
+        if not isinstance(flow, dict):
+            error('Use an object with kind, command (or web file_path), and steps.', i); continue
+        kind = flow.get('kind')
+        if not isinstance(kind, str) or kind not in {'web', 'desktop'}: error('kind must be web or desktop; put qt/gtk/swing in toolkit.', i)
+        if not (flow.get('command') or kind == 'web' and flow.get('file_path')):
+            error('Provide command as a shell command string, or a project-relative HTML file_path for web.', i)
+        if flow.get('command') and not isinstance(flow['command'], str): error('command must be a shell command string.', i)
+        path = flow.get('file_path')
+        if path and (not isinstance(path, str) or Path(path).is_absolute() or '..' in Path(path).parts or Path(path).suffix.lower() not in {'.html', '.htm'}):
+            error('file_path must identify a project-relative HTML file.', i)
+        if str(flow.get('url', '')).startswith('file:'): error('Use file_path instead of a file:// URL.', i)
+        steps = flow.get('steps')
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 40:
+            error('Provide one to forty steps.', i); continue
+        interacted = asserted = False
+        for n, step in enumerate(steps):
+            if not isinstance(step, dict): error('Use an action object.', i, n); continue
+            action = step.get('action'); expectation = 'equals' in step or 'contains' in step
+            if not isinstance(action, str):
+                error('action must be text naming a supported action.', i, n); continue
+            if action not in {'observe', 'click', 'fill', 'text', 'value', 'press', 'reload'}:
+                error('action must be observe, click, fill, text, value, press, or reload.', i, n)
+            if kind == 'desktop' and (step.get('selector') or step.get('session_id')):
+                error('Desktop references are session-local; persist accessible name/role instead.', i, n)
+            if action == 'observe' and (any(step.get(k) for k in ('selector', 'name', 'role')) or 'equals' in step):
+                error('observe reads the whole interface. For one display use {"action":"text","selector":"<result>","equals":"<expected text>"}; for an input use action value.', i, n)
+            if expectation and action not in {'observe', 'text', 'value'}:
+                error('Put equals/contains on a subsequent read-only text or value step, never on click/fill/press/reload.', i, n)
+            if 'equals' in step and 'contains' in step: error('Choose one comparison: equals or contains.', i, n)
+            if step.get('contains') == '': error('contains must not be empty; use equals "" to check an empty result.', i, n)
+            for field in ('equals', 'contains', 'value', 'selector', 'name', 'role'):
+                if field in step and not isinstance(step[field], str): error(f'{field} must be text; preserve exact values such as "0.00" or "".', i, n)
+            if action in {'click', 'fill', 'text', 'value', 'press'} and not (step.get('selector') or step.get('name')):
+                error('Provide a unique selector (web) or accessible name/role.', i, n)
+            if action in {'fill', 'press'} and 'value' not in step: error('Provide value for fill/press.', i, n)
+            if expectation and action in {'observe', 'text', 'value'} and interacted: asserted = True
+            if action in {'click', 'fill', 'press'}: interacted = True
+        if not asserted: error('Interact with a control, then assert its result using equals or contains on text/value (or whole-interface observe contains).', i)
+    if errors: raise UIFlowValidationError(errors)
+    return value
+
+
+def replay(flow, action, *, strict=False, deadline=None):
+    """Replay one flow; never retry mutating actions or proceed after a failure."""
+    observations = []; assertions = interactions = behavioral = 0; step_index = None
+    request = {'action': 'launch', **{k: v for k, v in flow.items() if k != 'steps'}}
+    observed = None; value = None; step = {}
+    try:
+        observed = action(request)
+        observations.append({'action': {'action': 'launch'}, 'observed': observed})
+        for step_index, step in enumerate(flow['steps']):
+            observed = value = None
+            if flow['kind'] == 'web' and step['action'] == 'observe' and ('equals' in step or step.get('selector')):
+                raise ValueError('Web observe returns the whole page accessibility snapshot. To compare one element, use action text with its CSS selector and equals or contains.')
+            request = {k: v for k, v in step.items() if k not in {'equals', 'contains'}}
+            until = min(time.monotonic() + 10, deadline if deadline is not None else float('inf'))
+            while True:
+                if deadline is not None and time.monotonic() >= deadline: raise TimeoutError('UI flow deadline reached')
+                try:
+                    observed = action(request)
+                    prop = 'value' if request['action'] == 'value' else 'text'
+                    value = observed.get(prop, json.dumps(observed, ensure_ascii=False))
+                    if strict and request['action'] == 'text' and ('equals' in step or 'contains' in step) and (observed.get('input_control') or observed.get('editable')):
+                        raise UIObservationFailure({'category': 'ui_flow_property', 'error': 'This target is an input control. Assert its actual value with action value; displayed text cannot prove an empty input.'})
+                    if 'equals' in step and value != step['equals']: raise AssertionError(f"Expected {step['equals']!r}; observed {value!r}")
+                    if 'contains' in step and step['contains'] not in value: raise AssertionError(f"Expected {step['contains']!r} in {value!r}")
+                    break
+                except AssertionError:
+                    if request['action'] not in {'observe', 'text', 'value'} or time.monotonic() >= until: raise
+                    time.sleep(min(.2, max(0, until - time.monotonic())))
+            interactions += int(request['action'] in {'click', 'fill', 'press'})
+            assertions += int('equals' in step or 'contains' in step)
+            behavioral += int(interactions > 0 and ('equals' in step or 'contains' in step))
+            observations.append({'action': request, 'observed': observed})
+        if not behavioral: raise ValueError('UI tests must exercise a control and assert its result; page loading alone is not behavioral evidence')
+        return {'observations': observations, 'assertions': assertions, 'passed': True, 'reason': '', 'diagnostic': {}}
+    except (InterruptedError, TimeoutError):
+        raise
+    except Exception as failure:
+        detail = {**getattr(failure, 'details', {}), 'step_index': step_index,
+                  'action': request.get('action'), 'locator': {k: request[k] for k in ('selector', 'name', 'role') if k in request},
+                  'property': 'value' if request.get('action') == 'value' else 'text' if request.get('action') == 'text' else 'interface',
+                  'category': getattr(failure, 'details', {}).get('category', 'assertion_mismatch' if isinstance(failure, AssertionError) else 'interaction_failed')}
+        if 'equals' in step or 'contains' in step:
+            detail.update(comparison='equals' if 'equals' in step else 'contains', expected=step.get('equals', step.get('contains')), observed=value[:4000] if isinstance(value, str) else value)
+        if not detail.get('log_tail'):
+            try: detail['log_tail'] = str(action({'action': 'diagnostics'}).get('log_tail', ''))[-4000:]
+            except (InterruptedError, TimeoutError): raise
+            except Exception: pass  # Preserve the original failure when diagnostics are unavailable.
+        if observed is not None: observations.append({'action': request, 'observed': observed, 'failed': True})
+        return {'observations': observations, 'assertions': assertions, 'passed': False, 'reason': str(failure)[:4000], 'diagnostic': detail}
+
+
 def interfaces(repository, profile):
     required = {'web'} if profile.get('web_packages') else set()
     repository.refresh()
@@ -83,7 +192,7 @@ def session(store, operation_id, repository):
     from coder_sandbox import Sandbox
     from coder_repository import Repository
     from coder_project_runtime import prepare_application, sandbox_paths
-    from coder_patch_runtime import stop_process
+    from coder_execution_utils import stop_process
     from coder_ui_session import free_port
     from coder_worker_runtime import _boundary
     operation = store.get(operation_id); payload=operation['payload']
@@ -162,7 +271,7 @@ def bind_project_entrypoint(repository, flow, task):
 
 def run(store, operation_id, repository, flows, *, origin='confirmed_interaction'):
     payload = store.get(operation_id)['payload']
-    validate(flows, payload.get('engine_behavior_version', 0))
+    validate(flows, payload.get('engine_behavior_version', 0), preflight_version=payload.get('ui_preflight_version', 0))
     revision=payload['revision_id']
     rows=[]
     for index,flow in enumerate(flows):
@@ -171,28 +280,11 @@ def run(store, operation_id, repository, flows, *, origin='confirmed_interaction
             if origin == 'project_interaction' and repository is not None:
                 bind_project_entrypoint(repository, flow, store.get(operation_id)['payload'].get('task', ''))
             with session(store,operation_id,repository) as action:
-                launched = action({'action':'launch',**{k:v for k,v in flow.items() if k!='steps'}})
-                observations.append({'action': {'action': 'launch'}, 'observed': launched})
-                for step_index,step in enumerate(flow['steps']):
-                    if flow['kind'] == 'web' and step['action'] == 'observe' and ('equals' in step or step.get('selector')):
-                        raise ValueError('Web observe returns the whole page accessibility snapshot. To compare one element, use action text with its CSS selector and equals or contains.')
-                    request={k:v for k,v in step.items() if k not in {'equals','contains'}}
-                    deadline=time.monotonic()+10
-                    while True:
-                        try:
-                            observed=action(request)
-                            value=observed.get('value' if request['action']=='value' else 'text',json.dumps(observed,ensure_ascii=False))
-                            if 'equals' in step and value != step['equals']: raise AssertionError(f"Expected {step['equals']!r}; observed {value!r}")
-                            if 'contains' in step and step['contains'] not in value: raise AssertionError(f"Expected {step['contains']!r} in {value!r}")
-                            break
-                        except (AssertionError,RuntimeError):
-                            # Retry read-only observations; never duplicate a click or input.
-                            if request['action'] not in {'observe','text','value'} or time.monotonic()>deadline: raise
-                            time.sleep(.2)
-                    interactions += int(request['action'] in {'click','fill','press'})
-                    assertions += int('equals' in step or 'contains' in step)
-                    behavioral_assertions += int(interactions > 0 and ('equals' in step or 'contains' in step))
-                    observations.append({'action':request,'observed':observed})
+                result = replay(flow, action, strict=payload.get('ui_preflight_version', 0) >= 1)
+                observations, assertions = result['observations'], result['assertions']
+                error, diagnostic = result['reason'], result['diagnostic']
+                behavioral_assertions = int(result['passed'])
+                if diagnostic: diagnostic['flow_index'] = index
         except (InterruptedError, TimeoutError):
             raise
         except Exception as failure:

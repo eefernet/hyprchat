@@ -2,7 +2,7 @@
 // snapshot the card already receives; every field is optional so older workflows
 // (policy-6 briefs without batches, legacy cancelled jobs) render without throwing.
 import {checkOutcome,currentChecks,onlyInconclusiveChecks} from './daedalusCheckOutcomes.js';
-import {jobBlockerMessage} from './daedalusJobs.js';
+import {jobBlockerMessage,reviewableCandidate} from './daedalusJobs.js';
 
 const STAGES=['Plan','Build','Check','Audit','Review','Deliver'];
 const STAGE_OF={queued:0,inspecting:0,baselining:0,planning:0,coding:1,checking:2,auditing:3,reviewing:3,
@@ -160,7 +160,7 @@ export function outcomeExplanation(job={}){
     text:'It builds and nothing failed, but no test or requested command ran the program. Try it yourself before you Accept it, or ask for tests in the chat.'};
   if(state==='ready_for_review'){
     const why=LIMIT_TEXT[job.stop_limit]||clip(job.blocker,180)||'not every outcome could be verified';
-    return {tone:'warn',title:job.candidate_artifact?.metadata?.runnable?'Ready for your review':'Build incomplete',
+    return {tone:'warn',title:reviewableCandidate(job)?'Ready for your review':'Build incomplete',
       text:`Not auto-accepted: ${why}. The saved candidate is yours to download and check.`+
         (checks.failed?` ${checks.failed} check${checks.failed===1?'':'s'} still failing.`:'')+(openText?` Still open: ${openText}.`:'')};
   }
@@ -174,7 +174,7 @@ export function outcomeExplanation(job={}){
 export function nowLine(job={}){
   if(job.progress?.version===1){
     const activity=job.progress.current;
-    if(activity)return ({preparation:'Preparing dependencies',command:'Running a command',interface:'Checking the interface',file:'Updating project files',plan:'Updating the implementation plan',tool:'Inspecting the project'})[activity.kind]||'Working on the project';
+    if(activity)return ({preparation:'Preparing dependencies',command:'Running a command',interface:'Checking the interface',ui_preflight:'Checking UI flows',file:'Updating project files',plan:'Updating the implementation plan',tool:'Inspecting the project'})[activity.kind]||'Working on the project';
     if(job.state==='coding')return 'Preparing the next model action';
   }
   if(job.state==='coding'){

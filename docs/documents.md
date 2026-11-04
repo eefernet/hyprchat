@@ -59,7 +59,7 @@ can change advanced Office features.
 
 Input is limited to 50 MB. Macro-enabled or encrypted files and unsafe ZIP/XML
 packages are rejected. LibreOffice runs with macros disabled and external link updates
-disabled, inside a network-isolated bubblewrap process with only its job directory
+disabled, inside an isolated Hephaestus Docker container with only its job directory
 writable. Jobs execute serially with a five-minute queue wait and five-minute execution
 limit. Stop terminates the worker process group. Graceful backend shutdown cancels API
 jobs; startup marks interrupted runs failed after an abrupt exit. Partial results are
@@ -67,37 +67,26 @@ not published. Completed artifacts survive restarts.
 
 Artifact records and binary downloads use the active HyprChat user scope. Managed
 Office files are unavailable through the older filename-only download/archive endpoints.
-Backend originals and revisions follow the existing artifact retention policy. Private
-Codebox staging is removed by systemd-tmpfiles after one day.
+Backend originals and revisions follow the existing artifact retention policy. Private Hephaestus staging is managed by lease-aware storage cleanup; active jobs and retained artifacts are protected.
 
 ## Installation and maintenance
 
 The backend uses the standard-library `document_formats.py` reader. Heavy Office
-libraries and LibreOffice run on Codebox in a separate virtual environment, leaving
-the coding worker's environment unchanged.
+libraries and LibreOffice run in scoped Hephaestus containers. The runtime image
+contains LibreOffice; the controller uses the locked document environment.
 
-Copy these files onto Codebox under `/opt/hyprchat-documents/`:
+Provision a new VM with `scripts/create-hephaestus-vm.sh`. For an existing VM,
+run `scripts/install-documents.sh` from the repository on Hephaestus. This delegates
+to the shared immutable-release installer; it does not install packages into a
+shared host Python environment. See [Hephaestus operations](hephaestus.md).
 
-- `backend/document_formats.py`
-- `backend/document_runtime.py`
-- `backend/document_worker.py`
-- `backend/document-requirements.txt`
-- `scripts/install-documents.sh`
-
-Run the installation script there as root. It installs LibreOffice Writer/Calc/Impress,
-bubblewrap, fonts and the dedicated Python dependencies. Confirm readiness with:
-
-```sh
-/opt/hyprchat-documents/venv/bin/python /opt/hyprchat-documents/document_worker.py health
-```
-
-The staging path is `/root/hyprchat-documents/jobs`, within Codebox's existing allowed
-upload roots. Runtime code lives in `/opt/hyprchat-documents`; it is read-only inside
-jobs. `deploy_monitor.py` watches the worker files and sends them to Codebox; it also
-copies the shared format reader to HyprChat. Re-run the installation script after
-changing the dependency manifest. Deploy the backend and rebuilt frontend normally,
-then enable Documents after its readiness check succeeds. Fresh installations default
-to disabled.
+Each owner's document jobs use a scoped workspace below
+`/srv/hephaestus/projects/`; HyprChat retains originals, revisions and delivered
+artifacts in its own data store. `deploy_monitor.py` identifies document/runtime
+changes that require a staged Hephaestus release instead of hot-copying live worker
+code. Activate the worker first, then the compatible application. Enable Documents
+in Connections after its readiness check succeeds; fresh installations default to
+disabled.
 
 Creation content is validated before a worker starts. Native and fallback calls share
 the nested content schema. Word/PDF exports of chat answers can instead supply
@@ -134,6 +123,6 @@ Backend tests require the document dependency manifest plus the normal test depe
 They cover preservation of formatting/images/unknown XML, independent library reopening,
 chart edits, formula ranges, malformed files, stale hashes, ownership, cancellation,
 shutdown and transactional publication failure. Live qualification should additionally
-exercise Codebox, actual LibreOffice output, browser previews/downloads, local native
+exercise Hephaestus, actual LibreOffice output, browser previews/downloads, local native
 and fallback chat models, and restart behavior. Unit tests alone do not validate layout
 or deployment.

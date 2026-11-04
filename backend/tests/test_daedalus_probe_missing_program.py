@@ -3,8 +3,9 @@ so the project's own tests alone gave "Checks passed". It is now a failing found
 ambiguous launchers and unknown placeholders stay skipped."""
 from pathlib import Path
 
-from coder_policy7_evidence import acceptance, blocking
-from coder_policy7_phases import layer, progress
+from coder_check_evidence import blocking
+from coder_engine_ops import summarize
+from coder_check_layers import layer, progress
 from coder_request_probes import command_rows, invokes_program, launcher, requested_commands
 
 CARGO = {'profiles': [{'toolchains': ['cargo']}]}
@@ -59,9 +60,9 @@ def test_crate_named_differently_from_the_requested_program_is_a_failing_foundat
     # The finding itself: a passing build and test suite are no longer "Checks passed" without the requested program.
     build = {'id': '.:build:0', 'origin': 'project', 'phase': 'build', 'passed': True, 'revision_id': 'r1', 'execution_id': 'b'}
     tests = {'id': '.:test:0', 'origin': 'project', 'phase': 'test', 'is_test': True, 'test_count': 3, 'passed': True,
-             'revision_id': 'r1', 'execution_id': 't'}
-    assert acceptance([], [build, tests], {}, 'r1')['checks_passed']
-    assert not acceptance([], [build, tests, row], {}, 'r1')['checks_passed']
+             'revision_id': 'r1', 'execution_id': 't', 'evidence_version':3, 'execution_succeeded':True, 'coverage_observed':True, 'source_bindings':[{'path':'app.rs'}]}
+    assert summarize([build, tests], 'r1')['checks_passed']
+    assert not summarize([build, tests, {**row,'revision_id':'r1'}], 'r1')['checks_passed']
 
 
 def test_output_literals_after_prints_never_become_rows(tmp_path):

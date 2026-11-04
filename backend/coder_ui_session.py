@@ -30,6 +30,30 @@ def free_port():
         return connection.getsockname()[1]
 
 
+def stop_session(process):
+    """Stop this owned session, including children that started new process groups."""
+    import psutil
+    try:
+        descendants = psutil.Process(process.pid).children(recursive=True) if process.poll() is None else []
+    except psutil.NoSuchProcess:
+        descendants = []
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=1)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait()
+    for child in reversed(descendants):
+        try: child.terminate()
+        except psutil.NoSuchProcess: pass
+    _, remaining = psutil.wait_procs(descendants, timeout=.2)
+    for child in remaining:
+        try: child.kill()
+        except psutil.NoSuchProcess: pass
+    psutil.wait_procs(remaining, timeout=.2)
+
+
 class UISession:
     def __init__(self, directory, vnc_port=None):
         self.directory = Path(directory); self.directory.mkdir(parents=True, exist_ok=True)
@@ -38,12 +62,13 @@ class UISession:
         self.behavior_version = int(os.environ.get('DAEDALUS_ENGINE_BEHAVIOR_VERSION', '0'))
         self.session_id = ''
         self.application_processes = []
-        self.env = {**os.environ, 'DISPLAY': ':91', 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON': '1',
+        display = next(f':{n}' for n in range(91, 191) if not Path(f'/tmp/.X11-unix/X{n}').exists())
+        self.env = {**os.environ, 'DISPLAY': display, 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON': '1',
                     'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '0', 'GTK_A11Y': 'atspi',
                     'GSETTINGS_BACKEND': 'memory'}
-        self.spawn(['Xvfb', ':91', '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], 'xvfb')
+        self.spawn(['Xvfb', display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], 'xvfb')
         deadline = time.monotonic()+10
-        while not Path('/tmp/.X11-unix/X91').exists():
+        while not Path('/tmp/.X11-unix/X' + display[1:]).exists():
             if time.monotonic() > deadline: raise RuntimeError('Xvfb did not become ready')
             time.sleep(.1)
         manager = self.spawn(['openbox'], 'window-manager')
@@ -56,7 +81,7 @@ class UISession:
                 raise RuntimeError('The desktop window manager did not become ready')
             time.sleep(.1)
         if vnc_port:
-            self.spawn(['x11vnc', '-display', ':91', '-localhost', '-rfbport', str(vnc_port),
+            self.spawn(['x11vnc', '-display', display, '-localhost', '-rfbport', str(vnc_port),
                         '-nopw', '-forever', '-shared', '-noxdamage'], 'vnc')
 
     def spawn(self, command, name):
@@ -104,13 +129,7 @@ class UISession:
                 except Exception: pass  # Continue terminating the failed application.
         self.browser = self.playwright = self.page = None
         for process in reversed(processes):
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL); process.wait()
-            except ProcessLookupError:
-                pass
+            stop_session(process)
             if process in self.processes: self.processes.remove(process)
         self.kind = None
         self.application_processes = []
@@ -118,6 +137,10 @@ class UISession:
 
     def _perform(self, request):
         action = request.get('action')
+        if action == 'diagnostics': return {'log_tail': self.log_tail()}
+        if action == 'reset':
+            self.close_application(self.application_processes)
+            return {'closed': True}
         if action == 'launch':
             if self.kind: raise ValueError('Close the session before launching another application')
             kind = request.get('kind')
@@ -205,7 +228,8 @@ class UISession:
                       self.page.get_by_role(request.get('role', 'button'), name=request.get('name', ''), exact=True))
             if action == 'click': target.click()
             elif action == 'fill': target.fill(str(request.get('value', '')))
-            elif action == 'text': return {'text': target.inner_text()}
+            elif action == 'text': return {'text': target.inner_text(),
+                'input_control': target.evaluate("el => el.matches('input,textarea,select,[contenteditable=true]')")}
             elif action == 'value': return {'value': target.input_value()}
             elif action == 'press': target.press(str(request['value']))
             else: raise ValueError('Unsupported browser action')
@@ -219,16 +243,20 @@ class UISession:
             return stream.read().decode(errors='replace')
 
     def close(self):
-        if self.browser: self.browser.close()
-        if self.playwright: self.playwright.stop()
-        for process in reversed(self.processes):
-            if process.poll() is None:
-                try: os.killpg(process.pid, signal.SIGTERM); process.wait(timeout=3)
-                except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait()
-                except ProcessLookupError: pass
+        self.close_application(list(self.processes))
 
 
 def serve(args):
+    # Chromium crash handlers and accessibility daemons may double-fork.
+    # Keep them owned by this session so its supervisor can terminate them.
+    if sys.platform == 'linux':
+        import ctypes
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'Cannot establish UI session child ownership')
+    # Allow scoped supervisors to stop the session and all application children.
+    def stop(signum, frame): raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
     session = UISession(args.directory, args.vnc_port)
     if args.launch:
         session.perform(json.loads(Path(args.launch).read_text()))
@@ -238,7 +266,10 @@ def serve(args):
             try:
                 length = int(self.headers.get('content-length', '0'))
                 if not 0 < length <= 16000: raise ValueError('Invalid action size')
-                data = session.perform(json.loads(self.rfile.read(length)))
+                request = json.loads(self.rfile.read(length))
+                if request.get('action') == 'reset' and request.get('_operation_id') != os.environ.get('DAEDALUS_UI_OPERATION'):
+                    raise ValueError('UI reset belongs to a different operation')
+                data = session.perform(request)
                 status = 200
             except Exception as error:
                 data, status = {**getattr(error, 'details', {'error': str(error)}),
@@ -248,7 +279,8 @@ def serve(args):
             self.end_headers(); self.wfile.write(body)
     server = HTTPServer(('127.0.0.1', args.port), Handler)
     server.timeout = .5
-    (Path(args.directory)/'ready.json').write_text(json.dumps({'port': server.server_port, 'pid': os.getpid()}))
+    (Path(args.directory)/'ready.json').write_text(json.dumps({'port': server.server_port, 'pid': os.getpid(),
+        'operation_id': os.environ.get('DAEDALUS_UI_OPERATION', '')}))
     deadline = time.monotonic()+args.seconds if args.seconds else float('inf')
     try:
         while time.monotonic() < deadline: server.handle_request()

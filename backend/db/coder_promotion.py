@@ -309,6 +309,8 @@ async def accept(project_id, revision_id):
     finished = {"ready_for_review", "completed", "blocked", "cancelled"}
     if job["state"] not in finished:
         raise ValueError("Wait for the job to finish before accepting it")
+    if job.get('engine') != 'openhands159':
+        raise ValueError('This coding engine is retired. Its recorded history remains read-only; upload source into a new project.')
     source = candidate_for(job, revision_id)
     if await asyncio.to_thread(empty_candidate, job, revision_id, Path(source.get("storage_path") or "")):
         raise ValueError("This version has no project files to accept (it is the build's empty starting tree)")

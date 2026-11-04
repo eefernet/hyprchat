@@ -638,7 +638,7 @@ def command_rows(store, op_id, root, profile, task, revision_id, *, project_id, 
     the requested program was not delivered under its name), followed by the negative rows (probe:invalid:<n>:<k>,
     probe:missing:<n>) the request wording promises."""
     from coder_project_runtime import run_probe
-    from coder_policy7_phases import layer
+    from coder_check_layers import layer
     rows = []
     folder = store.root / 'execution' / op_id
     fixtures = folder / 'audit' / 'tmp' / 'probes'

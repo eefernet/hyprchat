@@ -74,7 +74,9 @@ def freeze(task, source=None, *, mode='edit_project', source_revision=''):
     if previous.get('legacy_contracts'): result['legacy_contracts'] = deepcopy(previous['legacy_contracts'])
     ui_source = any(set(c.get('test_interfaces', [])) & {'web', 'desktop'} for c in source.get('checks', []))
     excerpts = list(clauses(task.strip()))
-    if mode != 'edit_project' or not (ui_source or _UI.search(task) or any(action_name(*tokenize(c)) for c in excerpts)):
+    # Initial builds have the same literal obligations as follow-ups. Without
+    # this, generated tests can affirm the wrong Clear value on the first build.
+    if mode not in {'build_from_prompt', 'edit_project'} or not (ui_source or _UI.search(task) or any(action_name(*tokenize(c)) for c in excerpts)):
         return result
     parsed = [(excerpt, parse(excerpt)) for excerpt in excerpts]
     key = lambda item: json.dumps([item.get('action'), item.get('target'), item.get('property')], sort_keys=True)
@@ -115,26 +117,27 @@ def freeze(task, source=None, *, mode='edit_project', source_revision=''):
 
 async def original_source(source, load):
     """Upgrade only the new job's inherited contract, never historical jobs/evidence."""
-    if not source or (source.get('ui_contract') or {}).get('parser_version') == 2:
+    from coder_ui_parser import PARSER_VERSION
+    if not source or (source.get('ui_contract') or {}).get('parser_version') == PARSER_VERSION:
         return source
     lineage, seen = [], set()
     row = source
     while row and row.get('id') not in seen:
         seen.add(row.get('id')); lineage.append(row)
-        if (row.get('ui_contract') or {}).get('parser_version') == 2: break
+        if (row.get('ui_contract') or {}).get('parser_version') == PARSER_VERSION: break
         row = await load(row['source_job_id']) if row.get('source_job_id') else None
     parent = {}
     legacy = []
     for row in reversed(lineage):
         old = row.get('ui_contract') or {}
-        if old.get('parser_version') == 2:
+        if old.get('parser_version') == PARSER_VERSION:
             parent = deepcopy(row); continue
         if old: legacy.append({'source_job_id': row.get('id'), 'contract': deepcopy(old)})
         literal = row.get('original_user_request')
         if isinstance(literal, str) and literal.strip():
             compiled = freeze(literal, parent, mode=row.get('mode', 'edit_project'), source_revision=row.get('source_revision_id', ''))
         else:
-            compiled = deepcopy(parent.get('ui_contract') or {'version': VERSION, 'parser_version': 2, 'criteria': [], 'history': []})
+            compiled = deepcopy(parent.get('ui_contract') or {'version': VERSION, 'parser_version': PARSER_VERSION, 'criteria': [], 'history': []})
             for criterion in old.get('criteria', []):
                 unresolved = {**criterion, 'supported': False,
                     'reason': 'The original user wording for this inherited requirement is unavailable.',
@@ -187,10 +190,18 @@ class Unverified(ValueError):
     pass
 
 
+def activation_matches(node, name):
+    # A user can name the visible button caption even when aria-label provides
+    # extra accessibility context. Both are controller-observed exact labels;
+    # never use substrings, drop a requested name, or prefer an arbitrary match.
+    return bool(node.get('activatable') and (node.get('name') == name or
+        node.get('tag') in {'button', 'a', 'div', 'span'} and node.get('role') == 'button' and node.get('text') == name))
+
+
 def _matches(nodes, target, *, activation=False):
     candidates = [n for n in nodes if n.get('showing', True)]
     if activation:
-        candidates = [n for n in candidates if n.get('activatable') and n.get('name') == target['name']]
+        candidates = [n for n in candidates if activation_matches(n, target['name'])]
     elif target.get('selector') or target.get('source_selector'):
         candidates = [n for n in candidates if n.get('selector') == (target.get('selector') or target['source_selector'])]
     else:
@@ -288,8 +299,7 @@ def run(store, operation_id, repository, contract, context, bound=None):
                                 # observations before replaying it as setup. Final
                                 # resolution below still rejects duplicate names.
                                 observed = action({'action': 'observe'}).get('nodes', [])
-                                activations = [n for n in observed if n.get('showing', True) and n.get('activatable') and
-                                               n.get('name') == criterion['action']['name']]
+                                activations = [n for n in observed if n.get('showing', True) and activation_matches(n, criterion['action']['name'])]
                                 if any(n.get('selector') == step['selector'] for n in activations):
                                     break
                         if step['action'] in {'fill', 'click', 'press'}:

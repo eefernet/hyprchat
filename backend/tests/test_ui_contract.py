@@ -35,7 +35,7 @@ def test_ambiguous_or_unsupported_outcomes_stay_unverified(task):
 
 
 def test_scope_and_explicit_replacement_preserve_history():
-    assert contract.freeze('Add a Reset button that clears the result.', mode='build_from_prompt')['criteria'] == []
+    assert contract.freeze('Add a Reset button that clears the result.', mode='build_from_prompt')['criteria'][0]['expected'] == ''
     assert contract.freeze('Add a CLI subcommand.')['criteria'] == []
     source = {'id': 'source', 'original_user_request': 'Create output id total.'}
     first = contract.freeze('Add a Reset button that clears the inputs and result.', source)
@@ -121,9 +121,10 @@ def test_followup_keeps_confirmed_flows_and_freezes_source_provenance(monkeypatc
     ('removed_source_input', 'unverified'),
 ])
 @pytest.mark.parametrize('activation', [{}, {'name': 'Reset'}, {'selector': '#reset'}])
-def test_observation_not_project_verdict_drives_outcomes(monkeypatch, condition, expected, activation):
+@pytest.mark.parametrize('mode', ['build_from_prompt', 'edit_project'])
+def test_observation_not_project_verdict_drives_outcomes(monkeypatch, condition, expected, activation, mode):
     import coder_ui_checks
-    specification = contract.freeze('Add a Reset button that clears the result.')
+    specification = contract.freeze('Add a Reset button that clears the result.', mode=mode)
     state = {'text': 'seed', 'clicks': 0}
     nodes = [{'selector': '#result', 'tag': 'output', 'role': 'output', 'name': '', 'showing': True},
              {'selector': '#reset', 'name': 'Reset', 'activatable': True, 'showing': True}]
@@ -188,7 +189,7 @@ def test_contract_failures_share_existing_two_repairs(repairs, expected):
 
 def test_unverified_candidate_remains_accept_ready_and_does_not_greenwash_metadata():
     from coder_presentation import presentation
-    job = {'state': 'ready_for_review', 'policy_version': 7, 'ui_contract_version': 1, 'revision_id': 'r',
+    job = {'engine':'openhands159', 'state': 'ready_for_review', 'policy_version': 7, 'ui_contract_version': 1, 'revision_id': 'r',
            'verification_summary': {'revision_id': 'r', 'checks_ok': True, 'checks_passed': False, 'exercised': True, 'failures': [],
                 'unverified_ui_criteria': ['a'], 'criteria': [{'id': 'a', 'status': 'unverified'}]},
            'candidate_artifact': {'id': 'artifact', 'metadata': {'revision_id': 'r', 'runnable': True, 'checks_passed': True}}}

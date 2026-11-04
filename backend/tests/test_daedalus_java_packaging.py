@@ -3,7 +3,6 @@ and stated exit codes never reach the builder. Offline; command_rows uses a fake
 from pathlib import Path
 
 from coder_request_probes import requested_commands, launcher, missing_program_row, built_jars, command_rows
-from coder_policy7_builder import stated_behaviour, guidance
 
 TASK = ('Build a Java 17 Maven project, ISBN checker. Running `java -jar target/isbn.jar validate 9780306406157` prints `valid`. '
         'Usage: `java -jar target/isbn.jar COMMAND ISBN`. An invalid ISBN prints an error to stderr and exits with code 2. '
@@ -39,26 +38,3 @@ def test_a_jar_built_under_the_wrong_name_fails_naming_the_real_one_and_owning_p
     # The jar under the requested name runs as before.
     (root / 'target/isbn.jar').write_bytes(b'PK')
     assert launcher(profile, root, spec) == spec['tokens']
-
-
-def test_the_jar_defect_reaches_the_repair_through_the_build_manifest(tmp_path):
-    from coder_repair_packet import repair_targets
-    root = project(tmp_path)
-    spec = requested_commands(TASK)[0]
-    row = missing_program_row('op', root, {'profiles': [{'cwd': '.', 'toolchains': ['mvn', 'java']}]}, TASK, spec, 1, tmp_path / 'fx', 'rev')
-    job = {'brief': {'outcomes': [], 'batches': []},
-           'last_patch': {'source_hashes': {'pom.xml': 'a', 'src/main/java/app/Isbn.java': 'b', 'README.md': 'c'}}}
-    assert 'pom.xml' in repair_targets(job, [row])
-
-
-def test_stated_exit_codes_and_invocations_reach_the_builder_task():
-    lines = stated_behaviour({'task': TASK, 'user_task': TASK})
-    text = '\n'.join(lines)
-    assert 'invalid isbn: exit with code 2 with a message on stderr' in text
-    assert 'missing argument: exit with code 1' in text
-    assert '`java -jar target/isbn.jar validate 9780306406157` must run exactly as written' in text and '<finalName>' in text
-    assert 'STATED BEHAVIOUR' in guidance({'task': TASK, 'user_task': TASK, 'brief': {'outcomes': []}})
-    # Repair rounds carry the packet instead; nothing stated is repeated there.
-    assert 'STATED BEHAVIOUR' not in guidance({'task': TASK, 'user_task': TASK, 'repair_round': 1, 'repair_feedback': [],
-                                              'brief': {'outcomes': [], 'batches': []}, 'last_patch': {'source_hashes': {}}})
-    assert stated_behaviour({'task': 'Build a quiet library.', 'user_task': 'Build a quiet library.'}) == []

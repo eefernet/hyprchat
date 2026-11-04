@@ -18,11 +18,16 @@ async def step(job, controller):
         result, _ = await operate('inspect')
         resume = job.get('resume_after_inspect')
         next_state = resume if resume in {'coding', 'checking', 'candidate_packaging'} else (
+            'answering' if job.get('mode') == 'ask_uploaded_project' else
             'baselining' if result['inventory']['files'] else 'coding')
         await save(state=next_state, inventory=result['inventory'], workspace=result['workspace'],
                    revision_id=result['snapshot']['revision'],
                    baseline_revision=job.get('baseline_revision') or result['snapshot']['revision'],
                    verification=result.get('verification', {}), resume_after_inspect='')
+    elif state == 'answering':
+        result, _ = await operate('qa')
+        await save(state='completed', answer=result['answer'], qa_revision_id=job['revision_id'])
+        return True
     elif state == 'baselining':
         result, current = await operate('check', baseline=True)
         await store.record_check(identity, current['worker_operation'], job['revision_id'], result)
@@ -55,7 +60,9 @@ async def step(job, controller):
                        blocker='Generation stopped. Review the retained incomplete candidate and its revision-specific checks.',
                        resume_state='coding',
                        stop_limit='application_repairs' if job.get('repair_round', 0) >= 2 else '', **common)
-        elif environment_fault and job.get('preparation_retries', 0) < 1:
+        elif environment_fault and job.get('preparation_retries', 0) < 1 and all(
+                c.get('diagnostic', {}).get('retryable', True) and c.get('diagnostic', {}).get('attempt', 0) < 2
+                for c in result['checks'] if c.get('environment_fault')):
             await save(state='checking', preparation_retries=job.get('preparation_retries', 0) + 1,
                        attempt=job.get('attempt', 0) + 1, **common)
         elif environment_fault:

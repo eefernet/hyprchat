@@ -60,7 +60,7 @@ def test_real_contract_rejects_zero_then_accepts_empty(tmp_path, kind):
              {'action': 'text', **({'selector': '#result'} if web else {'name': 'filled', 'role': 'label'}), 'equals': 'filled'}]
     repo = Repository(root, tmp_path/'repository', DEFAULTS['daedalus_exclude_dirs'])
     store = WorkerStore(tmp_path/'worker')
-    specification = freeze('Add a Reset button that clears the input and result.')
+    specification = freeze('Add a Reset button that clears the input and result.', mode='build_from_prompt')
     for phase, expected in [('broken', '0.00'), ('fixed', ''), ('literal', 'Ready')]:
         if phase == 'literal':
             specification = freeze('Make Reset set the result to "Ready".')

@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>ComfyUI</code> · <code>Codebox</code> · <code>PWA</code>
+  <code>FastAPI</code> · <code>React 18</code> · <code>Vite</code> · <code>Ollama</code> · <code>SQLite</code> · <code>SearXNG</code> · <code>ComfyUI</code> · <code>Hephaestus</code> · <code>PWA</code>
 </p>
 
 > ⚠️ Alpha software — actively developed, expect rough edges. See the [changelog](CHANGELOG.md) for changes and [releases](https://github.com/eefernet/hyprchat/releases) for published versions. Experimental Daedalus persistent jobs remain disabled by default.
@@ -44,7 +44,7 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 | 🧭 Routing | Optional Auto model — each message is classified locally and routed to the model you configured per category (chat / code / reasoning / long-context) |
 | ☁️ Cloud models | OpenAI/Anthropic with native tool calling and estimated spend; custom OpenAI-compatible endpoints with text-based tool fallback |
 | 🧑‍💻 Master Developer | Coding explanations, debugging, reviews, and examples across languages, using Coder Docs and Quick Search |
-| 🏛️ Daedalus | Architect → Builder → Reviewer → Acceptance workflow for building and fixing projects, with server-enforced gates |
+| 🏛️ Daedalus | OpenHands 1.59 builds and edits projects on Hephaestus, with independent checks and explicit owner acceptance |
 | 🔎 Research | Optional Quick Search for relevant turns, source cards, and Deep Research with investigative reports and durable history |
 | 🤖 Jarvis | Personal assistant, scheduled briefs/tasks, notifications, notes, calendar/CalDAV, email, and event automations |
 | 🧰 Tools | Code execution, shell/file tools, URL fetch, custom Python tools, uploaded project awareness |
@@ -169,25 +169,11 @@ The library spans languages, web frameworks, mobile/game development, databases,
 
 ### 🏛️ Daedalus Agentic Coding
 
-Use Daedalus to plan, build, review, repair, and package projects. The default workflow runs Architect and Builder on separate turns: `plan_project` returns a structured plan, then a later `generate_code` call starts Builder with that plan and advisory interface guidance. A unified workflow card shows progress through review, repair, acceptance, and packaging.
+Daedalus runs OpenHands 1.59 on Hephaestus. One coding conversation plans, implements and repairs projects while HyprChat manages budgets, checkpoints, cancellation, independent checks and delivery.
 
-<p align="center">
-  <img src="docs/images/daedalus.png" alt="Daedalus agentic coding workflow" width="900">
-</p>
+Choose a **Daedalus chat model** for request routing and a **Coding model** for planning and implementation. Upload existing source for edits or read-only project Q&A. Follow-ups use the working candidate. The card shows the agent-reported plan, file activity and revision-bound verification; owner acceptance promotes only the exact reviewed revision.
 
-| Agent | Role |
-|---|---|
-| 📐 Architect | Creates a structured plan, file tree, commands, dependencies, success criteria, and optional interface contract |
-| 🏗️ Builder | Uses OpenHands in Codebox for greenfield builds, with scaled rounds and bounded missing-file continuation |
-| 🔍 Reviewer | Runs real build/test/lint commands and returns concrete issues |
-| 🛠️ Aider Fixer | Applies focused repairs to existing project roots, including uploads and Builder-created projects |
-| 🔧 Fixer | Fallback scoped editor when Aider is disabled, unhealthy, or cannot produce a patch |
-| ✅ Acceptance | Final gate for request fit, docs, tests, packaging, and generated artifacts |
-| ❓ ProjectQA | Answers codebase questions with grounded file references |
-
-Server-side gates manage review, acceptance, repair limits, and repeated blockers. Delivered project archives exclude generated/cache/build outputs and Aider runtime metadata.
-
-**Experimental persistent jobs** add background execution, checkpoint continuation, restart recovery, Settings-owned context budgets, repository/evidence browsing, and downloads tied to the accepted revision. This workflow is **opt-in and disabled by default**; its local-model evaluation has not met promotion requirements. See the [Daedalus workflow guide](docs/daedalus-workflows.md) for both paths and their limitations.
+Failed or partially verified candidates remain available for review. Unsupported requirements are explicitly unverified. Older engines are retired; historical jobs and artifacts stay readable, but their source must be uploaded into a new project to continue. See the [Daedalus operating guide](docs/daedalus-workflows.md).
 
 ### 🧰 Tools & Quick Search
 
@@ -251,7 +237,7 @@ The browser only talks to HyprChat. The backend proxies OpenAI-compatible STT an
 
 ### 📁 Artifacts & Canvas Editor
 
-Artifact Studio is the library for everything HyprChat delivers — files, project archives, and generated images — with search and filters, previews, timelines, duplicate merge, revisions, bundles, add-to-KB, send-to-research, use-in-chat, and fork-to-Codebox.
+Artifact Studio is the library for everything HyprChat delivers — files, project archives, and generated images — with search and filters, previews, timelines, duplicate merge, revisions, bundles, add-to-KB, send-to-research, use-in-chat, and fork-to-Hephaestus.
 
 Text-like artifacts (text, markdown, code, JSON, HTML) open in a full-screen **Canvas editor** — syntax-highlighted CodeMirror with a ✏️ Edit button in the detail panel. Select any text and describe a change, and **AI Edit** proposes a rewrite with a before/after diff you can apply or reject. Saving always creates a new revision; originals are never overwritten.
 
@@ -332,8 +318,8 @@ Configure service connections and models in **Settings**. Environment variables 
 | Knowledge bases | Ollama embeddings — `EMBED_MODEL`, default `nomic-embed-text` | Same Ollama service |
 | Cloud chat | OpenAI/Anthropic keys or a custom provider URL/key in Settings → Connections | Provider-specific |
 | Quick Search and web research | SearXNG — `SEARXNG_URL`; enable its JSON search format | `8888` |
-| Code execution | Codebox — `CODEBOX_URL` | `8585` |
-| Daedalus project work | OpenHands/Aider worker — `OPENHANDS_URL`, `AIDER_WORKER_URL`; the worker host needs `bubblewrap` and `strace` | `8586` |
+| Code execution | Hephaestus execution API — `CODEBOX_URL` (compatibility name) | `8585` |
+| Daedalus project work | OpenHands 1.59 — `DAEDALUS_ENGINE_URL` | `8587` |
 | Images | ComfyUI — `COMFYUI_URL`, checkpoint or saved workflow | `8188` |
 | Speech-to-text | OpenAI-compatible STT — `STT_URL`, `STT_MODEL` | `8001` in the reference setup |
 | Text-to-speech | OpenAI-compatible TTS — `TTS_URL`, `TTS_VOICE` | `8880` in the reference setup |
@@ -346,7 +332,7 @@ Use URLs reachable **from the backend**. `127.0.0.1` refers to that machine, not
 
 Local storage defaults to `data/` beside the source. Set `HYPRCHAT_DATA_DIR` to choose another base, or override individual paths with `DATABASE_PATH`, `UPLOAD_DIR`, `KB_DIR`, `TOOLS_DIR`, `SANDBOX_DIR`, `SETTINGS_PATH`, and `CONNECTOR_SECRETS_PATH`. Individual paths take precedence, so remove the template's `/opt/hyprchat/data/...` overrides before using a different base.
 
-`DEFAULT_MODEL`, `WORKSPACE_MODEL`, `PLANNING_MODEL`, and `CODER_MODEL` supply model defaults. Use Settings for context budgets, helper models, and Daedalus stage overrides; persistent jobs remain disabled unless explicitly enabled. OpenAI/Anthropic credentials can also come from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+`DEFAULT_MODEL`, `WORKSPACE_MODEL`, `PLANNING_MODEL`, and `CODER_MODEL` supply model defaults. Use Settings for context budgets, helper models, and Daedalus context and reasoning overrides. OpenAI/Anthropic credentials can also come from `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
 
 OCR is controlled by `PDF_OCR`; its CPU dependencies are included in the backend requirements. If they are unavailable, text-layer PDFs still work and OCR is skipped. Optional KB reranking and history recall have separate controls; see the environment template.
 
@@ -366,7 +352,7 @@ For the reference homelab, run from the checkout:
 python3 deploy_monitor.py
 ```
 
-The monitor reads the ignored `.deploy_config.json`, stages backend updates before activation, installs changed dependencies, and restarts affected services. Frontend changes trigger a build and deployment of the complete `dist/`. It also deploys the OpenHands/Aider worker bundle and Coder Docs maintenance modules. Review its first-time setup prompts before using it against existing hosts.
+The monitor reads the ignored `.deploy_config.json`, stages application updates before activation, and restarts affected services. Dependency and runtime changes require immutable releases. Frontend changes trigger a build and deployment of the complete `dist/`. It retains Coder Docs maintenance support and rejects mutable execution-worker updates. Review its first-time setup prompts before using it against existing hosts.
 
 Example configuration using SSH keys (replace the host placeholders). If using password authentication, set `password` locally and install `sshpass` on the deployment machine:
 
@@ -412,7 +398,7 @@ ssh "$HYPRCHAT_SSH" 'set -e
   systemctl restart hyprchat'
 ```
 
-Use a fresh `dist.incoming` directory for each update; remove a leftover staging directory before retrying a failed transfer. This copies the application and Coder Docs tooling, not KB data or worker dependencies. For Daedalus worker changes, use the deploy monitor's complete worker bundle or follow the [workflow guide](docs/daedalus-workflows.md). Finish with the checks below.
+Use a fresh `dist.incoming` directory for each update; remove a leftover staging directory before retrying a failed transfer. This copies the application and Coder Docs tooling, not KB data or worker dependencies. For Daedalus worker changes, use the Hephaestus immutable installer and follow the [workflow guide](docs/daedalus-workflows.md). Finish with the checks below.
 
 ## Operations and Verification
 
@@ -466,7 +452,7 @@ User → HyprChat (:8000)
          ├── Backend: FastAPI + SSE streaming + SQLite
          │    ├── backend.main:app entrypoint + extracted routers in backend/routes/
          │    ├── Chat/tool loop + smart model routing + auto-compaction
-         │    ├── Daedalus legacy workflows + opt-in persistent jobs
+         │    ├── Daedalus persistent OpenHands 1.59 jobs
          │    ├── Research + Quick Search
          │    ├── RAG + ChromaDB (hybrid retrieval, reranking, OCR)
          │    ├── MCP/OpenAPI connector tools
@@ -479,8 +465,8 @@ User → HyprChat (:8000)
          ├── Ollama (:11434) - local LLM inference
          ├── OpenAI / Anthropic / Custom OpenAI-compatible (optional)
          │    - native tools for OpenAI/Anthropic; text tools for custom
-         ├── Codebox (:8585) - sandboxed execution
-         ├── OpenHands Worker (:8586) - OpenHands + Aider bridge
+         ├── Hephaestus (:8585) - scoped Docker execution
+         ├── OpenHands 1.59 (:8587) - coding and read-only Q&A
          ├── SearXNG (:8888) - private web search
          ├── ComfyUI (:8188) - local Stable Diffusion / Flux image generation
          ├── Speaches STT (:8001) - OpenAI-compatible speech-to-text
@@ -495,8 +481,8 @@ User → HyprChat (:8000)
 | `backend/main.py` | FastAPI app setup, lifespan, middleware/static serving, SSE/chat endpoints, and remaining unextracted API groups |
 | `backend/routes/` | Extracted FastAPI routers for health, settings/analytics, users, audio, cloud providers, HF, tools/connectors, model configs, Ollama model actions, artifacts, and backup |
 | `backend/agents/chat.py` | Streaming chat loop, tool calling, quick search injection, model routing, compaction, project-aware chat |
-| `backend/tools.py` | Tool execution, Daedalus routing/gates, OpenHands/Aider dispatch |
-| `backend/agents/*.py` | Chat agents, default personas including Master Developer, Daedalus review/repair/QA |
+| `backend/tools.py` | Tool execution, modern Daedalus routing and generic tool dispatch |
+| `backend/agents/*.py` | Chat agents, default personas including Master Developer, Daedalus request routing |
 | `backend/coder_*.py` / `backend/context_policy.py` | Persistent Daedalus jobs, worker operations, storage, and shared context settings |
 | `backend/seed_kb/` | Coder Docs source catalog, audit, and incremental refresh |
 | `backend/database.py` | SQLite schema, migrations, conversations, runs, workflows, reports |
@@ -566,7 +552,7 @@ The frontend tests include the shared syntax-highlighting helpers. Build output 
 | Frontend | React 18, Vite, Prism code highlighting, CodeMirror Canvas, installable PWA |
 | Storage | SQLite + ChromaDB; hybrid vector/keyword retrieval |
 | Models | Ollama; optional OpenAI, Anthropic, and custom compatible providers |
-| Coding | Codebox with OpenHands/Aider; optional persistent Daedalus controller |
+| Coding | Hephaestus Docker VM with OpenHands 1.59 and persistent Daedalus controller |
 | Assistant | In-process scheduler, CalDAV, IMAP/SMTP, optional ntfy; external n8n integration |
 | Search and media | SearXNG, ComfyUI, compatible STT/TTS services |
 
@@ -580,6 +566,6 @@ Keep secrets and generated state out of Git: deploy config, `.env` credentials, 
 | [Master Developer and Coder Docs](docs/coder-docs.md) | Persona setup, reference-library auditing and incremental refresh |
 | [Interactive web search](docs/web-search.md) | Planning, ranking, deadlines, citations, and diagnostics |
 | [SearXNG operations](scripts/searxng/README.md) | VPN recovery, access rules, verification, and configuration backups |
-| [Daedalus workflows](docs/daedalus-workflows.md) | Default versus experimental execution, settings, verification, and evaluation limits |
+| [Daedalus workflows](docs/daedalus-workflows.md) | Modern execution, settings, verification, recovery and release validation |
 | [Image generation setup](docs/image-generation-setup.md) | ComfyUI, companion media services, workflows, and cleanup |
 | [Environment template](.env.example) | Server startup and optional-feature settings |

@@ -8,14 +8,22 @@ export function backgroundJob(workflows=[]){
   return jobs.find(job=>!terminalJobStates.has(job.state))||jobs[0]||null;
 }
 
+export function reviewableCandidate(job={}){
+  const summary=job.verification_summary||{};
+  if(summary.incomplete_reason)return false;
+  return !!job.candidate_artifact?.metadata?.runnable||!!(job.engine==='openhands159'&&job.candidate_artifact&&
+    summary.revision_id&&summary.revision_id===job.revision_id&&summary.checks_ok&&summary.exercised&&!(summary.failures||[]).length);
+}
+
 export function jobStatusLabel(job){
   if(job.state==='completed')return job.artifact&&job.artifact_status==='delivered'?'Complete':job.answer?'Review complete':'Needs attention';
   if(job.state==='ready_for_review'){
     if(job.verification_summary?.incomplete_reason)return 'Build incomplete — please review';
     if(job.verification_summary?.rolled_back)return 'Ready for review';
-    if(!onlyInconclusiveChecks(job)&&(job.verification_summary?.checks_passed||job.candidate_artifact?.metadata?.checks_passed))return 'Checks passed — please review';
+    const uiGap=job.ui_contract_version&&(job.verification_summary?.criteria||[]).some(c=>c.status!=='passed');
+    if(!uiGap&&!onlyInconclusiveChecks(job)&&(job.verification_summary?.checks_passed||job.candidate_artifact?.metadata?.checks_passed))return 'Checks passed — please review';
     if(job.verification_summary?.checks_ok&&job.verification_summary.exercised===false)return 'Built, not exercised';
-    return job.candidate_artifact?.metadata?.runnable?'Ready for review':'Build incomplete';
+    return reviewableCandidate(job)?'Ready for review':'Build incomplete';
   }
   if(job.state==='coding')return job.repair_round>0?`Repairing · attempt ${job.repair_round} of 2`:'Building';
   return ({queued:'Planning',inspecting:'Planning',baselining:'Checking',planning:'Planning',

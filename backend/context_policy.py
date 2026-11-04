@@ -15,7 +15,6 @@ from dataclasses import asdict, dataclass
 DEFAULTS = {
     "default_num_ctx": 16384,
     "openhands_num_ctx": 65536,  # 2026-09-25: the SDK builder's fixed overhead (~14K tokens) left web-app repairs no room at 32-35K
-    "aider_num_ctx": 0,
     "research_num_ctx": 40960,
     "daedalus_role_contexts": {},
     "daedalus_role_outputs": {},
@@ -28,20 +27,10 @@ DEFAULTS = {
         "workspace": 4096, "title": 2048, "classifier": 2048,
         "compaction": 8192, "extraction": 8192, "image": 4096,
     },
-    "daedalus_v3_enabled": False,
-    "daedalus_engine": "legacy",
+    "daedalus_v3_enabled": True,
+    "daedalus_engine": "openhands159",
     "daedalus_preparation_seconds": 600,
     "daedalus_visual_review": False,
-    # Uploaded-project repairs and edits use the evidence-gated policy 7; new builds keep the default policy.
-    "daedalus_policy7_edits": False,
-    # New projects: agent-loop builder behind the policy-7 evidence gate (measured 9/16 accepted, 0 false acceptances).
-    "daedalus_policy7_builds": False,
-    # The model-written audit and per-outcome reviewer: off by default. They cost about a third of every job's
-    # model calls and no longer decide acceptance (that is the checks, the confirmed examples and the owner).
-    "daedalus_independent_review": False,
-    # The SDK builder's stop hook runs the build and tests when the agent says it is done and hands failures
-    # straight back inside the same session (up to three times per job).
-    "daedalus_stop_hook": True,
     "daedalus_visual_model": "",
     "daedalus_visual_batch_size": 2,
     "daedalus_image_tokens": 2048,
@@ -62,11 +51,30 @@ DEFAULTS = {
         "dist", "build", "target", ".cache", ".pytest_cache",
     ],
 }
-ROLES = ("chat", "architect", "builder", "reviewer", "acceptance", "visual", "qa", "fixer", "aider", "compaction")
+ROLES = ("chat", "builder", "visual", "qa", "compaction")
 _CONFIG_KEYS = {
     "default_num_ctx": "DEFAULT_NUM_CTX", "openhands_num_ctx": "OPENHANDS_NUM_CTX",
-    "aider_num_ctx": "AIDER_NUM_CTX", "research_num_ctx": "RESEARCH_NUM_CTX",
+    "research_num_ctx": "RESEARCH_NUM_CTX",
 }
+
+RETIRED_SETTINGS = frozenset({
+    'architect_model', 'reviewer_model', 'acceptance_model', 'builder_model', 'fixer_model',
+    'openhands_reasoning_effort', 'openhands_enabled', 'openhands_max_rounds', 'aider_enabled', 'aider_model', 'aider_num_ctx',
+    'aider_auto_test', 'aider_worker_url', 'daedalus_policy7_edits', 'daedalus_policy7_builds',
+    'daedalus_independent_review', 'daedalus_stop_hook',
+})
+
+
+def migrate_settings(settings, *, builder_fallback='', coder_fallback=''):
+    """Preserve the effective coding model and limits while retiring old selectors."""
+    if settings.get('daedalus_settings_version') == 2:
+        return dict(settings)
+    result = {k: v for k, v in settings.items() if k not in RETIRED_SETTINGS}
+    result['coder_model'] = settings.get('builder_model', builder_fallback) or settings.get('coder_model', coder_fallback)
+    for key in ('daedalus_role_contexts', 'daedalus_role_outputs', 'daedalus_role_thinking'):
+        result[key] = {k: v for k, v in (settings.get(key) or {}).items() if k in ROLES}
+    result.update(daedalus_settings_version=2, daedalus_engine='openhands159', daedalus_v3_enabled=True)
+    return result
 
 
 def positive_int(value, name: str, *, inherit=False) -> int:
@@ -109,16 +117,22 @@ def runtime_settings() -> dict:
     for key, attribute in _CONFIG_KEYS.items():
         values[key] = getattr(config, attribute, values[key])
     values["context_compaction"] = getattr(config, "CONTEXT_COMPACTION", "off")
+    values.update(daedalus_engine="openhands159", daedalus_v3_enabled=True)
     return values
 
 
 def validate_patch(patch: dict, current: dict) -> dict:
     """Validate before callers change runtime state or persist any setting."""
+    retired = sorted(set(patch) & RETIRED_SETTINGS)
+    if retired:
+        raise ValueError('Retired Daedalus settings: ' + ', '.join(retired) + '. Reload Settings to use OpenHands 1.59.')
+    if patch.get('daedalus_engine', 'openhands159') != 'openhands159' or patch.get('daedalus_v3_enabled', True) is not True:
+        raise ValueError('Legacy coding engines have been retired; Daedalus uses OpenHands 1.59.')
     clean = {}
     for key, value in patch.items():
         if key not in DEFAULTS:
             continue
-        if key in ("openhands_num_ctx", "aider_num_ctx"):
+        if key == "openhands_num_ctx":
             clean[key] = positive_int(value, key, inherit=True)
         elif key == "daedalus_role_thinking":
             if not isinstance(value, dict) or set(value) - set(ROLES):
@@ -147,8 +161,7 @@ def validate_patch(patch: dict, current: dict) -> dict:
             if value not in ("inherit", "on", "off"):
                 raise ValueError("daedalus_compaction must be inherit, on, or off")
             clean[key] = value
-        elif key in ("daedalus_v3_enabled", "daedalus_visual_review", "daedalus_policy7_edits", "daedalus_policy7_builds",
-                     "daedalus_independent_review", "daedalus_stop_hook"):
+        elif key in ("daedalus_v3_enabled", "daedalus_visual_review"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")
             clean[key] = value
@@ -176,8 +189,6 @@ def validate_patch(patch: dict, current: dict) -> dict:
             clean[key] = list(dict.fromkeys(value))
         else:
             clean[key] = positive_int(value, key)
-    if "aider_num_ctx" in clean and "aider" not in (patch.get("daedalus_role_contexts") or {}):
-        clean["daedalus_role_contexts"] = {**(current.get("daedalus_role_contexts") or {}), **clean.get("daedalus_role_contexts", {}), "aider":clean["aider_num_ctx"]}
     merged = {**DEFAULTS, **current, **clean}
     for role in ROLES:
         resolve(role, merged)
@@ -217,8 +228,6 @@ def resolve(role="builder", settings: dict | None = None) -> ContextPolicy:
     values = runtime_settings() if settings is None else {**DEFAULTS, **settings}
     overrides = values.get("daedalus_role_contexts") or {}
     override = overrides.get(role)
-    if role == "aider" and not override:
-        override = values.get("aider_num_ctx")
     if override:
         context, source = positive_int(override, role), f"stage:{role}"
     elif values.get("openhands_num_ctx"):

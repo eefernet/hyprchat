@@ -13,7 +13,7 @@ from openhands.sdk.tool import ToolExecutor, register_tool
 
 
 class UIAction(Action):
-    action: Literal['launch', 'observe', 'click', 'fill', 'text', 'value', 'press', 'reload', 'screenshot', 'close']
+    action: Literal['launch', 'observe', 'click', 'fill', 'text', 'value', 'press', 'reload', 'screenshot', 'close', 'check_flows']
     application_type: Literal['web', 'desktop'] = 'web'
     command: str = Field(default='', description='Launch command in the project; use the application\'s real entrypoint.')
     url: str = 'http://127.0.0.1:8000'
@@ -30,19 +30,28 @@ class UIObservation(Observation):
 
 
 class UIExecutor(ToolExecutor):
-    def __init__(self, directory):
+    def __init__(self, directory, preflight=None):
         self.directory = Path(directory) / 'ui'
         self.process = None
         self.url = ''
+        self.preflight = preflight or {}
 
     def close(self):
         if self.process:
-            from coder_patch_runtime import stop_process
-            stop_process(self.process)
+            from coder_ui_session import stop_session
+            stop_session(self.process)
             self.process = None
 
     def __call__(self, action, conversation=None):
         try:
+            if action.action == 'check_flows':
+                if self.preflight.get('version') != 1:
+                    raise ValueError('UI flow preflight is available for new modern jobs only.')
+                self.close()
+                from coder_ui_preflight import run
+                result = run(self.preflight['root'], self.directory.parent, self.preflight['operation_id'],
+                    commands=self.preflight.get('commands'), timeout=self.preflight['timeout'])
+                return UIObservation(content=[TextContent(text=json.dumps(result))], is_error=not result['passed'])
             if action.action == 'close':
                 self.close(); result = {'closed': True}
             else:
@@ -70,12 +79,15 @@ class UIExecutor(ToolExecutor):
 
 class UITool(ToolDefinition[UIAction, UIObservation]):
     @classmethod
-    def create(cls, conv_state, directory):
-        return [cls(action_type=UIAction, observation_type=UIObservation, executor=UIExecutor(directory),
+    def create(cls, conv_state, directory, preflight=None):
+        return [cls(action_type=UIAction, observation_type=UIObservation, executor=UIExecutor(directory, preflight),
             description='Launch and test the actual application in an isolated Linux GUI. Web uses Playwright; '
             'desktop uses AT-SPI accessible controls. Call launch with a command, then observe, click, fill, text (displayed text), and value (editable input value) '
             'to verify requested behavior. Use close before relaunching. GUI output is diagnostic; independent '
-            'verification decides the delivered status. Headless-only tests do not establish visible UI behavior.')]
+            'verification decides the delivered status. Use check_flows after writing or editing .daedalus-ui.json: '
+            'it validates every flow and replays them with disposable application state. It returns precise failures, '
+            'not acceptance. Use value for input assertions and text for result displays. '
+            'Headless-only tests do not establish visible UI behavior.')]
 
 
 register_tool(UITool.name, UITool)

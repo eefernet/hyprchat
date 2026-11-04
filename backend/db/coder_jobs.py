@@ -10,7 +10,7 @@ import database as db
 
 TERMINAL = {"completed", "cancelled"}
 PARKED = {"blocked", "waiting_for_input", "ready_for_review"}
-ACTIVE = {"queued", "inspecting", "baselining", "planning", "verifying", "coding", "checking", "reviewing", "auditing", "visual_review", "accepting", "packaging", "candidate_packaging", "cancelling"}
+ACTIVE = {"answering", "queued", "inspecting", "baselining", "planning", "verifying", "coding", "checking", "reviewing", "auditing", "visual_review", "accepting", "packaging", "candidate_packaging", "cancelling"}
 
 
 def now():
@@ -85,7 +85,7 @@ async def get(workflow_id):
 
 async def create(conversation_id, task, mode, project_id, model, key, *,
                  source_job_id="", source_revision_id="", source_project_id="", policy_version=1,
-                 visual_policy=None, request_options=None, parent_artifact_id="", inherited=None, source_pointer="", engine="legacy"):
+                 visual_policy=None, request_options=None, parent_artifact_id="", inherited=None, source_pointer="", engine="openhands159"):
     owner = db.current_user_id()
     identity = "cw3-" + hashlib.sha256(f"{owner}:{conversation_id}:{key}".encode()).hexdigest()[:24]
     body = dict(task=task, mode=mode, project_id=project_id, model=model)
@@ -117,7 +117,7 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
                 # already-created request. All non-derived request fields still
                 # participate in the original fingerprint.
                 old = dict(request_options or {})
-                for field in ('ui_contract', 'ui_contract_version', 'plan_finalization_version', 'engine_behavior_version'):
+                for field in ('ui_contract', 'ui_contract_version', 'plan_finalization_version', 'ui_preflight_version', 'engine_behavior_version'):
                     if field in result: old[field] = result[field]
                     else: old.pop(field, None)
                 same = result.get('request_fingerprint') == hashlib.sha256(
@@ -182,7 +182,7 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
         if engine == 'openhands159':
             from coder_progress import empty
             job['progress'] = empty()
-            for field in ('deliverable_contract_version', 'deliverable_contract', 'original_user_request', 'plan_finalization_version'):
+            for field in ('deliverable_contract_version', 'deliverable_contract', 'original_user_request', 'plan_finalization_version', 'ui_preflight_version'):
                 if field in (request_options or {}): job[field] = request_options[field]
             job['engine_behavior_version'] = (request_options or {}).get('engine_behavior_version', 0)
         await connection.execute(
@@ -238,7 +238,7 @@ async def save(workflow_id, *, state=None, event="updated", worker_events=None, 
             raise InterruptedError("Cancellation requested")
         payload = json.loads(row["job_json"])
         if event == 'resume' and payload.get('policy_version', 1) >= 6:
-            from coder_policy7_evidence import DURABLE_LIMITS
+            from coder_check_evidence import DURABLE_LIMITS
             if payload.get('policy_version', 1) >= 7 and payload.get('stop_limit') in DURABLE_LIMITS:
                 raise ValueError(payload.get('blocker') or 'Retained repair limits prevent continuation')
             if row['state'] not in ({'blocked', 'waiting_for_input', 'ready_for_review', 'cancelled'} if payload.get('policy_version', 1) >= 7 else {'blocked', 'waiting_for_input', 'ready_for_review'}):

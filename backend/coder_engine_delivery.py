@@ -4,6 +4,41 @@ import io
 import json
 from pathlib import Path
 import tarfile
+import re
+
+
+def portability_checks(repository, revision):
+    """Reject observed worker-browser paths in delivered executable source.
+
+    This narrow source guard is not proof of portability; release validation
+    also runs downloaded projects without any original browser-cache mounts.
+    """
+    locations, total, cursor = [], 0, ''
+    extensions = {'.js', '.cjs', '.mjs', '.ts', '.tsx', '.jsx', '.py', '.json', '.sh'}
+    while True:
+        page = repository.inventory(cursor=cursor, limit=200)
+        for item in page['items']:
+            path = Path(item['path'])
+            if path.suffix not in extensions or item.get('binary'): continue
+            source = (repository.root / path).read_text(errors='replace')
+            if not re.search(r'playwright|chromium|executablePath|executable_path', source, re.I): continue
+            for number, line in enumerate(source.splitlines(), 1):
+                if not re.search(r'/srv/hephaestus/|/root/\.cache/ms-playwright', line): continue
+                total += 1
+                if len(locations) < 20: locations.append({'path': str(path), 'line': number})
+        cursor = page['next_cursor']
+        if not cursor: break
+    if not total: return []
+    reason = ('Project browser configuration contains worker-specific paths at ' +
+              ', '.join(f"{row['path']}:{row['line']}" for row in locations) +
+              '. Remove those paths and executablePath overrides. Use the declared Playwright package with normal '
+              'browser resolution; preparation supplies PLAYWRIGHT_BROWSERS_PATH. Document the local browser '
+              'installation command for downloads. Preserve test names and assertions.')
+    return [{'id': 'delivery:browser-portability', 'phase': 'delivery', 'origin': 'controller',
+             'revision_id': revision, 'passed': False, 'execution_succeeded': False,
+             'classification': 'nonportable_browser', 'reason': reason,
+             'diagnostic': {'category': 'nonportable_browser', 'locations': locations,
+                            'omitted_count': total - len(locations)}}]
 
 
 def products(root, task, revision, contract=None):

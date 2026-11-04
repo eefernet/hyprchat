@@ -4,8 +4,9 @@ import asyncio
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import Request, APIRouter, Body, HTTPException, Query
 
 import comfyui
 import config
@@ -18,29 +19,22 @@ import voice
 
 from .context import route_context
 
-
 router = APIRouter()
-
 
 def load_settings() -> dict:
     return route_context().load_settings()
 
-
 def save_settings(settings: dict) -> None:
     route_context().save_settings(settings)
-
 
 def _public_settings_payload(settings: dict) -> dict:
     return route_context().public_settings_payload(settings)
 
-
 def _coerce_service_url(value: str, env_key: str, default: str) -> str:
     return route_context().coerce_service_url(value, env_key, default)
 
-
 def _sandbox_size_bytes() -> int:
     return route_context().sandbox_size_bytes()
-
 
 @router.get("/api/settings")
 async def get_app_settings():
@@ -70,22 +64,12 @@ async def get_app_settings():
         "rag_reranker": config.RAG_RERANKER,
         "model_routing": config.MODEL_ROUTING,
         # Coder Bot v2 per-agent overrides — empty string = inherit from umbrella
-        "current_architect_model": config.ARCHITECT_MODEL,
-        "current_reviewer_model":  config.REVIEWER_MODEL,
-        "current_acceptance_model": config.ACCEPTANCE_MODEL,
-        "current_builder_model":   config.BUILDER_MODEL,
-        "current_fixer_model":     config.FIXER_MODEL,
+
         "current_qa_model":        config.QA_MODEL,
-        "openhands_enabled": config.OPENHANDS_ENABLED,
-        "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
+
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
-        "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
         "openhands_disable_thinking": config.OPENHANDS_DISABLE_THINKING,
-        "aider_enabled": config.AIDER_ENABLED,
-        "aider_model": config.AIDER_MODEL,
-        "aider_num_ctx": config.AIDER_NUM_CTX,
-        "aider_auto_test": config.AIDER_AUTO_TEST,
-        "aider_worker_url": config.AIDER_WORKER_URL,
+
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
@@ -105,7 +89,6 @@ async def get_app_settings():
         "sandbox_venv_ready": venv_exists,
     }
 
-
 @router.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
     settings = load_settings()
@@ -119,10 +102,9 @@ async def update_app_settings(body: dict = Body(...)):
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
                "workspace_model", "context_compaction", "history_recall", "rag_reranker", "model_routing",
-               "architect_model", "reviewer_model", "acceptance_model", "builder_model", "fixer_model", "qa_model",
-               "openhands_enabled", "openhands_max_rounds", "openhands_num_ctx",
-               "openhands_reasoning_effort", "openhands_disable_thinking",
-               "aider_enabled", "aider_model", "aider_num_ctx", "aider_auto_test", "aider_worker_url",
+               "qa_model",
+               "openhands_num_ctx",
+               "openhands_disable_thinking",
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
                "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
                "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
@@ -181,7 +163,7 @@ async def update_app_settings(body: dict = Body(...)):
     if "codebox_url" in body and body["codebox_url"]:
         config.CODEBOX_URL = _coerce_service_url(body["codebox_url"], "CODEBOX_URL", "http://127.0.0.1:8585")
         settings["codebox_url"] = config.CODEBOX_URL
-        print(f"[Config] Updated Codebox URL to: {config.CODEBOX_URL}")
+        print(f"[Config] Updated Hephaestus URL to: {config.CODEBOX_URL}")
     elif "codebox_url" in body and not body["codebox_url"]:
         settings["codebox_url"] = ""
         config.CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
@@ -260,64 +242,18 @@ async def update_app_settings(body: dict = Body(...)):
         print(f"[Config] Updated model routing: {_clean_mr}")
     # Coder Bot v2 per-agent overrides
     for _key, _attr, _label in (
-        ("architect_model", "ARCHITECT_MODEL", "Architect"),
-        ("reviewer_model",  "REVIEWER_MODEL",  "Reviewer"),
-        ("acceptance_model", "ACCEPTANCE_MODEL", "Acceptance"),
-        ("builder_model",   "BUILDER_MODEL",   "Builder"),
-        ("fixer_model",     "FIXER_MODEL",     "Fixer"),
         ("qa_model",        "QA_MODEL",        "ProjectQA"),
     ):
         if _key in body:
             setattr(config, _attr, body[_key] or "")
             print(f"[Config] Updated {_label} Model to: {body[_key] or '(inherit umbrella)'}")
-    if "openhands_enabled" in body:
-        config.OPENHANDS_ENABLED = bool(body["openhands_enabled"])
-        print(f"[Config] OpenHands enabled: {config.OPENHANDS_ENABLED}")
-    if "openhands_max_rounds" in body:
-        config.OPENHANDS_MAX_ROUNDS = config.coerce_int(body["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
-        print(f"[Config] OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in body:
         config.OPENHANDS_NUM_CTX = body["openhands_num_ctx"]
         settings["openhands_num_ctx"] = config.OPENHANDS_NUM_CTX
         print(f"[Config] OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
-    if "openhands_reasoning_effort" in body:
-        _re_in = (body["openhands_reasoning_effort"] or "medium").strip().lower()
-        if _re_in not in ("low", "medium", "high"):
-            _re_in = "medium"
-        config.OPENHANDS_REASONING_EFFORT = _re_in
-        # Persist the validated value, not the raw input.
-        settings["openhands_reasoning_effort"] = _re_in
-        print(f"[Config] OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "openhands_disable_thinking" in body:
         config.OPENHANDS_DISABLE_THINKING = bool(body["openhands_disable_thinking"])
         print(f"[Config] OpenHands disable thinking: {config.OPENHANDS_DISABLE_THINKING}")
-    if "aider_enabled" in body:
-        config.AIDER_ENABLED = bool(body["aider_enabled"])
-        print(f"[Config] Aider enabled: {config.AIDER_ENABLED}")
-    if "aider_model" in body:
-        config.AIDER_MODEL = body["aider_model"] or ""
-        print(f"[Config] Aider Model: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
-    if "aider_num_ctx" in body:
-        # 0 / empty = inherit the Daedalus context-window slider
-        # (OPENHANDS_NUM_CTX) at call time; a positive value is an explicit
-        # per-Aider override.
-        _actx_raw = body["aider_num_ctx"]
-        if not _actx_raw:
-            config.AIDER_NUM_CTX = 0
-        else:
-            config.AIDER_NUM_CTX = config.coerce_num_ctx(
-                _actx_raw,
-                fallback=config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
-            )
-        settings["aider_num_ctx"] = config.AIDER_NUM_CTX
-        print(f"[Config] Aider num_ctx: {config.AIDER_NUM_CTX or '(inherit Daedalus slider)'}")
-    if "aider_auto_test" in body:
-        config.AIDER_AUTO_TEST = bool(body["aider_auto_test"])
-        print(f"[Config] Aider auto-test: {config.AIDER_AUTO_TEST}")
-    if "aider_worker_url" in body:
-        config.AIDER_WORKER_URL = body["aider_worker_url"] or config.OPENHANDS_URL
-        settings["aider_worker_url"] = config.AIDER_WORKER_URL
-        print(f"[Config] Aider worker URL: {config.AIDER_WORKER_URL}")
     if "default_num_ctx" in body:
         config.DEFAULT_NUM_CTX = config.coerce_num_ctx(
             body["default_num_ctx"],
@@ -402,27 +338,16 @@ async def update_app_settings(body: dict = Body(...)):
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
         "context_compaction": config.CONTEXT_COMPACTION,
-        "current_architect_model": config.ARCHITECT_MODEL,
-        "current_reviewer_model":  config.REVIEWER_MODEL,
-        "current_acceptance_model": config.ACCEPTANCE_MODEL,
-        "current_builder_model":   config.BUILDER_MODEL,
-        "current_fixer_model":     config.FIXER_MODEL,
+
         "current_qa_model":        config.QA_MODEL,
-        "openhands_enabled": config.OPENHANDS_ENABLED,
-        "openhands_max_rounds": config.OPENHANDS_MAX_ROUNDS,
+
         "openhands_num_ctx": config.OPENHANDS_NUM_CTX,
-        "openhands_reasoning_effort": config.OPENHANDS_REASONING_EFFORT,
         "openhands_disable_thinking": config.OPENHANDS_DISABLE_THINKING,
-        "aider_enabled": config.AIDER_ENABLED,
-        "aider_model": config.AIDER_MODEL,
-        "aider_num_ctx": config.AIDER_NUM_CTX,
-        "aider_auto_test": config.AIDER_AUTO_TEST,
-        "aider_worker_url": config.AIDER_WORKER_URL,
+
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
     }
-
 
 @router.get("/api/rag/stats")
 async def get_rag_stats():
@@ -459,7 +384,6 @@ async def get_rag_stats():
     except Exception as e:
         return {"error": str(e), "total_collections": 0, "total_chunks": 0, "disk_usage": "—", "collections": []}
 
-
 @router.delete("/api/rag/collections")
 async def delete_all_rag_collections():
     """Delete ALL ChromaDB collections (RAG indices) and reclaim disk space."""
@@ -482,19 +406,36 @@ async def delete_all_rag_collections():
         print(f"[RAG] Purge error: {e}")
         return {"deleted": 0, "error": str(e)}
 
-
 @router.post("/api/settings/cleanup-now")
-async def cleanup_now():
+async def cleanup_now(request: Request, body: dict | None = Body(default=None)):
+    if body and body.get('target') == 'hephaestus':
+        from .users import _require_main_user
+        await _require_main_user(request)
+        from storage_diagnostics import vm_request
+        if body.get('mode') not in {'safe','reset'}:raise HTTPException(422,'Expected safe or reset cleanup mode')
+        try:
+            return await vm_request(route_context().http,config.CODEBOX_URL,db.current_user_id(),'/storage/cleanup',
+                {k:body.get(k,'') for k in ('preview_id','operation_id','confirmation')})
+        except Exception as error:
+            raise HTTPException(409,'VM cleanup could not start. Refresh the preview and check active jobs. '+str(error)[:250]) from error
+    if body and body.get('target','local') != 'local':raise HTTPException(422,'Unknown cleanup target')
     """Preserve durable, referenced and unresolved legacy outputs."""
     from durable_storage import cleanup_outputs
     return await asyncio.to_thread(cleanup_outputs)
 
-
 @router.get('/api/settings/cleanup-preview')
-async def cleanup_preview():
+async def cleanup_preview(request: Request, target: Literal["local", "hephaestus"] = "local", action: Literal["status", "preview"] = "status", mode: Literal["safe", "reset"] = "safe"):
+    if target == "hephaestus":
+        from .users import _require_main_user
+        await _require_main_user(request)
+        if action == 'preview':
+            from storage_diagnostics import vm_request
+            try:return await vm_request(route_context().http,config.CODEBOX_URL,db.current_user_id(),'/storage/preview',{'mode':mode})
+            except Exception as error:raise HTTPException(503,'VM cleanup preview is unavailable') from error
+        from storage_diagnostics import execution_storage_status
+        return await execution_storage_status(route_context().http, config.CODEBOX_URL, db.current_user_id())
     from durable_storage import cleanup_outputs
     return await asyncio.to_thread(cleanup_outputs, dry_run=True)
-
 
 @router.post("/api/settings/cleanup-codebox")
 async def cleanup_codebox():
@@ -505,9 +446,8 @@ async def cleanup_codebox():
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"[Cleanup] Codebox clean failed: {e}")
+        print(f"[Cleanup] Hephaestus cleanup failed: {e}")
         return {"deleted": 0, "error": str(e)}
-
 
 @router.get("/api/changelog")
 async def get_changelog():
@@ -520,7 +460,6 @@ async def get_changelog():
     except FileNotFoundError:
         return {"content": "# Changelog\n\nNo changelog available."}
 
-
 # ============================================================
 # USER PREFERENCE KV — server-side home for per-user UI state
 # (prompt library, model params, custom quotes, conversation tags,
@@ -529,23 +468,19 @@ async def get_changelog():
 _PREF_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _PREF_MAX_BYTES = 256 * 1024
 
-
 def _validate_pref_key(key: str) -> str:
     if not _PREF_KEY_RE.fullmatch(key or ""):
         raise HTTPException(400, "Invalid pref key (lowercase alphanumerics, ., _, -; max 64 chars)")
     return key
 
-
 @router.get("/api/prefs")
 async def get_prefs():
     return {"prefs": await db.get_user_prefs()}
-
 
 @router.get("/api/prefs/{key}")
 async def get_pref(key: str):
     value = await db.get_user_pref(_validate_pref_key(key))
     return {"key": key, "value": value}
-
 
 @router.put("/api/prefs/{key}")
 async def put_pref(key: str, value=Body(...)):
@@ -556,12 +491,10 @@ async def put_pref(key: str, value=Body(...)):
     await db.set_user_pref(key, value)
     return {"ok": True, "key": key}
 
-
 @router.delete("/api/prefs/{key}")
 async def delete_pref(key: str):
     deleted = await db.delete_user_pref(_validate_pref_key(key))
     return {"ok": True, "deleted": deleted}
-
 
 # ============================================================
 # TOKEN USAGE ANALYTICS
@@ -574,10 +507,8 @@ def _annotate_cost(rows: list[dict]) -> list[dict]:
             r["cost_usd"] = round(c, 4)
     return rows
 
-
 def _sum_cost(rows: list[dict]) -> float:
     return round(sum(r.get("cost_usd") or 0 for r in rows), 4)
-
 
 async def _daily_costs(days: int) -> dict[str, float]:
     """date → summed cloud cost, from per-day-per-model aggregation."""
@@ -587,7 +518,6 @@ async def _daily_costs(days: int) -> dict[str, float]:
         if r.get("cost_usd"):
             out[r["date"]] = round(out.get(r["date"], 0) + r["cost_usd"], 4)
     return out
-
 
 @router.get("/api/analytics/tokens")
 async def get_token_analytics(days: int = Query(30), group_by: str = Query("day")):
@@ -603,21 +533,17 @@ async def get_token_analytics(days: int = Query(30), group_by: str = Query("day"
                 r["cost_usd"] = by_date[r["date"]]
     return rows
 
-
 @router.delete("/api/analytics/tokens")
 async def clear_token_analytics():
     deleted = await db.clear_token_usage()
     return {"ok": True, "deleted": deleted}
 
-
 _USAGE_SUM_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens", "request_count")
-
 
 def _usage_cutoff_date(days: int) -> str:
     """Date floor for an N-day window over date-grouped rows. Matches the SQL
     rolling window at date granularity (the boundary day counts in full)."""
     return (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-
 
 def _agg_by_day(rows: list[dict], days: int = 0) -> list[dict]:
     cutoff = _usage_cutoff_date(days) if days > 0 else ""
@@ -631,7 +557,6 @@ def _agg_by_day(rows: list[dict], days: int = 0) -> list[dict]:
             agg[k] += r.get(k) or 0
     return sorted(out.values(), key=lambda x: x["date"])
 
-
 def _agg_by_model(rows: list[dict], days: int = 0) -> list[dict]:
     cutoff = _usage_cutoff_date(days) if days > 0 else ""
     out: dict[str, dict] = {}
@@ -643,7 +568,6 @@ def _agg_by_model(rows: list[dict], days: int = 0) -> list[dict]:
         for k in _USAGE_SUM_KEYS:
             agg[k] += r.get(k) or 0
     return sorted(out.values(), key=lambda x: -(x["total_tokens"] or 0))
-
 
 @router.get("/api/analytics/tokens/summary")
 async def get_token_summary():

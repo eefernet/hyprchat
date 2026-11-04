@@ -90,7 +90,6 @@ def load_settings() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return config.DEFAULT_SETTINGS.copy()
 
-
 def save_settings(settings: dict):
     os.makedirs(os.path.dirname(config.SETTINGS_PATH), exist_ok=True)
     import tempfile
@@ -105,12 +104,10 @@ def save_settings(settings: dict):
         if os.path.exists(temporary):
             os.unlink(temporary)
 
-
 def _public_settings_payload(settings: dict) -> dict:
     public = {k: v for k, v in settings.items() if k != "ollama_scan_ssh_password"}
     public.update(hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=False))
     return public
-
 
 def _coerce_service_url(value: str, env_key: str, default: str) -> str:
     """Return a runtime service URL, accepting bare host:port input from Settings."""
@@ -120,7 +117,6 @@ def _coerce_service_url(value: str, env_key: str, default: str) -> str:
     if "://" not in raw:
         raw = f"http://{raw}"
     return raw.rstrip("/")
-
 
 # ============================================================
 # SANDBOX — directory init + venv
@@ -141,7 +137,6 @@ def _init_sandbox():
         except Exception as e:
             print(f"[Sandbox] Venv creation failed (non-fatal): {e}")
 
-
 def _sandbox_size_bytes() -> int:
     """Return total bytes used in the sandbox outputs directory."""
     total = 0
@@ -152,7 +147,6 @@ def _sandbox_size_bytes() -> int:
     except Exception:
         pass
     return total
-
 
 # ============================================================
 # CLEANUP — delete old files from sandbox/outputs
@@ -167,20 +161,26 @@ def _run_cleanup_sync() -> dict:
     from durable_storage import cleanup_outputs
     return cleanup_outputs(time.time() - cleanup_days * 86400)
 
-
 async def _cleanup_loop():
     """Background task: run cleanup every 6 hours."""
+    ticks=0
     while True:
-        await asyncio.sleep(6 * 3600)
-        await asyncio.to_thread(_run_cleanup_sync)
-        from research_evidence import retry_cleanup
-        await retry_cleanup()
-
+        await asyncio.sleep(600)
+        ticks+=1
+        if ticks % 36 == 0:
+            await asyncio.to_thread(_run_cleanup_sync)
+            from research_evidence import retry_cleanup
+            await retry_cleanup()
+        if os.environ.get('HEPHAESTUS_TOKEN') and os.environ.get('HEPHAESTUS_ARCHIVE_MAINTENANCE','1') == '1':
+            try:
+                from storage_diagnostics import archive_test_evidence
+                await archive_test_evidence(http, config.CODEBOX_URL)
+            except Exception as error:
+                print('[Storage] Evidence archival deferred:',type(error).__name__)
 
 events = EventBus()
 import documents
 documents.configure(events)
-
 
 # ============================================================
 # APP SETUP
@@ -194,7 +194,6 @@ _scheduler_task_ref = None
 _BG_TASKS: set = set()
 _RESEARCH_TASKS: dict = {}
 
-
 def _bg_task_done(t):
     _BG_TASKS.discard(t)
     # Surface failures instead of swallowing them — a crashed background task
@@ -204,13 +203,11 @@ def _bg_task_done(t):
         if exc is not None:
             print(f"[BG] background task {t.get_name()} failed: {exc!r}")
 
-
 def _track_bg(coro):
     t = asyncio.create_task(coro)
     _BG_TASKS.add(t)
     t.add_done_callback(_bg_task_done)
     return t
-
 
 def _runtime_storage_dirs() -> list[str]:
     data_dir = os.path.dirname(config.DATABASE_PATH)
@@ -239,11 +236,9 @@ def _runtime_storage_dirs() -> list[str]:
             out.append(path)
     return out
 
-
 def _ensure_runtime_storage_dirs() -> None:
     for path in _runtime_storage_dirs():
         os.makedirs(path, exist_ok=True)
-
 
 def _storage_health_check() -> dict:
     started = time.time()
@@ -254,7 +249,6 @@ def _storage_health_check() -> dict:
         result = {"status": "error", "error": str(exc)}
     result["response_ms"] = round((time.time() - started) * 1000)
     return result
-
 
 def _raise_if_rag_storage_unwritable() -> None:
     try:
@@ -268,12 +262,10 @@ def _raise_if_rag_storage_unwritable() -> None:
         print(f"[RAG] Storage preflight failed: {err}")
         raise HTTPException(500, storage_diagnostics.readonly_storage_message())
 
-
 def _format_reindex_error(kb_name: str, error: Exception) -> str:
     if storage_diagnostics.is_readonly_storage_error(error):
         return f"{kb_name}: {storage_diagnostics.readonly_storage_message()}"
     return f"{kb_name}: {error}"
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -308,13 +300,34 @@ async def lifespan(app: FastAPI):
     _init_sandbox()
     # Override service URLs from persistent settings if set. Empty values inherit
     # from environment/config defaults.
+    from agents.personas import upgrade_daedalus_personas
+    await upgrade_daedalus_personas()
     _settings = load_settings()
+    if _settings.get('daedalus_settings_version') != 2:
+        # Snapshot before changing selection semantics; publication is atomic and private.
+        import tempfile
+        snapshot = __import__("pathlib").Path(config.SETTINGS_PATH).with_name('settings.before-daedalus-modern.json')
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix='.settings-backup-', dir=snapshot.parent)
+        try:
+            with os.fdopen(descriptor, 'w') as output:
+                json.dump(_settings, output, indent=2)
+                output.flush(); os.fsync(output.fileno())
+            try:
+                os.link(temporary, snapshot)
+            except FileExistsError:
+                json.loads(snapshot.read_text())  # A previous migration snapshot must remain readable.
+        finally:
+            os.unlink(temporary)
+        _settings = context_policy.migrate_settings(_settings,
+            builder_fallback=os.getenv('BUILDER_MODEL', ''), coder_fallback=config.CODER_MODEL)
+        save_settings(_settings)
     if _settings.get("ollama_url"):
         config.OLLAMA_URL = _coerce_service_url(_settings["ollama_url"], "OLLAMA_URL", "http://127.0.0.1:11434")
         print(f"[Config] Loaded Ollama URL from settings: {config.OLLAMA_URL}")
     if _settings.get("codebox_url"):
         config.CODEBOX_URL = _coerce_service_url(_settings["codebox_url"], "CODEBOX_URL", "http://127.0.0.1:8585")
-        print(f"[Config] Loaded Codebox URL from settings: {config.CODEBOX_URL}")
+        print(f"[Config] Loaded Hephaestus URL from settings: {config.CODEBOX_URL}")
     if _settings.get("searxng_url"):
         config.SEARXNG_URL = _coerce_service_url(_settings["searxng_url"], "SEARXNG_URL", "http://127.0.0.1:8888")
         print(f"[Config] Loaded SearXNG URL from settings: {config.SEARXNG_URL}")
@@ -369,61 +382,21 @@ async def lifespan(app: FastAPI):
     # Coder Bot v2 per-agent overrides — each empty by default; only seen here
     # when the user has explicitly pinned a model for that agent.
     for _key, _attr in (
-        ("architect_model", "ARCHITECT_MODEL"),
-        ("reviewer_model",  "REVIEWER_MODEL"),
-        ("acceptance_model", "ACCEPTANCE_MODEL"),
-        ("builder_model",   "BUILDER_MODEL"),
-        ("fixer_model",     "FIXER_MODEL"),
         ("qa_model",        "QA_MODEL"),
     ):
         if _key in _settings:
             setattr(config, _attr, _settings[_key] or "")
             if _settings[_key]:
                 print(f"[Config] Loaded {_attr} from settings: {_settings[_key]}")
-    if "openhands_enabled" in _settings:
-        config.OPENHANDS_ENABLED = _settings["openhands_enabled"]
-        print(f"[Config] Loaded OpenHands enabled: {config.OPENHANDS_ENABLED}")
-    if "openhands_max_rounds" in _settings:
-        config.OPENHANDS_MAX_ROUNDS = config.coerce_int(_settings["openhands_max_rounds"], config.OPENHANDS_MAX_ROUNDS, minimum=1, maximum=200)
-        print(f"[Config] Loaded OpenHands max rounds: {config.OPENHANDS_MAX_ROUNDS}")
     if "openhands_num_ctx" in _settings:
         config.OPENHANDS_NUM_CTX = config.coerce_num_ctx(
             _settings["openhands_num_ctx"],
             fallback=config.OPENHANDS_NUM_CTX,
         )
         print(f"[Config] Loaded OpenHands num_ctx: {config.OPENHANDS_NUM_CTX}")
-    if "openhands_reasoning_effort" in _settings:
-        _re = (_settings["openhands_reasoning_effort"] or "medium").strip().lower()
-        if _re not in ("low", "medium", "high"):
-            _re = "medium"
-        config.OPENHANDS_REASONING_EFFORT = _re
-        print(f"[Config] Loaded OpenHands reasoning effort: {config.OPENHANDS_REASONING_EFFORT}")
     if "openhands_disable_thinking" in _settings:
         config.OPENHANDS_DISABLE_THINKING = bool(_settings["openhands_disable_thinking"])
         print(f"[Config] Loaded OpenHands disable thinking: {config.OPENHANDS_DISABLE_THINKING}")
-    if "aider_enabled" in _settings:
-        config.AIDER_ENABLED = bool(_settings["aider_enabled"])
-        print(f"[Config] Loaded Aider enabled: {config.AIDER_ENABLED}")
-    if "aider_model" in _settings:
-        config.AIDER_MODEL = _settings["aider_model"] or ""
-        print(f"[Config] Loaded Aider Model from settings: {config.AIDER_MODEL or '(inherit fixer/coder)'}")
-    if "aider_num_ctx" in _settings:
-        # 0/empty = inherit the Daedalus context-window slider at call time.
-        _actx = _settings["aider_num_ctx"]
-        if not _actx:
-            config.AIDER_NUM_CTX = 0
-        else:
-            config.AIDER_NUM_CTX = config.coerce_num_ctx(
-                _actx,
-                fallback=config.AIDER_NUM_CTX or config.OPENHANDS_NUM_CTX,
-            )
-        print(f"[Config] Loaded Aider num_ctx: {config.AIDER_NUM_CTX or '(inherit Daedalus slider)'}")
-    if "aider_auto_test" in _settings:
-        config.AIDER_AUTO_TEST = bool(_settings["aider_auto_test"])
-        print(f"[Config] Loaded Aider auto-test: {config.AIDER_AUTO_TEST}")
-    if "aider_worker_url" in _settings:
-        config.AIDER_WORKER_URL = _settings["aider_worker_url"] or config.OPENHANDS_URL
-        print(f"[Config] Loaded Aider worker URL: {config.AIDER_WORKER_URL}")
     if "default_num_ctx" in _settings:
         # Single knob the user controls. Drives the chat-side fallback in chat.py and
         # every internal LLM call (plan_project, critic) — so increasing the chat ctx
@@ -558,8 +531,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-HyprChat-User", "X-HyprChat-Session"],
 )
 
-
-
 def _request_user_id(request: Request) -> str:
     raw = (
         request.headers.get("x-hyprchat-user")
@@ -569,14 +540,12 @@ def _request_user_id(request: Request) -> str:
     raw = re.sub(r"[^a-zA-Z0-9_.:-]", "", str(raw or ""))[:80]
     return raw or db.DEFAULT_USER_ID
 
-
 def _request_session_token(request: Request) -> str:
     return (
         request.headers.get("x-hyprchat-session")
         or request.query_params.get("session")
         or ""
     )
-
 
 async def _validated_request_user(request: Request) -> dict:
     user_id = _request_user_id(request)
@@ -586,7 +555,6 @@ async def _validated_request_user(request: Request) -> dict:
     if user.get("password_hash") and not await db.validate_user_session(user_id, _request_session_token(request)):
         raise HTTPException(401, "Password required")
     return user
-
 
 @app.middleware("http")
 async def user_context_middleware(request: Request, call_next):
@@ -789,7 +757,6 @@ class KBCreate(BaseModel):
     name: str
     description: str = ""
 
-
 class ConversationSearchRequest(BaseModel):
     query: str
     limit: int = 20
@@ -801,7 +768,6 @@ class ForkRequest(BaseModel):
 # HEALTH & INFO
 # ============================================================
 _health_task_ref = None
-
 
 # ============================================================
 # OLLAMA — MODEL LISTING + STREAMING CHAT
@@ -847,7 +813,6 @@ async def list_models():
         **({"provider_errors": cloud_errors} if cloud_errors else {}),
     }
 
-
 async def _local_ollama_model_names() -> list[str]:
     try:
         r = await http.get(f"{config.OLLAMA_URL}/api/tags")
@@ -856,8 +821,6 @@ async def _local_ollama_model_names() -> list[str]:
         return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
     except Exception as e:
         raise HTTPException(502, f"Failed to reach Ollama: {e}")
-
-
 
 @app.get("/api/models/hyprfit")
 async def hyprfit_recommendations(refresh: bool = False, live: bool = True):
@@ -890,7 +853,6 @@ async def hyprfit_recommendations(refresh: bool = False, live: bool = True):
     response["ollama_error"] = ollama_error
     return response
 
-
 @app.post("/api/models/hyprfit/rescan")
 async def hyprfit_rescan_hardware():
     settings = load_settings()
@@ -905,10 +867,8 @@ async def hyprfit_rescan_hardware():
         save_settings(settings)
     return result
 
-
 async def _delete_ollama_model(model_name: str) -> dict:
     return await model_management.delete_ollama_model(http, model_name)
-
 
 @app.delete("/api/models")
 async def delete_all_models():
@@ -929,7 +889,6 @@ async def delete_all_models():
         "models": deleted,
         "failed": failed,
     }
-
 
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
@@ -968,7 +927,6 @@ async def chat_stream(req: ChatRequest):
         media_type="text/event-stream",
     )
 
-
 # ============================================================
 # CODER BOT — upload an existing project archive
 # ============================================================
@@ -977,7 +935,6 @@ class _UploadTooLarge(Exception):
     def __init__(self, budget_mb: int):
         super().__init__(f"decompressed size exceeds {budget_mb}MB")
         self.budget_mb = budget_mb
-
 
 def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
                                staging_root: str) -> tuple[list[str], dict[str, int]]:
@@ -1083,7 +1040,6 @@ def _extract_and_stage_project(content: bytes, lower: str, is_zip: bool,
             ext_counts[ext] = ext_counts.get(ext, 0) + 1
     return manifest, ext_counts
 
-
 @app.post("/api/coder/upload-project")
 async def upload_coder_project(
     file: UploadFile = File(...),
@@ -1093,7 +1049,6 @@ async def upload_coder_project(
     project_id=f'proj-{uuid.uuid4().hex[:12]}'
     with scope(conversation=conv_id,project=project_id):
         return await _upload_coder_project_scoped(file,conv_id,project_id)
-
 
 async def _upload_coder_project_scoped(file,conv_id,project_id):
     """Upload a .zip/.tar/.tar.gz of an existing project, extract it into the
@@ -1222,7 +1177,7 @@ async def _upload_coder_project_scoped(file,conv_id,project_id):
             # from the file we just wrote. No base64 in this command.
             extract_cmd = (
                 f"mkdir -p {shlex.quote(remote_dir)} && "
-                f"tar -xzf {shlex.quote(remote_tmp)} -C {shlex.quote(remote_dir)} && "
+                f"tar --no-same-owner -xzf {shlex.quote(remote_tmp)} -C {shlex.quote(remote_dir)} && "
                 f"rm -f {shlex.quote(remote_tmp)}"
             )
             r = await http_client.post(
@@ -1264,15 +1219,14 @@ async def _upload_coder_project_scoped(file,conv_id,project_id):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"CodeBox upload failed: {e}")
+        raise HTTPException(500, f"Hephaestus upload failed: {e}")
     finally:
         transfer_file.close()
         os.unlink(transfer_path)
 
     # Register as the conversation's active coding project. The chat agent's
     # ACTIVE PROJECT injection (agents/chat.py) will pick this up on next turn,
-    # and openhands_worker will reuse /root/projects/{project_id} because the
-    # directory name matches the project_id.
+    # the modern worker imports a scoped copy when the next job begins.
     description = f"Uploaded project: {safe_name} — {len(manifest)} files, {language}"
     try:
         await db.upsert_coding_project(
@@ -1287,99 +1241,16 @@ async def _upload_coder_project_scoped(file,conv_id,project_id):
     except Exception as e:
         print(f"[CoderUpload] DB save failed (non-fatal): {e}")
 
-    if upload_settings["daedalus_v3_enabled"]:
-        # Upload establishes a project; the next explicit request chooses Q&A
-        # or editing. Source inventory is built by the job worker, independently
-        # of optional embeddings.
-        return {"project_id": project_id, "workflow_id": "", "workflow_status": "awaiting_request",
-                "name": project_name, "language": language, "file_count": len(manifest), "files": manifest[:30],
-                "sandbox_path": remote_dir, "size_bytes": archive_size, "indexer_run_id": "",
-                "indexer_status": "optional", "git_baseline_status": git_baseline_status,
-                "detected_build_system": project_contract.get("build_system", "unknown"),
-                "detected_build_cmd": project_contract.get("build_cmd", ""),
-                "detected_test_cmd": project_contract.get("test_cmd", ""), "contract": project_contract}
-
-    workflow_id = f"cw-{uuid.uuid4().hex[:12]}"
-    workflow_status = "created"
-    for _wf_attempt in (1, 2):
-        try:
-            await db.create_coder_workflow(
-                workflow_id,
-                conv_id,
-                project_id=project_id,
-                mode="fix_uploaded_project",
-                state="planning",
-                user_task=f"Uploaded project: {safe_name}",
-                contract=project_contract,
-                artifact_status="not_ready",
-            )
-            break
-        except Exception as e:
-            print(f"[CoderUpload] workflow create failed (attempt {_wf_attempt}): {e}")
-            if _wf_attempt == 2:
-                workflow_id = ""
-                workflow_status = "failed"
-
-    # Phase 4.2 — run the Project Indexer inline (the response deliberately
-    # includes its status). It walks the uploaded tree, detects build system,
-    # and seeds ChromaDB code_memory so that subsequent ask_project /
-    # generate_code calls have semantic retrieval over the uploaded code.
-    # Failure is non-fatal: even if it fails, the upload itself succeeds.
-    indexer_run_id = ""
-    indexer_status = "not_started"
-    try:
-        from agents import project_indexer
-        indexer_envelope = await project_indexer.run_project_indexer(
-            http, events, conv_id,
-            project_id=project_id,
-            project_dir=remote_dir,
-            project_name=project_name,
-        )
-        indexer_run_id = indexer_envelope.get("run_id", "") or ""
-        indexer_status = indexer_envelope.get("status", "ok") or "ok"
-        # The indexer may also have detected a more accurate language than the
-        # upload-time mime/extension heuristic. If so, update the
-        # coding_projects row so downstream tools see the corrected value.
-        detected_lang = (indexer_envelope.get("language") or "").strip()
-        if detected_lang and detected_lang != language:
-            try:
-                await db.upsert_coding_project(
-                    project_id=project_id,
-                    name=project_name,
-                    conversation_id=conv_id,
-                    description=description,
-                    language=detected_lang,
-                    file_manifest=manifest,
-                    openhands_project_id=project_id,
-                )
-                language = detected_lang
-                print(f"[CoderUpload] Indexer corrected language → {detected_lang}")
-            except Exception as e:
-                print(f"[CoderUpload] language correction failed (non-fatal): {e}")
-    except Exception as e:
-        print(f"[CoderUpload] Indexer failed (non-fatal): {e}")
-        indexer_status = "failed"
-
-    # Keep the local staging copy as a backup we can re-push if needed.
-    return {
-        "project_id": project_id,
-        "workflow_id": workflow_id,
-        "workflow_status": workflow_status,
-        "name": project_name,
-        "language": language,
-        "file_count": len(manifest),
-        "files": manifest[:30],
-        "sandbox_path": remote_dir,
-        "size_bytes": archive_size,
-        "indexer_run_id": indexer_run_id,
-        "indexer_status": indexer_status,
-        "git_baseline_status": git_baseline_status,
-        "detected_build_system": project_contract.get("build_system", "unknown"),
-        "detected_build_cmd": project_contract.get("build_cmd", ""),
-        "detected_test_cmd": project_contract.get("test_cmd", ""),
-        "contract": project_contract,
-    }
-
+    # Upload establishes a project; the next explicit request chooses Q&A
+    # or editing. Source inventory is built by the job worker, independently
+    # of optional embeddings.
+    return {"project_id": project_id, "workflow_id": "", "workflow_status": "awaiting_request",
+            "name": project_name, "language": language, "file_count": len(manifest), "files": manifest[:30],
+            "sandbox_path": remote_dir, "size_bytes": archive_size, "indexer_run_id": "",
+            "indexer_status": "optional", "git_baseline_status": git_baseline_status,
+            "detected_build_system": project_contract.get("build_system", "unknown"),
+            "detected_build_cmd": project_contract.get("build_cmd", ""),
+            "detected_test_cmd": project_contract.get("test_cmd", ""), "contract": project_contract}
 
 # ============================================================
 # CODEBOX — CODE EXECUTION
@@ -1428,7 +1299,6 @@ async def execute_code(req: ExecuteRequest):
         })
         raise HTTPException(502, f"CodeBox error: {e}")
 
-
 @app.post("/api/execute/shell")
 async def execute_shell(req: ShellRequest):
     """Run a shell command on Codebox."""
@@ -1458,7 +1328,6 @@ async def execute_shell(req: ShellRequest):
         await events.emit(conv_id, "tool_error", {"tool": "run_shell", "status": str(e), "icon": "terminal"})
         raise HTTPException(502, f"Shell error: {e}")
 
-
 @app.get("/api/execute/languages")
 async def get_languages():
     """List available languages from Codebox."""
@@ -1466,8 +1335,7 @@ async def get_languages():
         r = await http.get(f"{config.CODEBOX_URL}/languages")
         return r.json()
     except Exception as e:
-        raise HTTPException(502, f"Codebox error: {e}")
-
+        raise HTTPException(502, f"Hephaestus error: {e}")
 
 # ============================================================
 # SEARXNG — WEB SEARCH
@@ -1511,7 +1379,6 @@ async def search(req: SearchRequest):
     except Exception as e:
         await events.emit(conv_id, "tool_error", {"tool": "research", "status": str(e), "icon": "search"})
         raise HTTPException(502, f"SearXNG error: {e}")
-
 
 @app.post("/api/fetch-url")
 async def fetch_url(req: FetchUrlRequest):
@@ -1559,7 +1426,6 @@ async def fetch_url(req: FetchUrlRequest):
         await events.emit(conv_id, "tool_error", {"tool": "fetch_url", "status": str(e), "icon": "globe"})
         raise HTTPException(502, f"Fetch error: {e}")
 
-
 @app.get("/api/proxy-preview")
 async def proxy_preview(url: str):
     """Fetch an external URL and return raw content for preview iframe."""
@@ -1602,7 +1468,6 @@ async def proxy_preview(url: str):
     except Exception as e:
         raise HTTPException(502, f"Proxy error: {e}")
 
-
 # ============================================================
 # N8N — WEBHOOK PROXY
 # ============================================================
@@ -1640,7 +1505,6 @@ async def n8n_execute(req: N8nRequest):
     except Exception as e:
         await events.emit(conv_id, "tool_error", {"tool": "n8n_execute", "status": str(e), "icon": "workflow"})
         raise HTTPException(502, f"n8n error: {e}")
-
 
 # ============================================================
 # SSE — STATUS EVENT STREAM
@@ -1683,7 +1547,6 @@ async def event_stream(conversation_id: str, after: int = 0):
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
-
 # ============================================================
 # DEEP RESEARCH — durable report workspace
 # ============================================================
@@ -1692,7 +1555,6 @@ def _research_default_depth(report_type: str, depth: Optional[int]) -> int:
         return max(1, min(5, int(depth or 3)))
     tmpl = REPORT_TEMPLATE_MAP.get(report_type or "analyst") or REPORT_TEMPLATE_MAP["analyst"]
     return int(tmpl.get("default_depth") or 3)
-
 
 async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
     query = (req.query or "").strip()
@@ -1754,22 +1616,18 @@ async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
     task.add_done_callback(lambda finished: _RESEARCH_TASKS.pop(report_id, None))
     return await db.get_research_report(report_id)
 
-
 @app.get("/api/research/templates")
 async def get_research_templates():
     return {"templates": REPORT_TEMPLATES}
-
 
 @app.get("/api/research/reports")
 async def list_research_reports(limit: int = Query(50), offset: int = Query(0),
                                 q: str = Query("")):
     return await db.list_research_reports(limit=limit, offset=offset, query=q)
 
-
 @app.post("/api/research/reports")
 async def create_research_report(req: ResearchReportCreate):
     return await _create_and_start_research_report(req)
-
 
 @app.get("/api/research/reports/{report_id}")
 async def get_research_report(report_id: str):
@@ -1777,7 +1635,6 @@ async def get_research_report(report_id: str):
     if not report:
         raise HTTPException(404, "Research report not found")
     return report
-
 
 @app.get("/api/research/reports/{report_id}/evidence/{source_id}")
 async def get_research_evidence(report_id: str, source_id: str,
@@ -1787,7 +1644,6 @@ async def get_research_evidence(report_id: str, source_id: str,
     if evidence is None:
         raise HTTPException(404, "Research report not found")
     return evidence
-
 
 @app.delete("/api/research/reports/{report_id}")
 async def delete_research_report(report_id: str):
@@ -1802,7 +1658,6 @@ async def delete_research_report(report_id: str):
         await asyncio.gather(task, return_exceptions=True)
     await db.delete_research_report(report_id)
     return {"ok": True}
-
 
 @app.post("/api/research/reports/{report_id}/cancel")
 async def cancel_research_report(report_id: str):
@@ -1836,7 +1691,6 @@ async def cancel_research_report(report_id: str):
         await events.emit(report_id, "research_error", ev["data"])
     return {"report_id": report_id, "signaled": signaled, "marked": marked}
 
-
 @app.post('/api/research/reports/{report_id}/resume')
 async def resume_research_report(report_id: str):
     import research_checkpoints
@@ -1862,13 +1716,11 @@ async def resume_research_report(report_id: str):
     task.add_done_callback(lambda finished:_RESEARCH_TASKS.pop(report_id,None))
     return await db.get_research_report(report_id)
 
-
 @app.get('/api/research/reports/{report_id}/versions')
 async def research_versions(report_id: str):
     import research_checkpoints
     try:return await research_checkpoints.versions(report_id)
     except LookupError as exc:raise HTTPException(404,str(exc)) from exc
-
 
 @app.get('/api/research/reports/{report_id}/compare')
 async def research_compare(report_id: str, older: int, newer: int):
@@ -1876,14 +1728,12 @@ async def research_compare(report_id: str, older: int, newer: int):
     try:return await research_checkpoints.compare(report_id,older,newer)
     except LookupError as exc:raise HTTPException(404,str(exc)) from exc
 
-
 @app.post('/api/research/reports/{report_id}/question')
 async def research_question(report_id: str, body: dict):
     import research_checkpoints
     try:return await research_checkpoints.question(http,report_id,str(body.get('question') or ''))
     except LookupError as exc:raise HTTPException(404,str(exc)) from exc
     except ValueError as exc:raise HTTPException(400,str(exc)) from exc
-
 
 @app.post("/api/research/reports/{report_id}/rerun")
 async def rerun_research_report(report_id: str):
@@ -1903,7 +1753,6 @@ async def rerun_research_report(report_id: str):
         inputs=report.get("inputs", []),
     ))
 
-
 # ============================================================
 # RUNS — Coder Bot v2 durable agent invocations
 # ============================================================
@@ -1919,7 +1768,6 @@ async def get_run(run_id: str):
         raise HTTPException(404, "Run not found")
     return run
 
-
 @app.get("/api/runs")
 async def list_runs(conversation_id: str = Query(None), project_id: str = Query(None),
                     limit: int = Query(100)):
@@ -1934,7 +1782,6 @@ async def list_runs(conversation_id: str = Query(None), project_id: str = Query(
     if project_id:
         return await db.get_runs_by_project(project_id, limit=limit)
     raise HTTPException(400, "conversation_id or project_id is required")
-
 
 @app.post("/api/runs/{run_id}/cancel")
 async def cancel_run(run_id: str):
@@ -1957,7 +1804,10 @@ async def cancel_run(run_id: str):
     if not row:
         raise HTTPException(404, "Run not found")
     if row.get("workflow_id") and await coder_job_store.get(row["workflow_id"]):
-        return await coder_jobs.cancel(row["workflow_id"])
+        try:return await coder_jobs.cancel(row["workflow_id"])
+        except ValueError as error:raise HTTPException(409,str(error)) from error
+    if row.get('role') in {'architect','builder','reviewer','acceptance','fixer','aider.fix','project_qa'}:
+        raise HTTPException(409,coder_jobs.RETIRED_ENGINE)
     if row.get("role") == "documents":
         return await documents.cancel_run(http, run_id)
     signaled = cancel_registry.signal(run_id)
@@ -1990,7 +1840,6 @@ async def cancel_run(run_id: str):
 
     return {"run_id": run_id, "signaled": signaled, "db_marked": db_marked}
 
-
 # ============================================================
 # CODER WORKFLOWS — workflow-level Coder Bot v2 state
 # ============================================================
@@ -2004,35 +1853,22 @@ async def get_coder_workflow(workflow_id: str):
         raise HTTPException(404, "Workflow not found")
     return wf
 
-
 @app.get("/api/coder/workflows")
 async def list_coder_workflows(conversation_id: str = Query(...),
                                limit: int = Query(50)):
     rows = await db.get_coder_workflows_by_conversation(conversation_id, limit=limit)
     return [await coder_job_store.get(row["id"]) if row.get("workflow_version") == 3 else row for row in rows]
 
-
 @app.post("/api/coder/workflows/{workflow_id}/cancel")
 async def cancel_coder_workflow(workflow_id: str):
     version3 = await coder_job_store.get(workflow_id)
     if version3:
-        return await coder_jobs.cancel(workflow_id)
+        try:return await coder_jobs.cancel(workflow_id)
+        except ValueError as error:raise HTTPException(409,str(error)) from error
     wf = await db.get_coder_workflow(workflow_id)
     if not wf:
         raise HTTPException(404, "Workflow not found")
-    active_run_id = wf.get("active_run_id") or ""
-    signaled = False
-    if active_run_id:
-        import cancel_registry
-        signaled = cancel_registry.signal(active_run_id)
-    await db.update_coder_workflow(
-        workflow_id,
-        state="cancelled",
-        cancel_requested=True,
-        artifact_status="cancelled",
-    )
-    return {"workflow_id": workflow_id, "active_run_id": active_run_id, "signaled": signaled}
-
+    raise HTTPException(409,coder_jobs.RETIRED_ENGINE)
 
 # ============================================================
 # CONVERSATIONS
@@ -2054,11 +1890,9 @@ async def create_conversation(req: ConversationCreate):
         raise HTTPException(400, str(exc)) from exc
     return await db.get_conversation(id)
 
-
 @app.get("/api/conversations")
 async def list_conversations(limit: int = Query(50), offset: int = Query(0)):
     return await db.get_conversations(limit, offset)
-
 
 @app.get("/api/conversations/{conv_id}")
 async def get_conversation(conv_id: str):
@@ -2066,7 +1900,6 @@ async def get_conversation(conv_id: str):
     if not conv:
         raise HTTPException(404, "Conversation not found")
     return conv
-
 
 @app.patch("/api/conversations/{conv_id}")
 async def update_conversation(conv_id: str, req: ConversationUpdate):
@@ -2078,14 +1911,12 @@ async def update_conversation(conv_id: str, req: ConversationUpdate):
         raise HTTPException(400, str(exc)) from exc
     return await db.get_conversation(conv_id)
 
-
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
     await db.delete_conversation(conv_id)
     # Drop any history-recall chunks indexed from this conversation
     _track_bg(rag.remove_history_conversation(conv_id))
     return {"status": "deleted"}
-
 
 @app.delete("/api/conversations")
 async def delete_all_conversations():
@@ -2116,7 +1947,6 @@ async def delete_all_conversations():
     print(f"[Cleanup] Deleted {count} conversations and related data for user {user_id}")
     return {"deleted": count}
 
-
 class AddMessageRequest(BaseModel):
     role: str
     content: str
@@ -2145,7 +1975,6 @@ async def add_message(conv_id: str, request: Request):
         raise HTTPException(400, "role and content are required")
     msg_id = await db.add_message(conv_id, role, content, metadata=meta)
     return {"status": "added", "message_id": msg_id}
-
 
 @app.patch("/api/conversations/{conv_id}/messages/{msg_id}")
 async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
@@ -2183,7 +2012,6 @@ async def update_message(conv_id: str, msg_id: int, body: dict = Body(...)):
         _track_bg(_reindex_edited())
     return {"status": "updated"}
 
-
 @app.patch("/api/conversations/{conv_id}/messages/{msg_id}/rating")
 async def rate_message(conv_id: str, msg_id: int, body: dict = Body(...)):
     """Thumbs feedback on a message. Deliberately a separate route: the content
@@ -2200,7 +2028,6 @@ async def rate_message(conv_id: str, msg_id: int, body: dict = Body(...)):
         raise HTTPException(404, "message not found")
     return {"status": "rated", "rating": rating}
 
-
 @app.delete("/api/conversations/{conv_id}/messages")
 async def truncate_messages(conv_id: str, from_id: int = Query(...)):
     """Delete a message and everything after it (regenerate/edit truncation).
@@ -2214,7 +2041,6 @@ async def truncate_messages(conv_id: str, from_id: int = Query(...)):
         _track_bg(rag.remove_history_messages(deleted))
     return {"status": "truncated", "deleted": len(deleted), "message_ids": deleted}
 
-
 @app.delete("/api/conversations/{conv_id}/messages/{msg_id}")
 async def delete_message(conv_id: str, msg_id: int):
     ok = await db.delete_message(msg_id)
@@ -2222,7 +2048,6 @@ async def delete_message(conv_id: str, msg_id: int):
         raise HTTPException(404, "message not found")
     _track_bg(rag.remove_history_message(msg_id))
     return {"status": "deleted"}
-
 
 @app.get("/api/history/search")
 async def search_chat_history(q: str, limit: int = 12):
@@ -2267,7 +2092,6 @@ async def search_chat_history(q: str, limit: int = 12):
                     "snippet": (k.get("snippet") or k.get("content") or "")[:300]})
     return {"query": q, "results": out[:limit]}
 
-
 # ============================================================
 # KNOWLEDGE BASES
 # ============================================================
@@ -2275,19 +2099,16 @@ async def search_chat_history(q: str, limit: int = 12):
 async def list_kbs():
     return await db.get_kbs()
 
-
 @app.post("/api/knowledge-bases")
 async def create_kb(req: KBCreate):
     id = f"kb-{uuid.uuid4().hex[:12]}"
     await db.create_kb(id, req.name, req.description)
     return {"id": id, "name": req.name, "description": req.description, "files": []}
 
-
 @app.put("/api/knowledge-bases/{kb_id}")
 async def update_kb(kb_id: str, req: KBCreate):
     await db.update_kb(kb_id, name=req.name, description=req.description)
     return {"status": "updated"}
-
 
 @app.delete("/api/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str):
@@ -2305,11 +2126,9 @@ async def delete_kb(kb_id: str):
         print(f"[RAG] Error deleting KB index: {e}")
     return {"status": "deleted"}
 
-
 # Track background indexing status per file
 _indexing_status: dict[str, dict] = {}  # key: "kb_id:filename" → status dict
 _INDEXING_STATUS_TTL = 3600  # seconds
-
 
 def _set_indexing_status(status_key: str, value: dict) -> None:
     """Write a status entry and TTL-evict stale ones on the way — uploads
@@ -2321,7 +2140,6 @@ def _set_indexing_status(status_key: str, value: dict) -> None:
     for k in [k for k, v in _indexing_status.items()
               if now - (v.get("_ts") or 0) > _INDEXING_STATUS_TTL]:
         _indexing_status.pop(k, None)
-
 
 @app.post("/api/knowledge-bases/{kb_id}/files")
 async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
@@ -2355,14 +2173,11 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 
     return {"id": file_id, "filename": safe_name, "file_size": len(content), "indexing": True}
 
-
 _URL_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
 
 def _kb_url_slug(text: str, fallback: str = "page") -> str:
     slug = _URL_SLUG_RE.sub("-", (text or "").lower()).strip("-")[:80]
     return slug or fallback
-
 
 @app.post("/api/knowledge-bases/{kb_id}/urls")
 async def ingest_kb_url(kb_id: str, body: dict = Body(...)):
@@ -2468,7 +2283,6 @@ async def ingest_kb_url(kb_id: str, body: dict = Body(...)):
     return {"id": file_id, "filename": safe_name, "file_size": len(content_bytes),
             "indexing": True, "source_url": final_url or url, "replaced": bool(existing)}
 
-
 @app.get("/api/knowledge-bases/{kb_id}/files/{filename}/status")
 async def get_file_index_status(kb_id: str, filename: str):
     """Check background indexing status for a file."""
@@ -2487,7 +2301,6 @@ async def get_file_index_status(kb_id: str, filename: str):
             _indexing_status.pop(status_key, None)
         return {k: v for k, v in status.items() if k != "_ts"}
     return {"status": "unknown", "filename": filename}
-
 
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/preview")
 async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200, chunk: Optional[int] = None):
@@ -2535,7 +2348,6 @@ async def preview_kb_file(kb_id: str, file_id: int, lines: int = 200, chunk: Opt
     except UnicodeDecodeError:
         return {"filename": filename, "content": "Binary file — preview not available", "truncated": False, "total_lines": 0}
 
-
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/pdf-text")
 async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
     """Extract text from first N pages of a PDF for quick preview."""
@@ -2579,7 +2391,6 @@ async def pdf_text_preview(kb_id: str, file_id: int, pages: int = 10):
     except Exception as e:
         return {"filename": filename, "content": f"Failed to extract PDF text: {e}", "total_pages": 0, "previewed_pages": 0, "truncated": False}
 
-
 @app.post("/api/extract-pdf")
 async def extract_pdf(file: UploadFile = File(...)):
     """Extract text from an uploaded PDF file."""
@@ -2619,7 +2430,6 @@ async def extract_pdf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(422, f"Failed to extract PDF text: {e}")
 
-
 @app.get("/api/knowledge-bases/{kb_id}/files/{file_id}/raw")
 async def raw_kb_file(kb_id: str, file_id: int):
     """Serve a KB file raw (for PDF/image preview in browser)."""
@@ -2645,7 +2455,6 @@ async def raw_kb_file(kb_id: str, file_id: int):
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found on disk")
     return FileResponse(file_path, filename=row["display_name"])
-
 
 @app.delete("/api/knowledge-bases/files/{file_id}")
 async def delete_kb_file(file_id: int):
@@ -2676,7 +2485,6 @@ async def delete_kb_file(file_id: int):
 
     return {"status": "deleted"}
 
-
 @app.post("/api/knowledge-bases/{kb_id}/reindex")
 async def reindex_kb(kb_id: str):
     """Reindex all files in a KB — useful for migration or after changing embed model."""
@@ -2693,7 +2501,6 @@ async def reindex_kb(kb_id: str):
     except Exception as e:
         raise HTTPException(500, f"Reindex failed: {_format_reindex_error(kb.get('name', kb_id), e)}")
     return {"status": "reindexed", "results": results}
-
 
 @app.post("/api/knowledge-bases/reindex-all")
 async def reindex_all_kbs():
@@ -2720,7 +2527,6 @@ async def reindex_all_kbs():
         raise HTTPException(500, f"Reindex failed: {errors[0]['error']}")
     return {"status": "reindexed", "kbs": all_results, "errors": errors}
 
-
 @app.post("/api/knowledge-bases/query")
 async def query_knowledge_bases(body: dict):
     """Hybrid retrieval probe (vector + keyword, RRF-fused). Used by tests/UI."""
@@ -2739,14 +2545,12 @@ async def query_knowledge_bases(body: dict):
     chunks = await rag.hybrid_query(kb_ids, query, top_k=top_k)
     return {"chunks": chunks, "count": len(chunks)}
 
-
 # ============================================================
 # IMAGE STUDIO — ComfyUI job proxy
 # ============================================================
 # In-process job registry (restart-lossy, same posture as cancel_registry).
 # On a cache miss after restart, GET falls back to ComfyUI history directly.
 _image_checkpoints_cache: dict = {"ts": 0.0, "checkpoints": []}
-
 
 @app.post("/api/images/generate")
 async def generate_image_job(body: dict = Body(...)):
@@ -2828,7 +2632,6 @@ async def generate_image_job(body: dict = Body(...)):
     await image_job_store.save(submission)
     return {"job_id": submission["id"], "seed": seed, "params": params}
 
-
 async def _image_monitor_loop():
     while True:
         for owner, identity in await image_job_store.pending():
@@ -2844,7 +2647,6 @@ async def _image_monitor_loop():
             finally:
                 db.reset_current_user_id(token)
         await asyncio.sleep(3)
-
 
 @app.get("/api/images/jobs/{job_id}")
 @image_job_store.serialized
@@ -2955,7 +2757,6 @@ async def get_image_job(job_id: str):
     _track_bg(comfyui.forget_job(prompt_id))
     return {"status": "done", "images": images, "params": params}
 
-
 @app.post("/api/images/jobs/{job_id}/cancel")
 @image_job_store.serialized
 async def cancel_image_job(job_id: str):
@@ -2979,7 +2780,6 @@ async def cancel_image_job(job_id: str):
         await image_job_store.save(job)
     return {"status": job["status"]}
 
-
 @app.post("/api/images/free-memory")
 async def free_image_memory():
     """Unload cached ComfyUI models from RAM/VRAM on demand."""
@@ -2993,7 +2793,6 @@ async def free_image_memory():
         detail = result.get("error") or "ComfyUI queue is active"
         raise HTTPException(409, detail)
     return result
-
 
 @app.post("/api/images/restart-comfyui")
 async def restart_comfyui_image_service():
@@ -3010,7 +2809,6 @@ async def restart_comfyui_image_service():
         raise HTTPException(status, detail)
     return result
 
-
 @app.get("/api/images/memory-status")
 async def get_image_memory_status():
     """Optional status from the HyprChat ComfyUI control node."""
@@ -3020,7 +2818,6 @@ async def get_image_memory_status():
     if status is None:
         raise HTTPException(404, "HyprChat ComfyUI control node is not installed")
     return status
-
 
 @app.get("/api/images/workflows")
 async def list_image_workflows():
@@ -3032,7 +2829,6 @@ async def list_image_workflows():
         if wf:
             out.append({"name": name, **comfyui.describe_workflow(wf)})
     return {"workflows": out}
-
 
 @app.post("/api/images/workflows")
 async def upload_image_workflow(body: dict = Body(...)):
@@ -3066,13 +2862,11 @@ async def upload_image_workflow(body: dict = Body(...)):
         raise HTTPException(400, f"Workflow not usable for text-to-image: {e}")
     return {"status": "saved", "name": saved, **comfyui.describe_workflow(wf)}
 
-
 @app.delete("/api/images/workflows/{name}")
 async def delete_image_workflow(name: str):
     if not comfyui.delete_workflow(name):
         raise HTTPException(404, "Workflow not found")
     return {"status": "deleted"}
-
 
 @app.get("/api/images/checkpoints")
 async def list_image_checkpoints():
@@ -3097,7 +2891,6 @@ async def list_image_checkpoints():
         # merged with user-saved overrides) so the UI can auto-configure.
         "settings": {c: comfyui.settings_for_checkpoint(c) for c in cks},
     }
-
 
 @app.put("/api/images/model-settings/{checkpoint}")
 async def save_model_settings_ep(checkpoint: str, body: dict = Body(...)):
@@ -3131,7 +2924,6 @@ async def save_model_settings_ep(checkpoint: str, body: dict = Body(...)):
     comfyui.save_model_settings(settings)
     return {"status": "saved", "checkpoint": checkpoint, "settings": comfyui.settings_for_checkpoint(checkpoint)}
 
-
 @app.delete("/api/images/model-settings/{checkpoint}")
 async def clear_model_settings_ep(checkpoint: str):
     settings = comfyui.load_model_settings()
@@ -3140,7 +2932,6 @@ async def clear_model_settings_ep(checkpoint: str):
     settings.pop(checkpoint)
     comfyui.save_model_settings(settings)
     return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint)}
-
 
 @app.post("/api/images/enhance-prompt")
 async def enhance_image_prompt(body: dict = Body(...)):
@@ -3156,7 +2947,6 @@ async def enhance_image_prompt(body: dict = Body(...)):
                                  "check that Ollama is reachable and try again")
     enhanced, negative, model = result
     return {"prompt": enhanced, "negative_prompt": negative, "model": model}
-
 
 @app.post("/api/images/purge")
 async def purge_image_studio():
@@ -3246,14 +3036,12 @@ async def purge_image_studio():
         "note": note,
     }
 
-
 # ============================================================
 # WORKSPACE API
 # ============================================================
 @app.get("/api/workspaces")
 async def list_workspaces():
     return await db.get_workspaces()
-
 
 @app.post("/api/workspaces")
 async def create_workspace_ep(body: dict = Body(...)):
@@ -3269,14 +3057,12 @@ async def create_workspace_ep(body: dict = Body(...)):
         raise HTTPException(400, str(exc)) from exc
     return await db.get_workspace(ws_id)
 
-
 @app.get("/api/workspaces/{ws_id}")
 async def get_workspace_ep(ws_id: str):
     ws = await db.get_workspace(ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Not found")
     return ws
-
 
 @app.patch("/api/workspaces/{ws_id}")
 async def update_workspace_ep(ws_id: str, body: dict = Body(...)):
@@ -3296,12 +3082,10 @@ async def update_workspace_ep(ws_id: str, body: dict = Body(...)):
         raise HTTPException(400, str(exc)) from exc
     return await db.get_workspace(ws_id)
 
-
 @app.delete("/api/workspaces/{ws_id}")
 async def delete_workspace_ep(ws_id: str):
     await db.delete_workspace(ws_id)
     return {"ok": True}
-
 
 @app.post("/api/workspaces/{ws_id}/conversations")
 async def add_conv_to_ws(ws_id: str, body: dict = Body(...)):
@@ -3310,13 +3094,11 @@ async def add_conv_to_ws(ws_id: str, body: dict = Body(...)):
     await db.add_conv_to_workspace(ws_id, body["conversation_id"])
     return {"ok": True}
 
-
 @app.delete("/api/workspaces/{ws_id}/conversations/{conv_id}")
 async def remove_conv_from_ws(ws_id: str, conv_id: str):
     if not await db.get_workspace_basic(ws_id): raise HTTPException(404, "Workspace not found")
     await db.remove_conv_from_workspace(ws_id, conv_id)
     return {"ok": True}
-
 
 @app.post("/api/workspaces/{ws_id}/research-reports")
 async def add_research_report_to_ws(ws_id: str, body: dict = Body(...)):
@@ -3330,12 +3112,10 @@ async def add_research_report_to_ws(ws_id: str, body: dict = Body(...)):
     await db.add_research_report_to_workspace(ws_id, report_id)
     return {"ok": True}
 
-
 @app.delete("/api/workspaces/{ws_id}/research-reports/{report_id}")
 async def remove_research_report_from_ws(ws_id: str, report_id: str):
     await db.remove_research_report_from_workspace(ws_id, report_id)
     return {"ok": True}
-
 
 def _extract_memory_json_array(text: str) -> list:
     raw = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
@@ -3348,15 +3128,12 @@ def _extract_memory_json_array(text: str) -> list:
     except Exception:
         return []
 
-
 def _looks_like_secret_memory(text: str) -> bool:
     return bool(re.search(r"(password|api[_ -]?key|secret|private key|token)\s*[:=]", text or "", re.I))
-
 
 def _memory_scan_num_ctx(prompt: str, num_predict: int = 900) -> int:
     """Use the configured extraction context without hidden clamps."""
     return context_policy.helper_context("extraction")
-
 
 def _existing_memories_scan_hint(existing: list, max_items: int = 20, max_chars: int = 2200) -> str:
     """Short list of current accepted/suggested memories for scan prompts, so
@@ -3375,16 +3152,13 @@ def _existing_memories_scan_hint(existing: list, max_items: int = 20, max_chars:
         total += len(line) + 1
     return "\n".join(lines)
 
-
 @app.get("/api/memory/profile")
 async def get_memory_profile_ep():
     return await db.get_user_profile()
 
-
 @app.patch("/api/memory/profile")
 async def update_memory_profile_ep(body: dict = Body(...)):
     return await db.update_user_profile(**body)
-
 
 @app.get("/api/memory/memories")
 async def list_global_memories_ep(
@@ -3397,7 +3171,6 @@ async def list_global_memories_ep(
         include_archived=True,
     )
     return {"memories": memories}
-
 
 @app.post("/api/memory/memories")
 async def create_global_memory_ep(body: dict = Body(...)):
@@ -3423,7 +3196,6 @@ async def create_global_memory_ep(body: dict = Body(...)):
         raise HTTPException(400, str(e))
     return mem
 
-
 @app.patch("/api/memory/memories/{memory_id}")
 async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
     mem = await db.update_global_memory(memory_id, **body)
@@ -3431,12 +3203,10 @@ async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
         raise HTTPException(404, "Memory not found")
     return mem
 
-
 @app.delete("/api/memory/memories")
 async def clear_all_memories_ep():
     deleted = await db.clear_user_memories()
     return {"ok": True, "deleted": deleted}
-
 
 @app.delete("/api/memory/memories/{memory_id}")
 async def delete_global_memory_ep(memory_id: str):
@@ -3445,7 +3215,6 @@ async def delete_global_memory_ep(memory_id: str):
         raise HTTPException(404, "Memory not found")
     return {"ok": True}
 
-
 @app.post("/api/memory/memories/{memory_id}/accept")
 async def accept_global_memory_ep(memory_id: str, body: dict = Body(default={})):
     mem = await db.accept_global_memory(memory_id, supersedes_id=body.get("supersedes_id"))
@@ -3453,14 +3222,12 @@ async def accept_global_memory_ep(memory_id: str, body: dict = Body(default={}))
         raise HTTPException(404, "Memory not found")
     return mem
 
-
 @app.post("/api/memory/memories/{memory_id}/reject")
 async def reject_global_memory_ep(memory_id: str):
     mem = await db.reject_global_memory(memory_id)
     if not mem:
         raise HTTPException(404, "Memory not found")
     return mem
-
 
 @app.post("/api/memory/suggest")
 async def suggest_global_memories_ep(body: dict = Body(default={})):
@@ -3580,7 +3347,6 @@ async def suggest_global_memories_ep(body: dict = Body(default={})):
 
     return {"created": len(created), "memories": created}
 
-
 @app.get("/api/workspaces/{ws_id}/memories")
 async def list_workspace_memories_ep(
     ws_id: str,
@@ -3596,7 +3362,6 @@ async def list_workspace_memories_ep(
         include_archived=True,
     )
     return {"memories": memories}
-
 
 @app.post("/api/workspaces/{ws_id}/memories/suggest")
 async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={})):
@@ -3717,7 +3482,6 @@ async def suggest_workspace_memories_ep(ws_id: str, body: dict = Body(default={}
 
     return {"created": len(created), "memories": created}
 
-
 @app.post("/api/workspaces/{ws_id}/memories")
 async def create_workspace_memory_ep(ws_id: str, body: dict = Body(...)):
     if not await db.get_workspace_basic(ws_id):
@@ -3745,14 +3509,12 @@ async def create_workspace_memory_ep(ws_id: str, body: dict = Body(...)):
         raise HTTPException(400, str(e))
     return mem
 
-
 @app.patch("/api/workspaces/{ws_id}/memories/{memory_id}")
 async def update_workspace_memory_ep(ws_id: str, memory_id: str, body: dict = Body(...)):
     mem = await db.update_workspace_memory(memory_id, ws_id, **body)
     if not mem:
         raise HTTPException(404, "Memory not found")
     return mem
-
 
 @app.delete("/api/workspaces/{ws_id}/memories/{memory_id}")
 async def delete_workspace_memory_ep(ws_id: str, memory_id: str):
@@ -3761,14 +3523,12 @@ async def delete_workspace_memory_ep(ws_id: str, memory_id: str):
         raise HTTPException(404, "Memory not found")
     return {"ok": True}
 
-
 @app.post("/api/workspaces/{ws_id}/memories/{memory_id}/accept")
 async def accept_workspace_memory_ep(ws_id: str, memory_id: str, body: dict = Body(default={})):
     mem = await db.accept_workspace_memory(memory_id, ws_id, supersedes_id=body.get("supersedes_id"))
     if not mem:
         raise HTTPException(404, "Memory not found")
     return mem
-
 
 @app.post("/api/workspaces/{ws_id}/memories/{memory_id}/reject")
 async def reject_workspace_memory_ep(ws_id: str, memory_id: str):
@@ -3777,13 +3537,11 @@ async def reject_workspace_memory_ep(ws_id: str, memory_id: str):
         raise HTTPException(404, "Memory not found")
     return mem
 
-
 @app.get("/api/workspaces/{ws_id}/memory-blocks")
 async def get_workspace_memory_blocks_ep(ws_id: str):
     if not await db.get_workspace_basic(ws_id):
         raise HTTPException(404, "Workspace not found")
     return {"blocks": await db.get_workspace_memory_blocks(ws_id)}
-
 
 @app.patch("/api/workspaces/{ws_id}/memory-blocks")
 async def update_workspace_memory_blocks_ep(ws_id: str, body: dict = Body(...)):
@@ -3791,7 +3549,6 @@ async def update_workspace_memory_blocks_ep(ws_id: str, body: dict = Body(...)):
         raise HTTPException(404, "Workspace not found")
     blocks = await db.update_workspace_memory_blocks(ws_id, body.get("blocks") or [])
     return {"blocks": blocks}
-
 
 @app.post("/api/workspaces/{ws_id}/analyze")
 async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
@@ -3839,7 +3596,6 @@ async def analyze_workspace_topics(ws_id: str, body: dict = Body(default={})):
         raise HTTPException(500, f"Analysis failed: {e}")
     await db.update_workspace(ws_id, topics=json.dumps(topics[:5]))
     return {"topics": topics}
-
 
 @app.post("/api/workspaces/{ws_id}/create-kb")
 async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
@@ -3907,7 +3663,6 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
     _track_bg(indexing_jobs.execute(indexing_id))
     return {**(await db.get_kb(kb_id)), 'indexing_job_id': indexing_id, 'snapshot': coverage}
 
-
 # ============================================================
 # COUNCIL — CRUD
 # ============================================================
@@ -3915,13 +3670,11 @@ async def create_kb_from_workspace(ws_id: str, body: dict = Body(...)):
 async def get_councils():
     return await db.get_councils()
 
-
 @app.post("/api/councils")
 async def create_council(req: CouncilCreate):
     council_id = f"council-{uuid.uuid4().hex[:8]}"
     await db.create_council(council_id, req.name, req.host_model, req.host_system_prompt, kb_ids=req.kb_ids)
     return await db.get_council(council_id)
-
 
 @app.get("/api/councils/{council_id}")
 async def get_council(council_id: str):
@@ -3930,19 +3683,16 @@ async def get_council(council_id: str):
         raise HTTPException(status_code=404, detail="Council not found")
     return c
 
-
 @app.patch("/api/councils/{council_id}")
 async def update_council(council_id: str, req: CouncilUpdate):
     patch = {k: v for k, v in req.dict().items() if v is not None}
     await db.update_council(council_id, **patch)
     return await db.get_council(council_id)
 
-
 @app.delete("/api/councils/{council_id}")
 async def delete_council(council_id: str):
     await db.delete_council(council_id)
     return {"ok": True}
-
 
 @app.post("/api/councils/{council_id}/members")
 async def add_council_member(council_id: str, req: CouncilMemberCreate):
@@ -3952,19 +3702,16 @@ async def add_council_member(council_id: str, req: CouncilMemberCreate):
             "model_config_id": req.model_config_id, "system_prompt": req.system_prompt,
             "persona_name": req.persona_name, "points": 0}
 
-
 @app.patch("/api/councils/members/{member_id}")
 async def update_council_member(member_id: str, req: CouncilMemberUpdate):
     patch = {k: v for k, v in req.dict().items() if v is not None}
     await db.update_council_member(member_id, **patch)
     return {"ok": True}
 
-
 @app.delete("/api/councils/members/{member_id}")
 async def delete_council_member(member_id: str):
     await db.delete_council_member(member_id)
     return {"ok": True}
-
 
 # ── Council Presets ──
 
@@ -4185,7 +3932,6 @@ COUNCIL_PRESETS = {
     },
 }
 
-
 @app.post("/api/seed/council-preset/{preset}")
 async def seed_council_preset(preset: str):
     """Create a council from a preset template."""
@@ -4212,7 +3958,6 @@ async def seed_council_preset(preset: str):
         member_model = m.get("model", "qwen2.5:3b")
         await db.add_council_member(member_id, council_id, member_model, m["system_prompt"], m["persona_name"])
     return await db.get_council(council_id)
-
 
 @app.get("/api/councils/{council_id}/suggestions")
 async def get_council_suggestions(council_id: str):
@@ -4264,7 +4009,6 @@ async def get_council_suggestions(council_id: str):
         print(f"[COUNCIL] Suggestions error: {e}")
         return {"suggestions": []}
 
-
 @app.get("/api/council-presets")
 async def list_council_presets():
     """List available council preset names and descriptions."""
@@ -4273,7 +4017,6 @@ async def list_council_presets():
          "members": [m["persona_name"] for m in v["members"]]}
         for k, v in COUNCIL_PRESETS.items()
     ]
-
 
 @app.get("/api/councils/{council_id}/analyze")
 async def analyze_council(council_id: str):
@@ -4380,7 +4123,6 @@ async def analyze_council(council_id: str):
         "recommendations": recommendations,
     }
 
-
 # ============================================================
 # COUNCIL — CHAT STREAM (multi-model parallel)
 # ============================================================
@@ -4417,7 +4159,6 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
-
 
 # ============================================================
 # QUICK SEARCH
@@ -4458,7 +4199,6 @@ async def img_proxy(u: str):
         headers={"Cache-Control": "public, max-age=86400"},
     )
 
-
 @app.post("/api/quick-search")
 async def quick_search(req: QuickSearchRequest):
     """Fast web search via SearXNG — returns structured results with type detection
@@ -4470,13 +4210,9 @@ async def quick_search(req: QuickSearchRequest):
     except Exception as e:
         return {"results": [], "query": req.query, "error": str(e)}
 
-
 # ============================================================
 # SETTINGS & SANDBOX API
 # ============================================================
-
-
-
 
 # ============================================================
 # FULL-TEXT CONVERSATION SEARCH
@@ -4488,7 +4224,6 @@ async def search_conversations(req: ConversationSearchRequest):
     # Sanitize through the quoted-terms builder: raw sentences with ?/quotes
     # are FTS5 MATCH syntax errors and made search silently return nothing.
     return await db.search_messages(db._fts_match_expr(req.query.strip()), req.limit)
-
 
 # ============================================================
 # CONVERSATION FORKING
@@ -4504,11 +4239,9 @@ async def fork_conversation(conv_id: str, req: ForkRequest):
         raise HTTPException(500, "Fork failed")
     return forked
 
-
 @app.get("/api/conversations/{conv_id}/forks")
 async def get_conversation_forks(conv_id: str):
     return await db.get_forks(conv_id)
-
 
 # ============================================================
 # AUTO-TITLE GENERATION
@@ -4573,7 +4306,6 @@ async def generate_daily_message(request: Request, body: dict = Body(default={})
         print(f"[DAILY-MESSAGE] Error: {e}")
         return {"message": fallback, "model": model, "fallback": True}
 
-
 @app.post("/api/conversations/{conv_id}/generate-title")
 async def generate_title(conv_id: str, body: dict = Body(default={})):
     conv = await db.get_conversation(conv_id)
@@ -4605,7 +4337,6 @@ async def generate_title(conv_id: str, body: dict = Body(default={})):
         print(f"[AUTO-TITLE] Error: {e}")
         return {"title": ""}
 
-
 # ============================================================
 # SERVE FRONTEND (production)
 # ============================================================
@@ -4627,7 +4358,6 @@ class _FrontendStaticFiles(StaticFiles):
             resp.headers["Cache-Control"] = "no-cache"
         return resp
 
-
 import job_registry
 import task_queue
 import indexing_jobs
@@ -4645,7 +4375,6 @@ job_registry.configure_actions({
         candidate_revision=opts.get('candidate_revision'), clarification=opts.get('clarification')),
 })
 
-
 @app.get('/api/kb/{kb_id}/index-health')
 async def kb_index_health(kb_id: str):
     if not await db.get_kb(kb_id):raise HTTPException(404,'Knowledge base not found')
@@ -4660,7 +4389,6 @@ async def kb_index_health(kb_id: str):
             'legacy_metadata_unavailable':max(0,len(files)-len(indexed))}
     finally:await conn.close()
 
-
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 if os.path.isfile(os.path.join(frontend_dir, "index.html")):
     app.mount("/", _FrontendStaticFiles(directory=frontend_dir, html=True), name="frontend")
@@ -4668,7 +4396,6 @@ else:
     print("[STARTUP] WARNING: frontend/dist/index.html not found — the UI will not be served.")
     print("[STARTUP]          frontend/dist/ is build output (not committed). Build it with:")
     print("[STARTUP]              cd frontend && npm install && npm run build")
-
 
 if __name__ == "__main__":
     import uvicorn

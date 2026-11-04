@@ -151,7 +151,7 @@ def model_bridge(store, operation_id, *, repository=None, environment=None, prep
 
 def run_isolated(store, operation_id, repository):
     from coder_worker_runtime import _boundary
-    from coder_patch_runtime import stop_process
+    from coder_execution_utils import stop_process
     operation = _boundary(store, operation_id)
     runtime = store.root / 'agent-runtime' / operation['job_id']
     runtime.mkdir(parents=True, exist_ok=True)
@@ -276,7 +276,7 @@ def relay_events(store, operation_id, runtime, cursor):
             kind, data = event.get('type'), event.get('data', {})
             if kind in {'source_activity', 'agent', 'browser_action', 'browser_diagnostic', 'builder_nudge', 'builder_stalled',
                         'tool_mode_fallback', 'text_tool_fallback', 'compaction', 'usage', 'stop_hook', 'tool_mode',
-                        'narration_turn'} and isinstance(data, dict):
+                        'narration_turn', 'ui_preflight'} and isinstance(data, dict):
                 event_data = data.get('event') or {}
                 observation = event_data.get('observation') or {}
                 if kind == 'agent' and event_data.get('kind') == 'ObservationEvent' and event_data.get('tool_name') == 'task_tracker' and not observation.get('is_error') and isinstance(observation.get('task_list'), list):
@@ -289,7 +289,6 @@ def relay_events(store, operation_id, runtime, cursor):
 def child_main(request, output):
     from coder_worker_runtime import WorkerStore
     from coder_repository import Repository
-    from coder_sdk_runtime import _run_coder_local
     from context_policy import apply_settings
     data = json.loads(Path(request).read_text())
     operation, runtime = data['operation'], Path(data['runtime'])
@@ -304,18 +303,18 @@ def child_main(request, output):
     class ChildRepository(Repository):
         def snapshot(self, message='Agent checkpoint', parent=''):
             return super().snapshot(message, parent='')
-    store = ChildStore(runtime / 'bookkeeping')
+    store = ChildStore(runtime / 'bookkeeping', controller_owned=False)
     store.create(operation['id'], operation['job_id'], operation['kind'], operation['payload'])
     store.update(operation['id'], status='running', calls=0, started=time.time())
     (store.root / 'jobs' / operation['job_id']).mkdir(parents=True, exist_ok=True)
     repository = ChildRepository(Path(data['root']), runtime / 'inventory', operation['payload']['settings']['daedalus_exclude_dirs'])
     apply_settings(operation['payload']['settings'])
+    os.environ.update(DAEDALUS_UI_OPERATION=operation['id'], DAEDALUS_UI_INSTANCE=__import__('uuid').uuid4().hex,
+        DAEDALUS_UI_TELEMETRY=str(runtime / 'telemetry' / (operation['id'] + '.jsonl')))
+    (runtime / 'telemetry').mkdir(exist_ok=True)
     try:
-        if operation['payload'].get('engine') == 'openhands159':
-            from coder_engine_runtime import run
-            result = run(store, operation['id'], repository)
-        else:
-            result = _run_coder_local(store, operation['id'], repository)
+        from coder_engine_runtime import run
+        result = run(store, operation['id'], repository)
     except Exception as error:
         result = {'error_type': type(error).__name__, 'error': str(error)}
     Path(output).write_text(json.dumps(result))

@@ -58,12 +58,21 @@ def presentation(job):
         elif summary.get('checks_ok') and not summary.get('exercised'):
             phase = 'Built, not exercised'
         else:
-            phase = 'Ready for review' if metadata.get('runnable') else 'Build incomplete'
-    from coder_policy7_evidence import DURABLE_LIMITS
-    # Only spent repair/correction rounds end a request; a spent model-call allowance is renewed by Continue.
+            exercised_candidate = (job.get('engine') == 'openhands159'
+                and summary.get('revision_id') == job.get('revision_id')
+                and summary.get('checks_ok') and summary.get('exercised')
+                and not summary.get('failures'))
+            # Modern delivery records execution in revision-bound evidence,
+            # rather than the retired artifact's runnable flag. Unsupported
+            # requirements still suppress "Checks passed" above.
+            phase = 'Ready for review' if metadata.get('runnable') or exercised_candidate else 'Build incomplete'
+    from coder_check_evidence import DURABLE_LIMITS
+    # Repair limits persist; additional calls/time require an explicit allowance.
     reason = job.get('blocker') if job.get('stop_limit') in DURABLE_LIMITS else ''
     if state == 'cancelled' and job.get('policy_version', 1) < 7:
         reason = 'This older workflow cannot resume after Stop. Start a new request from its saved project.'
+    if job.get("engine") != "openhands159":
+        reason = "This engine is retired. Download retained source and start a new OpenHands 1.59 project."
     if nothing_to_continue(job):
         reason = NOTHING_TO_CONTINUE
     candidate = job.get('candidate_artifact') or {}
@@ -72,7 +81,7 @@ def presentation(job):
     # only the review report. The starting tree, or a revision whose summary recorded no check row, has nothing to accept.
     empty = bool(revision) and job.get('mode') == 'build_from_prompt' and (revision == job.get('baseline_revision')
                                 or (summary.get('revision_id') == revision and 'checks' in summary and not summary['checks']))
-    accept_ready = state == 'ready_for_review' and bool(candidate.get('id')) and bool(revision) and not empty
+    accept_ready = job.get('engine') == 'openhands159' and state == 'ready_for_review' and bool(candidate.get('id')) and bool(revision) and not empty
     return {'phase': phase, 'detail': detail, 'project_name': job.get('project_name') or 'Daedalus project',
         **({'check_counts': counts(rows)} if job.get('engine') == 'openhands159' else {}),
         'not_verified': (('See the requirement evidence for failed or unverified UI outcomes. Passing checks cover only the observed interactions; other behavior needs your review.'
@@ -82,7 +91,7 @@ def presentation(job):
         'worker_contact_at': job.get('worker_contact_at'),
         'actions': {'resume': {'enabled': state in {'blocked', 'waiting_for_input', 'ready_for_review', 'cancelled'} and not reason,
                                'disabled_reason': reason or ''},
-                    'cancel': {'enabled': state in phases and state not in {'cancelled', 'cancelling'},
+                    'cancel': {'enabled': job.get('engine') == 'openhands159' and state in phases and state not in {'cancelled', 'cancelling'},
                                'disabled_reason': 'Waiting for worker acknowledgement' if state == 'cancelling' else ''},
                     'accept': {'enabled': accept_ready,
                                'revision_id': revision if accept_ready else '',

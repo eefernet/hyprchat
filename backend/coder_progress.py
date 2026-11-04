@@ -41,7 +41,7 @@ def project(previous, batch, operation, root='', stage='coding'):
                 identity = operation + ':' + text(event.get('id') or event.get('tool_call_id'), 180)
                 if tool == 'terminal' and not action.get('command') and current.get('kind') == 'command':
                     identity = current['id']
-                activity = 'command' if tool == 'terminal' else 'preparation' if tool == 'prepare_environment' else 'interface' if tool in {'ui', 'ui_tool'} else 'plan' if tool == 'task_tracker' else 'tool'
+                activity = 'ui_preflight' if action.get('action') == 'check_flows' and tool in {'ui', 'ui_tool'} else 'command' if tool == 'terminal' else 'preparation' if tool == 'prepare_environment' else 'interface' if tool in {'ui', 'ui_tool'} else 'plan' if tool == 'task_tracker' else 'tool'
                 path = relative(action.get('path'), root)
                 if path and action.get('command') in {'create', 'str_replace', 'insert', 'undo_edit'}:
                     activity = 'file'
@@ -73,6 +73,15 @@ def project(previous, batch, operation, root='', stage='coding'):
         elif kind == 'plan_finalization' and data.get('authority') == 'supervisor':
             progress['finalization'] = {k: data[k] for k in ('status','reminded','turns','deadline','acknowledged_plan') if k in data}
             records.append({'id': event_id, 'kind': 'plan_finalization', 'at': at, **progress['finalization']})
+        elif kind == 'ui_preflight':
+            # Child diagnostics never enter delivered checks or establish acceptance.
+            status = data.get('status')
+            if status == 'running':
+                progress['current'] = {'id': event_id, 'kind': 'ui_preflight', 'stage': stage, 'started_at': at}
+            else:
+                if current.get('kind') == 'ui_preflight': progress['current'] = None
+                progress['ui_preflight'] = {k: data[k] for k in ('status', 'passed', 'fingerprint', 'diagnostic_only', 'reused', 'reason', 'flows', 'errors') if k in data}
+                records.append({'id': event_id, 'kind': 'ui_preflight', 'at': at, **progress['ui_preflight']})
         elif kind == 'finished':
             if current.get('kind') == 'file':
                 records.append({'id': current['id'], 'kind': 'file', 'path': current['path'], 'action': current['action'], 'outcome': 'interrupted', 'at': at})

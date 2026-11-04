@@ -77,9 +77,13 @@ def workspace_root():
     from pathlib import Path
     metadata=current()
     if not metadata.get('owner'): raise ValueError('Authenticated execution scope is missing')
-    if metadata.get('workspace_available')=='false': raise ValueError('This workspace was discarded when Codebox retired. Start from a retained artifact or upload its source.')
+    if metadata.get('workspace_available')=='false': raise ValueError('This VM workspace was deliberately removed. Restore a retained artifact or upload its source.')
     root=Path(os.environ.get('HEPHAESTUS_ROOT','/srv/hephaestus'))
-    directory=root/'projects'/key(metadata)
+    identity=key(metadata)
+    from hephaestus_inventory import read, control
+    if identity in read(control(root)/'retired-jobs.json',{'workspaces':[]}).get('workspaces',[]):
+        raise ValueError('This VM workspace was deliberately removed. Upload the saved source as a new project to continue.')
+    directory=root/'projects'/identity
     from hephaestus_storage import require_space, ensure_quota
     require_space(root); ensure_quota(root,directory)
     (directory/'root').mkdir(exist_ok=True)
@@ -114,7 +118,7 @@ async def authorize_request(request):
     import config
     import database as db
     destinations = {urlsplit(value).netloc for value in (config.CODEBOX_URL, config.OPENHANDS_URL,
-                    getattr(config, 'AIDER_WORKER_URL', ''), os.environ.get('HEPHAESTUS_MODERN_URL',''),
+                    os.environ.get('HEPHAESTUS_MODERN_URL',''),
                     os.environ.get('DAEDALUS_ENGINE_URL','')) if value}
     if request.url.netloc.decode() not in destinations: return
     if 'x-hephaestus-signature' not in request.headers:
@@ -152,7 +156,7 @@ def install_worker_auth(app):
     from fastapi.responses import JSONResponse
     @app.middleware('http')
     async def authenticate(request: Request, call_next):
-        if request.url.path in {'/health','/aider/health'}: return await call_next(request)
+        if request.url.path in {'/health'}: return await call_next(request)
         try: metadata=verify(request.headers,os.environ.get('HEPHAESTUS_TOKEN',''))
         except (ValueError,TypeError): return JSONResponse({'detail':'Authenticated execution scope is required'},status_code=401)
         parts=request.url.path.strip('/').split('/')
@@ -160,7 +164,11 @@ def install_worker_auth(app):
             try: claim_job(parts[1],metadata['owner'],create=request.method in {'POST','PUT'})
             except (ValueError,OSError): return JSONResponse({'detail':'Job is unavailable in this owner scope'},status_code=404)
         with scope(**{k:v for k,v in metadata.items() if k in {'owner','conversation','project','workspace_available'}}):
-            return await call_next(request)
+            from hephaestus_inventory import lock
+            root=os.environ.get('HEPHAESTUS_ROOT','/srv/hephaestus')
+            try:
+                with lock(root,'admission',exclusive=False,blocking=False):return await call_next(request)
+            except BlockingIOError:return JSONResponse({'detail':'VM maintenance is in progress; retry shortly'},status_code=503)
 
 
 async def download_bytes(http, path, maximum):

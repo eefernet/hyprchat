@@ -61,17 +61,3 @@ def test_coder_chat_has_no_legacy_character_ceiling_and_obeys_compaction_off():
     with pytest.raises(ValueError,match='disabled'):
         asyncio.run(_coder_chat_context(None,'local',messages,[],small))
     assert len(messages[1]['content'])==90000
-
-
-def test_compaction_preserves_late_system_instructions_and_tool_pairs():
-    from coder_sdk_runtime import compile_context
-    policy=resolve(settings={**DEFAULTS,'openhands_num_ctx':8192,'generation_num_predict':512,'daedalus_compaction':'on'})
-    messages=[{'role':'system','content':'Rules'}, {'role':'user','content':'Task'}]
-    messages += [{'role':'user','content':'old evidence '*1500}]*3
-    messages += [{'role':'system','content':'Persistent workflow protocol'}]
-    messages += [{'role':'assistant','tool_calls':[{'id':'a'}]}, {'role':'tool','tool_call_id':'a','content':'result'},
-                 {'role':'user','content':'continue'}, {'role':'assistant','content':'working'}]
-    rebuilt,changed=compile_context(messages,[],policy,lambda older:'prior decisions')
-    assert changed
-    assert any(m.get('content')=='Persistent workflow protocol' and m['role']=='system' for m in rebuilt)
-    assert rebuilt[-4:]==messages[-4:]

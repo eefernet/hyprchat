@@ -95,6 +95,8 @@ async def inspect_workflow(workflow_id: str, body: dict = Body(...)):
     job = await store.get(workflow_id)
     if not job:
         raise HTTPException(404, "Workflow not found")
+    if job.get('engine') != 'openhands159':
+        raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     if not job.get("worker_operation"):
         raise HTTPException(409, "Workspace is not initialized")
     try:
@@ -145,6 +147,8 @@ async def stream_worker_file(url, media_type, filename=""):
 async def evidence(workflow_id: str, identity: str):
     job=await store.get(workflow_id)
     if not job: raise HTTPException(404,"Workflow not found")
+    if job.get('engine') != 'openhands159':
+        raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     import re
     if not re.fullmatch(r"[a-f0-9]{64}",identity): raise HTTPException(404,"Evidence not found")
     # The worker checks that this opaque reference belongs to the owned job.
@@ -156,6 +160,8 @@ async def evidence(workflow_id: str, identity: str):
 async def checkpoint(workflow_id: str):
     job=await store.get(workflow_id)
     if not job: raise HTTPException(404,"Workflow not found")
+    if job.get('engine') != 'openhands159':
+        raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     if not job.get("revision_id") or job["state"] not in {"blocked","waiting_for_input","cancelled","ready_for_review"}:
         raise HTTPException(409,"Stop the job before exporting an unverified checkpoint")
     return await stream_worker_file(coder_jobs.worker_url(job)+"/checkpoint?revision="+job["revision_id"],

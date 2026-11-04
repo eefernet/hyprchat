@@ -322,9 +322,7 @@ def test_council_invokes_shared_search_before_starting_members(monkeypatch):
 def test_tool_dispatch_uses_shared_search(monkeypatch):
     import tools
     import coder_jobs
-    from types import SimpleNamespace
     monkeypatch.setattr(coder_jobs, "route_tool", AsyncMock(return_value=None))
-    monkeypatch.setattr(tools, "build_gate_context", AsyncMock(return_value=SimpleNamespace(snapshot_partial=False, is_v2=False)))
     search = AsyncMock(return_value={"context": "shared evidence"})
     monkeypatch.setattr(qs, "run_quick_search_for_chat", search)
     result = asyncio.run(tools.exec_tool(None, AsyncMock(), "research", {"query": "a query"}, "test"))

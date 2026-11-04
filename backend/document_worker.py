@@ -1,4 +1,4 @@
-"""Small document subprocess supervisor, invoked through Codebox /command.
+"""Small document subprocess supervisor, invoked through Hephaestus /command.
 
 No listening socket and no dependency on Daedalus. All job identifiers are
 server-generated. The parser/converter only sees its job directory in bwrap.

@@ -16,8 +16,9 @@ def test_controller_between_operations_prevents_activation(tmp_path):
     with sqlite3.connect(path) as conn:
         conn.execute('CREATE TABLE coder_workflows (id TEXT, state TEXT, workflow_version INTEGER)')
         conn.executemany('INSERT INTO coder_workflows VALUES (?,?,?)',
-                         [('active','candidate_packaging',3),('parked','ready_for_review',3),('legacy-stale','fixing',2)])
-    assert release.active_jobs(path) == 1
+                         [('active','candidate_packaging',3),('qa','answering',3),
+                          ('parked','ready_for_review',3),('legacy-stale','fixing',2)])
+    assert release.active_jobs(path) == 2
 
 
 def test_install_failure_does_not_activate_or_change_live_files(tmp_path,monkeypatch):
@@ -46,6 +47,7 @@ def test_acceptance_failure_restores_previous_service_configuration(tmp_path,mon
     root=tmp_path/'app'; candidate=root/'.releases/candidate'; candidate.mkdir(parents=True)
     (root/'data').mkdir();sqlite3.connect(root/'data/hyprchat.db').close()
     vectors=root/'data/chroma_db';vectors.mkdir();(vectors/'version').write_text('previous vector store')
+    settings=root/'data/settings.json';settings.write_text('{"builder_model":"original"}')
     if os.geteuid()==0:
         for path in (root/'data/hyprchat.db',vectors,vectors/'version'):os.chown(path,65534,65534)
     database_owner=(root/'data/hyprchat.db').stat().st_uid
@@ -61,6 +63,8 @@ def test_acceptance_failure_restores_previous_service_configuration(tmp_path,mon
     def run(args,**kw):
         commands.append(args)
         if args==['acceptance-fixture']:
+            settings.write_text('{"coding_model":"migrated"}')
+            (root/'data/settings.before-daedalus-modern.json').write_text('migration snapshot')
             (vectors/'version').write_text('candidate vector format')
             with sqlite3.connect(root/'data/hyprchat.db') as db:
                 db.execute('CREATE TABLE candidate_only(value TEXT)')
@@ -79,24 +83,33 @@ def test_acceptance_failure_restores_previous_service_configuration(tmp_path,mon
         assert db.execute("SELECT name FROM sqlite_master WHERE name='candidate_only'").fetchall()==[]
     assert list(candidate.glob('rollback-*/hyprchat.db'))
     assert (vectors/'version').read_text()=='previous vector store'
+    assert settings.read_text()=='{"builder_model":"original"}'
+    assert not (root/'data/settings.before-daedalus-modern.json').exists()
     assert (root/'data/hyprchat.db').stat().st_uid==database_owner
     assert (vectors/'version').stat().st_uid==vector_owner
 
 
 def test_document_activation_failure_restores_previous_pointer(tmp_path,monkeypatch):
-    import sys
-    scripts=Path(__file__).resolve().parents[2]/'scripts'
-    monkeypatch.syspath_prepend(str(scripts))
-    import staged_worker_release as worker
+    # Documents now run through Hephaestus's shared API/runtime, so exercise its
+    # current activation path instead of the retired standalone document worker.
+    spec=importlib.util.spec_from_file_location('worker_install',Path(__file__).resolve().parents[2]/'scripts/hephaestus/install.py')
+    worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
     root=tmp_path/'documents';root.mkdir()
     old=root/'old';old.mkdir()
     candidate=root/'candidate';candidate.mkdir()
-    (root/'current').symlink_to(old)
-    worker.atomic_json(candidate/'release.json',{'state':'prepared','root':str(root),'release':str(candidate),'kind':'documents','files':{}})
-    monkeypatch.setattr(worker,'active_documents',lambda:None)
+    pointer=root/'current';pointer.write_text(str(old));pointer.chmod(0o600)
+    config=root/'runtime.json';config.write_text('previous document runtime')
+    journal=root/'activation.json';commands=[]
+    monkeypatch.setattr(worker,'run',lambda *args:commands.append(args))
+    monkeypatch.setattr(worker.subprocess,'run',lambda *a,**k:type('Result',(),{'returncode':0})())
     def reject(*a,**k):raise RuntimeError('fixture acceptance rejected')
-    monkeypatch.setattr(worker,'run',reject)
-    with pytest.raises(RuntimeError,match='acceptance'):worker.activate(candidate,['fixture'])
-    assert (root/'current').resolve()==old
+    with pytest.raises(RuntimeError,match='acceptance'):
+        worker.activate_files([(pointer,str(candidate),0o600),(config,'new document runtime',0o600)],
+                              journal,['hephaestus-api'],reject)
+    assert pointer.read_text()==str(old)
+    assert pointer.stat().st_mode & 0o777==0o600
+    assert config.read_text()=='previous document runtime'
     assert candidate.exists()
-    assert not (root/'.worker-release-journal.json').exists()
+    assert not journal.exists()
+    assert ('systemctl','start','hephaestus-api') in commands
+    assert json.loads(next(root.glob('rollback-*/receipt.json')).read_text())['state']=='rolled_back'

@@ -8,7 +8,6 @@ from context_policy import DEFAULTS as CONTEXT_DEFAULTS
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.abspath(os.getenv("HYPRCHAT_DATA_DIR") or os.path.join(PROJECT_ROOT, "data"))
 
-
 def data_path(*parts: str) -> str:
     return os.path.join(DATA_DIR, *parts)
 
@@ -17,7 +16,7 @@ def data_path(*parts: str) -> str:
 # ============================================================
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 CODEBOX_URL = os.getenv("CODEBOX_URL", "http://127.0.0.1:8585")
-OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8586")
+OPENHANDS_URL = os.getenv("OPENHANDS_URL", "http://127.0.0.1:8587")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888")
 # Optional CourtListener API token for the leak_sources court adapter (empty = anonymous).
 COURTLISTENER_TOKEN = os.getenv("COURTLISTENER_TOKEN", "")
@@ -228,35 +227,13 @@ CRITIC_ENABLED = os.getenv("CRITIC_ENABLED", "true").lower() == "true"
 # CODER_MODEL for code-writing agents) which in turn falls through to the
 # active chat model. Power users who want to pin a specific model per agent
 # can set these — most users leave them empty.
-ARCHITECT_MODEL = os.getenv("ARCHITECT_MODEL", "")  # Empty = use PLANNING_MODEL
-REVIEWER_MODEL  = os.getenv("REVIEWER_MODEL",  "")  # Empty = use PLANNING_MODEL
-ACCEPTANCE_MODEL = os.getenv("ACCEPTANCE_MODEL", "")  # Empty = use PLANNING_MODEL
-BUILDER_MODEL   = os.getenv("BUILDER_MODEL",   "")  # Empty = use CODER_MODEL
-FIXER_MODEL     = os.getenv("FIXER_MODEL",     "")  # Empty = use CODER_MODEL
 QA_MODEL        = os.getenv("QA_MODEL",        "")  # Empty = use chat / persona model
-OPENHANDS_ENABLED = os.getenv("OPENHANDS_ENABLED", "true").lower() == "true"  # Toggle OpenHands for generate_code tool
 # Floor for the OpenHands agent's per-run iteration budget (max_iteration_per_run).
 # For Architect-planned builds, generate_code scales this UP off the manifest file
 # count (tools._scaled_build_rounds, base 30 + 5/file; first pass cap is higher
 # than continue-pass cap). This floor covers unplanned / no-manifest builds; 20
 # was too low for a multi-file scaffold.
-OPENHANDS_MAX_ROUNDS = int(os.getenv("OPENHANDS_MAX_ROUNDS", "30"))
 OPENHANDS_NUM_CTX = int(os.getenv("OPENHANDS_NUM_CTX", str(CONTEXT_DEFAULTS["openhands_num_ctx"])))
-AIDER_ENABLED = os.getenv("AIDER_ENABLED", "true").lower() == "true"
-AIDER_FOR_GREENFIELD = os.getenv("AIDER_FOR_GREENFIELD", "true").lower() == "true"
-AIDER_MODEL = os.getenv("AIDER_MODEL", "")  # Empty = use FIXER_MODEL, then CODER_MODEL
-# 0 = inherit the Daedalus context-window slider (OPENHANDS_NUM_CTX) at call
-# time. The old int default (16384) silently pinned Aider below the slider and
-# forced an Ollama evict/reload on every build↔fix alternation. Set the env or
-# the aider_num_ctx setting only to explicitly diverge from the slider.
-AIDER_NUM_CTX = int(os.getenv("AIDER_NUM_CTX", "0") or 0)
-AIDER_AUTO_TEST = os.getenv("AIDER_AUTO_TEST", "true").lower() == "true"
-AIDER_WORKER_URL = os.getenv("AIDER_WORKER_URL", OPENHANDS_URL)
-# Reasoning effort for the OpenHands builder LLM. The SDK passes this through
-# to litellm; for OpenAI-style models it's "low" | "medium" | "high"; local
-# Ollama models silently ignore unsupported values. Default "medium" — "high"
-# adds a lot of think-token overhead per round on small/medium local models.
-OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").strip().lower()
 # Send think:false to thinking-capable coder models during builds. Without it
 # a qwen3.5-class model reasons with an UNBOUNDED budget before every tool
 # call (reasoning_effort never reaches Ollama's think switch through litellm).
@@ -264,7 +241,6 @@ OPENHANDS_REASONING_EFFORT = os.getenv("OPENHANDS_REASONING_EFFORT", "medium").s
 # are unaffected either way.
 OPENHANDS_DISABLE_THINKING = os.getenv("OPENHANDS_DISABLE_THINKING", "true").lower() == "true"
 MIN_NUM_CTX = 1  # Positivity validation only; no application context floor.
-
 
 def coerce_num_ctx(value, fallback=CONTEXT_DEFAULTS["default_num_ctx"], minimum=None):
     """Return a positive Ollama num_ctx, or a sane fallback for invalid values."""
@@ -283,7 +259,6 @@ def coerce_num_ctx(value, fallback=CONTEXT_DEFAULTS["default_num_ctx"], minimum=
         fb = 0
     return fb if fb >= minimum else CONTEXT_DEFAULTS["default_num_ctx"]
 
-
 def coerce_int(value, fallback, *, minimum=None, maximum=None):
     """Parse an int from untrusted settings input, clamped to [minimum, maximum].
     Junk / out-of-range values fall back instead of raising (a raw int(...) on
@@ -297,7 +272,6 @@ def coerce_int(value, fallback, *, minimum=None, maximum=None):
     if maximum is not None and n > maximum:
         return maximum
     return n
-
 
 DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", str(CONTEXT_DEFAULTS["default_num_ctx"])))
 # Context window for Deep Research LLM calls (planning, findings, audit,
@@ -357,9 +331,8 @@ Use execute_code for arithmetic, aggregation, statistics, parsing, and data tran
 - Fix the code and call execute_code again — do NOT give up after one failure
 - If a package is missing, use run_shell to install it (pip3 install X), then retry"""
 
-
 # Single source of visible, mutable context and execution defaults.
 CONTEXT_SETTINGS = {**CONTEXT_DEFAULTS, "default_num_ctx": DEFAULT_NUM_CTX,
-                    "openhands_num_ctx": OPENHANDS_NUM_CTX, "aider_num_ctx": AIDER_NUM_CTX,
+                    "openhands_num_ctx": OPENHANDS_NUM_CTX,
                     "research_num_ctx": RESEARCH_NUM_CTX}
 DEFAULT_SETTINGS.update(CONTEXT_SETTINGS)

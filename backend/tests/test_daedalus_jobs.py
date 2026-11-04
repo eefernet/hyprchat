@@ -16,6 +16,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(db, 'DATABASE_PATH', str(tmp_path / 'jobs.db'))
     monkeypatch.setattr(config, 'CONTEXT_SETTINGS', {**DEFAULTS, 'daedalus_v3_enabled': True})
     monkeypatch.setattr(controller, 'spawn', lambda *args: None)
+    monkeypatch.setenv('DAEDALUS_ENGINE_URL', 'http://worker:8587')
     async def initialize():
         await db.init_db()
         await db.create_conversation('conversation', model='coder:local')
@@ -64,9 +65,9 @@ def test_same_operation_reconnects_and_accounts_once(monkeypatch, tmp_path):
         async with httpx.AsyncClient(transport=httpx.MockTransport(remote)) as http:
             controller.configure(http,None)
             job=await store.create('conversation','task','build_from_prompt','','coder:local','request')
-            job=await store.save(job['id'],state='planning')
-            result,job=await controller._operate(job,'plan')
-            _,again=await controller._operate(job,'plan')
+            job=await store.save(job['id'],state='coding')
+            result,job=await controller._operate(job,'code')
+            _,again=await controller._operate(job,'code')
             assert len(operations)==1
             assert again['calls_used']==2 and again['seconds_used']==10
             runs=await db.get_runs_by_conversation('conversation', limit=-1)
@@ -94,7 +95,7 @@ def test_interrupted_coding_blocks_at_checkpoint_and_requires_resume(monkeypatch
             assert stopped['calls_used']==4
             assert calls==['POST','GET']
             continued=await controller.resume(job['id'])
-            assert continued['allowance']==2 and continued['calls_used']==0
+            assert continued['allowance']==1 and continued['calls_used']==4
             assert continued['resume_after_inspect']=='coding'
     asyncio.run(scenario())
 
@@ -114,7 +115,7 @@ def test_continue_after_failed_inspection_does_not_loop(monkeypatch,tmp_path):
         await store.save(job['id'],state='blocked',resume_state='inspecting',acceptance_attempt=3)
         continued=await controller.resume(job['id'])
         assert not continued['resume_after_inspect']
-        assert continued['acceptance_attempt']==0
+        assert continued['acceptance_attempt']==3
     asyncio.run(scenario())
 
 
@@ -142,21 +143,22 @@ def test_publication_is_atomic_idempotent_and_cancel_fenced(monkeypatch,tmp_path
     asyncio.run(scenario())
 
 
-def test_disabling_flag_applies_to_new_jobs_and_keeps_active_job(monkeypatch,tmp_path):
+def test_obsolete_runtime_flag_cannot_route_new_jobs_to_legacy(monkeypatch,tmp_path):
     setup(monkeypatch,tmp_path)
     monkeypatch.setattr(config,'CONTEXT_SETTINGS',{**DEFAULTS,'daedalus_v3_enabled':False})
     async def scenario():
         job=await store.create('conversation','task','build_from_prompt','','coder:local','request')
         assert await controller.uses_persistent_workflow('conversation')
         await store.save(job['id'],state='completed',answer='Q&A complete')
-        assert not await controller.uses_persistent_workflow('conversation')
-        assert await controller.route_tool('plan_project',{'task':'new task'},'conversation',None) is None
+        assert await controller.uses_persistent_workflow('conversation')
+        assert await controller.route_tool('plan_project',{'task':'new task'},'conversation',None) is not None
     asyncio.run(scenario())
 
 
 def test_question_uses_chat_model_and_registered_worker_project(monkeypatch,tmp_path):
     setup(monkeypatch,tmp_path)
     monkeypatch.setattr(config,'QA_MODEL','')
+    monkeypatch.setattr(config,'CODER_MODEL','coder:local')
     async def scenario():
         await db.upsert_coding_project('registry-id','Project',conversation_id='conversation',openhands_project_id='worker-directory')
         job=await controller.create('conversation','Explain the source','ask_uploaded_project','registry-id',key='question')
@@ -185,14 +187,6 @@ def test_shutdown_after_publication_keeps_downloaded_artifact(monkeypatch,tmp_pa
             from pathlib import Path
             assert Path(completed['artifact']['storage_path']).read_bytes()==b'archive'
     asyncio.run(scenario())
-
-
-def test_browser_criteria_use_the_discovered_preview_command():
-    plan=[{'task':'Make greetings work','browser_flows':[{'cwd':'.','steps':[{'action':'click','selector':'#greet'}]}]}]
-    discovered=[{'id':'browser','kind':'browser','cwd':'.','server_command':'python3 -m http.server {port} --bind 127.0.0.1'}]
-    checks=controller._checks(plan,discovered=discovered)
-    assert checks[0]['server_command']==discovered[0]['server_command']
-    assert checks[0]['steps']==plan[0]['browser_flows'][0]['steps']
 
 
 def test_stop_of_blocked_job_retries_worker_acknowledgement(monkeypatch,tmp_path):
@@ -228,7 +222,7 @@ def test_continue_requires_acknowledgement_that_previous_writer_stopped(monkeypa
                 current=await store.get(job['id'])
                 assert current['worker_operation']=='original-attempt' and current['allowance']==1
             status='interrupted'
-            assert (await controller.resume(job['id']))['allowance']==2
+            assert (await controller.resume(job['id']))['allowance']==1
     asyncio.run(scenario())
 
 
@@ -247,7 +241,7 @@ def test_lost_worker_response_reconnects_without_releasing_job(monkeypatch,tmp_p
             controller.configure(http,None)
             job=await store.create('conversation','task','build_from_prompt','','coder:local','request')
             await store.save(job['id'],state='coding',worker_operation='same-operation')
-            result=await controller._worker_request(job['id'],'POST',controller.worker_url({'id':job['id'],'worker_operation':'same-operation'}),json={'request_key':'stable'},timeout=1)
+            result=await controller._worker_request(job['id'],'POST',controller.worker_url({**job,'worker_operation':'same-operation'}),json={'request_key':'stable'},timeout=1)
             assert result.json()['status']=='running' and calls==2
             current=await store.get(job['id'])
             assert current['state']=='coding' and current['worker_operation']=='same-operation' and not current['blocker']
@@ -282,105 +276,6 @@ def test_controller_waits_for_stop_acknowledgement_before_returning(monkeypatch,
         job=await store.create('conversation','task','build_from_prompt','','coder:local','request')
         await controller.run(job['id'])
         assert attempts==2 and (await store.get(job['id']))['state']=='cancelled'
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize('accepted',[True,False])
-def test_final_verified_revision_requires_acceptance_even_without_finish_tool(monkeypatch,tmp_path,accepted):
-    setup(monkeypatch,tmp_path)
-    stages=[]
-    async def operate(job,kind,**kwargs):
-        stages.append(kind)
-        if kind=='check':return {'passed':True,'checks':[{'id':'tests','passed':True}]},job
-        if kind=='accept':return {'accepted':accepted,'revision_id':'revision','issues':[{'summary':'Missing requested behavior'}]},job
-        if kind=='package':raise ValueError('Stop before artifact download in this test')
-        raise AssertionError(f'Unexpected stage: {kind}')
-    monkeypatch.setattr(controller,'_operate',operate)
-    async def scenario():
-        job=await store.create('conversation','task','build_from_prompt','','coder:local','request')
-        await store.save(job['id'],state='checking',revision_id='revision',builder_finished=False,
-                         milestones=[{'task':'Implement and test the request'}],acceptance_attempt=2)
-        await controller.run(job['id'])
-        current=await store.get(job['id'])
-        assert stages==(['check','accept','package'] if accepted else ['check','accept'])
-        assert current['acceptance']['accepted'] is accepted and current['artifact'] is None
-        assert current['completion_basis']=='independent_acceptance_required'
-    asyncio.run(scenario())
-
-
-def test_failed_checks_report_verification_failure_when_builder_also_did_not_finish(monkeypatch,tmp_path):
-    setup(monkeypatch,tmp_path)
-    async def operate(job,kind,**kwargs):
-        assert kind=='check'
-        return {'passed':False,'checks':[{'id':'tests','passed':False}]},job
-    monkeypatch.setattr(controller,'_operate',operate)
-    async def scenario():
-        job=await store.create('conversation','task','build_from_prompt','','coder:local','request')
-        await store.save(job['id'],state='checking',revision_id='revision',builder_finished=False,
-                         milestones=[{'task':'Implement and test'}],attempt=2)
-        await controller.run(job['id'])
-        current=await store.get(job['id'])
-        assert current['state']=='blocked' and 'verification' in current['blocker']
-        assert current['checks'][0]['passed'] is False
-    asyncio.run(scenario())
-
-
-def test_verified_intermediate_milestone_advances_without_finish_tool(monkeypatch,tmp_path):
-    setup(monkeypatch,tmp_path)
-    stages=[]
-    async def operate(job,kind,**kwargs):
-        stages.append(kind)
-        if kind=='check':return {'passed':True,'checks':[{'id':'tests','passed':True}]},job
-        if kind=='code':
-            assert kwargs['task']=='Add regression tests' and kwargs['milestone_id']=='1'
-            return {'snapshot':{'revision':'tested'},'inventory':{},'agent_finished':False},job
-        if kind=='accept':return {'accepted':True,'revision_id':'tested'},job
-        if kind=='package':raise ValueError('Stop before artifact download')
-        raise AssertionError(kind)
-    monkeypatch.setattr(controller,'_operate',operate)
-    async def scenario():
-        job=await store.create('conversation','Fix lookup and add tests','build_from_prompt','','coder:local','request')
-        await store.save(job['id'],state='checking',revision_id='fixed',builder_finished=False,
-                         milestones=[{'task':'Fix lookup'},{'task':'Add regression tests'}])
-        await controller.run(job['id'])
-        current=await store.get(job['id'])
-        assert stages==['check','code','check','accept','package']
-        assert current['milestone_index']==1 and current['acceptance']['revision_id']=='tested'
-        assert current['artifact'] is None
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize('corrected',[True,False])
-def test_invalid_browser_plan_replans_and_stops_repeated_errors(monkeypatch,tmp_path,corrected):
-    setup(monkeypatch,tmp_path)
-    invalid={'task':'Implement Python utility','browser_flows':[{'cwd':'.','steps':[]}]}
-    stages=[]
-    async def operate(job,kind,**kwargs):
-        stages.append(kind)
-        if kind=='plan':
-            feedback=kwargs['evidence']['plan_feedback']
-            assert 'No preview server' in feedback['error']
-            assert feedback['previous_milestones']==[invalid]
-            assert job['user_task']=='Create a Python utility with tests'
-            return {'milestones':[{'task':'Implement Python utility'}] if corrected else [invalid]},job
-        if kind=='code':return {'snapshot':{'revision':'tested'},'inventory':{},'agent_finished':True},job
-        if kind=='check':return {'passed':True,'checks':[{'id':'tests','passed':True}]},job
-        if kind=='accept':return {'accepted':True,'revision_id':'tested'},job
-        if kind=='package':raise ValueError('Stop before artifact download')
-        raise AssertionError(kind)
-    monkeypatch.setattr(controller,'_operate',operate)
-    async def scenario():
-        job=await store.create('conversation','Create a Python utility with tests','build_from_prompt','','coder:local','request')
-        await store.save(job['id'],state='checking',revision_id='existing',milestones=[invalid])
-        await controller.run(job['id'])
-        current=await store.get(job['id'])
-        assert stages==(['plan','code','check','accept','package'] if corrected else ['plan','code'])
-        assert current['artifact'] is None
-        if not corrected:
-            assert current['state']=='blocked' and current['resume_state']=='planning'
-            continued=await controller.resume(job['id'])
-            assert continued['resume_after_inspect']=='planning' and continued['plan_errors']==[]
-            assert continued['plan_feedback']['error']==current['plan_feedback']['error']
     asyncio.run(scenario())
 
 
@@ -428,7 +323,8 @@ def test_deadline_waits_for_worker_ack_and_records_final_usage(monkeypatch,tmp_p
     setup(monkeypatch,tmp_path)
     monkeypatch.setattr(config,'CONTEXT_SETTINGS',{**DEFAULTS,'daedalus_v3_enabled':True,'daedalus_job_seconds':1})
     polls=[];cancel_posts=[]
-    ticks=iter([0,2])
+    import itertools
+    ticks=itertools.chain([0], itertools.repeat(1000))
     from types import SimpleNamespace
     monkeypatch.setattr(controller,'time',SimpleNamespace(monotonic=lambda:next(ticks),time=controller.time.time))
     async def fast_sleep(seconds):pass
@@ -549,7 +445,7 @@ def test_a_failed_candidate_package_blocks_visibly_instead_of_respawning(monkeyp
     async def scenario():
         job = await controller.create('conversation', 'task', model='coder:local', key='package')
         brief = {'outcomes': [{'id': 'o1', 'text': 'Works', 'evidence_types': ['behavior'], 'component': '.'}], 'batches': []}
-        await store.save(job['id'], state='accepting', revision_id='c' * 40, brief=brief, checks=[])
+        await store.save(job['id'], state='candidate_packaging', revision_id='c' * 40, brief=brief, checks=[])
         await controller.run(job['id'])
         parked = await store.get(job['id'])
         assert parked['state'] == 'blocked' and 'Worker operation failed' in parked['blocker']

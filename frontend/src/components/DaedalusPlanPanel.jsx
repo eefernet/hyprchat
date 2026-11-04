@@ -57,6 +57,7 @@ export function ChecksSection({job,defaultOpen=true,renderEvidence}){
       <div><span className="dp-text">{row.label}{row.outcome!=='failed'?` (${row.outcome})`:''}</span>
         {row.command&&<code className="dp-command">{row.command}</code>}
         <span className="dp-reason">{row.headline}</span>
+        {!!row.check.lost_tests?.length&&<details><summary>Missing or regressed tests ({row.check.lost_tests.length})</summary><p>Baseline {row.check.baseline_revision?.slice(0,12)||'recorded baseline'} → candidate {row.check.revision_id?.slice(0,12)}</p><ul>{row.check.lost_tests.slice(0,50).map(test=><li key={test.id}><code>{test.id}</code> — {test.status}</li>)}</ul>{row.check.lost_tests.length>50&&<p>Showing 50 of {row.check.lost_tests.length}. Full IDs are in Checks → Every check with its log → Diagnostic.</p>}</details>}
         {renderEvidence&&renderEvidence(row.check)}</div></li>)}</ul>
     {passed.length>0&&<p className="dp-muted">Passed: {[...passed.reduce((groups,row)=>{const key=row.label+(row.tests!=null?` (${row.tests} tests)`:'');return groups.set(key,(groups.get(key)||0)+1);},new Map())].map(([label,count])=>count>1?`${label} ×${count}`:label).join(' · ')}</p>}
   </details>;

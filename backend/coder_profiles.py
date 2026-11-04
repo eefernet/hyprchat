@@ -1,7 +1,7 @@
 """Policy-6 execution profiles. Discovery is independent of preview support.
 
 Explicit commands and .daedalus.json use {packages: {'.': {test: '...'}}}.
-Commands are ordinary shell commands run inside Codebox, never on the API host.
+Commands are ordinary shell commands run inside Hephaestus, never on the API host.
 """
 from __future__ import annotations
 
@@ -363,6 +363,8 @@ def environment_key(root, profile):
         runtime=json.loads(Path('/etc/hephaestus/runtime.json').read_text())
         profile_name=os.environ.get('HEPHAESTUS_RUNTIME_PROFILE','core')
         versions['container_image']=runtime['profiles'][profile_name]['image']
+    elif os.environ.get('DAEDALUS_RUNTIME_IMAGE'):
+        versions['container_image'] = os.environ['DAEDALUS_RUNTIME_IMAGE']
     for tool in profile.get('toolchains', []):
         if versions.get('container_image'):
             versions[tool]='provided by '+versions['container_image']

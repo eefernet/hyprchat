@@ -69,6 +69,7 @@ def docker_args(spec, config):
     args = ['docker', 'run', '--name', 'hephaestus-'+spec['id'], '--init', '--network', 'none',
             '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
             '--pids-limit', '256', '--memory', str(memory*1024**2), '--memory-swap', str(memory*1024**2),
+            '--ulimit', 'core=0:0',
             '--cpus', '3', '--cgroup-parent', group_unit(spec),
             '--label', 'hyprchat.managed=execution', '--label', 'hyprchat.scope='+spec['scope'],
             '--shm-size', '128m',
@@ -145,6 +146,11 @@ class Broker:
         finally: ready.close()
 
     def execute(self, spec, connection, emit):
+        from hephaestus_inventory import lock
+        with lock(ROOT, 'admission', exclusive=False, blocking=False):
+            return self._execute(spec, connection, emit)
+
+    def _execute(self, spec, connection, emit):
         args = docker_args(spec, self.config)
         seconds = spec.get('timeout', 900)
         application = spec.get('managed_application') is True

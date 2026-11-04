@@ -67,5 +67,5 @@ Offline tests cover persona seeding/scoping, Markdown/code preservation, duplica
 and stale-source flags, unchanged refreshes, incomplete embeddings and failed
 Chroma batches. Live checks should query several language/framework areas through
 `POST /api/knowledge-bases/query`, then exercise a saved Master Developer chat with
-KB and Quick Search events. Verify only runtime-supported examples with Codebox;
+KB and Quick Search events. Verify only runtime-supported examples with Hephaestus;
 a retrieved language manual is not evidence that its compiler or SDK is installed.

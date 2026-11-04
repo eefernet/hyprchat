@@ -131,7 +131,7 @@ def active_jobs(database):
             states = ('queued','inspecting','baselining','planning','verifying',
                       'coding','checking','reviewing','auditing','visual_review',
                       'accepting','packaging','candidate_packaging','cancelling',
-                      'building','fixing','running')
+                      'building','fixing','running','answering')
             count += conn.execute('SELECT count(*) FROM coder_workflows WHERE workflow_version=3 AND state IN ('
                                   + ','.join('?' for _ in states) + ')', states).fetchone()[0]
         if 'image_jobs' in tables:
@@ -177,8 +177,11 @@ def recover(root):
         os.replace(temp,database)
     for item in state.get('file_snapshots',[]):
         target=Path(item['target'])
-        if target.exists():shutil.rmtree(target)
-        if item['existed']:copy_tree_owned(item['snapshot'],target)
+        if target.is_dir():shutil.rmtree(target)
+        else:target.unlink(missing_ok=True)
+        if item['existed']:
+            if item.get('kind')=='file':copy_owned(item['snapshot'],target)
+            else:copy_tree_owned(item['snapshot'],target)
     dropin=Path(state['dropin'])
     if state['old_dropin'] is None:
         dropin.unlink(missing_ok=True)
@@ -211,6 +214,8 @@ def activate(release, url, acceptance):
     atomic_json(journal,state)
     try:
         run(['systemctl','stop',service])
+        if active_jobs(root/'data/hyprchat.db'):
+            raise RuntimeError('A job started during the drain; activation refused')
         # Snapshot only after every writer has stopped. The old release may
         # not understand new durable paths or additive migration state.
         rollback=release/('rollback-'+str(time.time_ns()))
@@ -231,6 +236,12 @@ def activate(release, url, acceptance):
         existed=vectors.exists()
         if existed:copy_tree_owned(vectors,vector_copy)
         state['file_snapshots']=[{'target':str(vectors),'snapshot':str(vector_copy),'existed':existed}]
+        # Settings migration is part of the release and must roll back with it.
+        for name in ('settings.json','settings.before-daedalus-modern.json'):
+            target=root/'data'/name; saved=rollback/name
+            if target.exists():copy_owned(target,saved)
+            state['file_snapshots'].append({'target':str(target),'snapshot':str(saved),
+                                           'existed':target.exists(),'kind':'file'})
         atomic_json(journal,state)
         command=[str(release/'venv/bin/python'),*state['command'][1:]]
         # Paths and inherited service arguments are quoted for systemd, not a shell.

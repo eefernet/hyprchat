@@ -1,4 +1,4 @@
-"""Owned document artifacts and cancellable Codebox jobs."""
+"""Owned document artifacts and cancellable Hephaestus jobs."""
 from __future__ import annotations
 
 import asyncio
@@ -81,7 +81,7 @@ async def worker(http, command, *args):
     response.raise_for_status()
     result = response.json()
     if result.get("exit_code", 0) != 0:
-        raise RuntimeError("Document worker unavailable; verify installation on Codebox")
+        raise RuntimeError("Document worker unavailable; verify installation on Hephaestus")
     try:
         return json.loads(result.get("stdout") or "{}")
     except ValueError as e:

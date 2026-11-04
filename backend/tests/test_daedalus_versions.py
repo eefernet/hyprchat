@@ -19,6 +19,7 @@ from coder_presentation import presentation
 
 
 def setup(monkeypatch, tmp_path):
+    monkeypatch.setenv('DAEDALUS_ENGINE_URL','http://worker:8587')
     monkeypatch.setattr(db, 'DATABASE_PATH', str(tmp_path / 'jobs.db'))
     monkeypatch.setattr(config, 'DATABASE_PATH', str(tmp_path / 'jobs.db'), raising=False)
     monkeypatch.setattr(config, 'SANDBOX_OUTPUTS_DIR', str(tmp_path / 'outputs'))
@@ -190,7 +191,7 @@ def test_migration_backfills_the_working_pointer_from_existing_candidates(monkey
 
 
 def test_card_labels_follow_the_check_outcome():
-    base = {'state': 'ready_for_review', 'policy_version': 7, 'candidate_artifact': {'id': 'x', 'metadata': {'revision_id': 'r'}}}
+    base = {'engine':'openhands159', 'state': 'ready_for_review', 'policy_version': 7, 'candidate_artifact': {'id': 'x', 'metadata': {'revision_id': 'r'}}}
     passed = presentation({**base, 'verification_summary': {'checks_passed': True, 'checks_ok': True, 'exercised': True}})
     assert passed['phase'] == 'Checks passed — please review' and passed['not_verified']
     idle = presentation({**base, 'verification_summary': {'checks_passed': False, 'checks_ok': True, 'exercised': False}})

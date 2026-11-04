@@ -42,13 +42,13 @@ def prepare(store, operation_id):
 
 def execute(store, operation_id, repository):
     from coder_project_runtime import contract, run_revision
-    from coder_policy7_ops import restore_protected
+    from coder_execution_utils import restore_protected
     from coder_required_tests import passing, regressions
     operation = store.get(operation_id)
     payload, kind = operation['payload'], operation['kind']
     if kind == 'code':
         from coder_sandbox_agent import run_isolated
-        from coder_policy7_builder import sanitize_workspace
+        from coder_execution_utils import sanitize_workspace
         result = run_isolated(store, operation_id, repository)
         sanitize_workspace(repository.root, repository.excludes)
         paths = list(dict.fromkeys(payload.get('protected_files', [])))
@@ -83,7 +83,8 @@ def execute(store, operation_id, repository):
     result['checks'] = [normalize(check) for check in result['checks']]
     from coder_engine_contract import checks as deliverable_checks
     result['checks'].extend(deliverable_checks(result['workspace'],payload.get('task',''),payload['revision_id'],payload.get('deliverable_contract')))
-    from coder_engine_delivery import products
+    from coder_engine_delivery import products, portability_checks
+    result['checks'].extend(portability_checks(repository, payload['revision_id']))
     result['verified_outputs'] = products(result['workspace'], payload.get('task', ''), payload['revision_id'], payload.get('deliverable_contract'))
     from coder_ui_checks import interfaces, run as check_interactions
     required_interfaces = interfaces(repository, profile)
@@ -97,7 +98,8 @@ def execute(store, operation_id, repository):
             result['checks'].extend(check_interactions(store, operation_id, repository, flows, origin='project_interaction'))
         except (ValueError, TypeError) as error:
             result['checks'].append({'id': 'project-ui-manifest', 'passed': False, 'revision_id': payload['revision_id'],
-                'classification': 'application_defect', 'reason': str(error)})
+                'classification': 'application_defect', 'reason': str(error),
+                'diagnostic': {'category': 'ui_flow_schema', 'errors': getattr(error, 'errors', [])}})
     result['execution_profile'] = profile
     result['required_tests'] = passing(result['checks'])
     if not payload.get('baseline'):
@@ -105,7 +107,8 @@ def execute(store, operation_id, repository):
         if lost:
             result['checks'].append({'id': 'baseline-regressions', 'passed': False,
                 'classification': 'application_defect', 'reason': 'Previously passing tests regressed',
-                'lost_tests': lost, 'revision_id': payload['revision_id']})
+                'lost_tests': [{**item, 'package': item['id'].split('::', 1)[0]} for item in lost],
+                'baseline_revision': payload.get('baseline_revision'), 'revision_id': payload['revision_id']})
     files = {p.get('path') for c in result['checks'] for p in c.get('test_files', []) if isinstance(p, dict) and p.get('path')}
     result['baseline_test_files'] = sorted(files)
     result['summary'] = summarize(result['checks'], payload['revision_id'], required_interfaces)
@@ -161,8 +164,26 @@ def summarize(checks, revision, required_interfaces=()):
         for interface in c.get('test_interfaces', [])}
     missing_interfaces = sorted(set(required_interfaces) - exercised_interfaces)
     feedback = []
-    for check in failed:
-        row = {k: check.get(k) for k in ('id', 'command', 'reason', 'log_tail', 'classification', 'diagnostic', 'service_diagnostic')}
+    for check in sorted(failed, key=lambda c: c.get('id') != 'baseline-regressions'):
+        row = {k: check.get(k) for k in ('id', 'command', 'reason', 'log_tail', 'classification', 'diagnostic', 'service_diagnostic', 'revision_id', 'baseline_revision')}
+        if check.get('lost_tests'):
+            # Keep full evidence in the check row; prioritize exact identities in
+            # the bounded repair packet rather than filling it with generic logs.
+            entries, size = [], 0
+            for item in check['lost_tests']:
+                entry = {**item, 'package': item.get('package', item['id'].split('::', 1)[0])}
+                length = len(json.dumps(entry, ensure_ascii=False))
+                if size + length > 12000: break
+                entries.append(entry); size += length
+            row.update(lost_tests=entries, omitted_test_count=len(check['lost_tests']) - len(entries),
+                       lost_test_count=len(check['lost_tests']), log_tail=None)
+            row['reason'] = ('Previously passing tests regressed. Restore these exact test identities, including their suite/package; '
+                'when the user changes an expected value, change the assertion while retaining the original test name. '
+                'Do not delete, skip, rename, or weaken unrelated assertions. Full diagnostics remain in the baseline-regressions check.')
+        if '/srv/hephaestus/control/browsers/' in str(check.get('log_tail', '')):
+            row['reason'] = (row.get('reason') or 'Project browser test failed.') + (' Project tests cannot use controller-only browser paths. '
+                'Use the declared Playwright package and normal chromium.launch() resolution without executablePath. '
+                'Declare the dependency and document npx playwright install chromium (or python -m playwright install chromium).')
         if not row['reason'] and row['classification'] == 'missing_provenance':
             row['reason'] = ('Assertions ran, but verification did not observe them exercising application code or its running service. '
                              'Test the actual imported application or launch it and assert its behavior; duplicated logic and mocks alone do not verify the application. '
@@ -179,7 +200,7 @@ def summarize(checks, revision, required_interfaces=()):
         feedback.append({'id': 'unverified-interface:' + interface, 'classification': 'missing_interaction',
                          'reason': 'No controller-observed interaction test exercised the requested ' + interface +
                          ' application. Declare .daedalus-ui.json with a launch command or HTML file_path, '
-                         'click/fill actions on real controls, and subsequent expected text/observe results.'})
+                         'click/fill actions on real controls, and subsequent expected text/value results. Use check_flows before Finish.'})
     return {'revision_id': revision, 'accepted': False, 'checks_ok': same_revision and not failed,
             'checks_passed': same_revision and not failed and exercised and not missing_interfaces, 'exercised': exercised,
             'unverified_interfaces': missing_interfaces,
