@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -189,7 +190,7 @@ def discover(repository, explicit=None, proposals=None):
                         command += ' -- --run'
                     add(phase, command, scripts[phase])
             dependencies = {**manifest.get('dependencies', {}), **manifest.get('devDependencies', {})}
-            web_runtime = bool(set(dependencies) & {'vite', 'next', 'react', 'vue', 'svelte', 'astro', 'express', 'fastify', 'koa'})
+            web_runtime = bool(set(dependencies) & {'vite', 'next', 'react', 'vue', 'svelte', 'astro', 'express', 'fastify', 'koa'}) or node_server_entrypoint(root, scripts.get('start', ''))
             # A server's dev script is usually a file watcher (nodemon); `start` is the documented way to run it.
             if 'start' in scripts and set(dependencies) & NODE_SERVERS:
                 launch = f'PORT={{port}} HOST=127.0.0.1 {manager} run start'
@@ -358,7 +359,14 @@ def environment_key(root, profile):
     # Same name, same bytes for a top-level manifest the setup also names: standard setups keep their key.
     manifests.update(setup_inputs(root, profile))
     versions = {}
+    if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+        runtime=json.loads(Path('/etc/hephaestus/runtime.json').read_text())
+        profile_name=os.environ.get('HEPHAESTUS_RUNTIME_PROFILE','core')
+        versions['container_image']=runtime['profiles'][profile_name]['image']
     for tool in profile.get('toolchains', []):
+        if versions.get('container_image'):
+            versions[tool]='provided by '+versions['container_image']
+            continue
         try:
             result = subprocess.run([tool, '--version'], capture_output=True, timeout=5)
             versions[tool] = (result.stdout + result.stderr).decode(errors='replace')
@@ -367,6 +375,23 @@ def environment_key(root, profile):
     key = hashlib.sha256(json.dumps({'manifests': manifests, 'versions': versions,
         'setup': profile.get('commands', {}).get('setup', [])}, sort_keys=True).encode()).hexdigest()
     return key, versions
+
+
+def node_server_entrypoint(root, command):
+    """Recognize an ordinary source-backed Node server, including stdlib HTTP.
+
+    A start script alone is not a server. Use the same PORT/listen evidence as
+    documented Node entrypoints, keeping ordinary CLI commands finite.
+    """
+    try: words = shlex.split(command)
+    except (ValueError, TypeError): return False
+    if len(words) != 2 or words[0] != 'node': return False
+    path = Path(words[1])
+    if path.is_absolute() or '..' in path.parts or path.suffix not in {'.js', '.mjs', '.cjs'}: return False
+    source_path = Path(root) / path
+    if not source_path.is_file() or not source_path.resolve().is_relative_to(Path(root).resolve()): return False
+    source = source_path.read_text(errors='replace')
+    return bool(re.search(r'\.listen\s*\(', source) and 'process.env.PORT' in source)
 
 
 def documented_launch(root):
@@ -392,8 +417,6 @@ def documented_launch(root):
                 if not (root/(module+'.py')).is_file(): continue
                 # Controller supplies bind address and port; app import stays exactly documented.
                 return '.venv/bin/python -m uvicorn ' + shlex.quote(words[offset]) + ' --host 0.0.0.0 --port {port}'
-            if runner == 'node' and len(words)==2 and not Path(words[1]).is_absolute() and '..' not in Path(words[1]).parts and (root/words[1]).is_file() and words[1].endswith(('.js','.mjs','.cjs')):
-                source=(root/words[1]).read_text(errors='replace')
-                if re.search(r'\.listen\s*\(',source) and 'process.env.PORT' in source:
-                    return 'PORT={port} HOST=127.0.0.1 node ' + shlex.quote(words[1])
+            if node_server_entrypoint(root, command):
+                return 'PORT={port} HOST=127.0.0.1 node ' + shlex.quote(words[1])
     return None

@@ -37,7 +37,7 @@ def test_ambiguous_or_unsupported_outcomes_stay_unverified(task):
 def test_scope_and_explicit_replacement_preserve_history():
     assert contract.freeze('Add a Reset button that clears the result.', mode='build_from_prompt')['criteria'] == []
     assert contract.freeze('Add a CLI subcommand.')['criteria'] == []
-    source = {'id': 'source', 'user_task': 'Create output id total.'}
+    source = {'id': 'source', 'original_user_request': 'Create output id total.'}
     first = contract.freeze('Add a Reset button that clears the inputs and result.', source)
     before = deepcopy(first)
     second = contract.freeze('Make Reset set the result to "Ready".', {'ui_contract': first})
@@ -49,7 +49,7 @@ def test_scope_and_explicit_replacement_preserve_history():
     assert second['history'][0]['superseded_by'] == second['criteria'][1]['id']
     unchanged = contract.freeze('Add a Cancel button that clears the result.', {'ui_contract': first})
     assert len(unchanged['criteria']) == 3 and not unchanged['history']
-    assert second['entrypoint_task'] == source['user_task']
+    assert second['entrypoint_task'] == source['original_user_request']
 
 
 def test_result_binding_excludes_button_and_input_descendant_labels():
@@ -59,6 +59,17 @@ def test_result_binding_excludes_button_and_input_descendant_labels():
     assert contract._matches(nodes, {'kind': 'result'}) == [result]
     with pytest.raises(contract.Unverified, match='found 2'):
         contract._matches(nodes + [{'id': 'other', 'role': 'label', 'name': 'Other'}], {'kind': 'result'})
+
+
+@pytest.mark.parametrize('identity', [{'selector': '#result'}, {'name': 'Result'}, {'name': 'Output'}])
+def test_identified_result_is_not_ambiguous_with_input_caption(identity):
+    result = {'role': 'div', 'text': '', **identity}
+    caption = {'role': 'label', 'text': 'Task'}
+    controls = [{'name': 'Result', 'editable': True}, {'name': 'Result', 'activatable': True}]
+    assert contract._matches([caption, result, *controls], {'kind': 'result'}) == [result]
+    # Two genuinely identified result displays still require clarification.
+    with pytest.raises(contract.Unverified, match='found 2'):
+        contract._matches([caption, result, {'selector': '#output', 'role': 'div'}], {'kind': 'result'})
 
 
 def test_contract_is_persisted_before_dispatch_and_old_jobs_keep_behavior(monkeypatch, tmp_path):
@@ -109,7 +120,8 @@ def test_followup_keeps_confirmed_flows_and_freezes_source_provenance(monkeypatc
     ('duplicate', 'unverified'), ('missing', 'unverified'), ('no_setup', 'unverified'),
     ('removed_source_input', 'unverified'),
 ])
-def test_observation_not_project_verdict_drives_outcomes(monkeypatch, condition, expected):
+@pytest.mark.parametrize('activation', [{}, {'name': 'Reset'}, {'selector': '#reset'}])
+def test_observation_not_project_verdict_drives_outcomes(monkeypatch, condition, expected, activation):
     import coder_ui_checks
     specification = contract.freeze('Add a Reset button that clears the result.')
     state = {'text': 'seed', 'clicks': 0}
@@ -137,6 +149,8 @@ def test_observation_not_project_verdict_drives_outcomes(monkeypatch, condition,
     monkeypatch.setattr(contract.time, 'sleep', lambda _: None)
     worker = SimpleNamespace(get=lambda _: {'payload': {'revision_id': 'candidate'}}, event=lambda *a, **kw: None)
     flow = {'kind': 'web', 'file_path': 'index.html', 'steps': [{'action': 'fill', 'selector': '#input', 'value': 'seed'}]}
+    if activation:
+        flow['steps'].append({'action': 'click', **activation})
     if condition == 'no_setup': flow['steps'] = []
     bound = {specification['criteria'][0]['id']: {'targets': [{'selector': '#removed'}]}} if condition == 'removed_source_input' else {}
     result = contract.run(worker, 'op', None, specification, [{'revision_id': 'source', 'flow': flow}], bound)

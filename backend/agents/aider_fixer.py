@@ -351,7 +351,9 @@ async def run_aider_fix(http, events, conv_id: str, *,
             return envelope
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=900, write=10, pool=10)) as client:
+            from hephaestus_scope import authorize_request
+            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=900, write=10, pool=10),
+                                         event_hooks={'request':[authorize_request]}) as client:
                 async with client.stream("POST", f"{worker_url}/aider/run-stream", json=payload) as resp:
                     if resp.status_code != 200:
                         raise ConnectionError(f"Aider stream HTTP {resp.status_code}: {await resp.aread()}")

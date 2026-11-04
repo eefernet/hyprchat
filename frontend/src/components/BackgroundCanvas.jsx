@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import {isLightTheme} from '../elevation.js';
 
 export default function BackgroundCanvas({effect,t,energy=0}){
   const ref=useRef(null);
@@ -450,5 +451,5 @@ export default function BackgroundCanvas({effect,t,energy=0}){
   },[effect,t.acc,t.acc2,t.warm,t.f1]);
   if(!["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"].includes(effect))return null;
   const opacity=effect==="rain"?0.58:effect==="flow"?0.8:effect==="aurora"?0.62:effect==="stars"?0.82:effect==="circuit"?0.78:effect==="candle"?0.48:effect==="microwave"?0.5:0.7;
-  return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity}}/>;
+  return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity:opacity*(isLightTheme(t)?.55:1)}}/>;
 }

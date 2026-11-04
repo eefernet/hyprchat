@@ -548,6 +548,12 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
+    from hephaestus_scope import scope, conversation_metadata
+    with scope(**await conversation_metadata(artifact.get("conversation_id"))):
+        return await _fork_artifact_scoped(artifact_id,artifact)
+
+
+async def _fork_artifact_scoped(artifact_id,artifact):
     filepath, safe_name = artifact_path_for_row(artifact)
     if not filepath:
         raise HTTPException(404, "Artifact file is missing")

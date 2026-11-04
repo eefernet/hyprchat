@@ -2,6 +2,10 @@
 # Run on Codebox after copying backend/document*.py and document-requirements.txt
 # into /opt/hyprchat-documents/. No changes to Ollama or the coding worker venv.
 set -euo pipefail
+if [[ -f /etc/hephaestus/current-release ]]; then
+  SOURCE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+  exec python3 "$SOURCE_ROOT/scripts/hephaestus/install.py" --source "$SOURCE_ROOT"
+fi
 if [ -x /opt/hyprchat-documents/venv/bin/python ]; then
   echo "Existing installation: use scripts/staged_worker_release.py for a reversible update" >&2
   exit 1

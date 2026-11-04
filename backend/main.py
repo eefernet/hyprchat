@@ -604,7 +604,9 @@ async def user_context_middleware(request: Request, call_next):
         db.reset_current_user_id(token)
 
 HTTP_VERIFY_SSL = config.HTTP_VERIFY_SSL
-http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL)
+from hephaestus_scope import authorize_request as _authorize_execution_request
+http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0), verify=HTTP_VERIFY_SSL,
+                        event_hooks={'request': [_authorize_execution_request]})
 register_extracted_routes(
     app,
     http=http,
@@ -1087,6 +1089,13 @@ async def upload_coder_project(
     file: UploadFile = File(...),
     conv_id: str = Form(...),
 ):
+    from hephaestus_scope import scope
+    project_id=f'proj-{uuid.uuid4().hex[:12]}'
+    with scope(conversation=conv_id,project=project_id):
+        return await _upload_coder_project_scoped(file,conv_id,project_id)
+
+
+async def _upload_coder_project_scoped(file,conv_id,project_id):
     """Upload a .zip/.tar/.tar.gz of an existing project, extract it into the
     sandbox at /root/projects/{project_id}, and register it as the active
     coding project for this conversation. The chat agent's ACTIVE PROJECT
@@ -1120,7 +1129,6 @@ async def upload_coder_project(
             base = base[: -len(suf)]
             break
     base = re.sub(r"[^a-zA-Z0-9._-]", "-", base).strip("-_.") or "uploaded-project"
-    project_id = f"proj-{uuid.uuid4().hex[:12]}"
     project_name = base[:60]
 
     # Extract locally to a staging dir — in a worker thread (decompression is
@@ -1190,7 +1198,8 @@ async def upload_coder_project(
 
     transfer_file = open(transfer_path, "rb")
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as http_client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0),
+                                     event_hooks={'request':[_authorize_execution_request]}) as http_client:
             for i in range(total_chunks):
                 chunk = await asyncio.to_thread(transfer_file.read, CHUNK)
                 files = {"file": (f"chunk-{i}", chunk, "application/octet-stream")}
@@ -1225,7 +1234,7 @@ async def upload_coder_project(
             if data.get("exit_code", 1) != 0:
                 raise HTTPException(
                     500,
-                    f"Sandbox extraction failed: {(data.get('stderr') or '')[:300]}",
+                    f"Sandbox extraction failed: {(data.get('stderr') or data.get('stdout') or '')[:1000]}",
                 )
             git_cmd = (
                 f"cd {shlex.quote(remote_dir)} && "
@@ -1396,6 +1405,8 @@ async def execute_code(req: ExecuteRequest):
                 "stdin": req.stdin,
                 "timeout": req.timeout,
             },
+            headers=__import__('hephaestus_scope').headers(db.current_user_id(),
+                **await __import__('hephaestus_scope').conversation_metadata(req.conversation_id)),
             timeout=req.timeout + 15
         )
         result = r.json()
@@ -1431,7 +1442,9 @@ async def execute_shell(req: ShellRequest):
     try:
         r = await http.post(
             f"{config.CODEBOX_URL}/command",
-            json={"command": req.command},
+            json={"command": req.command,"timeout":req.timeout},
+            headers=__import__('hephaestus_scope').headers(db.current_user_id(),
+                **await __import__('hephaestus_scope').conversation_metadata(req.conversation_id)),
             timeout=req.timeout + 5
         )
         result = r.json()

@@ -138,7 +138,7 @@ def inherited_protection(source, requested):
     return list(dict.fromkeys([*[p for p in (source or {}).get('protected_files', []) if p not in grounded], *requested]))
 
 
-async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None, source_pointer="", engine="", ui_checks=None):
+async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None, source_pointer="", engine="", ui_checks=None, original_request=None):
     if not context_policy.runtime_settings()["daedalus_v3_enabled"]:
         raise ValueError("Enable the new Daedalus workflow in Settings first")
     mode = "edit_project" if mode == "fix_uploaded_project" else mode
@@ -169,6 +169,9 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
         if not project:
             raise LookupError("Project not found")
         source, source_pointer, source_revision = await resolve_source(project, source_pointer)
+        from hephaestus_scope import retired_project
+        if not source and retired_project(project):
+            raise ValueError("This project workspace was discarded when Codebox retired. Upload its source or start from a retained artifact.")
     elif mode != "build_from_prompt":
         raise ValueError("Select a registered project")
     from coder_ui_checks import validate as validate_ui_checks
@@ -206,9 +209,12 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
     # partly initialized project after its creating request disconnects.
     contract_options = {}
     if engine == 'openhands159':
-        from coder_ui_contract import VERSION, freeze, recipes
-        contract_options = {'engine_behavior_version': 1, 'ui_contract_version': VERSION,
-            'ui_contract': freeze(task, source, mode=mode, source_revision=source_revision),
+        from coder_engine_contract import freeze as freeze_deliverables
+        literal_request = task if original_request is None else original_request
+        from coder_ui_contract import VERSION, freeze, recipes, original_source
+        contract_source = await original_source(source, store.get)
+        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'engine_behavior_version': 1, 'ui_contract_version': VERSION,
+            'ui_contract': freeze(literal_request, contract_source, mode=mode, source_revision=source_revision),
             'ui_contract_context': recipes((source or {}).get('checks', [])) or (source or {}).get('ui_contract_context', [])}
     job = await store.create(conversation_id, task, mode, project_id, chosen_model, key or uuid.uuid4().hex,
         source_job_id=source["id"] if source else "", source_revision_id=source_revision if source else "",
@@ -312,6 +318,8 @@ async def resume(job_id, *, visual_review=None, visual_model=None, candidate_rev
     job = await store.get(job_id)
     if not job:
         raise LookupError("Workflow not found")
+    if job.get('worker_workspace_available') is False:
+        raise ValueError('This worker workspace was discarded during the Hephaestus migration. Download the retained artifact and start a new job to continue it.')
     modern = job.get('engine') == 'openhands159'
     budget_mode = budget_mode or ('preserve' if modern else 'new_allowance')
     if budget_mode not in {'preserve', 'new_allowance'}:
@@ -480,7 +488,7 @@ async def route_tool(name, args, conversation_id, events):
             mode = "build_from_prompt"
         if mode == "build_from_prompt":
             project_id = ""
-        job = await create(conversation_id, task, mode, project_id, key=key,
+        job = await create(conversation_id, task, mode, project_id, key=key, original_request=latest_user.get('content') or '',
                            visual_review=options.get("visual_review", args.get("visual_review")),
                            visual_model=options.get("visual_model"),
                            source_pointer="accepted" if options.get("source_pointer") == "accepted" else "")
@@ -530,6 +538,10 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                                call_limit=settings["daedalus_model_calls"])
     await store.start_attempt(job, job["worker_operation"], kind)
     payload = {"kind": kind, "engine": job.get('engine', 'legacy'),
+               'conversation_id':job.get('conversation_id',''), 'project_id':job.get('project_id',''),
+               'progress_version': (job.get('progress') or {}).get('version', 0),
+               'plan_finalization_version': job.get('plan_finalization_version', 0),
+               'deliverable_contract': job.get('deliverable_contract'),
                'engine_behavior_version': job.get('engine_behavior_version', 0), 'model_digest': job.get('model_digest', ''),
                "request_key": operation_key, "task": job["user_task"], "mode": job.get("mode", ""),
                "original_task": job["user_task"], "source_project_id": job.get("source_project_id", "") if job.get("policy_version",1)>=2 else job.get("source_project_id") or job["project_id"],
@@ -560,6 +572,8 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
         path = Path(artifact.get("storage_path", ""))
         expected = artifact.get("sha256", "")
         if not path.is_file() or len(expected) != 64:
+            if (source or {}).get('worker_workspace_available') is False:
+                raise ValueError('The retired worker workspace is unavailable and this revision has no retained artifact. Upload its source to start a new job.')
             if (source or {}).get('engine', 'legacy') != job.get('engine', 'legacy'):
                 raise ValueError('An immutable source archive is required when moving a project between engines')
             if job.get("source_pointer") == "accepted" and not (source or {}).get("candidate_history") and not (source or {}).get("candidate_artifact"):
@@ -608,7 +622,7 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                     timeline.append({"operation_id":job["worker_operation"],**entry["data"]})
                 if entry['type'] in {'probe_diagnosis','probe_proposed','probe_rejected','response_format_recovery','raw_probe_review'}:
                     verification_events.append({'operation_id':job['worker_operation'], **entry})
-            await store.save(job["id"], event="progress", worker_event_cursor=batch[-1]["seq"],
+            await store.save(job["id"], event="progress", worker_events=batch, worker_operation=job["worker_operation"],
                              worker_contact_at=store.now(),
                              context=context, operation_calls=operation.get("calls",0),
                              operation_seconds=max(0, time.time()-(operation.get("started") or time.time())),

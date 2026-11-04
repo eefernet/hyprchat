@@ -5,6 +5,7 @@ import asyncio
 import ast
 import base64
 import json
+import os
 import re
 import shlex
 import sys
@@ -43,6 +44,8 @@ def _strip_ansi(text: str) -> str:
 async def _ensure_venv(http):
     """Lazily create a Python venv in the CodeBox sandbox."""
     global _sandbox_venv_ready, _sandbox_venv_lock, _sandbox_venv_retry_at
+    if os.environ.get('HEPHAESTUS_TOKEN'):
+        return await _scoped_environment(http, 'python')
     if _sandbox_venv_ready:
         return True
     if _sandbox_venv_lock is None:
@@ -88,6 +91,8 @@ async def ensure_data_stack(http):
     finishes before the model's first execute_code call.
     """
     global _data_stack_ready, _data_stack_retry_at, _data_stack_lock
+    if os.environ.get('HEPHAESTUS_TOKEN'):
+        return await _scoped_environment(http, 'data')
     if _data_stack_ready:
         return True
     if _data_stack_lock is None:
@@ -118,6 +123,16 @@ async def ensure_data_stack(http):
         except Exception as e:
             print(f"[SANDBOX] data stack setup error: {e}")
         _data_stack_retry_at = time.monotonic() + _SETUP_RETRY_SECONDS
+        return False
+
+
+async def _scoped_environment(http, kind):
+    # Readiness belongs to the remote scope/image, not to process-global flags.
+    try:
+        response=await http.post(f'{config.CODEBOX_URL}/environment',json={'kind':kind},timeout=65)
+        return response.status_code==200 and response.json().get('ready') is True
+    except Exception as error:
+        print(f'[SANDBOX] scoped environment unavailable: {error}')
         return False
 
 

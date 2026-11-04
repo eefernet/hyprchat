@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import {IC} from './icons.jsx';
 import { codeTokenStyle, highlightCode, normalizeCodeLanguage } from '../syntaxHighlight.js';
 import '../codeBlocks.css';
 
@@ -407,13 +408,14 @@ export function InlineColorSwatch({value,theme,font,printMode=false}){
 // Collapsible <details>/<summary> block
 export function Collapsible({summary,children,theme,font,defaultOpen,variant=""}){
   const [open,setOpen]=useState(!!defaultOpen);
+  const bodyId=React.useId();
   const isReleaseSummary=typeof summary==="string"&&/^Alpha v/i.test(summary.trim());
   const isChangelogRelease=variant==="changelog"&&isReleaseSummary;
   return <div style={{margin:isChangelogRelease?"0 0 24px":"8px 0",border:isChangelogRelease?"none":"1px solid var(--hc-line)",borderRadius:isChangelogRelease?0:8,background:isChangelogRelease?"transparent":`${theme.surface}44`,overflow:"hidden"}}>
-    <div onClick={()=>setOpen(o=>!o)} style={{padding:isReleaseSummary?(isChangelogRelease?"4px 0 14px":"13px 16px"):"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:isReleaseSummary?10:6,fontSize:isReleaseSummary?20:12,fontWeight:isReleaseSummary?900:600,color:isReleaseSummary?theme.acc:theme.dim,userSelect:"none",background:isChangelogRelease?"transparent":`${theme.surface}66`,letterSpacing:isReleaseSummary?0.2:0,lineHeight:1.25,borderBottom:isChangelogRelease&&open?"1px solid var(--hc-line-subtle)":"none"}}>
-      <span style={{display:"inline-block",transition:"transform .15s",transform:open?"rotate(90deg)":"rotate(0)",color:theme.acc,fontSize:isReleaseSummary?13:10}}>▶</span>
+    <button type="button" className="hc-collapsible-toggle" aria-expanded={open} aria-controls={bodyId} onClick={()=>setOpen(o=>!o)} style={{padding:isReleaseSummary?(isChangelogRelease?"4px 0 14px":"13px 16px"):"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:isReleaseSummary?10:6,fontSize:isReleaseSummary?20:12,fontWeight:isReleaseSummary?900:600,color:isReleaseSummary?theme.acc:theme.dim,userSelect:"none",background:isChangelogRelease?"transparent":`${theme.surface}66`,letterSpacing:isReleaseSummary?0.2:0,lineHeight:1.25,borderBottom:isChangelogRelease&&open?"1px solid var(--hc-line-subtle)":"none"}}>
+      <span className="hc-chevron" data-open={open?"true":"false"} aria-hidden="true" style={{display:"inline-flex",color:theme.acc}}><IC.ChevDown/></span>
       <span style={{fontWeight:isReleaseSummary?900:600}}>{summary||"Details"}</span>
-    </div>
-    {open&&<div style={{padding:isChangelogRelease?"22px 0 0":"8px 12px",fontSize:"var(--hc-text-control)",lineHeight:1.6,color:theme.dim,borderTop:isChangelogRelease?"none":"1px solid var(--hc-line-subtle)"}}>{children}</div>}
+    </button>
+    {open&&<div id={bodyId} style={{padding:isChangelogRelease?"22px 0 0":"8px 12px",fontSize:"var(--hc-text-control)",lineHeight:1.6,color:theme.dim,borderTop:isChangelogRelease?"none":"1px solid var(--hc-line-subtle)"}}>{children}</div>}
   </div>;
 }

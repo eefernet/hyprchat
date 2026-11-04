@@ -22,11 +22,45 @@ import time
 import threading
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 from coder_native_checks import PYTHON_TRACE, compiled_count, native_count, native_runner, provenance, report_count
 from coder_patch_runtime import tree_hashes, stop_process, readonly_command
 from coder_profiles import discover, environment_key, validate_command
 from coder_repository import safe_relative, file_hash
+
+
+def service_endpoint_feedback(tail, environment, launches):
+    """Diagnose failed test connections; logs never establish passing evidence."""
+    if not re.search(r'ERR_CONNECTION_REFUSED|ECONNREFUSED|Connection refused', tail, re.I):
+        return None
+    def origin(value):
+        try:
+            url = urlsplit(value)
+            if url.scheme in {'http', 'https'} and url.hostname in {'127.0.0.1', 'localhost', '::1'}:
+                return (url.scheme, 'loopback', url.port or (443 if url.scheme == 'https' else 80))
+        except ValueError:
+            pass
+        return None
+    ready_urls = {launch['url'] for launch in launches if launch.get('passed') and launch.get('url')}
+    endpoints = {key: value for key, value in environment.items()
+                 if re.fullmatch(r'DAEDALUS_[A-Z0-9_]+_URL', key) and value in ready_urls and origin(value)}
+    if not endpoints:
+        return None
+    expected = {origin(value) for value in endpoints.values()}
+    reported = sorted({match.rstrip('.,;') for match in re.findall(r'https?://[^\s\"\'<>]+', tail)
+                       if origin(match.rstrip('.,;')) and origin(match.rstrip('.,;')) not in expected})[:8]
+    if not reported:
+        return None
+    # A log may mention an unrelated URL: describe the observation, not an
+    # invented network trace or a verdict about the application's behavior.
+    reason = ('The failed test log reports a loopback URL outside the controller-provided service endpoints: '
+              + ', '.join(reported) + '. Available URL variables: ' + ', '.join(sorted(endpoints)) + '. '
+              'Resolve the supplied environment variable once and use that same base URL for every navigation/request. '
+              'Start a fallback server only when that variable is absent. Checking the variable only to skip server '
+              'startup while still navigating to a hardcoded fallback URL causes this mismatch. '
+              'Do not hardcode the controller port, increase startup retries, remove assertions, or replace the tests.')
+    return {'category': 'test_service_endpoint', 'reported_urls': reported, 'endpoints': endpoints, 'reason': reason}
 
 
 def contract(repository, explicit=None, *, managed_dependencies=False):
@@ -134,7 +168,8 @@ def sandbox_paths(root, env):
                     target = path.resolve()
                     if not target.is_relative_to(cache):
                         raise ValueError('Dependency link escapes the current project environment')
-                    readonly.append(target)
+                    if not any(target.is_relative_to(p.resolve()) for p in __import__('coder_mount_policy').private_paths(env)):
+                        readonly.append(target)
                 if name in {'.venv', 'node_modules', 'vendor', '.git', 'target', 'build'}:
                     dirs.remove(name)
     return readonly
@@ -156,9 +191,10 @@ def execute(store, op_id, command, cwd, env, log, writable=None, process_trace=N
     urls = [v for k, v in env.items() if k.startswith('DAEDALUS_') and k.endswith('_URL')]
     with log.open('w') as output, Sandbox(['bash', '-c', command], cwd=cwd,
             writable=writes, readonly=sandbox_paths(root, env), environment=env,
-            network_urls=urls, runtime=(store.root / 'operation-caches' / op_id / log.stem) if operation['payload'].get('engine') == 'openhands159' else log.parent / 'runtime') as box:
+            network_urls=urls, runtime=(store.root / 'operation-caches' / op_id / log.stem) if operation['payload'].get('engine') == 'openhands159' else log.parent / 'runtime',
+            process_trace=process_trace,timeout=max(.1,deadline-time.monotonic()),resource_group=op_id) as box:
         args = box.args
-        if process_trace is not None:
+        if process_trace is not None and os.environ.get('HEPHAESTUS_EXECUTOR')!='docker':
             from coder_process_evidence import trace_command
             args = trace_command(args, process_trace)
         process = subprocess.Popen(args, cwd=cwd, env=box.env,
@@ -230,10 +266,27 @@ def prepare_environment(store, op_id, root, profile, project_id, env, folder):
         if payload.get('engine') == 'openhands159' and not payload.get('_preparation_active_started'):
             from coder_engine_environment import preparation
             lifetime.enter_context(preparation(store, op_id))
+        if payload.get('engine') == 'openhands159':
+            from coder_environment_publish import publication_lock, failure
+            key, _ = environment_key(safe_relative(root, profile['cwd']), profile)
+            try:
+                with publication_lock(cache / key):
+                    return _prepare_environment(store, op_id, root, profile, project_id, env, folder)
+            except OSError as error:
+                (cache / key / 'environment-ready.json').unlink(missing_ok=True)
+                diagnostic = failure(error).diagnostic
+                store.event(op_id, 'preparation_failure', diagnostic=diagnostic)
+                return [{'id': profile['cwd'] + ':dependency-publication', 'phase': 'setup',
+                    'origin': 'environment', 'passed': False, 'environment_fault': True,
+                    'classification': 'environment', 'reason': diagnostic['message'],
+                    'diagnostic': diagnostic, 'log_tail': diagnostic.get('detail', str(error))}]
         return _prepare_environment(store, op_id, root, profile, project_id, env, folder)
 
 
 def _prepare_environment(store, op_id, root, profile, project_id, env, folder):
+    if store.get(op_id)['payload'].get('engine') == 'openhands159':
+        from coder_prepared_environment import prepare
+        return prepare(store, op_id, root, profile, project_id, env, folder)
     """Same cache for editing/checks/follow-ups; editable installs always refresh."""
     env.setdefault('DAEDALUS_ENVIRONMENT_ROOT', str(store.root / 'project-environments' / hashlib.sha256(project_id.encode()).hexdigest()))
     modern = store.get(op_id)['payload'].get('engine') == 'openhands159'
@@ -252,10 +305,15 @@ def _prepare_environment(store, op_id, root, profile, project_id, env, folder):
     cache = store.root / 'project-environments' / scope / key
     cache.mkdir(parents=True, exist_ok=True)
     rows = []
+    pending_markers = []
+    ready = cache / 'environment-ready.json'
     for i, original in enumerate(profile['commands'].get('setup', [])):
         command = original
         marker = cache / (hashlib.sha256(command.encode()).hexdigest() + '.json')
         if command.startswith('python3 -m venv .venv'):
+            if modern and (cwd / '.venv').is_dir() and not (cwd / '.venv').is_symlink() and not (cache / '.venv').exists():
+                from coder_environment_publish import publish
+                publish(cwd / '.venv', cache / '.venv')
             if not (cache / '.venv').exists():
                 try:
                     payload = store.get(op_id)['payload']
@@ -276,12 +334,17 @@ def _prepare_environment(store, op_id, root, profile, project_id, env, folder):
             command = command.replace('python3 -m venv .venv', 'true', 1)
         for name in ('.venv', 'node_modules', 'vendor'):
             target = cwd / name
+            if modern and ((cwd / ('.daedalus-publish-' + name)).exists() or
+                           (cache / ('.published-' + name + '.json')).exists() and not target.is_symlink()):
+                from coder_environment_publish import publish
+                publish(target, cache / name)
             if target.is_symlink() and target.resolve() != (cache / name).resolve():
                 target.unlink()
             if (cache / name).exists() and not target.exists():
                 target.symlink_to(cache / name, target_is_directory=True)
-        reusable = marker.exists() and not re.search(r'(?:-e\s|--editable|cmake|dotnet)', original)
+        reusable = marker.exists() and (not modern or ready.exists()) and not re.search(r'(?:-e\s|--editable|cmake|dotnet)', original)
         log = folder / f'setup-{hashlib.sha256(profile["cwd"].encode()).hexdigest()[:10]}-{i}.log'
+        if modern and not reusable: ready.unlink(missing_ok=True)
         try:
             code = 0 if reusable else execute(store, op_id, command, cwd, uninstrumented(env), log,
                                              writable=[root, cache, Path(env['DAEDALUS_AUDIT_DIR'])])
@@ -295,7 +358,7 @@ def _prepare_environment(store, op_id, root, profile, project_id, env, folder):
         # The package is named: a failed setup in mdtoc/ must not read as the root's (coder_required_tests).
         row = {'id': profile['cwd'] + ':setup:' + str(i), 'cwd': profile['cwd'], 'origin': 'project', 'phase': 'setup', 'command': original,
             'passed': code == 0, 'exit_code': code, 'environment_reused': reusable, 'toolchains': versions,
-            'log': str(log), 'log_tail': tail, 'environment_fault': stalled or code == 127 or bool(re.search(
+            'log': str(log), 'log_tail': tail, 'environment_fault': stalled or code in {125, 126, 127} or bool(re.search(
                 r'\bENOTFOUND\b|\bEAI_AGAIN\b|Temporary failure|Network is unreachable|Connection refused', tail, re.I))}
         rows.append(row)
         if code:
@@ -304,20 +367,27 @@ def _prepare_environment(store, op_id, root, profile, project_id, env, folder):
             target = cwd / name
             if target.is_dir() and not target.is_symlink() and not (cache / name).exists():
                 if modern:
-                    target.rename(cache / name)
-                    target.symlink_to(cache / name, target_is_directory=True)
+                    from coder_environment_publish import publish
+                    publish(target, cache / name)
                 else:
                     shutil.copytree(target, cache / name, symlinks=True)
-        marker.write_text(json.dumps({'command': original, 'toolchains': versions}))
+        pending_markers.append((marker, {'command': original, 'toolchains': versions}))
     if modern and all(row['passed'] for row in rows):
         from coder_engine_environment import prepare_browsers
         rows.extend(prepare_browsers(store, op_id, root, cwd, cache, env, folder))
-    if modern:
-        ready = cache / 'environment-ready.json'
-        if all(row['passed'] for row in rows):
-            ready.write_text(json.dumps({'key': key, 'prepared_at': time.time()}))
+    if all(row['passed'] for row in rows):
+        from coder_environment_publish import atomic_json
+        if modern:
+            from coder_environment_publish import tree_manifest
+            for name in ('.venv', 'node_modules', 'vendor'):
+                if (cache / name).is_dir():
+                    atomic_json(cache / ('.published-' + name + '.json'), {'version': 1, 'tree': tree_manifest(cache / name)[0]})
+            for marker, record in pending_markers: atomic_json(marker, record)
+            atomic_json(ready, {'key': key, 'prepared_at': time.time()})
         else:
-            ready.unlink(missing_ok=True)
+            for marker, record in pending_markers: atomic_json(marker, record)
+    elif modern:
+        ready.unlink(missing_ok=True)
     return rows
 
 
@@ -714,6 +784,12 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         row = {**c, 'exit_code': code, 'passed': code == 0, 'log': str(log), 'log_tail': tail,
             'test_count': count, 'assertions_executed': assertions, 'coverage_observed': observed,
             'source_bindings': bindings, 'service_bindings': network, 'environment_fault': host_fault(code, tail)}
+        if code and payload.get('engine') == 'openhands159':
+            from coder_prepared_environment import classify
+            diagnostic = classify(code, tail, phase=c.get('phase', 'check'),
+                                  managed_paths=[env.get('DAEDALUS_ENVIRONMENT_ROOT', '/nonexistent'), cwd / '.venv', cwd / 'node_modules'])
+            if diagnostic:
+                row.update(environment_fault=True, diagnostic={**diagnostic, 'command': command})
         if subprocess_diagnostics:
             row['subprocess_diagnostics'] = subprocess_diagnostics
         if code != 0:
@@ -762,6 +838,10 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         if fixture_error:
             row.update(classification='audit_defect', audit_fixture_error=fixture_error,
                        reason='The audit passed a relative fixture path from the project directory. Use the observed absolute fixture path.')
+        if code and c.get('is_test') and payload.get('engine') == 'openhands159' and not row['environment_fault'] and not assertion_failures:
+            endpoint = service_endpoint_feedback(tail, check_env, [launch for launch, _ in offsets])
+            if endpoint:
+                row.update(service_diagnostic=endpoint, reason=endpoint['reason'])
         rows.append(row)
 
     for c in commands:

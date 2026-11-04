@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary,outcomeExplanation,nowLine,requestSummary} from './daedalusProgress.js';
+import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary,outcomeExplanation,nowLine,requestSummary,fileActivity} from './daedalusProgress.js';
 
 // Trimmed snapshots of real jobs from the 2026-09-18/19 evaluation runs.
 const jobs=JSON.parse(readFileSync(new URL('./daedalusProgress.fixtures.json',import.meta.url)));
@@ -102,4 +102,71 @@ test('a rolled-back change explains the rollback instead of a generic limit',()=
     verification_summary:{rolled_back:true,checks_passed:false}};
   const banner=outcomeExplanation(job);
   assert.equal(banner.title,'Change rolled back');assert.match(banner.text,/test_total \(failed\)/);
+});
+
+test('modern stage rail keeps preparation failure at Check',()=>{
+  assert.deepEqual(stageRail({engine:'openhands159',state:'blocked',failure:{stage:'checking'}}).map(x=>[x.label,x.state]),
+    [['Plan','done'],['Build','done'],['Check','stopped'],['Deliver','pending']]);
+});
+test('modern tasks are agent reported and do not imply verification',()=>{
+  const job={engine:'openhands159',state:'coding',progress:{version:1,plan:[{title:'Create UI',status:'done'}]}};
+  assert.equal(planSteps(job)[0].state,'done');
+  assert.equal(outcomeExplanation(job),null);
+  assert.equal(nowLine(job),'Preparing the next model action');
+});
+
+
+test('file activity is active only during its action and retains the last update',()=>{
+  const job={state:'coding',progress:{version:1,current:{kind:'file',path:'app.js',action:'create'},files:[{path:'last.js',outcome:'succeeded'}]}};
+  assert.deepEqual(fileActivity(job),{label:'Creating',path:'app.js'});
+  assert.deepEqual(fileActivity({...job,state:'cancelled'}),{label:'Last updated:',path:'last.js'});
+  assert.equal(fileActivity({state:'coding'}).label,'No file changes yet');
+});
+
+test('modern delivery retains failed and unverified revision checks',()=>{
+  const job={engine:'openhands159',state:'ready_for_review',revision_id:'r2',candidate_artifact:{id:'candidate'},
+    verification_summary:{revision_id:'r2',checks_passed:false,failures:[{id:'setup'}]}};
+  assert.equal(stageRail(job)[2].state,'failed');
+  assert.equal(stageRail(job)[3].state,'delivered');
+  assert.equal(stageRail({...job,state:'completed'})[2].state,'failed');
+  assert.equal(stageRail({...job,revision_id:'r3'})[2].state,'unverified');
+  assert.equal(stageRail({...job,state:'blocked',failure:{category:'environment',stage:'checking'}})[2].state,'blocked');
+});
+
+test('modern check list requires evidence bound to the current revision',()=>{
+  const job={engine:'openhands159',revision_id:'new',checks:[{id:'test',passed:true,revision_id:'old'},{id:'unbound',passed:true}]};
+  assert.equal(checkSummary(job).rows.length,0);
+});
+
+test('modern failed lint is advisory only when the controller marks it optional',()=>{
+  const job={engine:'openhands159',revision_id:'r',checks:[{id:'lint',phase:'lint',revision_id:'r',passed:false}]};
+  assert.equal(checkSummary(job).failed,1);
+  assert.equal(checkSummary({...job,checks:[{...job.checks[0],optional:true}]}).advisory,1);
+});
+
+test('historical workflow advisories never count as passed, even after owner acceptance',()=>{
+  const job={engine:'openhands159',state:'completed',revision_id:'r',checks:[
+    ...Array.from({length:8},(_,i)=>({id:`check:${i}`,passed:true,revision_id:'r'})),
+    ...Array.from({length:2},(_,i)=>({id:`workflow:${i}`,passed:true,workflow_status:'advisory',revision_id:'r',log_tail:'Inconclusive'}))]};
+  const before=JSON.stringify(job);let counts=checkSummary(job);
+  assert.equal(counts.passed,8);assert.equal(counts.advisory,2);assert.equal(counts.failed,0);
+  assert.equal(JSON.stringify(job),before);
+  job.checks.push({id:'extra',passed:true,revision_id:'r'},{id:'workflow:extra',passed:true,workflow_status:'advisory',revision_id:'r'});
+  counts=checkSummary(job);assert.equal(counts.passed,9);assert.equal(counts.advisory,3);
+});
+test('unreconciled agent plan is not active after coding and is never auto-completed',()=>{
+  const job={state:'ready_for_review',progress:{version:1,plan:[{title:'Done',status:'done'},{title:'Old',status:'in_progress'},{title:'Pending',status:'todo'}]}};
+  assert.deepEqual(planSteps(job).map(s=>s.state),['done','not_updated','not_updated']);
+  assert.deepEqual(planSteps({...job,state:'coding'}).map(s=>s.state),['done','current','pending']);
+});
+test('outcome categories are disjoint and only the latest current-revision row counts',()=>{
+ const job={engine:'openhands159',revision_id:'new',checks:[{id:'a',passed:true,revision_id:'old'},{id:'b',passed:true,revision_id:'new'},
+ {id:'b',passed:false,revision_id:'new'},{id:'c',passed:false,optional:true,revision_id:'new'},
+ {id:'d',skipped:true,revision_id:'new'},{id:'e',status:'unverified',revision_id:'new'}]};
+ const summary=checkSummary(job);assert.deepEqual([summary.passed,summary.failed,summary.advisory,summary.skipped,summary.unverified],[0,1,1,1,1]);
+});
+
+test('advisory-only historical evidence does not turn Check green',()=>{
+ const job={engine:'openhands159',state:'ready_for_review',revision_id:'r',verification_summary:{revision_id:'r',checks_passed:true},checks:[{id:'probe',revision_id:'r',passed:true,workflow_status:'advisory'}]};
+ assert.equal(stageRail(job)[2].state,'unverified');assert.notEqual(outcomeExplanation(job).title,'Checks passed — please review');
 });

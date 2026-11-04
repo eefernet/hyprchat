@@ -17,6 +17,9 @@ def run(kind, request, emit=None):
     from coder_sandbox_agent import model_bridge
     from coder_patch_runtime import stop_process
     from context_policy import runtime_settings
+    if kind=='aider' and os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+        from hephaestus_scope import resolve_workspace_path
+        request=request.model_copy(update={'project_dir':str(resolve_workspace_path(request.project_dir))})
     project, name, reused = worker._workspace_for_request(request) if kind == 'sdk' else (Path(request.project_dir).resolve(), '', True)
     if not project.is_dir():
         raise ValueError('Project directory does not exist')
@@ -36,7 +39,7 @@ def run(kind, request, emit=None):
     command = [sys.executable, str(Path(__file__).resolve()), str(runtime / 'request.json')]
     modules = list(Path(__file__).parent.glob('*.py'))
     binary = worker._aider_bin() if kind == 'aider' else ''
-    if binary:
+    if binary and os.environ.get('HEPHAESTUS_EXECUTOR')!='docker':
         modules.extend(toolchain_mounts([binary]))
     cursor = 0
     def drain():
@@ -57,7 +60,8 @@ def run(kind, request, emit=None):
         with model_bridge(store, identity) as bridge:
             with Sandbox(command, cwd=project, writable=[project, runtime], readonly=modules,
                          environment={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LITELLM_LOCAL_MODEL_COST_MAP': 'True'},
-                         network_urls=[bridge], runtime=runtime / 'environment') as box:
+                         runtime_profile='aider' if kind=='aider' and os.environ.get('HEPHAESTUS_EXECUTOR')=='docker' else None,
+                         network_urls=[bridge], runtime=runtime / 'environment',timeout=settings['daedalus_job_seconds']) as box:
                 data = request.model_dump(); data['ollama_url'] = box.translate_url(bridge)
                 (runtime / 'request.json').write_text(json.dumps({'kind': kind, 'request': data, 'project': str(project),
                                                                 'name': name, 'reused': reused, 'runtime': str(runtime)}))
@@ -89,12 +93,14 @@ def run(kind, request, emit=None):
 async def stream(request):
     from fastapi.responses import StreamingResponse
     queue = asyncio.Queue(); loop = asyncio.get_running_loop()
+    from contextvars import copy_context
+    execution_context=copy_context()
     def emit(event): loop.call_soon_threadsafe(queue.put_nowait, event)
     def execute():
         try: emit({'type': 'done', **run('sdk', request, emit)})
         finally: emit(None)
     async def events():
-        future = loop.run_in_executor(None, execute)
+        future = loop.run_in_executor(None, execution_context.run, execute)
         complete = False
         try:
             while True:

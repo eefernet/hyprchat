@@ -59,9 +59,12 @@ async def resume_workflow(workflow_id: str, body: dict = Body(default={})):
 
 
 @router.get("/api/coder/workflows/{workflow_id}/events")
-async def workflow_events(workflow_id: str, request: Request, after: int = 0):
+async def workflow_events(workflow_id: str, request: Request, after: int = 0, view: str = "", before: int = 0, limit: int = 50):
     if not await store.get(workflow_id):
         raise HTTPException(404, "Workflow not found")
+    if view == 'activity':
+        return await store.activity(workflow_id, max(0,before), min(100,max(1,limit)))
+    if view: raise HTTPException(422, 'Unknown events view')
     try:
         cursor = max(after, int(request.headers.get("last-event-id") or 0))
     except ValueError:

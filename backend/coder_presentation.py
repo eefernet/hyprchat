@@ -26,6 +26,9 @@ NOT_VERIFIED = ('Daedalus ran the build, the project\'s own tests and the comman
 
 def presentation(job):
     state = job['state']
+    from coder_check_outcomes import current, counts
+    rows = current(job.get('checks', []), job.get('revision_id')) if job.get('engine') == 'openhands159' else []
+    inconclusive = bool(rows) and not any(row['outcome'] == 'passed' for row in rows)
     phases = {'queued': 'Planning', 'inspecting': 'Planning', 'planning': 'Planning',
         'baselining': 'Checking', 'coding': 'Repairing' if job.get('repair_round') else 'Building',
         'checking': 'Checking', 'auditing': 'Checking', 'reviewing': 'Reviewing', 'accepting': 'Reviewing',
@@ -50,7 +53,7 @@ def presentation(job):
         if summary.get('incomplete_reason'):
             phase = 'Build incomplete'
             detail = 'Generation stopped; saved work is available for review'
-        elif not contract_gap and (summary.get('checks_passed') or metadata.get('checks_passed')):
+        elif not contract_gap and not inconclusive and (summary.get('checks_passed') or metadata.get('checks_passed')):
             phase = 'Checks passed — please review'
         elif summary.get('checks_ok') and not summary.get('exercised'):
             phase = 'Built, not exercised'
@@ -71,6 +74,7 @@ def presentation(job):
                                 or (summary.get('revision_id') == revision and 'checks' in summary and not summary['checks']))
     accept_ready = state == 'ready_for_review' and bool(candidate.get('id')) and bool(revision) and not empty
     return {'phase': phase, 'detail': detail, 'project_name': job.get('project_name') or 'Daedalus project',
+        **({'check_counts': counts(rows)} if job.get('engine') == 'openhands159' else {}),
         'not_verified': (('See the requirement evidence for failed or unverified UI outcomes. Passing checks cover only the observed interactions; other behavior needs your review.'
                          if job.get('ui_contract_version') else NOT_VERIFIED)
                         if job.get('policy_version', 1) >= 7 and state in {'completed', 'ready_for_review'} and not job.get('answer') else ''),

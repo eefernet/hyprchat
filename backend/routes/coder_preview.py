@@ -28,7 +28,7 @@ def published(job, revision):
 
 
 def public_session(state):
-    return {k: state[k] for k in ('id','revision','status','expires_at','error') if k in state}
+    return {k: state[k] for k in ('id','revision','status','expires_at','error','lifecycle','desired_state') if k in state}
 
 
 async def worker(job, method, suffix='', **kwargs):
@@ -50,6 +50,25 @@ async def create(workflow_id: str, body: dict = Body(...)):
 async def status(workflow_id: str, identity: str):
     job = await owned_job(workflow_id)
     return public_session(await worker(job,'GET','/'+identity))
+
+
+@router.get('/api/coder/workflows/{workflow_id}/previews')
+async def listing(workflow_id: str):
+    job=await owned_job(workflow_id)
+    return [public_session(state) for state in await worker(job,'GET') if published(job,state['revision'])]
+
+
+@router.post('/api/coder/workflows/{workflow_id}/previews/{identity}/control')
+async def control(workflow_id: str, identity: str, body: dict=Body(...)):
+    job=await owned_job(workflow_id)
+    state=await worker(job,'GET','/'+identity)
+    if not published(job,state['revision']): raise HTTPException(409,'Application requires its exact delivered revision')
+    return public_session(await worker(job,'POST','/'+identity+'/control',json=body))
+
+
+@router.get('/api/coder/workflows/{workflow_id}/previews/{identity}/logs')
+async def logs(workflow_id: str, identity: str):
+    return await worker(await owned_job(workflow_id),'GET','/'+identity+'/logs')
 
 
 @router.delete('/api/coder/workflows/{workflow_id}/previews/{identity}')

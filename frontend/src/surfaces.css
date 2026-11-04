@@ -129,3 +129,38 @@ select option { background: var(--hc-bg-deep); color: var(--hc-text); }
 .hc-shortcut-row + .hc-shortcut-row { border-top: 1px solid var(--hc-line-subtle); }
 .hc-shortcut-row dt { margin: 0; display: flex; gap: 2px; flex-shrink: 0; }
 .hc-shortcut-row dd { margin: 0; color: var(--hc-secondary); font-size: var(--hc-text-secondary); text-align: right; }
+
+/* Lantern surfaces. The composer retains its previous fill, radius and spacing. */
+.hc-nav-rail { background:var(--hc-sunken); box-shadow:inset -1px 0 0 var(--hc-line-subtle); }
+.hc-conversation-sidebar { background:linear-gradient(180deg,var(--hc-sunken),color-mix(in srgb,var(--hc-sunken) 94%,var(--hc-accent))); }
+.hc-app-header { background:color-mix(in srgb,var(--hc-elev-0) 96%,var(--hc-surface)); border-bottom:1px solid var(--hc-line-subtle); box-shadow:0 3px 16px -12px var(--hc-scrim); }
+.nav-panel-button.is-active { box-shadow:inset 0 0 0 1px var(--hc-accent-ring); }
+.conv-row.is-act { box-shadow:inset 0 0 0 1px var(--hc-line-subtle); }
+.hc-composer-box { background:color-mix(in srgb,var(--hc-elev-2) 90%,transparent); backdrop-filter:blur(var(--hc-blur-float)) saturate(1.25); -webkit-backdrop-filter:blur(var(--hc-blur-float)) saturate(1.25); border:1px solid var(--hc-line); box-shadow:var(--hc-shadow-2); }
+/* These selectors follow the base recipe so focused/error states take precedence. */
+.hc-composer-box[data-focused="true"] { border-color:color-mix(in srgb,var(--hc-composer-tone) 55%,transparent); box-shadow:0 0 0 3px color-mix(in srgb,var(--hc-composer-tone) 12%,transparent),var(--hc-shadow-2); }
+.hc-composer-box[data-active="true"] { border-color:color-mix(in srgb,var(--hc-composer-tone) 45%,transparent); box-shadow:0 0 0 1px color-mix(in srgb,var(--hc-composer-tone) 18%,transparent),var(--hc-shadow-2); }
+.hc-composer-box[data-state="error"] { background:color-mix(in srgb,var(--hc-danger) 8%,var(--hc-elev-2)); border-color:color-mix(in srgb,var(--hc-danger) 55%,transparent); }
+.hc-composer-box[data-state="stopped"] { border-color:var(--hc-line-strong); }
+.msg-avatar { display:flex; }
+.msg-row.is-user .msg-avatar { display:none; }
+.msg-row.is-user .hc-prose { box-shadow:inset 0 1px 0 var(--hc-edge-light); }
+.hc-popover,.hc-drawer,.hc-elev-3 { box-shadow:var(--hc-shadow-3),inset 0 1px 0 var(--hc-edge-light); }
+.hc-collapsible-toggle { display:flex; align-items:center; width:100%; border:0; text-align:left; font:inherit; }
+.hc-hero { display:flex; flex-direction:column; align-items:center; gap:16px; text-align:center; position:relative; isolation:isolate; max-width:100%; overflow-wrap:anywhere; transition:transform 240ms var(--hc-ease-out); animation:hc-reveal 240ms var(--hc-ease-out) both; }
+.hc-hero::before { content:""; position:absolute; width:min(650px,85vw); height:300px; top:50%; left:50%; transform:translate(-50%,-50%); background:radial-gradient(ellipse,color-mix(in srgb,var(--hc-accent) 9%,transparent),transparent 68%); z-index:-1; pointer-events:none; }
+.hc-hero-mark { width:64px; height:64px; border-radius:20px; display:flex; align-items:center; justify-content:center; gap:7px; background:var(--hc-elev-1); border:1px solid var(--hc-line-strong); box-shadow:var(--hc-shadow-2),inset 0 1px 0 var(--hc-edge-light); margin-bottom:4px; }
+.hc-hero-mark i { width:9px; height:29px; background:var(--hc-accent); border-radius:3px; transform:translateY(-3px); }
+.hc-hero-mark i+i { background:var(--hc-warm); transform:translateY(3px); }
+.hc-hero-wordmark { font-size:clamp(32px,3.5vw,48px); font-weight:500; letter-spacing:-.055em; line-height:1.1; color:var(--hc-text); }
+.hc-hero-greeting { font-size:var(--hc-text-section); font-weight:500; color:var(--hc-text); }
+.hc-hero-tagline { max-width:48ch; color:var(--hc-muted); font-size:var(--hc-text-control); line-height:1.7; }
+.hc-hero.is-compact { gap:8px; }
+.hc-hero.is-compact .hc-hero-wordmark { font-size:28px; }
+.hc-starter-chips { gap:10px; }
+@media (max-width:768px), (pointer:coarse) {
+  .hc-composer-box { backdrop-filter:none; -webkit-backdrop-filter:none; }
+  .hc-hero { padding:12px 20px; }
+  .hc-hero-mark { width:52px; height:52px; border-radius:16px; }
+}
+@media (prefers-reduced-motion:reduce) { .hc-hero { animation:none; transition:none; } }

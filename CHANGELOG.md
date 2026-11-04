@@ -1,21 +1,30 @@
 <details open>
+<summary>Unreleased — UI refresh</summary>
+
+- **A clearer interface** — refined sidebar, headings, theme previews, and shared surfaces, while keeping the familiar composer and existing animated backgrounds.
+- **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
+- **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.
+- **Visual fixes** — composer focus feedback, Send/Stop shape changes, interface-font persistence, and consistent update notices.
+
+</details>
+
+<details open>
 <summary>Alpha v18.2.1 — Oct 27, 2026</summary>
 
-> Daedalus says when a build passes its checks, lets you accept it, and edits it without losing tests that already passed.
+> Clearer coding results, safer follow-up edits, and a new home for running your projects.
 
 ## Daedalus
 
-- **Checks passed — please review** — a build whose setup, build, project tests and requested commands pass on a fresh copy now says so, instead of always landing on "Ready for review". A build that compiles but that nothing ran says **Built, not exercised**. Model-written audits and the reviewer no longer decide the result; they are off by default (Settings flag `daedalus_independent_review`).
-- **Accept** — **Accept this build** on the job card marks that exact revision as the project's accepted version (shown as **Complete · Accepted by you**). Accepted and current versions are pinned, so cleanup and deletion keep them.
-- **Follow-up edits work before anything is accepted** — "now add a --json flag" continues from the latest build. The composer offers **Start from: Accepted version** when the two differ. Follow-ups on Daedalus-built projects use the agent builder.
-- **Tests that passed must keep passing** — Daedalus tracks each test by the name its runner reports (pytest, unittest, Maven, Gradle, cargo, go, ctest, node, .NET). A change that breaks, skips or deletes one is rolled back to the last version that kept them, and a newly failing test is run once more before it counts. Say "update the tests" when a change is meant to alter tested behaviour.
-- **Checks inside the build session** — when the builder says it is finished, Daedalus runs the project's own build and tests and hands any failure straight back, up to three times, before the separate check stage. Replies without a tool call get a short nudge instead of ending the session, and no longer switch the model into text-only tool calling.
-- **Deleting a chat keeps the project consistent** — the project's latest build moves to the newest one that survives in another chat. If the accepted version came from the deleted chat, edits stop and ask you to upload its archive, which stays downloadable, instead of quietly starting from an older build.
-- **Coding models stay on the GPU** — before each stage, Daedalus checks that its model is wholly in GPU memory. If another model has pushed part of it onto the CPU, it unloads the others and reloads alone. On the two 3090s, the planning model left behind made the coder run at 0.5 tokens/s instead of 140, and a build spent its whole hour on timed-out calls. The check runs where it can see every loaded model: inside the sandboxed build session only the session's own model is visible, so the first version of this check unloaded and reloaded the coder six times beside the planning model and reported a false "does not fit" twice per job; the supervisor now evicts before the session's warm-up load.
-- **Java builds get the jar they asked for** — when a request runs `java -jar target/name.jar`, Daedalus checks that exact file exists after the Maven or Gradle build. If the build produced `name-1.0-SNAPSHOT.jar` instead, the repair is pointed at `pom.xml` (`<finalName>`) rather than the Java sources. In the first held-out baseline, 10 of 12 Java builds failed only on this. Usage templates such as `java -jar target/x.jar COMMAND FILE` are no longer run literally, and the exit codes and error cases a request states are now listed for the builder up front.
-- **"Add tests" means new tests** — when an edit request asks for tests to be added, the delivered suite must contain a passing test the project did not have before (tracked by the runner's own test names); the tests inherited from the previous version no longer count for it. In the live follow-up "add a `--min-length` option and add tests for the new option", the option worked, no test was written, and the build still said Checks passed. Requests that only ask for existing tests to keep passing are unaffected, as are runners that report no test names.
-- **A rollback never lands on an empty tree** — after a Stop and Continue, a repair that "regressed" the documentation of a near-empty starting revision restored that empty revision over a real project and delivered an archive holding only the review report, with Accept offered. Documentation now counts as retained only from outcomes that asked for it, a rollback target must be a revision with at least one passed project check (never a new build's starting tree), and Accept is refused, in the card and on the server, for a version with no project files.
-- **Clearer cards** — the assistant's reply shows above the job card, each card lists what Daedalus did not verify, and reloading a conversation no longer puts the composer into Stop mode while a background job runs.
+- **Clearer build results** — see which checks passed, what still needs review, and what Daedalus couldn't verify.
+- **Accept the version you want** — mark a build as accepted while keeping later edits separate. Accepted projects stay available to download.
+- **Easier follow-up edits** — continue from the latest build, even before accepting it, or choose your accepted version as the starting point.
+- **Safer changes** — protect tests that already pass and check that requests to add tests actually produce new ones. Improved recovery prevents empty projects from being offered for acceptance.
+- **More reliable builds** — improved Java packaging, coding performance, and Stop/Continue recovery, with clearer job cards and fewer confusing status messages.
+
+## Hephaestus & Application Previews
+
+- **Codebox retired; Hephaestus added** — code execution, coding agents, document generation, and application previews now run in isolated Docker containers for more consistent environments.
+- **Keep applications running** — keep supported previews running, stop or restart them, and view their logs. Saved application data survives restarts; temporary previews close after 15 minutes.
 
 </details>
 

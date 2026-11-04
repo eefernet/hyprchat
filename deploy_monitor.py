@@ -78,7 +78,7 @@ WORKER_SHARED.update({'backend/'+name+'.py' for name in (
     'coder_sandbox', 'coder_sandbox_agent', 'coder_sandbox_call', 'coder_sandbox_legacy',
     'coder_assertion_outcomes', 'coder_criteria', 'coder_generated',
     'coder_policy7_phases', 'coder_request_probes', 'coder_workflow_guard', 'coder_repair_packet', 'coder_skeletons', 'coder_policy7_prompt',
-    'coder_stop_hook', 'coder_test_ids', 'coder_required_tests')})
+    'coder_stop_hook', 'coder_test_ids', 'coder_required_tests', 'hephaestus_scope', 'hephaestus_client')})
 
 # ── Watched files → (label, remote_dir, needs_restart) ──
 # needs_restart: whether deploying this file requires restarting hyprchat service
@@ -324,6 +324,7 @@ FRONTEND_SRC_FILES = {
     "frontend/src/panels/LibrarySearchPanel.jsx",
     "frontend/src/components/BackgroundCanvas.jsx",
     "frontend/src/components/ChatHero.jsx",
+    "frontend/src/components/CodeCard.jsx",
     "frontend/src/components/EmptyState.jsx",
     "frontend/src/components/NavLayoutEditor.jsx",
     "frontend/src/components/PanelChart.jsx",
@@ -426,6 +427,8 @@ def normalize_config(cfg):
     """Accept both old deploy_monitor keys and the AGENTS.md template keys."""
     if not cfg:
         return cfg
+    if "hephaestus" in cfg and "codebox" not in cfg:
+        cfg["codebox"] = {**cfg["hephaestus"], "runtime": "hephaestus"}
     for key in ("hyprchat", "codebox", "searxng"):
         server = cfg.get(key)
         if not isinstance(server, dict):
@@ -517,17 +520,23 @@ def setup_servers():
         default_user=hypr_def.get("user", "root"),
         default_pass=hypr_def.get("pass") or hypr_def.get("password", ""))
 
-    print(f"  {BLD}{M}Codebox Server{RST} {DIM}(sandbox execution){RST}")
-    cb = prompt_server("",
+    print(f"  {BLD}{M}Hephaestus / Codebox Server{RST} {DIM}(sandbox execution){RST}")
+    cb = {**cb_def, **prompt_server("",
         default_ip=cb_def.get("ip") or cb_def.get("host", ""),
         default_user=cb_def.get("user", "root"),
-        default_pass=cb_def.get("pass") or cb_def.get("password", ""))
+        default_pass=cb_def.get("pass") or cb_def.get("password", ""))}
+    if cb_def.get("runtime") == "hephaestus":
+        cb["runtime"] = "hephaestus"
 
     sx = prompt_optional_searxng(sx_def)
 
-    cfg = {"hyprchat": hypr, "codebox": cb}
+    cfg = {**cfg, "hyprchat": hypr, "codebox": cb}
+    if cb.get("runtime") == "hephaestus":
+        cfg["hephaestus"] = dict(cb)
     if sx:
         cfg["searxng"] = sx
+    else:
+        cfg.pop("searxng", None)
     save_config(cfg)
     print(f"  {G}Config saved to {CONFIG_FILE}{RST}")
     print()
@@ -891,6 +900,8 @@ def _codebox_host_ready(cb):
 
 
 def _bootstrap_codebox_host(cb):
+    if cb.get("runtime") == "hephaestus":
+        return False, "", "Provision Hephaestus with scripts/create-hephaestus-vm.sh and its locked runtime installer; host pip bootstrap is disabled."
     cmd = (
         "set -u\n"
         "if command -v apt-get >/dev/null 2>&1; then\n"
@@ -1125,6 +1136,9 @@ def deploy_changes(changed, cfg):
     pushed = {}  # filepath -> sha256 of the content actually sent
 
     cb = cfg["codebox"]
+    if cb.get("runtime") == "hephaestus" and any(path in WORKER_FILES | WORKER_SHARED | DOCUMENT_WORKER_FILES for path, _ in changed):
+        print("Hephaestus worker changes require a tested immutable runtime release; live worker file copies and pip installs are disabled.")
+        return {}
     ensured_dirs = set()
 
     print()
@@ -1147,7 +1161,8 @@ def deploy_changes(changed, cfg):
     else:
         print(f"  {G}\u2713{RST} HyprChat host ready")
 
-    cb_ready, _out, cb_err = _codebox_host_ready(cb)
+    hephaestus = cb.get('runtime') == 'hephaestus'
+    cb_ready, _out, cb_err = (True, '', '') if hephaestus else _codebox_host_ready(cb)
     cb_reachable = cb_ready
     if not cb_ready:
         ok, out, err = _bootstrap_codebox_host(cb)
@@ -1341,7 +1356,7 @@ def deploy_changes(changed, cfg):
                 _show_journal(hypr, "hyprchat")
 
     worker_deployed = bool(set(pushed) & (WORKER_FILES | WORKER_SHARED))
-    aider_ready, aider_out, _ = _aider_worker_ready(cb)
+    aider_ready, aider_out, _ = (True, '', '') if hephaestus else _aider_worker_ready(cb)
     if worker_deployed or not aider_ready:
         print()
         print(f"  {Y}\u25b6{RST} Checking Aider worker venv on Codebox...")
@@ -1418,7 +1433,7 @@ def draw_monitor(file_states, prev_times, cfg, last_event=""):
     if _LIVE_ROOT["checked"]:
         kind = "staged release" if _LIVE_ROOT["release"] else "legacy root"
         print(f"    {DIM}live {kind}: {_LIVE_ROOT['root']}{RST}")
-    print(f"  {M}\u25cf{RST} {BLD}Codebox{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
+    print(f"  {M}\u25cf{RST} {BLD}{'Hephaestus' if cb.get('runtime') == 'hephaestus' else 'Codebox'}{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
     sx = cfg.get("searxng")
     if _server_configured(sx):
         print(f"  {Y}\u25cf{RST} {BLD}SearXNG{RST}   {G}{sx['user']}@{sx['ip']}{RST}")
@@ -1521,7 +1536,7 @@ def main():
             f"{BLD}     HyprChat Deploy Monitor{RST}",
             "",
             f"  {C}HyprChat{RST}  {hypr['user']}@{hypr['ip']}",
-            f"  {M}Codebox{RST}   {cb['user']}@{cb['ip']}",
+            f"  {M}{'Hephaestus' if cb.get('runtime') == 'hephaestus' else 'Codebox'}{RST}   {cb['user']}@{cb['ip']}",
             *sx_lines,
             "",
             f"  {BLD}Enter{RST}  Start watching        ",

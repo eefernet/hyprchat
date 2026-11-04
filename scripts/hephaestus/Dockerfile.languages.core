@@ -1,0 +1,21 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ruby php-cli perl lua5.4 r-base-core groovy elixir scala ocaml \
+    golang rustc cargo mono-mcs mono-runtime kotlin ghc gfortran gnucobol \
+    gnat fp-compiler node-typescript ts-node libgc-dev xz-utils && \
+    dpkg-query -W > /usr/local/share/hephaestus-packages.txt && rm -rf /var/lib/apt/lists/*
+RUN curl -fL --retry 3 https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz -o /tmp/zig.tar.xz && \
+    echo 'd45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea  /tmp/zig.tar.xz' | sha256sum -c - && \
+    tar xf /tmp/zig.tar.xz -C /opt && ln -s /opt/zig-linux-x86_64-0.13.0/zig /usr/local/bin/zig && rm /tmp/zig.tar.xz
+RUN curl -fL --retry 3 https://storage.googleapis.com/dart-archive/channels/stable/release/3.11.6/sdk/dartsdk-linux-x64-release.zip -o /tmp/dart.zip && \
+    echo 'ea0ff2396ea5af402ba3598a9139a0f4b1b3471d9d7e834882d1559622760add  /tmp/dart.zip' | sha256sum -c - && \
+    unzip -q /tmp/dart.zip -d /opt && ln -s /opt/dart-sdk/bin/dart /usr/local/bin/dart && rm /tmp/dart.zip
+RUN curl -fL --retry 3 https://github.com/vlang/v/releases/download/0.5/v_linux.zip -o /tmp/v.zip && \
+    echo '11008152d01244aeb4b9e39bfbac88c7c875b4cdf0ed840d413d65e94aa532bb  /tmp/v.zip' | sha256sum -c - && \
+    unzip -q /tmp/v.zip -d /opt && ln -s /opt/v/v /usr/local/bin/v && rm /tmp/v.zip
+ENV JAVA_HOME=/usr/lib/jvm/default-java DART_SUPPRESS_ANALYTICS=true
+RUN curl -fL --retry 3 https://nim-lang.org/download/nim-2.2.4-linux_x64.tar.xz -o /tmp/nim.tar.xz && \
+    echo '791802138aaf19c8579232c50b4998ce2ae2928b791127ce5b4ef3c7af53fb46  /tmp/nim.tar.xz' | sha256sum -c - && \
+    tar xf /tmp/nim.tar.xz -C /opt && ln -s /opt/nim-2.2.4/bin/nim /usr/local/bin/nim && \
+    ln -s /opt/nim-2.2.4/bin/nimble /usr/local/bin/nimble && rm /tmp/nim.tar.xz

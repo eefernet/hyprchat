@@ -58,6 +58,13 @@ async def step(job, controller):
         elif environment_fault and job.get('preparation_retries', 0) < 1:
             await save(state='checking', preparation_retries=job.get('preparation_retries', 0) + 1,
                        attempt=job.get('attempt', 0) + 1, **common)
+        elif environment_fault:
+            diagnostics = [c.get('diagnostic') or {'detail': c.get('log_tail', '')} for c in result['checks'] if c.get('environment_fault')]
+            await save(state='blocked', resume_state='checking',
+                blocker='Dependency setup failed; your project files are saved.',
+                failure={'category': 'environment', 'stage': 'checking', 'preparation': diagnostics,
+                    'next_action': 'Restore dependency preparation before trying again.'}, **common)
+            return True
         elif failures and job.get('repair_round', 0) < 2 and not environment_fault:
             await save(state='coding', repair_round=job.get('repair_round', 0) + 1,
                        repair_feedback=failures, **common)
@@ -66,6 +73,7 @@ async def step(job, controller):
                       'Some checks failed; review the retained candidate.' if failures else
                       'Tests ran, but existing test files changed. Review the changed expectations before accepting.' if summary.get('changed_baseline_tests') else
                       'Some requested UI outcomes remain unverified. Review the requirement evidence before accepting.' if summary.get('unverified_ui_criteria') else
+                      'Some requested file locations are ambiguous. Review the unverified requirements before accepting.' if summary.get('unverified_deliverables') else
                       'Built, but requested interface behavior has not been independently exercised. Review the candidate.' if summary.get('unverified_interfaces') else
                       'Built, but no executed behavioral test established correctness. Review the candidate.')
             await save(state='candidate_packaging', delivery_status='review_candidate', blocker=reason,

@@ -98,7 +98,12 @@ def session(store, operation_id, repository):
         env={'PATH':os.environ.get('PATH','/usr/bin:/bin'),
              'DAEDALUS_ENGINE_BEHAVIOR_VERSION': str(payload.get('engine_behavior_version', 0))}
         rows=prepare_application(store,operation_id,isolated,project_id,env,runtime)
-        if any(not r.get('passed') for r in rows): raise RuntimeError('UI preparation or build failed: '+json.dumps(rows)[-6000:])
+        if any(not r.get('passed') for r in rows):
+            failed = [r for r in rows if not r.get('passed')]
+            if any(r.get('environment_fault') for r in failed):
+                raise UIObservationFailure({'error': 'UI environment preparation failed', 'category': 'environment',
+                    'environment_fault': True, 'phase': 'preparation', 'checks': failed})
+            raise RuntimeError('UI preparation or build failed: '+json.dumps(failed)[-6000:])
         port=free_port(); modules=Path(__file__).parent
         command=['dbus-run-session','--',sys.executable,str(modules/'coder_ui_session.py'),
                  '--directory',str(runtime),'--port',str(port),'--seconds','300']
@@ -204,6 +209,8 @@ def run(store, operation_id, repository, flows, *, origin='confirmed_interaction
              'reason':error,'classification':'interaction_failed' if error else 'passed', 'flow': flow}
         if diagnostic:
             row.update(diagnostic=diagnostic, log_tail=diagnostic.get('log_tail', ''))
+            if diagnostic.get('environment_fault'):
+                row.update(environment_fault=True, classification='environment')
         if origin == 'project_interaction':
             manifest = repository.root / '.daedalus-ui.json' if repository is not None else None
             row.update(is_test=True, phase='test', cwd='.',

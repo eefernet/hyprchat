@@ -1,0 +1,12 @@
+ARG PYTHON_IMAGE
+ARG BASE_IMAGE
+FROM ${PYTHON_IMAGE} AS python312
+FROM ${BASE_IMAGE}
+COPY --from=python312 /usr/local /opt/python312
+RUN echo /opt/python312/lib > /etc/ld.so.conf.d/python312.conf && ldconfig && \
+    /opt/python312/bin/python3.12 -m venv /opt/aider-venv
+COPY aider.lock.txt /tmp/aider.lock.txt
+RUN /opt/aider-venv/bin/pip install --require-hashes -r /tmp/aider.lock.txt && \
+    /opt/aider-venv/bin/pip check && /opt/aider-venv/bin/aider --version && \
+    rm -rf /root/.cache/pip /tmp/aider.lock.txt
+RUN ln -s /opt/aider-venv/bin/aider /usr/local/bin/aider

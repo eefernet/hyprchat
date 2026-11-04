@@ -51,9 +51,12 @@ def safe_relative(root: Path, relative: str) -> Path:
 def validate_links(root, excludes=()):
     """Preserve ordinary internal links, never copy or package outside files."""
     root = Path(root).resolve()
+    from coder_generated import directories, excluded
+    generated = directories(root)
     links = []
     for directory, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if name not in excludes and name != ".git"]
+        dirs[:] = [name for name in dirs if name not in excludes and name != ".git"
+                   and not excluded((Path(directory) / name).relative_to(root), generated)]
         for name in dirs + files:
             if name in excludes or name == ".git":
                 continue
@@ -173,7 +176,11 @@ class Repository:
         # it so newly excluded/generated files cannot leak into checkpoints.
         self.git("read-tree", "--empty")
         from coder_generated import directories
-        generated = directories(self.root)
+        with self.connect() as connection:
+            authored = [row[0] for row in connection.execute('SELECT path FROM files')]
+        protection = self.state / 'protected-source.json'
+        protected = json.loads(protection.read_text()) if protection.exists() else []
+        generated = directories(self.root, [*authored, *protected])
         # Prepared environments may be directory symlinks. A trailing slash
         # only ignores real directories, allowing absolute cache links into
         # archives even though inventory excludes them.

@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path("/root/hyprchat-documents/jobs")
+ROOT = Path(os.environ.get('HEPHAESTUS_DOCUMENT_ROOT', '/root/hyprchat-documents/jobs'))
 INSTALL = Path(__file__).resolve().parent
 
 
@@ -79,8 +79,17 @@ def supervise(job):
                         raise TimeoutError("Document worker queue timed out")
                     time.sleep(.2)
             atomic(job / "status.json", {"status": "running"})
-            with (job / "worker.log").open("wb") as log:
-                child = subprocess.Popen(sandbox_command(job), stdout=log, stderr=log,
+            from contextlib import ExitStack
+            with ExitStack() as boundary, (job / "worker.log").open("wb") as log:
+                command=sandbox_command(job)
+                if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+                    from coder_sandbox import Sandbox
+                    box=boundary.enter_context(Sandbox([sys.executable,str(INSTALL/'document_worker.py'),'execute'],
+                        cwd=job,writable=[job],readonly=list(INSTALL.glob('document*.py')),
+                        aliases=[(job,'/work')],runtime=job/'runtime',timeout=300,
+                        environment={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','DAEDALUS_DOCUMENT_LIMITS':'1'},runtime_profile='core',public_network=False))
+                    command=box.args
+                child = subprocess.Popen(command, stdout=log, stderr=log,
                                          start_new_session=True, preexec_fn=limits)
                 if cancelled or (job / "cancel").exists():
                     os.killpg(child.pid, signal.SIGKILL)
@@ -125,7 +134,9 @@ def main():
         import importlib.util
         import shutil
         missing = [x for x in ("docx", "pptx", "openpyxl", "lxml", "PIL", "olefile") if not importlib.util.find_spec(x)]
-        missing += [x for x in ("bwrap", "libreoffice") if not shutil.which(x)]
+        if os.environ.get('HEPHAESTUS_EXECUTOR')!='docker':
+            missing += [x for x in ("bwrap", "libreoffice") if not shutil.which(x)]
+        elif not Path('/run/hephaestus/broker.sock').exists(): missing.append('runtime broker')
         print(json.dumps({"ready": not missing, "missing": missing, "version": 1}))
         return
     job_id = sys.argv[2]
@@ -155,6 +166,12 @@ def main():
     elif action == "supervise":
         supervise(job)
     elif action == "status":
+        if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker' and (job/'started').exists() and (job/'status.json').exists():
+            status=json.loads((job/'status.json').read_text())
+            if status.get('status') in {'queued','running'} and time.time()-(job/'started').stat().st_mtime>10:
+                pid=json.loads((job/'pid.json').read_text()) if (job/'pid.json').exists() else {}
+                if not pid.get('identity') or identity(pid.get('pid',0))!=pid['identity']:
+                    atomic(job/'status.json',{'status':'failed','error':'Document controller stopped before publication. The request was not replayed; retry as a new document job.'})
         print((job / "status.json").read_text() if (job / "status.json").exists() else '{"status":"queued"}')
     elif action == "cancel":
         job.mkdir(mode=0o700, parents=True, exist_ok=True)

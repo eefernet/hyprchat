@@ -85,23 +85,40 @@ def run(store, operation_id, repository):
              Tool(name=UITool.name, params={'directory': str(store.root / 'tool-output')}),
              Tool(name=PrepareEnvironmentTool.name, params={'url': payload['ollama_url'],
                  'timeout': settings['daedalus_preparation_seconds'] + 10})]
+    if payload.get('progress_version') == 1:
+        from openhands.tools.task_tracker import TaskTrackerTool
+        tools.append(Tool(name=TaskTrackerTool.name))
     agent = Agent(llm=llm, tools=tools, condenser=condenser, tool_concurrency_limit=1)
     session_id = uuid.uuid5(uuid.NAMESPACE_URL, operation['job_id'] + ':' + ENGINE)
     directory = store.root / 'engine'; directory.mkdir(exist_ok=True)
     state_path = directory / 'stop.json'
-    state = {'root': str(repository.root), 'finish_seen': False, 'passed': False,
+    previous = json.loads(state_path.read_text()) if state_path.is_file() else {}
+    state = {'operation_id': operation_id, 'plan': previous.get('plan', []),
+             'root': str(repository.root), 'finish_seen': False, 'passed': False,
              'denials': repair_count(state_path, payload.get('repair_round', 0)), 'nudges': 0,
              'command_seconds': settings['daedalus_command_seconds'],
-             'execution_commands': payload.get('execution_commands') or {}}
+             'execution_commands': payload.get('execution_commands') or {},
+             'plan_finalization_version': payload.get('plan_finalization_version', 0),
+             'bridge_url': payload['ollama_url']}
+    if previous.get('operation_id') == operation_id and previous.get('finalizing'):
+        state.update({k: previous[k] for k in ('finalizing', 'passed', 'finish_seen') if k in previous})
     state_path.write_text(json.dumps(state))
     events = 0
+    from coder_source_activity import Observer
+    observer = Observer(repository.root, directory / 'source-activity.json',
+        lambda **data: store.event(operation_id, 'source_activity', **data), repository.excludes) if payload.get('progress_version') == 1 else None
 
     def on_event(event):
         nonlocal events
         _boundary(store, operation_id)
         data = event.model_dump(mode='json')
         store.event(operation_id, 'agent', event=data)
+        if observer: observer.event(data)
         events += 1
+        if data.get('kind') == 'ObservationEvent' and data.get('tool_name') == 'task_tracker' and not (data.get('observation') or {}).get('is_error'):
+            state = json.loads(state_path.read_text())
+            state['plan'] = (data.get('observation') or {}).get('task_list', [])
+            state_path.write_text(json.dumps(state))
         if data.get('kind') == 'ActionEvent':
             state = json.loads(state_path.read_text())
             state['finish_seen'] = (data.get('tool_name') == 'finish' or
@@ -123,7 +140,7 @@ def run(store, operation_id, repository):
             'Add useful tests for new behavior. Do not replace the project to avoid a failing test. '
             'Declare runtime and test dependencies and reproducible test commands in the project. '
             'Tools installed in the worker are not automatically available in the delivered project. '
-            'A pre-existing .venv symlink points to a read-only managed dependency cache. Do not modify its target. '
+            'Dependency links point to controller-managed environments. Declare all dependencies and use prepare_environment; do not create alternate venv or pip-target directories. '
             'If you need additional packages while coding, declare them in the project dependency manifest and '
             'call the prepare_environment tool to refresh the managed environment, then use its returned commands. '
             'The independent runner provisions the declared dependencies afresh. '
@@ -136,6 +153,8 @@ def run(store, operation_id, repository):
             '(CSS for web), name/role (desktop), value (fill), and equals or contains directly on a subsequent '
             'text/observe result. Web text with a CSS selector returns that element\'s text; web observe returns '
             'the whole page snapshot and supports contains, not an element selector or numeric equals. '
+            'For web displays explicitly named by the user, put that stable accessible name (aria-label or aria-labelledby) '
+            'on the exact element containing the changing result text. A surrounding heading alone does not name the display. '
             'Exercise real controls and assert exact expected results. These project-authored '
             'flows are replayed by the controller on a fresh revision; page loading alone is not a test. '
             'Exact flow shapes (replace placeholders with this project\'s values): '
@@ -149,7 +168,9 @@ def run(store, operation_id, repository):
             'For Python/Node browser scripts declare Playwright dependencies. During controller verification, '
             'navigate to the injected DAEDALUS_APP_URL for a static web project, or '
             'DAEDALUS_<SERVICE_ID>_URL for a declared service. Read that environment variable before starting '
-            'a local fallback server; use the fallback only when the variable is absent. The controller URL '
+            'a local fallback server; use the fallback only when the variable is absent. '
+            'Resolve one base URL from the supplied variable or the fallback and use it for every navigation/request. '
+            'Do not merely check the variable to skip server startup while still navigating to a hardcoded fallback URL. The controller URL '
             'connects browser requests to this revision. A separately started server or a hardcoded localhost '
             'URL bypasses that observation even when its page works. Project-relative file:// interactions '
             'belong in .daedalus-ui.json using file_path. '
@@ -159,10 +180,20 @@ def run(store, operation_id, repository):
             'Final acceptance is performed separately on an immutable copy.\n\nREQUEST:\n' + payload['task'])
     if payload.get('repair_feedback'):
         task += '\n\nFresh verification failures to repair:\n' + json.dumps(payload['repair_feedback'])
+    criteria = [row for row in (payload.get('ui_contract') or {}).get('criteria', []) if row.get('supported')]
+    if criteria:
+        task += ('\n\nLiteral user-request UI outcomes (not private evaluator assertions):\n' +
+                 json.dumps([{k: row[k] for k in ('action', 'target', 'property', 'expected', 'request_excerpt')}
+                             for row in criteria]) +
+                 '\nKeep each named target unambiguous and accessible in the real interface. For web result text, '
+                 'apply aria-label or aria-labelledby to the exact changing-text element. A nearby heading does not name it. '
+                 'These expected values come only from the original user request; do not redefine them in project tests or manifests.')
     if payload.get('execution_commands'):
         task += '\n\nRequired execution commands:\n' + json.dumps(payload['execution_commands'])
     if payload.get('builder_guidance'):
         task += '\n\nEnvironment preparation feedback:\n' + payload['builder_guidance']
+    if payload.get('progress_version') == 1:
+        task += '\nAfter inspection, publish a short implementation plan with task_tracker (plan), then continue automatically. Update task status as you work, and reconcile every task status before Finish, including after repairs. Mark done only for completed work; leave incomplete work unresolved. Task status is progress, not independent verification.'
     if payload.get('engine_behavior_version', 0) >= 1:
         task = task.replace('click, fill, press, text, observe, or reload.', 'click, fill, press, text, value, observe, or reload.')
         task += ('\nEvery coding turn must use a declared tool, including finish for completion. Keep edits and diagnostics small. '
@@ -178,7 +209,7 @@ def run(store, operation_id, repository):
     try:
         # Operation idempotency prevents a reconnect from appending the request twice.
         if payload.get('engine_behavior_version', 0) >= 1:
-            feedback = 'Continue the same request from the saved project and conversation. Use tools, then finish.\n'
+            feedback = 'Continue the same request from the saved project and conversation. Use tools; reconcile task_tracker statuses before finish, including repaired work.\n'
             if payload.get('repair_feedback'):
                 feedback += 'Repair these observed failures:\n' + json.dumps(payload['repair_feedback'])
             if payload.get('builder_guidance'):

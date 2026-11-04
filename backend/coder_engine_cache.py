@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -33,6 +34,13 @@ def collect(store, *, required_bytes=0, limit_bytes=None, reserve_bytes=0):
     from coder_worker_runtime import storage_usage
     removed = []
     candidates = []
+    pinned=set()
+    for record in (store.root/'previews').glob('*/session.json'):
+        try:
+            session=json.loads(record.read_text())
+            if session.get('lifecycle')=='pinned' and session.get('status')!='deleted':
+                pinned.update(Path(value).resolve() for value in session.get('cache_roots',[]))
+        except (OSError,ValueError): continue
     # A full store walk per cache makes recovery quadratic in retained jobs.
     # Account for removals incrementally; enforce_storage performs the final
     # fresh measurement, including any concurrent writes to leased caches.
@@ -42,6 +50,7 @@ def collect(store, *, required_bytes=0, limit_bytes=None, reserve_bytes=0):
         if parent.exists():
             candidates.extend(p for p in parent.iterdir() if p.is_dir() and not p.is_symlink())
     for path in sorted(candidates, key=lambda p: p.stat().st_mtime):
+        if path.resolve() in pinned: continue
         enough = (limit_bytes is None or used + required_bytes <= limit_bytes)
         enough = enough and shutil.disk_usage(store.root).free >= reserve_bytes + required_bytes
         if enough: break

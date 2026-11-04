@@ -41,6 +41,16 @@ def model_bridge(store, operation_id, *, repository=None, environment=None, prep
             try:
                 current = _boundary(store, operation_id)
                 active = current['payload']
+                if modern and self.path == '/daedalus/plan-finalization':
+                    if self.command != 'POST': raise ValueError('Checklist transition requires POST')
+                    length = int(self.headers.get('Content-Length', '0'))
+                    if not 0 < length <= 256: raise ValueError('Invalid checklist request')
+                    request = json.loads(self.rfile.read(length))
+                    if set(request) != {'action'} or request['action'] not in {'begin','end'}: raise ValueError('Invalid checklist transition')
+                    from coder_plan_finalization import change
+                    with lock: result = change(store, operation_id, request['action'])
+                    self.respond(200, result)
+                    return
                 if modern and self.path == '/daedalus/environment':
                     if self.command != 'POST' or repository is None:
                         raise ValueError('Environment preparation capability unavailable')
@@ -109,7 +119,7 @@ def model_bridge(store, operation_id, *, repository=None, environment=None, prep
                         latest = current['payload']
                         seconds = max(1, latest['seconds_remaining'] - (time.time() - latest.get('_active_started', current['started'])))
                         return request_json(upstream, self.command, self.path, body if request_body is None else request_body,
-                                            seconds, connections, network_lock, closed)
+                                            min(seconds, max(.1, finalization['deadline']-time.time())) if (finalization := __import__('coder_plan_finalization').active(store, operation_id)) else seconds, connections, network_lock, closed)
                     result = modern_infer(store, operation_id, body, role, policy, send) if infer and modern else send(current)
                     if self.path in {'/api/tags', '/api/ps'}:
                         result['models'] = [m for m in result.get('models', [])
@@ -158,14 +168,19 @@ def run_isolated(store, operation_id, repository):
     profiles = contract(repository, managed_dependencies=operation['payload'].get('engine') == 'openhands159')
     audit = runtime / 'fixtures'; audit.mkdir(exist_ok=True)
     environment.update(DAEDALUS_PROJECT_ROOT=str(repository.root), DAEDALUS_AUDIT_DIR=str(audit),
-        DAEDALUS_ENVIRONMENT_ROOT=str(store.root / 'project-environments' / __import__('hashlib').sha256(operation['payload'].get('project_id', operation['job_id']).encode()).hexdigest()))
+        DAEDALUS_ENVIRONMENT_ROOT=str(store.root / 'project-environments' / __import__('hashlib').sha256((operation['payload'].get('project_id') or operation['job_id']).encode()).hexdigest()))
     preflight = []
-    from contextlib import nullcontext
-    from coder_engine_environment import preparation
-    with preparation(store, operation_id) if operation['payload'].get('engine') == 'openhands159' else nullcontext():
+    if operation['payload'].get('engine') == 'openhands159':
+        from coder_engine_environment import refresh
+        preflight = refresh(store, operation_id, repository, [], environment, runtime)['checks']
+        _boundary(store, operation_id)  # Persistent infrastructure faults park before inference.
+    else:
         for profile in profiles['profiles']:
             preflight.extend(prepare_environment(store, operation_id, repository.root, profile,
                 operation['payload'].get('project_id') or operation['job_id'], environment, runtime))
+    if operation['payload'].get('engine') == 'openhands159':
+        from coder_prepared_environment import configure
+        configure(store, operation_id, environment)
     environment['PATH'] = str(repository.root / '.venv/bin') + os.pathsep + environment.get('PATH', '')
     environment['VIRTUAL_ENV'] = str(repository.root / '.venv')
     for row in preflight:
@@ -183,10 +198,13 @@ def run_isolated(store, operation_id, repository):
         environment['DAEDALUS_TOKENIZER_DIR'] = tokenizer
         readonly.append(Path(tokenizer))
     cursor = 0
+    finalization_stopped = False
     with model_bridge(store, operation_id, repository=repository, environment=environment, preparation_folder=runtime / 'preparation') as bridge:
         with Sandbox(command, cwd=repository.root, writable=[repository.root, runtime], readonly=readonly,
                      runtime=(store.root / 'operation-caches' / operation_id / 'agent') if modern else runtime / 'environment',
-                     short_tmp=modern, environment=environment, network_urls=[bridge]) as box:
+                     short_tmp=modern, environment=environment, network_urls=[bridge],
+                     resource_group=operation_id,
+                     timeout=operation['payload']['seconds_remaining']+operation['payload']['settings'].get('daedalus_preparation_seconds',600)) as box:
             child_operation = copy.deepcopy(_boundary(store, operation_id))
             child_operation['payload']['ollama_url'] = box.translate_url(bridge)
             if modern:
@@ -205,10 +223,30 @@ def run_isolated(store, operation_id, repository):
                     while process.poll() is None:
                         _boundary(store, operation_id)
                         cursor = relay_events(store, operation_id, runtime, cursor)
+                        if modern:
+                            from coder_plan_finalization import active
+                            finalization = active(store, operation_id)
+                            if finalization and time.time() >= finalization['deadline']:
+                                finalization_stopped = True
+                                break
                         time.sleep(.1)
                 finally:
                     stop_process(process)
                     relay_events(store, operation_id, runtime, cursor)
+                    if modern and operation['payload'].get('progress_version') == 1:
+                        from coder_source_activity import finish_interrupted
+                        finish_interrupted(repository.root, runtime / 'bookkeeping/engine/source-activity.json',
+                            lambda **data: store.event(operation_id, 'source_activity', **data), repository.excludes)
+            from coder_plan_finalization import state as finalization_state, change as finalize_change
+            finalization = finalization_state(store, operation_id) if modern else {}
+            if finalization.get('operation_id') == operation_id and (finalization_stopped or not output.is_file() or json.loads(output.read_text()).get('error')):
+                # A normal Finish preceded this bookkeeping phase. Failure here
+                # cannot prevent the independent controller from checking the checkpoint.
+                finalize_change(store, operation_id, 'end')
+                hook = runtime / 'bookkeeping/engine/stop.json'
+                denials = json.loads(hook.read_text()).get('denials', 0) if hook.is_file() else 0
+                return {'engine': 'openhands159', 'agent_finished': True, 'hook_denials': denials,
+                        'execution_status': 'checklist_ended', 'incomplete_reason': ''}
             if not output.is_file():
                 raise IsolationUnavailable('SDK child did not return a checkpoint: ' + log.read_text(errors='replace')[-1500:])
             result = json.loads(output.read_text())
@@ -236,9 +274,14 @@ def relay_events(store, operation_id, runtime, cursor):
             try: event = json.loads(line)
             except ValueError: continue
             kind, data = event.get('type'), event.get('data', {})
-            if kind in {'agent', 'browser_action', 'browser_diagnostic', 'builder_nudge', 'builder_stalled',
+            if kind in {'source_activity', 'agent', 'browser_action', 'browser_diagnostic', 'builder_nudge', 'builder_stalled',
                         'tool_mode_fallback', 'text_tool_fallback', 'compaction', 'usage', 'stop_hook', 'tool_mode',
                         'narration_turn'} and isinstance(data, dict):
+                event_data = data.get('event') or {}
+                observation = event_data.get('observation') or {}
+                if kind == 'agent' and event_data.get('kind') == 'ObservationEvent' and event_data.get('tool_name') == 'task_tracker' and not observation.get('is_error') and isinstance(observation.get('task_list'), list):
+                    from coder_plan_finalization import state as checklist_state, change
+                    if checklist_state(store, operation_id).get('operation_id') == operation_id: change(store, operation_id, 'acknowledge', observation['task_list'])
                 store.event(operation_id, kind, **{**{k: v for k, v in data.items() if k not in {'identity', 'operation_id', 'kind'}}, 'authority': 'untrusted_agent_diagnostic'})
         return stream.tell()
 

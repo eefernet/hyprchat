@@ -97,3 +97,18 @@ button { transition: background-color var(--hc-dur-1) var(--hc-ease-out), border
   :root { --hc-dur-1: 0ms; --hc-dur-2: 0ms; --hc-dur-3: 0ms; --hc-press-scale: 1; --hc-pop-scale: 1; --hc-pop-dy: 0px; --hc-drawer-dx: 0px; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0ms !important; scroll-behavior: auto !important; }
 }
+
+/* Composer motion: resting geometry and surface are unchanged. */
+      .composer-trace{position:absolute;display:block;background:linear-gradient(90deg,transparent,var(--trace-color),transparent);filter:drop-shadow(0 0 4px var(--trace-color));opacity:.52;pointer-events:none}
+      .composer-trace-top{top:0;left:0;width:42%;height:2px;animation:traceX 1.25s linear infinite}
+      .composer-trace-bottom{right:0;bottom:0;width:42%;height:2px;animation:traceXReverse 1.25s linear infinite}
+      .composer-trace-right{top:0;right:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceY 1.25s linear infinite}
+      .composer-trace-left{left:0;bottom:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceYReverse 1.25s linear infinite}
+      @keyframes traceX{0%{transform:translateX(-115%)}100%{transform:translateX(260%)}}
+      @keyframes traceXReverse{0%{transform:translateX(115%)}100%{transform:translateX(-260%)}}
+      @keyframes traceY{0%{transform:translateY(-115%)}100%{transform:translateY(260%)}}
+      @keyframes traceYReverse{0%{transform:translateY(115%)}100%{transform:translateY(-260%)}}
+.empty-composer-box { animation: hc-composer-arrive 240ms var(--hc-ease-out) both; }
+@keyframes hc-composer-arrive { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+.hc-send-btn { border-radius:50%; }
+@media (prefers-reduced-motion:reduce) { .composer-trace { animation:none; opacity:.25; } .empty-composer-box { animation:none; } }

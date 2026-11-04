@@ -6,12 +6,12 @@ from pathlib import Path
 import tarfile
 
 
-def products(root, task, revision):
+def products(root, task, revision, contract=None):
     from coder_engine_contract import required_files
     from coder_repository import safe_relative
     root = Path(root)
     rows = []
-    for name in required_files(task):
+    for name in ([r['path'] for r in contract['criteria']] if contract is not None else required_files(task)):
         if Path(name).suffix.lower() not in {'.jar', '.war', '.zip'}: continue
         path = safe_relative(root, name)
         if path.is_file() and not path.is_symlink() and 0 < path.stat().st_size <= 250*1024**2:

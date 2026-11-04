@@ -1,3 +1,4 @@
+import {onlyInconclusiveChecks} from './daedalusCheckOutcomes.js';
 export const terminalJobStates=new Set(['completed','cancelled','blocked','waiting_for_input','ready_for_review']);
 // Completed work never changes again. (A cancelled policy-7 job can be continued from another tab, so it keeps its slow poll.)
 export const finishedJobStates=new Set(['completed']);
@@ -12,7 +13,7 @@ export function jobStatusLabel(job){
   if(job.state==='ready_for_review'){
     if(job.verification_summary?.incomplete_reason)return 'Build incomplete — please review';
     if(job.verification_summary?.rolled_back)return 'Ready for review';
-    if(job.verification_summary?.checks_passed||job.candidate_artifact?.metadata?.checks_passed)return 'Checks passed — please review';
+    if(!onlyInconclusiveChecks(job)&&(job.verification_summary?.checks_passed||job.candidate_artifact?.metadata?.checks_passed))return 'Checks passed — please review';
     if(job.verification_summary?.checks_ok&&job.verification_summary.exercised===false)return 'Built, not exercised';
     return job.candidate_artifact?.metadata?.runnable?'Ready for review':'Build incomplete';
   }
@@ -52,6 +53,7 @@ export function jobActivity(job){
 // Limits Continue cannot lift. A spent model-call allowance is not one: Continue grants another.
 export const durableLimits=new Set(['application_repairs','audit_corrections','no_progress']);
 export function continueReason(job){
+  if(job.worker_workspace_available===false)return 'This workspace was retired during the Hephaestus migration. Download the retained project and start a new job to continue it.';
   if(job.state==='cancelled'&&(job.policy_version||1)<7)return 'This older workflow cannot resume after Stop. Start a new request from its saved project.';
   return job.presentation?.actions?.resume?.disabled_reason||(durableLimits.has(job.stop_limit)?(job.blocker||'Retained limits prevent further progress on this request.'):'');
 }
@@ -97,6 +99,7 @@ export function jobBlockerMessage(value){
 
 export function applyJobEvent(job,event,lastSequence=0){
   if(!event||event.seq<=lastSequence)return {job,lastSequence};
+  if(event.type==='activity')return {job:{...job,event_sequence:event.seq},lastSequence:event.seq};
   return {job:{...job,...event.data,event_sequence:event.seq},lastSequence:event.seq};
 }
 

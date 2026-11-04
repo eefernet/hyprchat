@@ -87,3 +87,13 @@ def test_settings_fetch_hydrates_server_values_without_echo_patch():
         assert f'hydrateServerSetting("{key}"' in html
 
     assert "catch(()=>{settingsLoadedRef.current=true;})" in html
+
+
+def test_playful_status_preference_is_user_scoped_and_hydrated():
+    html = _html()
+    assert 'hc-fun-verbs::${hcStoredUserId()||"default"}' in html
+    assert '{key:"fun-verbs",legacy:"hc-fun-verbs",set:setFunVerbs,fallback:true}' in html
+    assert 'persistPref("fun-verbs",funVerbs)' in html
+    assert 'setFunVerbs(true);setPrompts([])' in html
+    assert "if(d.key==='fun-verbs')val=typeof val==='boolean'?val:true;" in html
+    assert "localStorage.removeItem('hc-ui-font')" not in html

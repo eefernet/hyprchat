@@ -63,6 +63,8 @@ HyprChat is a local-first replacement for hosted AI chat apps and OpenWebUI-styl
 
 ## Quick Start
 
+**Hephaestus** runs code, coding workers, documents and application previews in managed Docker containers. Its [installation and operations guide](docs/hephaestus.md) covers the Proxmox VM, scoped execution, persistent previews and migration checks. Existing `CODEBOX_URL` and worker URL settings remain compatible.
+
 ### Prerequisites
 
 - **Python 3.11+** for the backend; local development also needs the standard `venv` module.

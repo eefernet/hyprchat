@@ -19,7 +19,7 @@ export default function NewVersionBar(){
   const button={background:'transparent',color:'inherit',border:'1px solid currentColor',borderRadius:"var(--hc-radius)",padding:'4px 10px',cursor:'pointer',font:'inherit'};
   return <div role="status" style={{position:'fixed',left:'50%',bottom:'calc(16px + env(safe-area-inset-bottom, 0px))',transform:'translateX(-50%)',zIndex:9999,
     display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',justifyContent:'center',maxWidth:'calc(100vw - 32px)',padding:'8px 14px',borderRadius:"var(--hc-radius-card)",
-    background:'var(--bg, #10222c)',color:'var(--fg, #e6edf3)',border:'1px solid var(--acc, #5ab0ff)',boxShadow:"var(--hc-shadow-2)",fontSize:"var(--hc-text-control)"}}>
+    background:'var(--hc-elev-3)',color:'var(--hc-text)',border:'1px solid var(--hc-accent)',boxShadow:"var(--hc-shadow-2)",fontSize:"var(--hc-text-control)"}}>
     <span>A new version of HyprChat is available.</span>
     <button style={button} onClick={()=>window.location.reload()}>Reload</button>
     <button style={button} onClick={()=>setDismissed(true)} aria-label="Dismiss new version notice">Later</button>

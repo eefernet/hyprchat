@@ -1,6 +1,7 @@
 // Pure view-model helpers for the Daedalus job card. Everything here reads the job
 // snapshot the card already receives; every field is optional so older workflows
 // (policy-6 briefs without batches, legacy cancelled jobs) render without throwing.
+import {checkOutcome,currentChecks,onlyInconclusiveChecks} from './daedalusCheckOutcomes.js';
 import {jobBlockerMessage} from './daedalusJobs.js';
 
 const STAGES=['Plan','Build','Check','Audit','Review','Deliver'];
@@ -15,6 +16,28 @@ const clip=(value,size=160)=>{const text=String(value||'').replace(/\x1b\[[0-9;]
 
 export function stageRail(job={}){
   const state=job.state||'queued';
+  if(job.engine==='openhands159'){
+    const stopped=['cancelled','blocked','waiting_for_input'].includes(state);
+    const stage=stopped?(job.failure?.stage||job.resume_state||job.operation_kind):state;
+    const indices={queued:0,inspecting:0,planning:0,coding:1,code:1,baselining:2,checking:2,check:2,candidate_packaging:3,packaging:3,package:3,ready_for_review:4,completed:4};
+    let reached=indices[stage]??0;
+    if(state==='coding'&&job.progress?.current?.kind==='plan')reached=0;
+    const rail=['Plan','Build','Check','Deliver'].map((label,index)=>({label,
+      state:index<reached?'done':index===reached?(stopped?'stopped':'current'):'pending'}));
+    const summary=job.verification_summary;
+    const currentEvidence=summary?.revision_id && summary.revision_id===job.revision_id;
+    const terminal=['ready_for_review','completed','blocked','waiting_for_input','cancelled'].includes(state);
+    if(reached>=2||terminal){
+      if(job.failure?.category==='environment')rail[2].state='blocked';
+      else if(state==='checking')rail[2].state='current';
+      else if(currentEvidence){
+        rail[2].state=(summary.failures||[]).length?'failed':summary.checks_passed&&!onlyInconclusiveChecks(job)?'done':'unverified';
+      } else rail[2].state=stopped&&reached===2?'stopped':'unverified';
+    }
+    if(job.candidate_artifact||job.artifact)rail[3].state='delivered';
+    else if(terminal)rail[3].state='pending';
+    return rail;
+  }
   const accepted=state==='completed'&&!!job.artifact;
   const stopped=['cancelled','blocked','waiting_for_input','ready_for_review'].includes(state);
   // A finished or stopped job shows how far it got, judged by what it produced.
@@ -61,6 +84,8 @@ export function planOutcomes(job={}){
 }
 
 export function planSteps(job={}){
+  if(job.progress?.version===1)return list(job.progress.plan).map((step,index)=>({index:index+1,task:step.title,files:[],
+    state:step.status==='done'?'done':job.state==='coding'?({todo:'pending',in_progress:'current'})[step.status]||'pending':'not_updated'}));
   const batches=list(job.brief?.batches);
   const written=new Set([...Object.keys(job.last_patch?.source_hashes||{}),...list(job.last_patch?.changed)]);
   const current=job.batch||0,active=job.state==='coding',pastBuild=(STAGE_OF[job.state]??(job.checks?.length?2:0))>1;
@@ -90,21 +115,19 @@ const scope=check=>{const cwd=check.cwd||String(check.id||'').split(':')[0];retu
 const CHECK_LABEL={setup:'Install dependencies',build:'Build',lint:'Lint',typecheck:'Type check',test:'Tests',launch:'Start the app'};
 
 export function checkSummary(job={}){
-  // Checks are appended per round; the latest row for an id is the current truth.
-  const latest=new Map();
-  list(job.checks).forEach(check=>{if(check&&check.id)latest.set(check.id,check);});
-  const rows=[...latest.values()].map(check=>{
-    const advisory=!check.passed&&['lint','typecheck'].includes(check.phase)&&!check.is_test;
+  const rows=currentChecks(job).map(check=>{
+    const outcome=checkOutcome(check,job.engine!=='openhands159'),advisory=outcome==='advisory';
     const label=check.id==='audit-metadata'?'Independent audit':check.id.startsWith('audit-')?'Independent audit check':
       check.id.startsWith('protected:')?`Unchanged: ${check.id.slice(10)}`:check.id.startsWith('interface:')?`Requested ${check.id.slice(10)}`:
       check.id.startsWith('page:')?'Page loads without script errors':check.id.startsWith('documentation:')?'Requested documentation present':check.id==='immutable-source'?'Checks must not edit source':check.id==='execution-contract'?'Project run configuration':
       `${CHECK_LABEL[check.phase]||check.id}${scope(check)?` (${scope(check)})`:''}`;
-    return {id:check.id,label,command:check.command||'',passed:!!check.passed,advisory,tests:check.test_count??null,
-      headline:check.passed?'':headline(check),check};
+    return {id:check.id,label,command:check.command||'',passed:outcome==='passed',advisory,outcome,tests:check.test_count??null,
+      headline:outcome==='passed'?'':headline(check),check};
   });
-  const failed=rows.filter(row=>!row.passed&&!row.advisory);
+  const failed=rows.filter(row=>row.outcome==='failed');
   return {rows,passed:rows.filter(row=>row.passed).length,failed:failed.length,advisory:rows.filter(row=>row.advisory).length,
-    failing:[...failed,...rows.filter(row=>row.advisory)]};
+    skipped:rows.filter(row=>row.outcome==='skipped').length,unverified:rows.filter(row=>row.outcome==='unverified').length,
+    failing:[...failed,...rows.filter(row=>!row.passed&&row.outcome!=='failed')]};
 }
 
 const LIMIT_TEXT={input_budget:'the builder prompt did not fit the configured input budget, so the model never ran (raise the Daedalus context window in Settings, then Continue)',application_repairs:'both automatic repair rounds were used',
@@ -131,7 +154,7 @@ export function outcomeExplanation(job={}){
   const uiGap=job.ui_contract_version&&(summary.criteria||[]).some(c=>c.status!=='passed');
   if(state==='ready_for_review'&&summary.rolled_back)return {tone:'warn',title:'Change rolled back',
     text:clip(job.blocker,420)||'A change broke tests that passed before, so the last version that kept them passing was restored for review.'};
-  if(state==='ready_for_review'&&!summary.incomplete_reason&&!uiGap&&(summary.checks_passed||job.candidate_artifact?.metadata?.checks_passed))return {tone:'good',title:'Checks passed — please review',
+  if(state==='ready_for_review'&&!summary.incomplete_reason&&!uiGap&&!onlyInconclusiveChecks(job)&&(summary.checks_passed||job.candidate_artifact?.metadata?.checks_passed))return {tone:'good',title:'Checks passed — please review',
     text:`The build${checks.passed?` and ${checks.passed} check${checks.passed===1?'':'s'}`:''} passed on this revision. Download it and try it, then Accept it or ask for changes in the chat.`};
   if(state==='ready_for_review'&&summary.checks_ok&&summary.exercised===false)return {tone:'warn',title:'Built, not exercised',
     text:'It builds and nothing failed, but no test or requested command ran the program. Try it yourself before you Accept it, or ask for tests in the chat.'};
@@ -143,11 +166,17 @@ export function outcomeExplanation(job={}){
   }
   if(state==='cancelled')return {tone:'neutral',title:'Stopped',
     text:`Work stopped at a saved checkpoint${job.inventory?.files?` with ${job.inventory.files} file${job.inventory.files===1?'':'s'}`:''}.`};
+  if(['blocked','waiting_for_input'].includes(state)&&job.failure?.category==='environment')return {tone:'warn',title:'Dependency setup needs attention',text:'Dependency setup failed; your project files are saved. See Diagnostic for the cause.'};
   if(state==='blocked'||state==='waiting_for_input')return {tone:'warn',title:'Needs attention',text:clip(jobBlockerMessage(job.blocker),260)||'The job cannot continue on its own.'};
   return null;
 }
 
 export function nowLine(job={}){
+  if(job.progress?.version===1){
+    const activity=job.progress.current;
+    if(activity)return ({preparation:'Preparing dependencies',command:'Running a command',interface:'Checking the interface',file:'Updating project files',plan:'Updating the implementation plan',tool:'Inspecting the project'})[activity.kind]||'Working on the project';
+    if(job.state==='coding')return 'Preparing the next model action';
+  }
   if(job.state==='coding'){
     const narrowed=list(job.narrowed_targets);
     if(narrowed.length)return `Editing ${narrowed[0]}`;
@@ -160,3 +189,11 @@ export function nowLine(job={}){
 }
 
 export function requestSummary(task,size=200){return clip(String(task||'').replace(/[*_`#>]+/g,' '),size);}
+
+export function fileActivity(job={}){
+  const active=!['blocked','waiting_for_input','ready_for_review','completed','cancelled','cancelling'].includes(job.state);
+  const current=job.progress?.current;
+  if(active&&current?.kind==='file'&&current.path)return {label:current.action==='create'?'Creating':'Editing',path:current.path};
+  const last=(job.progress?.files||[]).find(row=>row.outcome!=='failed');
+  return last?{label:'Last updated:',path:last.path}:{label:'No file changes yet',path:''};
+}

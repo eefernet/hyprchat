@@ -68,7 +68,7 @@ class WorkerStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT INTO events VALUES(?,COALESCE((SELECT MAX(seq)+1 FROM events WHERE operation_id=?),1),?)",
-                       (operation_id, operation_id, json.dumps({"type": kind, "data": data})))
+                       (operation_id, operation_id, json.dumps({"type": kind, "data": data, "at": time.time()})))
 
     def events(self, operation_id, after=0, limit=100):
         with self.connect() as db:
@@ -128,8 +128,15 @@ class WorkerStore:
 
 def operation_repo(store, operation):
     root = store.root / "jobs" / operation["job_id"] / "workspace"
-    return Repository(root, store.root / "jobs" / operation["job_id"] / "repository",
+    repository = Repository(root, store.root / "jobs" / operation["job_id"] / "repository",
                       operation["payload"]["settings"].get("daedalus_exclude_dirs", DEFAULTS["daedalus_exclude_dirs"]))
+    if operation['payload'].get('deliverable_contract') is not None:
+        protected = list(operation['payload'].get('protected_files', []))
+        protected += [row['path'] for row in operation['payload']['deliverable_contract']['criteria']
+                      if Path(row['path']).suffix.lower() not in {'.jar', '.war', '.zip'}]
+        from coder_environment_publish import atomic_json
+        atomic_json(repository.state / 'protected-source.json', protected)
+    return repository
 
 
 def _alive(operation):
@@ -225,6 +232,8 @@ def _boundary(store, operation_id, *, model_call=False):
     if operation["cancel_requested"]:
         raise InterruptedError("Cancellation requested")
     payload = operation["payload"]
+    if payload.get('_preparation_failure'):
+        raise ValueError('Dependency environment preparation failed; project files are saved.')
     now = time.time()
     preparing = max(0, now - payload.get('_preparation_active_started', now))
     if payload.get('_preparation_deadline') and now >= payload['_preparation_deadline']:
@@ -761,6 +770,13 @@ def stop_descendants():
 def execute(store, operation_id):
     operation = store.get(operation_id)
     payload, kind = operation["payload"], operation["kind"]
+    if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+        metadata=payload.get('_execution_scope',{})
+        if not metadata.get('owner'):
+            store.update(operation_id,status='blocked',result={'error':'Authenticated execution scope is missing'},ended=time.time())
+            return
+        os.environ['HEPHAESTUS_EXECUTION_IDENTITY']=json.dumps({**metadata,'operation':operation_id,
+            'job':operation['job_id'],'revision':payload.get('revision_id','')})
     store.update(operation_id, status="running")
     result, status = {}, "succeeded"
     alarm = threading.current_thread() is threading.main_thread()
@@ -856,6 +872,11 @@ def execute(store, operation_id):
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", source_id):
                     raise ValueError("Invalid registered project identity")
                 projects_root = Path(payload["projects_root"]).resolve()
+                if os.environ.get("HEPHAESTUS_EXECUTOR")=="docker":
+                    from hephaestus_scope import scope, workspace_root
+                    with scope(**payload["_execution_scope"]):
+                        with scope(project=source_id):
+                            projects_root=workspace_root()/"root/projects"
                 source = safe_relative(projects_root, source_id)
                 source_links = validate_links(source, payload["settings"]["daedalus_exclude_dirs"])
                 remaining = payload["settings"]["daedalus_storage_mb"] * 1024 * 1024 - storage_usage(store.root)
@@ -1072,6 +1093,12 @@ def execute(store, operation_id):
                     next_action='Inspect the inference request and termination reason before resuming the retained conversation.')
                 result['failure'].update({key: detail[key] for key in ('bridge_status', 'response_requirement', 'usage') if key in detail})
                 result['transport_failure'] = detail
+    preparation_failure = store.get(operation_id)['payload'].get('_preparation_failure')
+    if preparation_failure:
+        result['failure'] = {'category': 'environment', 'stage': kind, 'preparation': preparation_failure,
+            'next_action': 'Restore dependency preparation, then start a fresh project or resume the saved checkpoint.'}
+        result['error'] = 'Dependency setup failed; your project files are saved.'
+        status = 'blocked'
     store.update(operation_id, status=status, result=result, ended=time.time())
     store.event(operation_id, "finished", status=status, result=result)
 
@@ -1149,6 +1176,14 @@ def install_routes(app, projects_root, *, engine=None):
     def start_operation(job_id: str, operation_id: str, body: dict = Body(...)):
         try:
             payload = {**body, "projects_root": str(projects_root)}
+            if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+                from hephaestus_scope import current, claim_job
+                metadata=current()
+                if payload.get('source_job_id') and not payload.get('source_archive_sha256'):
+                    claim_job(payload['source_job_id'],metadata['owner'])
+                if not metadata.get('owner'): raise ValueError('Authenticated execution scope is missing')
+                payload['_execution_scope']={**metadata,'project':payload.get('project_id') or job_id,
+                                             'conversation':payload.get('conversation_id','')}
             if engine and payload.get('engine') != engine:
                 raise ValueError('This worker accepts only ' + engine + ' jobs')
             for key in ("seconds_remaining", "calls_remaining", "settings"):
@@ -1210,6 +1245,8 @@ def install_routes(app, projects_root, *, engine=None):
         operation = operation_status(job_id, operation_id)
         repository = operation_repo(store, operation)
         try:
+            if body.get("refresh") and body.get("operation") in {"files", "symbols", "search", "dependencies"}:
+                repository.refresh()
             if body.get("operation") == "screenshot":
                 import base64
                 path = Path(body["path"]).resolve()

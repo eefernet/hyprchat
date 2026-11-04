@@ -98,3 +98,9 @@ test('incomplete recovery never inherits a green badge or offers irrelevant allo
  assert.equal(needsMoreAllowance({...job,stop_limit:'job_seconds'}),true);
  assert.equal(needsMoreAllowance({...job,stop_limit:'application_repairs'}),false);
 });
+
+test('normalized activity events cannot overwrite workflow identity or state',()=>{
+  const job={id:'workflow',state:'coding',revision_id:'reviewed'};
+  const result=applyJobEvent(job,{seq:2,type:'activity',data:{id:'file-event',state:'completed',path:'app.js'}},1);
+  assert.equal(result.job.id,'workflow');assert.equal(result.job.state,'coding');assert.equal(result.job.revision_id,'reviewed');assert.equal(result.lastSequence,2);
+});

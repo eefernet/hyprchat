@@ -333,5 +333,8 @@
   "PUT /api/tools/{tool_id}": "profile",
   "POST /api/coder/workflows/{workflow_id}/previews": "profile",
   "GET /api/coder/workflows/{workflow_id}/previews/{identity}": "profile",
-  "DELETE /api/coder/workflows/{workflow_id}/previews/{identity}": "profile"
+  "DELETE /api/coder/workflows/{workflow_id}/previews/{identity}": "profile",
+  "GET /api/coder/workflows/{workflow_id}/previews": "profile",
+  "POST /api/coder/workflows/{workflow_id}/previews/{identity}/control": "profile",
+  "GET /api/coder/workflows/{workflow_id}/previews/{identity}/logs": "profile"
 }

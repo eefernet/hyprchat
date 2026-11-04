@@ -93,6 +93,11 @@ pct exec $CTID -- bash -c "
 "
 
 echo ""
+read -r -p "Create companion Hephaestus Docker VM now? [y/N] " CREATE_HEPHAESTUS
+if [[ "$CREATE_HEPHAESTUS" =~ ^[Yy]$ ]]; then
+    bash "$SCRIPT_DIR/create-hephaestus-vm.sh"
+fi
+
 read -r -p "Create companion ComfyUI + Voice LXC now? [y/N] " CREATE_COMFY
 if [[ "$CREATE_COMFY" =~ ^[Yy]$ ]]; then
     read -r -p "ComfyUI CTID [115]: " COMFY_CTID

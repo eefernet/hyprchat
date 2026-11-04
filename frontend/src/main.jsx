@@ -28,6 +28,8 @@ import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles
 import './vendor.js';
 import {mergeResearchReport,researchRevision,researchTerminal,researchHeadings,linkResearchCitations,researchExportMarkdown} from './researchState.js';
 import { parseCodeFence } from './syntaxHighlight.js';
+import CodeCard,{CodeCardSession,CodeMessageBoundary} from './components/CodeCard.jsx';
+import {ActivityLabel,PlayfulStatusContext} from './components/hyprChatWidgets.jsx';
 
 import React from 'react';
 import DaedalusSettings from './components/DaedalusSettings.jsx';
@@ -188,6 +190,7 @@ function HyprChat(){
   const [tm,setTm]=useState(()=>{try{const saved=localStorage.getItem("hc-theme");return Object.hasOwn(THEMES,saved)?saved:"hyprflat";}catch{return "hyprflat";}});
   const [fi,setFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-font")||"0");return Number.isInteger(saved)&&FONTS[saved]?saved:0;}catch{return 0;}});
   // Interface font: -1 matches the code font (default); otherwise an index into UI_FONTS (sans faces).
+  const [funVerbs,setFunVerbs]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-fun-verbs::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
   const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
   const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
@@ -399,7 +402,6 @@ function HyprChat(){
   const t=UI_THEMES[tm], codeFont=FONTS[fi].v, uiFont=uiFi>=0?UI_FONTS[uiFi]:null, font=uiFont?uiFont.v:codeFont;
   useEffect(()=>{
     for(const [key,value] of Object.entries(presentationTokens(t,font,codeFont,uiFontSize/14)))document.documentElement.style.setProperty(key,String(value));
-    try{localStorage.removeItem('hc-ui-font');}catch{}
   },[t,font,codeFont,uiFontSize]);
   const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
@@ -456,6 +458,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
+  useEffect(()=>{persistPref("fun-verbs",funVerbs);},[funVerbs]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
@@ -1474,7 +1477,7 @@ function HyprChat(){
     // Server-backed prefs are per-profile: clear them and re-gate persistence
     // until the next boot hydration fetches the new profile's values.
     prefsReadyRef.current=false;prefsSkipRef.current={};
-    setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});setGlobalEffort(0);setThinkMode("auto");setNativeEffort({});setPendingNativeEffort({});setEffortCaps({});setPendingEffort(null);
+    setFunVerbs(true);setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});setGlobalEffort(0);setThinkMode("auto");setNativeEffort({});setPendingNativeEffort({});setEffortCaps({});setPendingEffort(null);
   };
 
   // Boot hydration for server-backed prefs. Server value wins; otherwise the
@@ -1496,6 +1499,7 @@ function HyprChat(){
         {key:"effort-level",legacy:"hc-effort-level",set:setGlobalEffort,fallback:0},
         {key:"think-mode",legacy:"hc-think-mode",set:setThinkMode,fallback:"auto"},
         {key:"native-effort",legacy:"hc-native-effort",set:setNativeEffort,fallback:{},convMap:true},
+        {key:"fun-verbs",legacy:"hc-fun-verbs",set:setFunVerbs,fallback:true},
         {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
       let server={};
@@ -1514,6 +1518,7 @@ function HyprChat(){
         if(d.convMap&&val&&typeof val==="object"&&!Array.isArray(val)){
           val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
         }
+        if(d.key==='fun-verbs')val=typeof val==='boolean'?val:true;
         if(d.key==='effort-level')val=reviewLevel(val);
         if(d.key==='think-mode'&&!['auto','on','off'].includes(val))val='auto';
         if(d.key==='native-effort'&&(!val||typeof val!=='object'||Array.isArray(val)))val={};
@@ -4603,7 +4608,7 @@ function HyprChat(){
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
         if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
-        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,opts)}</Collapsible>;
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,{...opts,codePath:`${opts.codePath||""}/details${i}`})}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
         const parsed=parseCodeFence(p);
@@ -4620,27 +4625,7 @@ function HyprChat(){
         if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode} streaming={streaming}/>;
         const isDiff=lang==="diff";
         if(printMode)return <pre key={i} className="print-code-block"><code>{code}</code></pre>;
-        return <div key={i} style={{margin:"10px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:"1px solid var(--hc-line)",background:t.bgDeep}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:"1px solid var(--hc-line)"}}>
-            <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0}}><IC.Terminal/>{lang||"code"}</span>
-            <button onClick={()=>cp(code,bid)} style={{background:"none",border:"none",color:copied===bid?t.ok:t.dim,cursor:"pointer",padding:3,display:"flex",alignItems:"center",gap:4,fontSize:"var(--hc-text-control)",fontFamily:font}}>
-              {copied===bid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
-            </button>
-          </div>
-          {isDiff
-            ?<pre style={{margin:0,padding:"8px 0",fontSize:"var(--hc-text-secondary)",lineHeight:1.6,overflowX:"auto",fontFamily:codeFont,color:t.dim}}>{code.split("\n").map((ln,li)=>{
-                const c0=ln.charAt(0);
-                const isAdd=c0==="+"&&!ln.startsWith("+++");
-                const isDel=c0==="-"&&!ln.startsWith("---");
-                const isHunk=ln.startsWith("@@");
-                const isMeta=ln.startsWith("+++")||ln.startsWith("---")||ln.startsWith("diff ")||ln.startsWith("index ");
-                const bg=isAdd?`${t.ok}12`:isDel?`${t.err}12`:isHunk?`${t.acc}10`:"transparent";
-                const col=isAdd?t.ok:isDel?t.err:isHunk?t.acc:isMeta?t.mut:t.dim;
-                const fs=isMeta?"italic":"normal";
-                return <div key={li} style={{padding:"0 12px",background:bg,color:col,fontStyle:fs,whiteSpace:"pre"}}>{ln||" "}</div>;
-              })}</pre>
-            :<CodeBlock code={code} lang={lang} t={t} font={codeFont}/>}
-        </div>;
+        return <CodeCard key={i} code={code} lang={lang} filename={parsed?.meta?.filename} blockKey={`${opts.codePath||""}/${bid}`} streaming={streaming}/>;
       }
       // Protect $$/$ sequences inside single-line backtick inline code from the display-math split below
       const _DD="",_SD="";
@@ -4655,11 +4640,18 @@ function HyprChat(){
         return <React.Fragment key={`s${si}`}>{_lines.map((ln,j)=>{
         if(_consumed.has(j))return null;
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${rt.brd}44`,margin:"10px 0"}}/>;
-        if(ln.match(/^##### /))return <div key={j} style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
-        if(ln.match(/^#### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
-        if(ln.match(/^### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
-        if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
-        if(ln.match(/^# /))return <div key={j} style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
+        if(printMode){
+          if(ln.match(/^##### /))return <div key={j} style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
+          if(ln.match(/^#### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
+          if(ln.match(/^### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
+          if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
+          if(ln.match(/^# /))return <div key={j} style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
+        }
+        if(ln.match(/^##### /))return <h5 key={j} className="hc-prose-heading">{ip(ln.slice(6))}</h5>;
+        if(ln.match(/^#### /))return <h4 key={j} className="hc-prose-heading">{ip(ln.slice(5))}</h4>;
+        if(ln.match(/^### /))return <h3 key={j} className="hc-prose-heading">{ip(ln.slice(4))}</h3>;
+        if(ln.match(/^## /))return <h2 key={j} data-research-heading={ln.slice(3)} className="hc-prose-heading">{ip(ln.slice(3))}</h2>;
+        if(ln.match(/^# /))return <h1 key={j} className="hc-prose-heading">{ip(ln.slice(2))}</h1>;
         /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
         const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
         if(mCallout){
@@ -4737,23 +4729,24 @@ function HyprChat(){
           let header=null,aligns=[],body=[];
           if(tRows.length>=2&&isDivRow(tRows[1])){
             header=parseRow(tRows[0]);
-            aligns=parseRow(tRows[1]).map(c=>{const lf=c.startsWith(":"),rg=c.endsWith(":");return lf&&rg?"center":rg?"right":"left";});
+            aligns=parseRow(tRows[1]).map(c=>{const lf=c.startsWith(":"),rg=c.endsWith(":");return lf&&rg?"center":rg?"right":lf?"left":null;});
             body=tRows.slice(2).map(parseRow);
           }else{
             body=tRows.filter(r=>!isDivRow(r)).map(parseRow);
           }
+          const tableAlign=Array.from({length:Math.max(header?.length||0,...body.map(r=>r.length))},(_,ci)=>aligns[ci]||(body.some(r=>r[ci]?.trim())&&body.every(r=>!r[ci]?.trim()||/^[-+]?[$€£]?\d[\d,.]*(?:%|\s*[$€£])?$/.test(r[ci].trim()))?"right":"left"));
           if(printMode)return <table key={j} className="print-md-table">
             {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left"}}>{ip(h)}</th>)}</tr></thead>}
             <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left"}}>{ip(c)}</td>)}</tr>)}</tbody>
           </table>;
-          return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.bgDeep}F5`}}>
-            <table style={{borderCollapse:"collapse",width:"100%",fontSize:"var(--hc-text-secondary)",fontFamily:font}}>
-              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:"1px solid var(--hc-line-strong)",background:`${t.surface}F5`,color:t.acc,fontWeight:700,fontSize:"var(--hc-text-secondary)",letterSpacing:0,textTransform:"none",whiteSpace:"nowrap"}}>{ip(h)}</th>)}</tr></thead>}
-              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?"1px solid var(--hc-line-subtle)":"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{ip(c)}</td>)}</tr>)}</tbody>
+          return <div key={j} className="hc-table-wrap">
+            <table className="hc-table">
+              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:tableAlign[hi]}}>{ip(h)}</th>)}</tr></thead>}
+              <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:tableAlign[ci],fontVariantNumeric:tableAlign[ci]==="right"?"tabular-nums":undefined}}>{ip(c)}</td>)}</tr>)}</tbody>
             </table>
           </div>;
         }
-        return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{ip(ln)}</div>;
+        return printMode?<div key={j} style={{minHeight:ln===""?8:"auto"}}>{ip(ln)}</div>:<div key={j} className={ln===""?"hc-prose-gap":"hc-prose-line"}>{ip(ln)}</div>;
       })}</React.Fragment>;
       })}</div>;
     });
@@ -4770,7 +4763,7 @@ function HyprChat(){
   };
 
   // Level 0 chrome (rail, header) is tonal; level 2 float (composer, scroll buttons) gets real elevation.
-  const chromeS={background:"var(--hc-sunken)",border:"none",boxShadow:"none"};
+  const chromeS={border:"none"};
   const floatS={background:"color-mix(in srgb, var(--hc-elev-2) 90%, transparent)",backdropFilter:"blur(var(--hc-blur-float)) saturate(1.25)",WebkitBackdropFilter:"blur(var(--hc-blur-float)) saturate(1.25)",border:"1px solid var(--hc-line)",boxShadow:"var(--hc-shadow-2)"};
   const glass=floatS;
   const _navShort={...Object.fromEntries(NAV_ITEMS.map(i=>[i.label,i.short])),Settings:"Settings",More:"More",Search:"Search"};
@@ -4794,14 +4787,14 @@ function HyprChat(){
   const inputS={width:"100%",background:"var(--hc-sunken)",border:"1px solid var(--hc-line)",color:t.text,padding:"9px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",boxSizing:"border-box"};
   const labelS={fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:5};
   const cardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:18,marginBottom:14,boxShadow:"var(--hc-shadow-1)"};
-  const settingsCardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:14};
+  const settingsCardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:14,boxShadow:"var(--hc-shadow-1)"};
   const settingsKickerS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};
   const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}33`,color:c,padding:"6px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:500,minHeight:"var(--hc-control-height)",display:"flex",alignItems:"center",gap:8});
   // ── Settings design system: one titled-card language for every settings tab ──
   const secS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:12,display:"flex",flexDirection:"column",gap:12};
   const subSecS={background:"var(--hc-sunken)",border:"none",borderRadius:"var(--hc-radius)",padding:12,display:"flex",flexDirection:"column",gap:10};
   const secHeadRowS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10};
-  const secTitleS={fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text};
+  const secTitleS={fontSize:"var(--hc-text-section)",fontWeight:600,color:t.text,letterSpacing:"-.02em"};
   const secHintS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};
   const secFieldLabelS={fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:500,display:"flex",flexDirection:"column",gap:5,minWidth:0};
   const secGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,190px),1fr))",gap:10,alignItems:"end"};
@@ -4811,7 +4804,7 @@ function HyprChat(){
   // types. Defining components here would mint a new type each App render and
   // remount the subtree, dropping input focus mid-keystroke.
   const settingSection=(title,extras,children,hint,color)=>(
-    <section style={color?{...secS,background:`${color}08`,border:`1px solid ${color}1F`}:secS}>
+    <section className="hc-settings-section" style={color?{...secS,background:`${color}08`,border:`1px solid ${color}1F`}:secS}>
       <div style={secHeadRowS}>
         <div style={color?{...secTitleS,color}:secTitleS}>{title}</div>
         {extras||null}
@@ -4852,7 +4845,7 @@ function HyprChat(){
   const msgActionS=(c=t.mut)=>({background:"transparent",border:"none",color:c,cursor:"pointer",padding:"0 8px",height:28,minHeight:28,borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5});
   // Shared panel header recipe (Research pattern). Plain function — call as {panelHeader(...)}.
   const panelHeader=(icon,title,extras,{color=t.acc,left,subtitle}={})=>(
-    <div style={{padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
+    <div className="hc-panel-heading" style={{padding:"18px 24px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
         <span style={{display:"flex",color}}>{icon}</span>
         <div style={{minWidth:0}}>
@@ -4989,9 +4982,9 @@ function HyprChat(){
   // Only newly appended rows animate; loads/switches fade the list container instead (useNewKeys).
   const newMessageKeys=useNewKeys((act?.messages||[]).map((m,idx)=>`${actId}:${m._activityKey||m.id||idx}`),actId);
   const _uiScale=uiFontSize/14;
-  return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+  return <PlayfulStatusContext.Provider value={funVerbs}><div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
     {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>({...c,messages:(c.messages||[]).map(m=>m.id===id?{...m,...saved}:m)})))}/>}
-    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
+    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${isLightTheme?THEMES[tm].text:THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
     <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
@@ -5026,7 +5019,7 @@ function HyprChat(){
     </div>}
 
     {/* NAV RAIL */}
-    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...chromeS,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
+    <div className="hc-nav-rail" inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...chromeS,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
         <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title={`Search conversations (${MOD_KEY} K)`} style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
@@ -5061,9 +5054,9 @@ function HyprChat(){
     </div>
 
     {/* CONVERSATION LIST */}
-    <div data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{...(isMobile
+    <div className="hc-conversation-sidebar" data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{...(isMobile
       ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,paddingTop:"var(--hc-content-safe-top)",paddingBottom:"var(--hc-content-safe-bottom)",transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
-      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:"1px solid var(--hc-line-subtle)",overflow:"hidden",background:"var(--hc-sunken)"}}>
+      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:"1px solid var(--hc-line-subtle)",overflow:"hidden"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
         <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:"var(--hc-radius-sm)"}}>ALPHA</span></div>
         <button onClick={()=>{openSettings();setSettingsTab("users");}} style={{width:"100%",display:"flex",alignItems:"center",gap:7,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",color:t.dim,borderRadius:"var(--hc-radius)",padding:"6px 8px",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8,textAlign:"left"}}>
@@ -5173,7 +5166,7 @@ function HyprChat(){
 
     {/* MAIN */}
     <div ref={contentRef} className="hc-content" data-panel={panel} style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
-      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",background:"var(--hc-elev-0)",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
+      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
         <div style={{display:"flex",alignItems:"center",gap:6,...(isMobile?{flexWrap:"wrap",minWidth:0,maxWidth:"100%"}:{})}}>
           {isMobile&&<button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide menu":"Show menu"} aria-label={sidebar?"Hide menu":"Show menu"} className="hc-icon-btn is-lg" style={{color:t.dim}}><IC.Sidebar/></button>}
           {panel==="chat"&&!act&&<>
@@ -7387,7 +7380,7 @@ function HyprChat(){
               </div>}
               <div ref={chatEnd}/>
             </div>;
-          })():<div key={actId||"empty"} className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
+          })():<CodeCardSession key={`${currentUserId}:${actId||"empty"}`}><div className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
             {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
               const totalMessages=messageRows.length;
               const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
@@ -7445,14 +7438,14 @@ function HyprChat(){
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               const quickSearchPayload=renderOpts?.quickSearch;
               const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
-              return <React.Fragment key={`${actId}:${msg._activityKey||msg.id||i}`}>
+              return <CodeMessageBoundary key={`${actId}:${msg._activityKey||msg.id||i}`} identity={msg._activityKey||msg.id||i} live={!!msg.isS}>
               <div id={`saved-message-${msg.id}`} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
                 {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
-                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
+                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>}
                 <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
-                  {(!grouped||refinedN>0)&&<div style={{fontSize:"var(--hc-text-secondary)",marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
+                  {(!grouped||refinedN>0)&&<div className="hc-msg-meta" style={{display:"flex",alignItems:"center",gap:6}}>
                     {isU?<span style={{color:t.mut}}>you</span>:personaName
                       ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:"var(--hc-radius-card)",color:t.pink}}>
                         {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:"var(--hc-radius-sm)",objectFit:"cover"}} alt=""/>}
@@ -7462,9 +7455,9 @@ function HyprChat(){
                     {msg.created_at&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
                     {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius)",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
                   </div>}
-                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t}/>}
+                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t} messageKey={`${actId}:${msg._activityKey||msg.id||i}`}/>}
                   {!isU&&activityLive&&<WaitingQuote active={streaming&&tokC===0&&!renderedContent} quotes={customQuotes} t={t}/>}
-                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":hidesReply?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
+                  <div className={`hc-prose${isU?" is-user":""}`} style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":hidesReply?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -7604,12 +7597,12 @@ function HyprChat(){
                     {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
                   </div>}
                 </div>
-              </div></React.Fragment>;
+              </div></CodeMessageBoundary>;
             })}</>;})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
             {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
             <div ref={chatEnd}/>
-          </div>}
+          </div></CodeCardSession>}
         </div>
         </div>
         <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
@@ -7624,7 +7617,7 @@ function HyprChat(){
             const active=streaming||councilRunning||searchLoading;
             return <div className="hc-run-pill hc-live-head is-active hc-pop" data-placement="top" {...runPill.props} style={{maxWidth:chatWidth,margin:"0 auto 7px",display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:`${currentRun.color}0d`,boxShadow:`0 0 0 1px ${currentRun.color}2f`,color:currentRun.color,fontSize:"var(--hc-text-secondary)",minHeight:31,boxSizing:"border-box"}}>
               <span className={`hc-activity-dot${active?" is-running":""}`} aria-hidden="true" style={{width:7,height:7,color:currentRun.color}}/>
-              <span key={phaseLabel} className="hc-activity-label" style={{fontSize:"var(--hc-text-secondary)"}}>{phaseLabel}</span>
+              <ActivityLabel label={phaseLabel} phase={currentRun.phase} active={active} seed={`${actId}:${currentRun.id||currentRun.label}`}/>
               <span style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
               {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
               {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
@@ -7679,7 +7672,7 @@ function HyprChat(){
               </span>)}
           </div>}
           </div>
-          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",...floatS,borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
+          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
             {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:"inherit",pointerEvents:"none",overflow:"hidden",zIndex:0}}>
               {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
             </div>}
@@ -7789,8 +7782,8 @@ function HyprChat(){
             </button>}
             {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
             :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>
         </div>
@@ -7893,7 +7886,7 @@ function HyprChat(){
               <span style={{fontSize:"var(--hc-text-control)"}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:health.codebox?.runtime==="hephaestus"?"Hephaestus":"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{s.response_ms}ms</span>}
@@ -7946,7 +7939,7 @@ function HyprChat(){
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,300px),1fr))",gap:12}}>
             {[
               ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
-              ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
+              [health.codebox?.runtime==="hephaestus"?"Hephaestus":"Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
               ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.47:5678","External workflow automation"],
               ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.56:8888","Search and research backend"],
               ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://192.168.1.115:8188","Stable Diffusion image generation (optional)"],
@@ -8274,37 +8267,31 @@ function HyprChat(){
       <div className="hc-tab-pane" style={{display:settingsTab==="appearance"?"block":"none"}}>
         {settingSection("Theme & Background",null,(()=>{
             const previewKey=pendingTheme||tm;
-            const pTh=THEMES[previewKey]||t;
+            const pTh=UI_THEMES[previewKey]||t;
             return <div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:8,alignItems:"end",marginBottom:8}}>
                 <div>
                   <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
-                  <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
+                  <select aria-label="Theme" value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                     {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
                   </select>
                 </div>
                 <div>
                   <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Background</div>
-                  <select value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
+                  <select aria-label="Background" value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                     {BACKGROUND_EFFECTS.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
                 </div>
               </div>
-              <div style={{padding:"10px 14px",background:pTh.bgDeep,border:`1px solid ${pTh.brd}44`,borderRadius:"var(--hc-radius-card)",marginBottom:8}}>
-                <div style={{display:"flex",gap:4,marginBottom:8,flexWrap:"wrap"}}>
-                  {[["bg",pTh.bg],["surface",pTh.surface],["text",pTh.text],["accent",pTh.acc],["warm",pTh.warm],["ok",pTh.ok],["err",pTh.err],["pink",pTh.pink]].map(([label,c])=><div key={label} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                    <div style={{width:18,height:18,borderRadius:"var(--hc-radius-sm)",background:c,border:`1px solid ${pTh.brd}66`}}/>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:pTh.mut}}>{label}</span>
-                  </div>)}
-                </div>
-                <div style={{borderRadius:"var(--hc-radius)",overflow:"hidden",background:pTh.bg,padding:8}}>
-                  <div style={{display:"flex",gap:6,marginBottom:4}}>
-                    <div style={{flex:1,padding:"6px 10px",borderRadius:"var(--hc-radius)",background:`${pTh.surface}CC`,fontSize:"var(--hc-text-secondary)",color:pTh.text}}>Hello!</div>
-                  </div>
-                  <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
-                    <div style={{flex:1,maxWidth:"70%",padding:"6px 10px",borderRadius:"var(--hc-radius)",background:`${pTh.acc}22`,border:`1px solid ${pTh.acc}33`,fontSize:"var(--hc-text-secondary)",color:pTh.acc}}>Response preview</div>
-                  </div>
-                </div>
+              <div className="hc-theme-grid" role="group" aria-label="Theme palettes">
+                {Object.entries(UI_THEMES).map(([key,palette])=><button key={key} type="button" className="hc-theme-choice" aria-pressed={previewKey===key} onClick={()=>setPendingTheme(key)} style={{background:palette.bg,color:palette.text,border:`1px solid ${previewKey===key?palette.acc:palette.brd}`,borderRadius:"var(--hc-radius)",padding:12,font: "inherit",fontSize:"var(--hc-text-secondary)"}}>
+                  <span>{palette.name}</span><span className="hc-theme-swatches" aria-hidden="true">{[palette.acc,palette.acc2,palette.warm,palette.pink].map((color,i)=><i key={i} style={{background:color}}/>)}</span>
+                </button>)}
+              </div>
+              <div className="hc-theme-preview" style={presentationTokens(pTh,font,codeFont,uiFontSize/14)} aria-label="Theme preview">
+                <div className="preview-user">Make something useful.</div>
+                <div className="preview-answer"><strong>A little clarity goes a long way.</strong><br/><span style={{color:"var(--hc-muted)"}}>Readable answers, thoughtful details, your colors.</span></div>
+                <pre><span style={{color:"var(--code-keyword)"}}>const</span>{' idea = '}<span style={{color:"var(--code-string)"}}>"Hello, HyprChat"</span>{';\n'}<span style={{color:"var(--code-function)"}}>console.log</span>{'(idea);'}</pre>
               </div>
               <div style={{display:"flex",gap:6}}>
                 {pendingTheme&&pendingTheme!==tm&&<><button onClick={()=>{setTm(pendingTheme);setPendingTheme(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:"var(--hc-radius)",background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Apply</button>
@@ -8312,6 +8299,7 @@ function HyprChat(){
               </div>
             </div>;
           })())}
+        {settingSection("Activity",null,toggleField("Playful status words",funVerbs,()=>setFunVerbs(v=>!v),funVerbs?"On":"Off"),"A little personality while working. Specific actions and errors keep their precise labels.")}
         {settingSection("Typography",null,(()=>{
             const previewIdx=pendingFont!==null?pendingFont:fi;
             const pF=FONTS[previewIdx]||FONTS[0];
@@ -8809,17 +8797,7 @@ function HyprChat(){
       @import url('https://fonts.googleapis.com/css2?family=${FONTS[fi].i}${uiFont?.i?`&family=${uiFont.i}`:""}&display=swap');
       @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
       @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
-      .composer-trace{position:absolute;display:block;background:linear-gradient(90deg,transparent,var(--trace-color),transparent);filter:drop-shadow(0 0 4px var(--trace-color));opacity:.52;pointer-events:none}
-      .composer-trace-top{top:0;left:0;width:42%;height:2px;animation:traceX 1.25s linear infinite}
-      .composer-trace-bottom{right:0;bottom:0;width:42%;height:2px;animation:traceXReverse 1.25s linear infinite}
-      .composer-trace-right{top:0;right:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceY 1.25s linear infinite}
-      .composer-trace-left{left:0;bottom:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceYReverse 1.25s linear infinite}
-      .empty-composer-box{animation:emptyComposerAura .75s ease-out .08s both}
-      @keyframes emptyComposerAura{0%{box-shadow:0 0 0 rgba(0,0,0,0)}42%{box-shadow:0 0 0 1px var(--empty-composer-glow),0 0 34px var(--empty-composer-glow)}100%{box-shadow:0 0 0 rgba(0,0,0,0)}}
-      @keyframes traceX{0%{transform:translateX(-115%)}100%{transform:translateX(260%)}}
-      @keyframes traceXReverse{0%{transform:translateX(115%)}100%{transform:translateX(-260%)}}
-      @keyframes traceY{0%{transform:translateY(-115%)}100%{transform:translateY(260%)}}
-      @keyframes traceYReverse{0%{transform:translateY(115%)}100%{transform:translateY(-260%)}}
+
       @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
       @keyframes glow{0%,100%{box-shadow:0 0 8px ${t.acc}88}50%{box-shadow:0 0 16px ${t.acc}CC}}
       @keyframes pGlow{0%,100%{box-shadow:0 0 4px ${t.err}44}50%{box-shadow:0 0 14px ${t.err}88}}
@@ -8830,7 +8808,7 @@ function HyprChat(){
       @keyframes writing{0%{transform:rotate(-8deg) translateY(0)}25%{transform:rotate(4deg) translateY(-1px)}50%{transform:rotate(-6deg) translateY(0)}75%{transform:rotate(5deg) translateY(-1px)}100%{transform:rotate(-8deg) translateY(0)}}
 	      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
     `}</style>
-  </div></div>;
+  </div></div></PlayfulStatusContext.Provider>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<><PanelBoundary><HyprChat/></PanelBoundary><NewVersionBar/></>);

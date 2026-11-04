@@ -10,6 +10,8 @@ from coder_worker_runtime import WorkerStore
 from coder_preview import install_routes as install_preview_routes
 
 app = FastAPI(title='Daedalus engine worker')
+from hephaestus_scope import install_worker_auth
+install_worker_auth(app)
 projects = Path(os.environ.get('DAEDALUS_PROJECTS_DIR', '/opt/daedalus-engine/projects'))
 install_routes(app, projects, engine=ENGINE)
 install_preview_routes(app, WorkerStore(os.environ.get('DAEDALUS_STATE_DIR', str(projects.parent / '.daedalus'))))

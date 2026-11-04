@@ -119,10 +119,14 @@ export function interfaceTheme(theme) {
   return {...theme, ...Object.fromEntries(['text','dim','mut','acc','acc2','warm','ok','err','pink','f1','f4'].map(key => [key, readableColor(theme[key],surfaces,5)]))};
 }
 export const UI_THEMES = Object.fromEntries(Object.entries(THEMES).map(([id,theme]) => [id,interfaceTheme(theme)]));
+export function codeThemeTokens(t) {
+  const slots={keyword:'pink',string:'ok',number:'warm',function:'acc',type:'f1',operator:'acc2',comment:'mut',punctuation:'dim'};
+  return Object.fromEntries(Object.entries(slots).map(([name,slot])=>[`--code-${name}`,readableColor(t[slot],[t.bgDeep],4.5)]));
+}
 export function presentationTokens(t, font, codeFont, scale = 1) {
   return {'--hc-font-ui':font,'--hc-font-code':codeFont,'--hc-ui-scale':scale,
     '--hc-surface':t.surface,'--hc-surface-raised':t.bgDeep,'--hc-hover':t.sfHov,
     '--hc-border':t.brd,'--hc-text':t.text,'--hc-secondary':t.dim,'--hc-muted':t.mut,
     '--hc-accent':t.acc,'--hc-danger':t.err,
-    ...elevationTokens(t)};
+    ...elevationTokens(t),...codeThemeTokens(t)};
 }

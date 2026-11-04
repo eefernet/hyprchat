@@ -1955,7 +1955,18 @@ def _image_recipe_event_detail(recipe: dict) -> dict:
 
 # ── Tool execution dispatcher ──
 
-async def exec_tool(
+async def exec_tool(http, events, name, args, conv_id, *positional, **kwargs):
+    from hephaestus_scope import scope, conversation_metadata
+    metadata=await conversation_metadata(conv_id)
+    if os.environ.get('HEPHAESTUS_TOKEN') and name=='generate_code' and not metadata.get('project'):
+        # Allocate the namespace before the builder starts, so post-build reads use it too.
+        metadata['project']='proj-'+uuid.uuid4().hex[:12]
+        args={**args,'_hephaestus_project_id':metadata['project']}
+    with scope(**metadata):
+        return await _exec_tool_scoped(http, events, name, args, conv_id, *positional, **kwargs)
+
+
+async def _exec_tool_scoped(
     http,
     events,
     name: str,
@@ -3486,12 +3497,17 @@ async def exec_tool(
             path = args.get("path", "")
             await events.emit(conv_id, "tool_start", {"tool": "download_file", "icon": "code", "status": f"Preparing: {path}"})
             qpath = shlex.quote(path)
-            r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                "command": f"base64 -w0 {qpath} 2>/dev/null && echo '|||SEPARATOR|||' && basename {qpath}",
-                "timeout": 30
-            }, timeout=40)
-            result = r.json()
-            stdout = result.get("stdout", "")
+            if os.environ.get('HEPHAESTUS_TOKEN'):
+                from hephaestus_scope import download_bytes
+                data=await download_bytes(http,path,config.MAX_UPLOAD_SIZE_MB*1024*1024)
+                stdout=base64.b64encode(data).decode()+'|||SEPARATOR|||'+os.path.basename(path)
+            else:
+                r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                    "command": f"base64 -w0 {qpath} 2>/dev/null && echo '|||SEPARATOR|||' && basename {qpath}",
+                    "timeout": 30
+                }, timeout=40)
+                result = r.json()
+                stdout = result.get("stdout", "")
             if "|||SEPARATOR|||" in stdout:
                 parts = stdout.split("|||SEPARATOR|||")
                 b64_data = parts[0].strip()
@@ -3983,11 +3999,15 @@ async def exec_tool(
                 if line.startswith("EXCLUDED_EXAMPLE:"):
                     excluded_examples.append(line.split(":", 1)[1])
             r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                "command": f"cd {qdir} && tar czf {qtarname} {exclude_args} . 2>&1 && base64 -w0 {qtarname}",
+                "command": f"cd {qdir} && tar czf {qtarname} {exclude_args} . 2>&1" + ("" if os.environ.get("HEPHAESTUS_TOKEN") else f" && base64 -w0 {qtarname}"),
                 "timeout": 60
             }, timeout=70)
             result = r.json()
-            raw = result.get("stdout", "").strip()
+            if os.environ.get('HEPHAESTUS_TOKEN'):
+                if result.get('exit_code')!=0: raise ValueError('Project packaging failed: '+result.get('stdout','')[-2000:])
+                from hephaestus_scope import download_bytes
+                raw=base64.b64encode(await download_bytes(http,f'/tmp/{tarname}',config.MAX_UPLOAD_SIZE_MB*1024*1024)).decode()
+            else: raw = result.get("stdout", "").strip()
             b64_match = re.search(r'([A-Za-z0-9+/\n]{100,}={0,2})$', raw)
             b64_data = b64_match.group(1).replace("\n", "").strip() if b64_match else ""
             if b64_data:
@@ -5937,7 +5957,7 @@ async def exec_tool(
                 "num_predict": context_policy.resolve("builder").num_predict,
                 "language": language,
                 "context": context,
-                "project_id": _oh_project_id,
+                "project_id": _oh_project_id or args.get("_hephaestus_project_id", ""),
                 # Pass our run_id through so the worker registers the run under
                 # this key. POST /cancel/{run_id} can then abort it cleanly.
                 "run_id": _run_id or "",
@@ -6011,7 +6031,9 @@ async def exec_tool(
             try:
                 import httpx
                 print(f"[CODEGEN:OH] Attempting SSE stream to {openhands_url}/run-stream", flush=True)
-                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=10, pool=10)) as stream_client:
+                from hephaestus_scope import authorize_request
+                async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=10, pool=10),
+                                             event_hooks={'request':[authorize_request]}) as stream_client:
                     async with stream_client.stream("POST", f"{openhands_url}/run-stream", json=oh_payload) as sse_resp:
                         if sse_resp.status_code != 200:
                             raise ConnectionError(f"SSE HTTP {sse_resp.status_code}")
@@ -6659,7 +6681,9 @@ If the code is genuinely correct, output exactly: NO RUNTIME ISSUES FOUND"""
                     _retry_first_event = False
                     try:
                         import httpx as _httpx
-                        async with _httpx.AsyncClient(timeout=_httpx.Timeout(connect=10, read=600, write=10, pool=10)) as retry_client:
+                        from hephaestus_scope import authorize_request
+                        async with _httpx.AsyncClient(timeout=_httpx.Timeout(connect=10, read=600, write=10, pool=10),
+                                                      event_hooks={'request':[authorize_request]}) as retry_client:
                             async with retry_client.stream("POST", f"{openhands_url}/run-stream", json=oh_payload) as retry_resp:
                                 if retry_resp.status_code == 200:
                                     async for line in retry_resp.aiter_lines():

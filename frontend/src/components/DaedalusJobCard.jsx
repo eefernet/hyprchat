@@ -1,7 +1,7 @@
 import React,{useEffect,useState,useRef} from 'react';
 import {API,userScopedUrl} from '../session.js';
 import {terminalJobStates,jobBlockerMessage,jobStatusLabel,jobActivity,continueReason,needsMoreAllowance,elapsedLabel,timestamp} from '../daedalusJobs.js';
-import {loopLabel,nowLine,outcomeExplanation} from '../daedalusProgress.js';
+import {loopLabel,nowLine,outcomeExplanation,fileActivity} from '../daedalusProgress.js';
 import {useDaedalusJob} from '../daedalusJobStore.js';
 import {StageRail,ResultBanner,PlanSection,ChecksSection} from './DaedalusPlanPanel.jsx';
 import './daedalusJob.css';
@@ -38,6 +38,7 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const progress=<>
     <StageRail job={job}/>
     {active&&<p className="dp-now" role="status" aria-live="polite"><strong>Now:</strong> {nowLine(job)||jobActivity(job)}{Number.isFinite(updated)?<span className="dp-facts"> · updated {elapsedLabel((now-updated)/1000)} ago</span>:null}</p>}
+    {job.engine==='openhands159'&&<FileActivity job={job}/> }
     {!active&&<ResultBanner job={job}/>}
     {connection==='reconnecting'&&<p className="dj-notice">Reconnecting to progress. Last confirmed status is shown.</p>}
     {active&&job.blocker&&<p className="dj-notice">{jobBlockerMessage(job.blocker)}</p>}
@@ -88,13 +89,16 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
           <ChecksSection job={job} renderEvidence={evidence}/>
           {!!job.verification_summary?.criteria?.length&&<details className="dp-section"><summary>Independent verification of requirements</summary>
             <p>These observations cover the stated requirements at this revision. Other behavior still needs your review.</p>
-            {job.verification_summary.criteria.map(criterion=><div className="dj-row" key={criterion.id}><strong>{criterion.status==='passed'?'Verified':criterion.status==='failed'?'Failed':'Needs verification'}</strong><p>{criterion.request_excerpt}</p>{criterion.reason&&<pre>{criterion.reason}</pre>}</div>)}
+            {job.verification_summary.criteria.map(criterion=><div className="dj-row" key={criterion.id}>
+              <strong>{criterion.status==='passed'?'Verified':criterion.status==='failed'?'Failed':'Needs verification'}</strong>
+              {criterion.supported&&criterion.action&&criterion.target&&<p>After {criterion.action.name}: {criterion.target.name||criterion.target.selector||criterion.target.kind} — {criterion.property==='value'?'input value':'displayed text'}.</p>}
+              <p>{criterion.request_excerpt}</p>{criterion.reason&&<pre>{criterion.reason}</pre>}</div>)}
           </details>}
           {!!job.checks?.length&&<details className="dp-section"><summary>Every check with its log</summary>
             {(job.checks||[]).map((check,index)=><div className="dj-row" key={`${check.id}-${index}`}><strong>{check.passed?'✓':'✗'} {check.id}</strong><p>{check.classification|| (check.passed?'Passed':'Needs attention')}{check.test_count!=null&&` · ${check.test_count} tests`}</p><pre>{check.log_tail||check.error||check.summary||check.command}</pre>{evidence(check)}</div>)}</details>}
           {job.visual_review?.status&&<p>AI visual review: {job.visual_review.status} {job.visual_review.reason}</p>}
         </>}
-        {tab==='Files & logs'&&<><h2>Files & logs</h2>{job.workspace?<ProjectEvidence jobId={job.id} t={t} font={font}/>:<p>Project files will appear after the first checkpoint.</p>}
+        {tab==='Files & logs'&&<><h2>Files & logs</h2>{job.workspace?<ProjectEvidence jobId={job.id} changedAt={job.progress?.files_changed_at} t={t} font={font}/>:<p>Project files will appear after the first checkpoint.</p>}
           {(job.checks||[]).filter(c=>c.log).map((check,index)=><div className="dj-row" key={index}><p>{check.id}</p><CheckEvidence jobId={job.id} check={check} button={button}/></div>)}
           <details><summary>Model responses and recovery evidence</summary><pre>{JSON.stringify({plan:job.plan_text,patch:job.last_patch&&{...job.last_patch,source_hashes:undefined},recovery:job.verification_events,knowledge:job.knowledge_sources},null,2)}</pre></details>
         </>}
@@ -128,9 +132,10 @@ function ProjectHistory({projectId,refreshKey,button}){
   </details>;
 }
 
-function ProjectEvidence({jobId,t,font}){
+function ProjectEvidence({jobId,changedAt,t,font}){
   const [kind,setKind]=useState('files'),[query,setQuery]=useState(''),[result,setResult]=useState(null),[request,setRequest]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-  const generation=useRef(0);
+  const generation=useRef(0),opened=useRef(false),latestRequest=useRef(null);
+  useEffect(()=>{if(!opened.current)return;const timer=setTimeout(()=>load({operation:'files',refresh:true}),750);return()=>clearTimeout(timer);},[changedAt]);
   useEffect(()=>{setResult(null);setRequest(null);setError('');setBusy(false);return()=>{generation.current++;};},[jobId]);
   const load=async(body)=>{
     const version=++generation.current;setBusy(true);setError('');
@@ -138,7 +143,7 @@ function ProjectEvidence({jobId,t,font}){
       const response=await fetch(`${API}/api/coder/workflows/${jobId}/inspect`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       const data=await response.json();if(version!==generation.current)return;
       if(!response.ok)throw new Error(data.detail||'Inspection failed');
-      setResult(data);setRequest(body);
+      setResult(data);setRequest(body);latestRequest.current=body;
     }catch(e){if(version===generation.current)setError(e.message);}finally{if(version===generation.current)setBusy(false);}
   };
   const control={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius-sm)",padding:'5px 8px',fontFamily:font,fontSize:"var(--hc-text-secondary)"};
@@ -147,8 +152,8 @@ function ProjectEvidence({jobId,t,font}){
     else if(result.next_line!=null)load({...request,start:result.next_line,sha256:result.sha256});
     else if(result.next_cursor!=null)load({...request,cursor:result.next_cursor});
   };
-  return <details style={{marginTop:10,fontSize:"var(--hc-text-secondary)"}} onToggle={e=>{if(e.currentTarget.open&&!result&&!busy)load({operation:'files'});}}>
-    <summary style={{cursor:'pointer'}}>Browse project evidence</summary>
+  return <details style={{marginTop:10,fontSize:"var(--hc-text-secondary)"}} onToggle={e=>{opened.current=e.currentTarget.open;if(opened.current&&!result&&!busy)load({operation:'files',refresh:true});}}>
+    <summary style={{cursor:'pointer'}}>Browse working files</summary><p className="dp-muted">Live workspace. Checks refer to the saved revision shown in their evidence.</p>
     <form onSubmit={e=>{e.preventDefault();load({operation:kind,query});}} style={{display:'flex',gap:6,flexWrap:'wrap',margin:'10px 0'}}>
       <select aria-label="Evidence type" value={kind} onChange={e=>setKind(e.target.value)} style={control}><option value="files">Files</option><option value="symbols">Symbols</option><option value="search">Text search</option><option value="dependencies">Imports</option></select>
       <input aria-label="Search project evidence" value={query} onChange={e=>setQuery(e.target.value)} style={{...control,flex:1,minWidth:100}} placeholder="Path, symbol, or text"/>
@@ -188,4 +193,24 @@ export function CheckEvidence({jobId,check,button}){
     {result?.image&&<img src={result.image} alt="Browser verification screenshot" style={{display:'block',maxWidth:'100%',marginTop:8}}/>}
     {error&&<p role="alert">{error}</p>}
   </div>;
+}
+
+function FileActivity({job}){
+  const [expanded,setExpanded]=useState(false),[older,setOlder]=useState([]),[cursor,setCursor]=useState(0),[more,setMore]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState('');
+  const current=fileActivity(job);
+  const rows=[...new Map([...(job.progress?.files||[]),...older].filter(row=>row.kind==='file').map(row=>[row.id,row])).values()];
+  const load=async()=>{
+    setBusy(true);setError('');
+    try{const response=await fetch(userScopedUrl(`/api/coder/workflows/${job.id}/events?view=activity&before=${cursor}&limit=50`));
+      const data=await response.json();if(!response.ok)throw new Error(data.detail||'Activity unavailable');
+      setOlder(previous=>[...previous,...data.items]);setCursor(data.next_cursor||0);setMore(data.next_cursor!=null);
+    }catch(e){setError(e.message);}finally{setBusy(false);}
+  };
+  return <details className="dp-section dp-file-activity" open={expanded} onToggle={e=>setExpanded(e.currentTarget.open)}>
+    <summary>{current.label} {current.path&&<code>{current.path}</code>}</summary>
+    {!rows.length&&<p className="dp-muted">No file changes have been recorded for this job.</p>}
+    <ol className="dp-activity-list">{rows.map(row=><li key={row.id}><span>{({create:'Created',edit:'Edited',delete:'Deleted'})[row.action]} <code>{row.path}</code></span><span className="dp-muted">{row.outcome==='succeeded'?'Saved':row.outcome==='interrupted'?'Interrupted':'Failed'}{row.at&&<> · <time dateTime={new Date(typeof row.at==='number'?row.at*1000:row.at).toISOString()}>{new Date(typeof row.at==='number'?row.at*1000:row.at).toLocaleTimeString()}</time></>}</span></li>)}</ol>
+    {more&&rows.length>=50&&<button type="button" disabled={busy} onClick={load}>{busy?'Loading…':'Load earlier activity'}</button>}
+    {error&&<p role="alert">{error}</p>}
+  </details>;
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from coder_check_outcomes import normalize, current, counts
 
 
 def prepare(store, operation_id):
@@ -67,6 +68,11 @@ def execute(store, operation_id, repository):
     profile = contract(repository, payload.get('execution_commands'), managed_dependencies=True)
     result = run_revision(store, operation_id, repository, profile,
                           project_id=payload.get('project_id') or operation['job_id'])
+    result['checks'] = [normalize(check) for check in result['checks']]
+    if any(check.get('environment_fault') for check in result['checks']):
+        result.update(execution_profile=profile, required_tests=[], baseline_test_files=[], verified_outputs=[])
+        result['summary'] = summarize(result['checks'], payload['revision_id'])
+        return result
     for check in result['checks']:
         # A guessed initial-page selector is diagnostic. Conditional controls
         # may only appear after an interaction; confirmed UI flows remain hard
@@ -74,10 +80,11 @@ def execute(store, operation_id, repository):
         if (str(check.get('id', '')).startswith(('interface:labels:', 'workflow:'))
                 and not check.get('environment_fault')):
             check['optional'] = True
+    result['checks'] = [normalize(check) for check in result['checks']]
     from coder_engine_contract import checks as deliverable_checks
-    result['checks'].extend(deliverable_checks(result['workspace'],payload.get('task',''),payload['revision_id']))
+    result['checks'].extend(deliverable_checks(result['workspace'],payload.get('task',''),payload['revision_id'],payload.get('deliverable_contract')))
     from coder_engine_delivery import products
-    result['verified_outputs'] = products(result['workspace'], payload.get('task', ''), payload['revision_id'])
+    result['verified_outputs'] = products(result['workspace'], payload.get('task', ''), payload['revision_id'], payload.get('deliverable_contract'))
     from coder_ui_checks import interfaces, run as check_interactions
     required_interfaces = interfaces(repository, profile)
     if payload.get('ui_checks'):
@@ -126,13 +133,24 @@ def execute(store, operation_id, repository):
             result['ui_contract_bindings'] = bindings(payload.get('ui_contract', {}), result['checks'])
         else:
             criteria = run_contract(store, operation_id, repository, payload.get('ui_contract', {}), context, payload.get('ui_contract_bindings'))
+            for criterion in criteria:
+                if criterion.get('environment_fault'):
+                    failure = {'id': criterion['id'], 'revision_id': payload['revision_id'], 'passed': False,
+                        'environment_fault': True, 'classification': 'environment', 'phase': 'preparation',
+                        'diagnostic': criterion['diagnostic'], 'reason': criterion['reason']}
+                    result['checks'].append(failure)
+                    result['summary']['failures'].append(failure)
+                    result['summary']['checks_ok'] = False
             apply_summary(result['summary'], criteria)
+    from coder_engine_contract import apply_summary as apply_deliverables
+    apply_deliverables(result['summary'], payload.get('deliverable_contract'))
     return result
 
 
 def summarize(checks, revision, required_interfaces=()):
     """Evidence is revision-bound and cannot treat an empty test run as exercise."""
-    failed = [c for c in checks if not c.get('passed') and not c.get('optional')]
+    checks = current(checks, revision)
+    failed = [c for c in checks if c['outcome'] == 'failed']
     exercised = any(c.get('passed') and c.get('revision_id') == revision and
         c.get('evidence_version') == 3 and c.get('coverage_observed') and
         c.get('execution_succeeded') and (c.get('source_bindings') or c.get('service_bindings'))
@@ -144,7 +162,7 @@ def summarize(checks, revision, required_interfaces=()):
     missing_interfaces = sorted(set(required_interfaces) - exercised_interfaces)
     feedback = []
     for check in failed:
-        row = {k: check.get(k) for k in ('id', 'command', 'reason', 'log_tail', 'classification', 'diagnostic')}
+        row = {k: check.get(k) for k in ('id', 'command', 'reason', 'log_tail', 'classification', 'diagnostic', 'service_diagnostic')}
         if not row['reason'] and row['classification'] == 'missing_provenance':
             row['reason'] = ('Assertions ran, but verification did not observe them exercising application code or its running service. '
                              'Test the actual imported application or launch it and assert its behavior; duplicated logic and mocks alone do not verify the application. '
@@ -165,4 +183,4 @@ def summarize(checks, revision, required_interfaces=()):
     return {'revision_id': revision, 'accepted': False, 'checks_ok': same_revision and not failed,
             'checks_passed': same_revision and not failed and exercised and not missing_interfaces, 'exercised': exercised,
             'unverified_interfaces': missing_interfaces,
-            'outcomes': [], 'failures': feedback, 'verification_version': 1}
+            'outcomes': [], 'failures': feedback, 'verification_version': 1, 'check_counts': counts(checks)}

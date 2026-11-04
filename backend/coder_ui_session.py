@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import threading
 import uuid
 
 
@@ -59,10 +60,17 @@ class UISession:
                         '-nopw', '-forever', '-shared', '-noxdamage'], 'vnc')
 
     def spawn(self, command, name):
-        log = (self.directory / (name+'.log')).open('ab')
         process = subprocess.Popen(command, env=self.env, stdin=subprocess.DEVNULL,
-            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        log.close(); self.processes.append(process)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        path=self.directory/(name+'.log')
+        def collect():
+            with process.stdout:
+                while chunk:=process.stdout.read1(32768):
+                    if path.exists() and path.stat().st_size>=1024**2:
+                        path.replace(path.with_suffix('.log.1'))
+                    with path.open('ab') as log: log.write(chunk)
+        threading.Thread(target=collect,daemon=True).start()
+        self.processes.append(process)
         return process
 
     def perform(self, request):
@@ -80,7 +88,7 @@ class UISession:
             if guarded and launching:
                 tail = self.log_tail()
                 self.close_application(self.processes[before:])
-                raise UIFailure({'error': str(error), 'category': 'application_startup',
+                raise UIFailure({'error': str(error), 'category': 'application_startup', **getattr(error, 'details', {}),
                                  'requested': request, 'log_tail': tail, 'session_id': self.session_id}) from error
             raise
         if guarded:
@@ -128,8 +136,21 @@ class UISession:
             app = self.spawn(['bash', '-c', request['command']], 'application') if request.get('command') else None
             if kind == 'web':
                 from playwright.sync_api import sync_playwright
-                os.environ['PLAYWRIGHT_BROWSERS_PATH'] = '/root/.cache/ms-playwright'
-                self.playwright = sync_playwright().start()
+                # The controller driver and project tests may pin different
+                # Playwright versions. Only the driver inherits this cache;
+                # self.env retains the project's environment for its process.
+                previous = os.environ.get('PLAYWRIGHT_BROWSERS_PATH')
+                os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.environ.get('DAEDALUS_CONTROLLER_BROWSERS_PATH', previous or '/root/.cache/ms-playwright')
+                try:
+                    self.playwright = sync_playwright().start()
+                finally:
+                    if previous is None: os.environ.pop('PLAYWRIGHT_BROWSERS_PATH', None)
+                    else: os.environ['PLAYWRIGHT_BROWSERS_PATH'] = previous
+                executable = self.playwright.chromium.executable_path
+                if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+                    raise UIFailure({'error': 'The controller browser is missing or not executable; repair the worker browser installation.',
+                        'category': 'environment', 'environment_fault': True, 'phase': 'browser_preparation',
+                        'managed_path': executable})
                 self.browser = self.playwright.chromium.launch(headless=False, env=self.env,
                     args=['--no-sandbox', '--disable-dev-shm-usage'])
                 self.page = self.browser.new_page(viewport={'width': 1200, 'height': 720})
@@ -228,7 +249,7 @@ def serve(args):
     server = HTTPServer(('127.0.0.1', args.port), Handler)
     server.timeout = .5
     (Path(args.directory)/'ready.json').write_text(json.dumps({'port': server.server_port, 'pid': os.getpid()}))
-    deadline = time.monotonic()+args.seconds
+    deadline = time.monotonic()+args.seconds if args.seconds else float('inf')
     try:
         while time.monotonic() < deadline: server.handle_request()
     finally:

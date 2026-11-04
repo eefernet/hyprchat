@@ -112,6 +112,16 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
                 variants = [options, {**options, 'engine_behavior_version':0}]
                 same = any(result.get('request_fingerprint') == hashlib.sha256(
                     json.dumps({**body, 'options': old}, sort_keys=True).encode()).hexdigest() for old in variants)
+            if not same and engine == 'openhands159' and result.get('original_user_request') == (request_options or {}).get('original_user_request'):
+                # A deployment must not reparse or enable new behavior for an
+                # already-created request. All non-derived request fields still
+                # participate in the original fingerprint.
+                old = dict(request_options or {})
+                for field in ('ui_contract', 'ui_contract_version', 'plan_finalization_version', 'engine_behavior_version'):
+                    if field in result: old[field] = result[field]
+                    else: old.pop(field, None)
+                same = result.get('request_fingerprint') == hashlib.sha256(
+                    json.dumps({**body, 'options': old}, sort_keys=True).encode()).hexdigest()
             if not same:
                 raise ValueError("Idempotency key was already used for another request")
             return result
@@ -170,6 +180,10 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
             for field in ('ui_contract_version', 'ui_contract', 'ui_contract_context'):
                 job[field] = request_options[field]
         if engine == 'openhands159':
+            from coder_progress import empty
+            job['progress'] = empty()
+            for field in ('deliverable_contract_version', 'deliverable_contract', 'original_user_request', 'plan_finalization_version'):
+                if field in (request_options or {}): job[field] = request_options[field]
             job['engine_behavior_version'] = (request_options or {}).get('engine_behavior_version', 0)
         await connection.execute(
             "INSERT INTO coder_workflows(id,conversation_id,project_id,mode,state,user_task,workflow_version,job_json,created_at,updated_at) "
@@ -208,7 +222,7 @@ async def _event(connection, workflow_id, kind, data):
         (workflow_id, workflow_id, json.dumps({"type": kind, "data": data}), now()))
 
 
-async def save(workflow_id, *, state=None, event="updated", **changes):
+async def save(workflow_id, *, state=None, event="updated", worker_events=None, **changes):
     connection = await db.get_db()
     try:
         await connection.execute("BEGIN IMMEDIATE")
@@ -240,6 +254,24 @@ async def save(workflow_id, *, state=None, event="updated", **changes):
                                "The project has a newer version; start a new edit instead of resuming stale work")
         if state and state != row['state'] or changes.get('activity') and changes['activity'] != payload.get('activity'):
             changes['meaningful_update_at'] = now()
+        if worker_events is not None:
+            # The durable cursor, projection and normalized events commit together.
+            if changes.get('worker_operation', payload.get('worker_operation')) != payload.get('worker_operation'):
+                raise ValueError('Progress operation changed')
+            batch = [e for e in worker_events if e['seq'] > payload.get('worker_event_cursor', 0)]
+            if batch:
+                changes['worker_event_cursor'] = batch[-1]['seq']
+                if payload.get('progress', {}).get('version') == 1:
+                    from coder_progress import project
+                    projected, records = project(payload['progress'], batch, payload['worker_operation'], payload.get('workspace', ''), row['state'])
+                    changes['progress'] = projected
+                    for record in records:
+                        seen = await connection.execute_fetchall("SELECT 1 FROM coder_workflow_events WHERE workflow_id=? AND json_extract(payload,'$.type')='activity' AND json_extract(payload,'$.data.id')=? LIMIT 1", (workflow_id, record['id']))
+                        if not seen: await _event(connection, workflow_id, 'activity', record)
+            else:
+                changes.pop('worker_event_cursor', None)
+        if state in TERMINAL | PARKED and payload.get('progress'):
+            changes['progress'] = {**changes.get('progress', payload['progress']), 'current': None}
         payload.update(changes)
         new_state = state or row["state"]
         artifact_status = "delivered" if new_state == "completed" and payload.get("artifact") else "not_ready"
@@ -476,8 +508,26 @@ async def account_operation(workflow_id, operation_id, kind, operation):
                 last_operation_status=operation['status'], operation_calls=0, operation_seconds=0, stage_usage=usage)
             await connection.execute('UPDATE coder_workflows SET job_json=?,updated_at=? WHERE id=?',
                                      (json.dumps(payload), now(), workflow_id))
-            await _event(connection, workflow_id, 'operation_accounted', {'operation_id': operation_id, 'calls': operation.get('calls', 0)})
+            # SSE consumers need the same totals committed above. Otherwise the
+            # next operation clears its live counters while the card still has
+            # the old lifetime totals, appearing to reset usage between stages.
+            await _event(connection, workflow_id, 'operation_accounted', {
+                'operation_id': operation_id, 'calls': operation.get('calls', 0),
+                **{key: payload[key] for key in ('calls_used', 'seconds_used', 'operation_calls',
+                    'operation_seconds', 'operation_accounted', 'last_operation_status', 'stage_usage')}})
         await connection.commit()
     finally:
         await connection.close()
     return await get(workflow_id)
+
+
+async def activity(workflow_id, before=0, limit=50):
+    if not await get(workflow_id): raise LookupError('Workflow not found')
+    connection = await db.get_db()
+    try:
+        rows = await connection.execute_fetchall("""SELECT * FROM coder_workflow_events
+            WHERE workflow_id=? AND json_extract(payload,'$.type')='activity'
+            AND (?=0 OR seq<?) ORDER BY seq DESC LIMIT ?""", (workflow_id, before, before, min(100,max(1,limit))+1))
+        items = [{"seq": r['seq'], **json.loads(r['payload'])['data']} for r in rows[:limit]]
+        return {'items': items, 'next_cursor': items[-1]['seq'] if len(rows)>limit else None}
+    finally: await connection.close()

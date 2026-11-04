@@ -67,6 +67,12 @@ def require_enabled():
 
 
 async def worker(http, command, *args):
+    if os.environ.get('HEPHAESTUS_TOKEN'):
+        from hephaestus_scope import headers
+        response=await http.post(f'{config.CODEBOX_URL}/documents/{command}',json={'args':list(args)},
+            headers=headers(db.current_user_id(),project=str(args[0]) if args else 'document-health'),timeout=35)
+        response.raise_for_status()
+        return response.json()
     command_args=" ".join(shlex.quote(str(x)) for x in [command,*args])
     cmd=(f"document_install={shlex.quote(INSTALL)}; "
          'if [ -x "$document_install/current/venv/bin/python" ]; then document_install="$document_install/current"; fi; '
@@ -229,6 +235,12 @@ async def submit(http, parameters, *, wait=False, track_bg=None):
 
 
 async def run_job(http, run_id, parameters, source, source_path, assets):
+    from hephaestus_scope import scope
+    with scope(project=run_id):
+        return await _run_job_scoped(http,run_id,parameters,source,source_path,assets)
+
+
+async def _run_job_scoped(http, run_id, parameters, source, source_path, assets):
     from routes.chat_files import upload_bytes_to_codebox, safe_filename
     conv_id, action = parameters["conversation_id"], parameters["action"]
     async def emit(event, data):

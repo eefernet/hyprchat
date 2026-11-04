@@ -238,7 +238,13 @@ def edit(store, operation_id, root, task, *, read_root=None, preferred=(), binar
     role = 'reviewer' if read_root else 'builder'
     policy = resolve(role, operation_settings(payload))
     binary = binary or '/opt/openhands-worker/aider-venv/bin/aider'
-    version = subprocess.run([binary, '--version'], capture_output=True, text=True, timeout=20)
+    managed=os.environ.get('HEPHAESTUS_EXECUTOR')=='docker'
+    if managed:
+        from hephaestus_scope import profile_probe
+        binary='/opt/aider-venv/bin/aider'
+        version=profile_probe('aider',[binary,'--version'])
+    else:
+        version = subprocess.run([binary, '--version'], capture_output=True, text=True, timeout=20)
     if version.returncode or version.stdout.strip() != 'aider ' + AIDER_VERSION:
         raise ValueError(f'Policy-7 proof requires aider {AIDER_VERSION}')
     excludes = tuple(payload['settings']['daedalus_exclude_dirs']) + ('.git', '.aider', '__pycache__')
@@ -306,6 +312,7 @@ def edit(store, operation_id, root, task, *, read_root=None, preferred=(), binar
                 path.touch(exist_ok=True)
             writable = [*audit_targets, folder]
         with Sandbox(command, cwd=root, writable=writable,
+                     runtime_profile='aider' if managed else None,
                      readonly=[root, *([read_root] if read_root else [])],
                      environment=environment, network_urls=[url]) as box, log.open('w') as output:
             process = subprocess.Popen(box.args, cwd=root, env=box.env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)

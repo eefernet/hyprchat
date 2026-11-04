@@ -117,6 +117,8 @@ def _deregister_aider_run(run_id: str) -> None:
         _ACTIVE_AIDER_RUNS.pop(run_id, None)
 
 app = FastAPI(title="OpenHands Worker")
+from hephaestus_scope import install_worker_auth
+install_worker_auth(app)
 
 # Lazy imports — heavy SDK loaded on first request
 _sdk_loaded = False
@@ -194,17 +196,22 @@ def _workspace_for_request(req: "RunRequest") -> tuple[Path, str, bool]:
     """
     import uuid
 
-    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    projects = PROJECTS_DIR
+    if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+        from hephaestus_scope import workspace_root
+        projects=workspace_root()/'root/projects'
+    projects.mkdir(parents=True, exist_ok=True)
     requested = _clean_project_name(req.project_id)
-    if requested and (PROJECTS_DIR / requested).is_dir():
-        work_dir = PROJECTS_DIR / requested
+    if requested and (projects / requested).is_dir():
+        work_dir = projects / requested
         work_dir.mkdir(parents=True, exist_ok=True)
         return work_dir, requested, True
 
-    project_name = _derive_project_name(req.task, req.language)
-    work_dir = PROJECTS_DIR / project_name
+    project_name = (requested if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker' and requested
+                    else _derive_project_name(req.task, req.language))
+    work_dir = projects / project_name
     if work_dir.exists():
-        work_dir = PROJECTS_DIR / f"{project_name}-{uuid.uuid4().hex[:4]}"
+        work_dir = projects / f"{project_name}-{uuid.uuid4().hex[:4]}"
         project_name = work_dir.name
     work_dir.mkdir(parents=True, exist_ok=True)
     return work_dir, project_name, False
@@ -605,6 +612,7 @@ def _ensure_loaded_inner(ollama_base: str, model: str, num_ctx: int, requests) -
 
 
 def _aider_bin() -> str:
+    if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker': return '/opt/aider-venv/bin/aider'
     configured = os.getenv("AIDER_BIN", "").strip()
     if configured:
         return configured
@@ -1145,6 +1153,11 @@ def _run_aider_blocking(req: AiderRunRequest, stream_cb=None) -> dict:
 
 @app.get("/aider/health")
 def aider_health():
+    if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+        from hephaestus_scope import profile_probe
+        result=profile_probe('aider',['/opt/aider-venv/bin/aider','--version'])
+        return {'status':'ok' if result.returncode==0 else 'missing','installed':result.returncode==0,
+                'binary':'/opt/aider-venv/bin/aider','version':result.stdout.strip()}
     binary = _aider_bin()
     installed = bool(shutil.which(binary) or Path(binary).exists())
     version = ""
@@ -1197,7 +1210,8 @@ async def run_aider_stream(req: AiderRunRequest):
             _send(None)
 
     async def generate():
-        fut = loop.run_in_executor(None, _run_sync)
+        from contextvars import copy_context
+        fut = loop.run_in_executor(None, copy_context().run, _run_sync)
         finished = False
         try:
             while True:
@@ -2125,6 +2139,7 @@ _run_counter = 0
 def _auto_cleanup_stale():
     """Delete project directories older than 24 hours."""
     import shutil
+    if os.environ.get("HEPHAESTUS_EXECUTOR")=="docker": return 0  # Retained project data is never age-evicted.
     cutoff = time.time() - 86400  # 24 hours
     deleted = 0
     try:
@@ -2154,6 +2169,7 @@ def clean_stale():
 @app.get("/health")
 def health():
     return {"status": "ok", "sdk_loaded": _sdk_loaded,
+            "active_runs": len(_ACTIVE_RUNS), "active_aider_runs": len(_ACTIVE_AIDER_RUNS),
             "projects_root": str(PROJECTS_DIR.resolve()),
             "state_root": str(Path(os.environ.get('DAEDALUS_STATE_DIR', str(PROJECTS_DIR.parent / '.daedalus'))).resolve())}
 
@@ -2161,6 +2177,8 @@ def health():
 @app.post("/clean")
 def clean_workspace():
     """Delete all project files from /root/projects/ and stray project files from /root/."""
+    if os.environ.get("HEPHAESTUS_EXECUTOR")=="docker":
+        raise HTTPException(409,"Hephaestus retains project data. Stop applications and use explicit project deletion; cache cleanup is automatic.")
     import shutil
     deleted = 0
     freed = 0

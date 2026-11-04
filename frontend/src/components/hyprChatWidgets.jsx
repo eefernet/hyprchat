@@ -5,7 +5,7 @@ import LibrarySearchPanel from '../panels/LibrarySearchPanel.jsx';
 import {workspaceSections,workspaceSection,workspaceSubviews,workspaceSectionLabel} from '../workspaceNavigation.js';
 import {WorkspaceOverview,WorkspaceSources,WorkspaceDaily,WorkspaceDefaults,WorkspaceDefaultSummary,WorkspaceContentDialog} from './workspaceComponents.jsx';
 import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
-import {activityVisual, summaryChips} from "../chatActivityVisual.js";
+import {activityVisual, summaryChips, playfulPhase, activityVerbOrder} from "../chatActivityVisual.js";
 import usePresence from "../usePresence.js";
 import "./chatActivity.css";
 import {apiJson} from "../api.js";
@@ -148,7 +148,36 @@ function ThinkingPreview({text}){
 }
 
 
-export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t}){
+export const PlayfulStatusContext=React.createContext(true);
+
+// Only this label ticks; tokens and historical markdown do not rerender with it.
+export function ActivityLabel({label,phase,active=false,seed=''}){
+  const enabled=React.useContext(PlayfulStatusContext);
+  const pool=playfulPhase(label,phase);
+  const words=useMemo(()=>activityVerbOrder(pool,seed),[pool,seed]);
+  const [tick,setTick]=useState(0);
+  useEffect(()=>{
+    setTick(0);
+    if(!enabled||!active||!pool)return;
+    const media=window.matchMedia('(prefers-reduced-motion: reduce)');
+    let timer;
+    const update=()=>{
+      clearInterval(timer);
+      if(media.matches)setTick(0);
+      if(!document.hidden&&!media.matches)timer=setInterval(()=>setTick(n=>n+1),3000);
+    };
+    document.addEventListener('visibilitychange',update);media.addEventListener('change',update);update();
+    return()=>{clearInterval(timer);document.removeEventListener('visibilitychange',update);media.removeEventListener('change',update);};
+  },[enabled,active,pool,seed]);
+  const fun=enabled&&active&&pool;
+  const word=fun?words[tick%words.length]:label;
+  return <span className={`hc-activity-label${fun?' is-playful':''}`} title={label}>
+    <span key={word} className="hc-activity-word" aria-hidden="true">{word}</span>
+    <span className="hc-sr-only">{label}</span>
+  </span>;
+}
+
+export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t,messageKey=""}){
   const state=chatActivity({events,savedEvents,live,content,status});
   const [expanded,setExpanded]=useState(false);
   const [following,setFollowing]=useState(true);
@@ -182,7 +211,7 @@ export function ChatActivity({events=[],savedEvents=[],live=false,content="",sta
   const chips=state.active?[]:summaryChips(state);
   const header=<>
     <span key={visual.icon} aria-hidden="true" className="hc-activity-icon"><span className="hc-activity-badge"><Icon/></span></span>
-    <span key={state.label} className="hc-activity-label">{state.label}</span>
+    <ActivityLabel label={state.label} phase={state.phase} active={state.active} seed={messageKey}/>
     {preview&&<ThinkingPreview key={thought.id} text={preview}/>}
     {chips.length>0&&<span className="hc-activity-chips">{chips.map((chip,i)=><span key={chip} className="hc-activity-chip" style={{"--i":i}}>{chip}</span>)}</span>}
     {expandable&&<span className="hc-activity-chevron hc-chevron" data-open={expanded?"true":"false"} aria-hidden="true"><IC.ChevDown/></span>}
@@ -212,6 +241,7 @@ export function ChatActivity({events=[],savedEvents=[],live=false,content="",sta
 const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   const [expanded,setExpanded]=useState(streaming);
   const [copied,setCopied]=useState(false);
+  const bodyId=React.useId();
   useEffect(()=>{setExpanded(streaming);},[streaming]);
   if(!plan) return null;
   const bc=streaming?`${t.acc}66`:`${t.acc}38`;
@@ -223,14 +253,16 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
     onCopy&&onCopy();
   };
   return <div className="hc-reveal" style={{marginBottom:6,borderRadius:"var(--hc-radius-card)",border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 0 1px ${t.acc}55`:"none",transition:"border-color var(--hc-dur-3) var(--hc-ease-out),box-shadow var(--hc-dur-3) var(--hc-ease-out),background-color var(--hc-dur-3) var(--hc-ease-out)"}}>
-    <div onClick={()=>setExpanded(p=>!p)} className={`hc-live-head${streaming?" is-active":""}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
-      <span className={`hc-run-icon${streaming?" is-active":""}`} style={{fontSize:"var(--hc-text-control)",lineHeight:1}}>📐</span>
-      <span style={{fontWeight:600,fontSize:"var(--hc-text-secondary)",color:tc}}>Architecture Plan</span>
-      {streaming&&<span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
+    <div className={`hc-live-head${streaming?" is-active":""}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
+      <button type="button" aria-expanded={expanded} aria-controls={bodyId} onClick={()=>setExpanded(p=>!p)} className="hc-plan-toggle">
+        <span className="hc-run-icon" aria-hidden="true"><IC.Layers/></span>
+        <span>Architecture Plan</span>
+        {streaming&&<span style={{opacity:.7,fontWeight:400}}>building…</span>}
+        <span className="hc-chevron" data-open={expanded?"true":"false"} aria-hidden="true"><IC.ChevDown/></span>
+      </button>
       <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
-      <span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
     </div>
-    {expanded&&<div style={{padding:"10px 14px",fontSize:"var(--hc-text-secondary)",lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
+    {expanded&&<div id={bodyId} style={{padding:"10px 14px",fontSize:"var(--hc-text-secondary)",lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
       {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
     </div>}
   </div>;

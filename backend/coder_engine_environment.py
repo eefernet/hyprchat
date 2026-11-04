@@ -17,6 +17,7 @@ def preparation(store, operation_id):
     started = time.time()
     store.update(operation_id, payload={**payload, '_preparation_active_started': started,
                                        '_preparation_deadline': started + remaining})
+    store.event(operation_id, 'preparation_started')
     try: yield
     finally:
         current = dict(store.get(operation_id)['payload'])
@@ -81,8 +82,10 @@ def refresh(store, operation_id, repository, manifests, environment, folder):
     result = []
     dependency_hashes = {}
     excluded = set(store.get(operation_id)['payload']['settings']['daedalus_exclude_dirs']) | {'vendor'}
+    from coder_generated import directories, excluded as is_generated
+    generated = directories(repository.root)
     for directory, folders, files in os.walk(repository.root, followlinks=False):
-        folders[:] = [name for name in folders if name not in excluded and not (Path(directory) / name).is_symlink()]
+        folders[:] = [name for name in folders if name not in excluded and not is_generated((Path(directory) / name).relative_to(repository.root), generated) and not (Path(directory) / name).is_symlink()]
         for name in set(files) & (MANIFESTS | LOCKFILES):
             path = Path(directory) / name
             if not path.is_symlink():
@@ -94,14 +97,26 @@ def refresh(store, operation_id, repository, manifests, environment, folder):
         raise ValueError('Two preparation attempts failed for these unchanged dependencies; inspect the reported environment failure')
     try:
         with preparation(store, operation_id):
-            for item in profile['profiles']:
-                result.extend(prepare_environment(store, operation_id, repository.root, item, project_id, environment, folder))
+            for attempt in range(2 - attempts.get(fingerprint, 0)):
+                result = []
+                for item in profile['profiles']:
+                    result.extend(prepare_environment(store, operation_id, repository.root, item, project_id, environment, folder))
+                    if any(row.get('environment_fault') for row in result): break
+                if not any(row.get('environment_fault') for row in result): break
+                attempts[fingerprint] = attempts.get(fingerprint, 0) + 1
+                store.update(operation_id, payload={**store.get(operation_id)['payload'], '_environment_failures': attempts})
+            if any(row.get('environment_fault') for row in result):
+                diagnostic = next((row.get('diagnostic') for row in result if row.get('diagnostic')), None) or {
+                    'category': 'environment', 'stage': 'dependency_preparation',
+                    'message': 'Dependency setup failed; your project files are saved.',
+                    'detail': next((row.get('log_tail', '') for row in result if row.get('environment_fault')), '')}
+                store.update(operation_id, payload={**store.get(operation_id)['payload'], '_preparation_failure': diagnostic})
     except Exception:
         attempts[fingerprint] = attempts.get(fingerprint, 0) + 1
         store.update(operation_id, payload={**store.get(operation_id)['payload'], '_environment_failures': attempts})
         raise
     passed = all(row.get('passed') for row in result)
-    if not passed:
+    if not passed and not any(row.get('environment_fault') for row in result):
         attempts[fingerprint] = attempts.get(fingerprint, 0) + 1
         store.update(operation_id, payload={**store.get(operation_id)['payload'], '_environment_failures': attempts})
     return {'passed': passed, 'checks': result,

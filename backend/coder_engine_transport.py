@@ -64,9 +64,18 @@ def infer(store, operation_id, body, role, policy, send):
     declared = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
     if requirement == 'action_required' and not declared:
         raise TransportFailure(400, 'response_configuration', 'Action-required inference needs declared tools')
+    from coder_plan_finalization import active, change, FinalizationEnded
+    finalization = active(store, operation_id)
     request = deepcopy(body)
+    if finalization:
+        change(store, operation_id, 'turn')
+        if role != 'builder': raise FinalizationEnded('No additional compaction during checklist finalization')
+        request['tools'] = [t for t in request.get('tools', []) if t.get('function', {}).get('name') in {'task_tracker', 'finish'}]
+        declared = {t['function']['name'] for t in request['tools']}
+        request.setdefault('messages', []).append({'role':'user', 'content':'Checklist finalization only: update task_tracker statuses truthfully, then finish. Only task_tracker and finish are permitted.'})
     identity = uuid.uuid4().hex
     for attempt in range(2):
+        if finalization and time.time() >= finalization['deadline']: raise FinalizationEnded('Checklist deadline reached')
         estimate = count_request(request)
         if estimate > policy.input_budget:
             store.event(operation_id, 'model_failure', request_id=identity, attempt=attempt+1, role=role,
@@ -100,6 +109,8 @@ def infer(store, operation_id, body, role, policy, send):
                 function = call.get('function') or {}
                 if not isinstance(function, dict) or not isinstance(function.get('name'), str) or not isinstance(function.get('arguments'), dict):
                     raise TransportFailure(502, 'malformed_tool_output', 'Incomplete native tool-call name or arguments', True, usage=usage, upstream_status=200)
+                if finalization and function['name'] not in {'task_tracker', 'finish'}:
+                    raise FinalizationEnded('Checklist-only phase rejected a non-checklist action before dispatch')
                 if guarded and function['name'] not in declared:
                     raise TransportFailure(502, 'malformed_tool_output', 'The response names an undeclared tool', True, usage=usage, upstream_status=200)
             if result.get('done') is not True:
@@ -108,9 +119,10 @@ def infer(store, operation_id, body, role, policy, send):
                 raise TransportFailure(502, 'missing_required_tool',
                     'This coding turn requires a declared tool call; prose is not execution or completion.',
                     True, usage=usage, upstream_status=200)
+            if finalization and time.time() >= finalization['deadline']: raise FinalizationEnded('Checklist response arrived after deadline')
             store.event(operation_id, 'model_response', request_id=identity, attempt=attempt+1, role=role,
                         seconds=time.time()-started, usage=usage, tool_calls=len(calls), upstream_status=200,
-                        bridge_status=200, response_requirement=requirement, first_attempt_passed=attempt == 0,
+                        bridge_status=200, tool_names=[c['function']['name'] for c in calls], response_requirement=requirement, first_attempt_passed=attempt == 0,
                         recovered=attempt > 0, authority='supervisor')
             return result
         except InterruptedError:

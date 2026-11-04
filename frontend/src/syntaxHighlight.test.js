@@ -7,7 +7,7 @@ import { THEMES } from './theme.js';
 test('language aliases and metadata do not enter the code body',()=>{
   for(const [label,lang] of [['Swift','swift'],['JS','javascript'],['py','python'],['c++','cpp'],['C#','csharp'],['shell','bash']]){
     const code='  x < y && y > 0\n  return "hello"';
-    assert.deepEqual(parseCodeFence('```'+label+' filename=example\n'+code+'\n```'),{lang,code});
+    assert.deepEqual(parseCodeFence('```'+label+' filename=example\n'+code+'\n```'),{lang,code,meta:{filename:'example'}});
   }
   assert.deepEqual(parseCodeFence('```\nhello\n```'),{lang:'',code:'hello'});
   assert.deepEqual(parseCodeFence('```Swift\r\nlet x = 1\r\n```'),{lang:'swift',code:'let x = 1'});
@@ -47,5 +47,39 @@ test('light and dark token palettes remain legible against every bundled theme',
       const contrast=(Math.max(background,foreground)+.05)/(Math.min(background,foreground)+.05);
       assert.ok(contrast>=4.5,`${theme.name} ${kind}: ${contrast}`);
     }
+  }
+});
+
+test('filename fence forms preserve code and keep unknown metadata harmless',()=>{
+  for(const [info,lang,filename] of [['js:app.js','javascript','app.js'],['js title="my app.js"','javascript','my app.js'],['python app.py','python','app.py'],['c++ filename="demo.cpp"','cpp','demo.cpp']]){
+    assert.deepEqual(parseCodeFence('```'+info+'\n  const x = "<script>";\n```'),{lang,code:'  const x = "<script>";',meta:{filename}});
+  }
+  assert.deepEqual(parseCodeFence('```unknown some-flag\nvalue\n```'),{lang:'unknown',code:'value'});
+  assert.equal(parseCodeFence('incomplete'),null);
+});
+
+test('logical code lines retain multiline token scopes and exact text',async()=>{
+  const {codeLines}=await import('./syntaxHighlight.js');
+  const source='/* comment\n * still comment */\nconst text = `first\nsecond`;\n\n';
+  const lines=codeLines(source,'javascript',Prism);
+  assert.equal(lines.map(line=>line.map(token=>token.text).join('')).join('\n'),source);
+  assert.ok(lines[1].some(token=>token.classes.includes('comment')));
+  assert.ok(lines[3].some(token=>token.classes.includes('template-string')));
+  for(const lang of ['unlisted-language','constructor','__proto__']){
+    assert.equal(codeLines('<script>\n\n&',lang,Prism).map(l=>l.map(t=>t.text).join('')).join('\n'),'<script>\n\n&');
+  }
+});
+
+test('diff headers are not confused with additions and deletions',async()=>{
+  const {codeDiffKind}=await import('./syntaxHighlight.js');
+  for(const [line,kind] of [['+++ b/app.js','meta'],['--- a/app.js','meta'],['@@ -1 +1 @@','hunk'],['+added','add'],['-removed','delete'],[' context','']])assert.equal(codeDiffKind(line),kind);
+});
+
+test('line tokenization retains embedded-language hooks and incomplete streams',async()=>{
+  const {codeLines}=await import('./syntaxHighlight.js');
+  for(const [lang,source] of [['php','<div>\n<?php echo "hello"; ?>\n</div>'],['javascript','const message = `unfinished\n'],['swift','func greet() {\n  print("Hi")\n}'],['python','text = """first\nsecond"""']]){
+    const lines=codeLines(source,lang,Prism);
+    assert.equal(lines.map(line=>line.map(token=>token.text).join('')).join('\n'),source,lang);
+    assert.ok(lines.flat().some(token=>token.classes.length),lang);
   }
 });
