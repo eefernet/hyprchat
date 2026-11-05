@@ -61,6 +61,33 @@ def test_python_scripts_unittest_pytest_and_demonstrations_are_distinct(tmp_path
     assert not any('demo' in c for c in commands)
 
 
+@pytest.mark.parametrize('manifest,has_tests,expected', [
+    ('[project]\nname="sample"\ndependencies=["PyQt6"]\n[project.optional-dependencies]\ntest=["pytest-qt"]', True, "install -e '.[test]'"),
+    ('[project]\nname="sample"\n[project.optional-dependencies]\ntests=["pytest"]', False, 'install -e .'),
+    ('[tool.pytest.ini_options]\naddopts="-q"', True, None),
+])
+def test_python_declared_package_and_test_dependencies(tmp_path,manifest,has_tests,expected):
+    files={'pyproject.toml':manifest,'app.py':'pass'}
+    if has_tests:
+        files['test_app.py']='def test_app():\n    assert True\n'
+    profile=discover(repository(tmp_path,files))['profiles'][0]
+    setup=profile['commands']['setup'][0]
+    if expected is None:
+        assert 'install -e' not in setup
+    else:
+        assert expected in setup
+    assert ('[test' in setup)==(has_tests and expected is not None)
+
+
+def test_discovered_qt_tests_get_a_display_and_keep_the_native_runner(tmp_path):
+    repo=repository(tmp_path,{'test_gui.py':'from PyQt6.QtWidgets import QApplication\ndef test_ui():\n    assert QApplication([])\n',
+                              'test_plain.py':'def test_plain():\n    assert True\n'})
+    rows={c['test_runner']:c['command'] for c in discover(repo)['checks'] if c.get('is_test')}
+    gui='.venv/bin/python -m pytest -q test_gui.py'
+    plain='.venv/bin/python -m pytest -q test_plain.py'
+    assert rows=={gui:'xvfb-run -a '+gui,plain:plain}
+
+
 @pytest.mark.parametrize('files,command', [
     ({'app.csproj':'<Project/>'}, 'dotnet build'), ({'CMakeLists.txt':'project(App)'}, 'cmake --build'),
     ({'Makefile':'test:\n\ttrue\n'}, 'make test'), ({'composer.json':'{"scripts":{"test":"phpunit"}}'}, 'composer run test'),

@@ -211,8 +211,15 @@ def discover(repository, explicit=None, proposals=None):
                     project_config = tomllib.loads((root / 'pyproject.toml').read_text())
                 except ValueError:
                     add('build', "python3 -c \"import tomllib; tomllib.load(open('pyproject.toml','rb'))\"")
-            if 'build-system' in project_config or (root / 'setup.py').exists():
-                setup += ' && .venv/bin/python -m pip install -e .'
+            metadata = project_config.get('project', {})
+            if 'build-system' in project_config or metadata or (root / 'setup.py').exists():
+                # A project can declare its dependencies without overriding pip's
+                # default build backend. Install conventional test extras only
+                # when the package actually contains discovered tests.
+                optional = metadata.get('optional-dependencies', {}) if isinstance(metadata, dict) else {}
+                extras = [name for name in ('test','tests') if isinstance(optional, dict) and name in optional]
+                target = '.[' + ','.join(extras) + ']' if extras and any(kind for _,kind in tests) else '.'
+                setup += ' && .venv/bin/python -m pip install -e ' + shlex.quote(target)
             if (root / 'requirements.txt').exists():
                 setup += ' && .venv/bin/python -m pip install -r requirements.txt'
             if any(kind == 'pytest' for _, kind in tests):
@@ -220,13 +227,20 @@ def discover(repository, explicit=None, proposals=None):
             add('setup', setup)
             add('build', '.venv/bin/python -m compileall -q -x "(^|/)(\\.venv|venv|node_modules)/" .')
             for path, kind in tests:
+                if not kind:
+                    continue
+                source = (root / path).read_text(errors='replace')
                 if kind in {'unittest', 'pytest'}:
-                    add('test', '.venv/bin/python -m ' + ('pytest -q ' if kind == 'pytest' else 'unittest -v ') + shlex.quote(path))
-                elif kind in {'script', 'invalid'}:
+                    runner = '.venv/bin/python -m ' + ('pytest -q ' if kind == 'pytest' else 'unittest -v ') + shlex.quote(path)
+                else:
                     # Browser automation exists only in the controller interpreter, never a fresh project venv.
-                    source = (root / path).read_text(errors='replace') if (root / path).is_file() else ''
-                    runner = '"$DAEDALUS_AUDIT_PYTHON" ' if re.search(r'^\s*(?:from|import)\s+playwright\b', source, re.M) else '.venv/bin/python '
-                    add('test', runner + shlex.quote(path))
+                    python = '"$DAEDALUS_AUDIT_PYTHON"' if re.search(r'^\s*(?:from|import)\s+playwright\b', source, re.M) else '.venv/bin/python'
+                    runner = python + ' ' + shlex.quote(path)
+                # Qt aborts before pytest can report an assertion if there is no
+                # display. Scope Xvfb to this test, keeping explicit commands and
+                # the runner identity used for regression evidence intact.
+                qt = re.search(r'^\s*(?:from|import)\s+(?:PyQt[56]|PySide[26]|pytestqt)\b', source, re.M)
+                add('test', 'xvfb-run -a ' + runner if qt else runner, runner)
         if (root / 'Cargo.toml').exists():
             toolchains.append('cargo'); add('build', 'cargo build --workspace'); add('test', 'cargo test --workspace')
         if (root / 'go.mod').exists():

@@ -193,7 +193,6 @@ def session(store, operation_id, repository):
     from coder_repository import Repository
     from coder_project_runtime import prepare_application, sandbox_paths
     from coder_execution_utils import stop_process
-    from coder_ui_session import free_port
     from coder_worker_runtime import _boundary
     operation = store.get(operation_id); payload=operation['payload']
     from coder_engine_cache import lease, scope
@@ -213,11 +212,15 @@ def session(store, operation_id, repository):
                 raise UIObservationFailure({'error': 'UI environment preparation failed', 'category': 'environment',
                     'environment_fault': True, 'phase': 'preparation', 'checks': failed})
             raise RuntimeError('UI preparation or build failed: '+json.dumps(failed)[-6000:])
-        port=free_port(); modules=Path(__file__).parent
+        # Each sandbox has its own network namespace. Keep the internal
+        # control listener off the ephemeral range and let the host reserve
+        # its forwarding port atomically.
+        control_port = 27771
+        modules=Path(__file__).parent
         command=['dbus-run-session','--',sys.executable,str(modules/'coder_ui_session.py'),
-                 '--directory',str(runtime),'--port',str(port),'--seconds','300']
+                 '--directory',str(runtime),'--port',str(control_port),'--seconds','300']
         with Sandbox(command,cwd=root,writable=[root,runtime],readonly=[modules/'coder_ui_session.py',
-                modules/'coder_accessibility.py',*sandbox_paths(root,env)],environment=env,listen_port=port) as box:
+                modules/'coder_accessibility.py',*sandbox_paths(root,env)],environment=env,listen_port=0,guest_port=control_port) as box:
             with (directory/'session.log').open('ab') as log:
                 process=subprocess.Popen(box.args,env=box.env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
             client=requests.Session(); client.trust_env=False
@@ -228,7 +231,7 @@ def session(store, operation_id, repository):
                     target = safe_relative(root, request['file_path'])
                     if not target.is_file(): raise ValueError('Browser entrypoint does not exist')
                     request = {**request, 'url': target.as_uri(), 'command': ''}
-                response=client.post(f'http://127.0.0.1:{port}',json=request,timeout=45)
+                response=client.post(f'http://127.0.0.1:{box.listen_port}',json=request,timeout=45)
                 data=response.json()
                 if response.status_code != 200: raise UIObservationFailure(data)
                 return data

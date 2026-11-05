@@ -66,10 +66,16 @@ class UISession:
         self.env = {**os.environ, 'DISPLAY': display, 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON': '1',
                     'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '0', 'GTK_A11Y': 'atspi',
                     'GSETTINGS_BACKEND': 'memory'}
-        self.spawn(['Xvfb', display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], 'xvfb')
+        xserver = self.spawn(['Xvfb', display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], 'xvfb')
         deadline = time.monotonic()+10
-        while not Path('/tmp/.X11-unix/X' + display[1:]).exists():
-            if time.monotonic() > deadline: raise RuntimeError('Xvfb did not become ready')
+        while True:
+            if Path('/tmp/.X11-unix/X'+display[1:]).exists():
+                probe = subprocess.run(['xprop','-root'],env=self.env,capture_output=True,timeout=2)
+                if probe.returncode == 0:
+                    break
+            if xserver.poll() is not None or time.monotonic() > deadline:
+                self.close()
+                raise RuntimeError('Xvfb did not become ready')
             time.sleep(.1)
         manager = self.spawn(['openbox'], 'window-manager')
         deadline = time.monotonic()+10
@@ -78,7 +84,10 @@ class UISession:
                                    capture_output=True, text=True, timeout=2)
             if 'window id #' in probe.stdout: break
             if manager.poll() is not None or time.monotonic()>deadline:
-                raise RuntimeError('The desktop window manager did not become ready')
+                details = self.directory / 'window-manager.log'
+                tail = details.read_text(errors='replace')[-1200:] if details.is_file() else ''
+                self.close()
+                raise RuntimeError(f'The desktop window manager did not become ready (exit={manager.poll()}, display={display}): {tail}')
             time.sleep(.1)
         if vnc_port:
             self.spawn(['x11vnc', '-display', display, '-localhost', '-rfbport', str(vnc_port),

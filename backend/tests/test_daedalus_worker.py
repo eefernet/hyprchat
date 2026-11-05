@@ -59,20 +59,45 @@ def wait(store, identity):
     pytest.fail('Worker failed to finish fixture')
 
 
-def test_duplicate_worker_post_launches_only_one_process(tmp_path):
-    store=WorkerStore(tmp_path/'state')
-    root=tmp_path/'projects';(root/'source').mkdir(parents=True)
-    (root/'source'/'file.py').write_text('print(1)\n')
-    request=payload(projects_root=str(root),source_project_id='source')
-    assert store.create('op','job','inspect',request)
-    launch(store,'op');pid=store.get('op')['pid']
-    assert not store.create('op','job','inspect',request)
-    launch(store,'op');assert store.get('op')['pid']==pid
-    finished=wait(store,'op')
-    assert finished['status']=='succeeded',finished['result']
-    assert finished['result']['inventory']['files']==1
-    assert finished['calls']==0
-    assert (root/'source'/'file.py').read_text()=='print(1)\n'
+def test_duplicate_worker_post_launches_only_one_process(tmp_path, monkeypatch):
+    import hashlib
+    import io
+    import tarfile
+    import uuid
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from coder_worker_runtime import install_routes
+    from hephaestus_scope import headers, install_worker_auth
+
+    store = WorkerStore(tmp_path/'state')
+    monkeypatch.setenv('DAEDALUS_STATE_DIR', str(store.root))
+    app = FastAPI()
+    install_worker_auth(app)
+    install_routes(app, tmp_path/'projects')
+    client = TestClient(app)
+    job = 'cw3-' + uuid.uuid4().hex
+    signed = lambda: headers('duplicate-operation-fixture', project=job)
+    source = tmp_path/'file.py'
+    source.write_text('print(1)\n')
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+        archive.add(source, arcname='file.py')
+    digest = hashlib.sha256(stream.getvalue()).hexdigest()
+    response = client.put(f'/jobs/{job}/source/{digest}', headers=signed(), content=stream.getvalue())
+    assert response.is_success, response.text
+    url = f'/jobs/{job}/operations/op'
+    request = payload(source_job_id=job, source_archive_sha256=digest, project_id=job)
+    first = client.post(url, json=request, headers=signed())
+    second = client.post(url, json=request, headers=signed())
+    assert first.status_code == second.status_code == 202
+    assert first.json()['pid'] and second.json()['pid'] == first.json()['pid']
+    finished = wait(store,'op')
+    assert finished['status'] == 'succeeded', finished['result']
+    assert finished['result']['inventory']['files'] == 1
+    assert finished['calls'] == 0
+    assert source.read_text() == 'print(1)\n'
+    if os.environ.get('HEPHAESTUS_EXECUTOR') == 'docker':
+        assert client.get(url, headers=headers('other-fixture', project=job)).status_code == 404
 
 
 def test_copy_never_follows_external_symlink(tmp_path):

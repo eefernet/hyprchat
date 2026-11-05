@@ -57,7 +57,7 @@ def classify(code, tail, *, phase='setup', managed_paths=(), network_diagnostics
         if any(Path(name).name in HOST_TOOLS | {'composer', 'bundle'} for name in missing): category = 'runtime'
         elif re.search(r'Runtime (?:profile|broker)|Mount source|Invalid .*mount|Read-only child', tail): category = 'mount'
     if not category and re.search(r'No space left on device|Disk quota exceeded|ENOSPC|EDQUOT', tail, re.I): category = 'storage'
-    if not category and re.search(r'ENOTFOUND|EAI_AGAIN|Temporary failure|Network is unreachable|Connection refused', tail, re.I): category = 'network'
+    if not category and re.search(r'\b(?:ENOTFOUND|EAI_AGAIN)\b|Temporary failure in name resolution|Network is unreachable|Connection refused', tail, re.I): category = 'network'
     if not category and any(str(p) in tail for p in managed_paths) and re.search(r'Read-only file system|Permission denied|EROFS|EACCES', tail, re.I): category = 'permission'
     return {'category': category, 'phase': phase, 'exit_status': code, 'detail': tail[-4000:], 'retryable': category in {'network', 'timeout'}, **(detail or {})} if category else None
 

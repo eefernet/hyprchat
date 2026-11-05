@@ -28,28 +28,40 @@ def save(path,data):
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError('Protocol qualification requires Python assertions enabled')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--ollama',default='http://192.168.1.110:11434')
     parser.add_argument('--model',default='qwen3.6-35b-a3b-gguf:latest')
     parser.add_argument('--limits',type=int,nargs='+',default=[4096,8192,16384])
+    parser.add_argument('--settings',type=Path,help='Frozen candidate Settings for a single release configuration')
     args=parser.parse_args();root=args.output.resolve();root.mkdir(parents=True,exist_ok=True)
     path=root/'report.json'
     if path.exists():raise ValueError('Use a new matrix directory; never overwrite a prior result')
     lock=(root.parent/'inference-evaluation.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     store=WorkerStore(root/'worker')
     report={'model':args.model,'digest':MODEL_DIGEST,'context':65536,'temperature':.2,'thinking':True,'seed':None,'rows':[]}
+    if args.settings:
+        from context_policy import resolve
+        saved = {**DEFAULTS, **json.loads(args.settings.read_text())}
+        policy = resolve('builder', saved)
+        if args.limits != [policy.num_predict] or resolve('compaction', saved).num_predict != policy.num_predict:
+            raise ValueError('Release protocol limits must match saved coding and compaction settings')
+        report.update(context=policy.num_ctx, settings=saved)
     for output in args.limits:
         settings={**DEFAULTS,'context_compaction':'on','openhands_num_ctx':65536,
                   'daedalus_role_contexts':{'builder':65536,'compaction':65536},
                   'daedalus_role_outputs':{'builder':output,'compaction':output},
                   'daedalus_role_thinking':{'builder':'on','compaction':'on'}}
+        if args.settings:
+            settings=saved
         for repeat in range(3):
             for name in ('native_tool','tool_continuation','large_edit','reasoning','compaction','termination'):
                 identity=f'{output}-{repeat+1}-{name}'
                 payload={'engine':'openhands159','engine_behavior_version':1,'policy_version':8,'settings':settings,'model':args.model,'model_digest':MODEL_DIGEST,
                          'ollama_url':args.ollama,'seconds_remaining':600,'calls_remaining':12}
-                store.create(identity,'protocol','code',payload);store.update(identity,started=time.time())
+                store.create(identity,'protocol','code',payload);store.update(identity,status='running',started=time.time())
                 row={'case':name,'output_limit':output,'repeat':repeat+1,'started':time.time(),'passed':False}
                 try:
                     prepare(store,identity)
@@ -111,6 +123,8 @@ def main():
                     row['passed']=True
                 except Exception as error:
                     row['error']=str(error)[:4000]
+                finally:
+                    store.update(identity,status='succeeded' if row['passed'] else 'failed',ended=time.time())
                 row.update(seconds=time.time()-row['started'],calls=store.get(identity)['calls'])
                 with store.connect() as connection:
                     events=[dict(x) for x in connection.execute('SELECT * FROM events WHERE operation_id=?',(identity,))]
@@ -122,6 +136,8 @@ def main():
     report['passing_limits']=[limit for limit in args.limits if all(r['passed'] for r in report['rows'] if r['output_limit']==limit)]
     report['selected_protocol_limit']=min(report['passing_limits']) if report['passing_limits'] else None
     report['completed']=time.time();save(path,report)
+    if args.settings and not report['passing_limits']:
+        raise SystemExit(1)
 
 
 if __name__=='__main__':main()

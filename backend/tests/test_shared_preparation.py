@@ -57,6 +57,8 @@ def test_infrastructure_errors_are_not_package_errors():
     assert classify(1, 'Permission denied: /arbitrary/file', managed_paths=['/work/.venv']) is None
     assert classify(1, 'npm ERR! E404 package does not exist') is None
     assert classify(1, 'Invalid pyproject.toml') is None
+    assert classify(2, "ModuleNotFoundError: No module named 'PyQt6'", phase='test') is None
+    assert classify(1, 'getaddrinfo ENOTFOUND registry.npmjs.org')['category'] == 'network'
     assert classify(127, 'sh: 1: undeclared-test-runner: not found') is None
     assert classify(125, 'the application exited') is None
     assert classify(127, 'bash: line 1: composer: command not found')['category'] == 'runtime'

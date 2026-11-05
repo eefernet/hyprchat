@@ -1,5 +1,9 @@
 """Qualification specifications and held-out assertions. Never mounted in agent sandboxes."""
-from run_engine_smoke import TASK
+TASK = ('Create a Python standard-library command-line program calc.py. '
+        'python3 calc.py add 2 3 prints 5 followed by a newline; sub 9 4 prints 5. '
+        'Accept negative integers. Successful operations exit 0. Invalid arguments print an error '
+        'to stderr and exit 2. Include unittest tests in test_calc.py and a README with usage. '
+        'No third-party dependencies.')
 
 
 def cli(identity, task, command, probes, followup='Add a --version option that prints 1.0 and exits successfully. Preserve all existing behavior and tests.'):
@@ -16,7 +20,19 @@ def ui(identity,family,task,command,steps,followup,followup_steps,toolkit=''):
 def click(name):return {'action':'click','name':name,'role':'button'}
 def fill(selector,value):return {'action':'fill','selector':selector,'value':value}
 def text(selector,value):return {'action':'text','selector':selector,'equals':value}
+def value(selector, expected): return {'action':'value','selector':selector,'equals':expected}
+def field(name, expected): return {'action':'value','name':name,'equals':expected}
+def label(expected): return {'action':'text','name':expected,'role':'label','equals':expected}
 def observe(value):return {'action':'observe','contains':value}
+
+def private_probes(case, followup):
+    probes = list(case['probes'])
+    if followup:
+        defaults = {'dev-python': [{'args':['mul','-7','8'],'stdout':'-56\n'}],
+                    'dev-java': [{'args':['--loud','Ada'],'stdout':'HELLO, ADA!\n'}]}
+        probes.extend(case.get('followup_probes', defaults.get(case['id'], [{'args':['--version'],'stdout':'1.0\n'}])))
+    return probes
+
 
 DEVELOPMENT = [
  cli('dev-python',TASK,['python3','calc.py'],[
@@ -27,11 +43,16 @@ DEVELOPMENT = [
      {'args':['Ada'],'stdout':'Hello, Ada!\n'}, {'args':[],'stdout':'Hello, world!\n'}],
      'Add --loud: java -jar target/app.jar --loud Ada prints HELLO, ADA!. Preserve the default greeting, package the executable JAR and add tests.'),
  ui('dev-web','web','Create a plain HTML/JavaScript tip calculator in index.html. Inputs with ids amount and percent, button Calculate, output id total. For amount 20 and percent 10, total displays exactly 22.00 without a currency symbol. Reject negative values with a visible error. No build dependencies.',
-    'python3 -m http.server 8000',[fill('#amount','20'),fill('#percent','10'),click('Calculate'),text('#total','22.00')],
-    'Add a Reset button that clears the inputs and result. Preserve calculation and validation.',[click('Reset'),text('#total','')]),
+    'python3 -m http.server 8000',[fill('#amount','-3'),fill('#percent','10'),click('Calculate'),
+     {'action':'observe','feedback_pattern':r'(?i)error|invalid|negative|positive|at least|greater|non.?negative|zero|below'},
+     fill('#amount','20'),fill('#percent','10'),click('Calculate'),text('#total','22.00')],
+    'Add a Reset button that clears the inputs and result. Preserve calculation and validation.',[value('#amount','20'),value('#percent','10'),click('Reset'),value('#amount',''),value('#percent',''),text('#total',''),
+     fill('#amount','9'),fill('#percent','20'),click('Calculate'),text('#total','10.80')]),
  ui('dev-qt','desktop','Create a PyQt6 Celsius-to-Fahrenheit desktop application in app.py, runnable with /usr/bin/python3 app.py. A QLineEdit named Celsius, a Convert button, and a result QLabel that displays the numeric Fahrenheit value to one decimal place. Give the input accessibleName Celsius. Keep the result label accessible name equal to its visible text. Show Error for invalid numbers.',
-    '/usr/bin/python3 app.py',[{'action':'fill','name':'Celsius','value':'25'},click('Convert'),observe('77.0')],
-    'Add a Reset button that clears the input and sets the result label to Ready. Preserve conversion and error behavior.',[click('Reset'),observe('Ready')],toolkit='qt'),
+    '/usr/bin/python3 app.py',[{'action':'fill','name':'Celsius','value':'bad'},click('Convert'),label('Error'),
+     {'action':'fill','name':'Celsius','value':'25'},click('Convert'),label('77.0')],
+    'Add a Reset button that clears the input and sets the result label to Ready. Preserve conversion and error behavior.',[field('Celsius','25'),click('Reset'),field('Celsius',''),label('Ready'),
+     {'action':'fill','name':'Celsius','value':'-40'},click('Convert'),label('-40.0')],toolkit='qt'),
 ]
 
 CORE = [
@@ -60,16 +81,16 @@ CORE = [
 WEB = [
  ui('web-counter','web','Create index.html with a counter starting at 0, output id count, Increment and Reset buttons. Persist the count with localStorage across reloads. Use plain HTML/JS.', 'python3 -m http.server 8000',
     [click('Increment'),click('Increment'),text('#count','2'),{'action':'reload'},text('#count','2'),click('Reset'),text('#count','0')],
-    'Add a Decrement button. Negative counts are allowed and persisted. Preserve Increment and Reset.',[click('Decrement'),text('#count','-1')]),
+    'Add a Decrement button. Negative counts are allowed and persisted. Preserve Increment and Reset.',[click('Decrement'),text('#count','-1'),{'action':'reload'},text('#count','-1')]),
  ui('web-todos','web','Create index.html with input id task, Add button, and list id tasks. Ignore blank input. Added task text must appear in the list and survive reload. Each task has a Delete button. Use plain HTML/JS and localStorage.', 'python3 -m http.server 8000',
     [fill('#task','buy oats'),click('Add'),{'action':'text','selector':'#tasks','contains':'buy oats'},{'action':'reload'},{'action':'text','selector':'#tasks','contains':'buy oats'},click('Delete'),text('#tasks','')],
-    'Add a Clear all button that removes all tasks and persists the empty list. Preserve Add and Delete.',[fill('#task','walk'),click('Add'),click('Clear all'),text('#tasks','')]),
+    'Add a Clear all button that removes all tasks and persists the empty list. Preserve Add and Delete.',[fill('#task','walk'),click('Add'),click('Clear all'),text('#tasks',''),{'action':'reload'},text('#tasks','')]),
  ui('web-distance','web','Create index.html with input id meters, Convert button, output id feet. Use 3.28084 feet per meter and display three decimals, including negative values. Invalid input displays Error. Use plain HTML/JS.', 'python3 -m http.server 8000',
     [fill('#meters','-2'),click('Convert'),text('#feet','-6.562'),fill('#meters','0'),click('Convert'),text('#feet','0.000')],
-    'Add Reset that clears meters and feet. Preserve conversion behavior.',[click('Reset'),text('#feet','')]),
+    'Add Reset that clears meters and feet. Preserve conversion behavior.',[value('#meters','0'),click('Reset'),value('#meters',''),text('#feet','')]),
  ui('web-notes','web','Create index.html with textarea id note, Save and Clear buttons, status output id status. Save persists the exact note to localStorage and shows Saved. Restore the note on reload. Clear empties the note, removes saved content and shows Cleared. Use plain HTML/JS.', 'python3 -m http.server 8000',
-    [fill('#note','line one\nline two'),click('Save'),text('#status','Saved'),{'action':'reload'},{'action':'observe','contains':'line one'},click('Clear'),text('#status','Cleared')],
-    'Add output id length showing only the current note length as an integer, without labels or units, updating on input, restore and clear. Preserve Save and Clear.',[fill('#note','hello'),text('#length','5')]),
+    [fill('#note','line one\nline two'),click('Save'),text('#status','Saved'),{'action':'reload'},value('#note','line one\nline two'),click('Clear'),text('#status','Cleared'),value('#note',''),{'action':'reload'},value('#note','')],
+    'Add output id length showing only the current note length as an integer, without labels or units, updating on input, restore and clear. Preserve Save and Clear.',[fill('#note','hello'),text('#length','5'),click('Save'),{'action':'reload'},text('#length','5'),click('Clear'),text('#length','0')]),
 ]
 
 DESKTOP = [
@@ -77,7 +98,7 @@ DESKTOP = [
     [click('Increment'),click('Increment'),observe('"name": "2"'),click('Reset'),observe('"name": "0"')],
     'Add Decrement, allowing negative values. Preserve Increment and Reset.',[click('Decrement'),observe('"name": "-1"')],toolkit='qt'),
  ui('qt-list','desktop','Create app.py using PyQt6. A QLineEdit with accessibleName Item, Add button, QListWidget, and Clear button. Add appends nonblank input then clears the input. Clear empties the list. Run with /usr/bin/python3 app.py.', '/usr/bin/python3 app.py',
-    [{'action':'fill','name':'Item','value':'apples'},click('Add'),observe('apples'),click('Clear')],
+    [{'action':'fill','name':'Item','value':'apples'},click('Add'),field('Item',''),observe('apples'),click('Clear'),{'action':'observe','absent_name':'apples'}],
     'Add a Count button and label that show the number of list items when Count is clicked, as Count: N. Preserve Add and Clear.',[click('Count'),observe('Count: 0')],toolkit='qt'),
  ui('gtk-counter','desktop','Create app.py using system Python and GTK4 via gi. A visible numeric count label starts 0. Increment adds one, Reset sets zero. Run with /usr/bin/python3 app.py. Keep controls accessible through AT-SPI.', '/usr/bin/python3 app.py',
     [click('Increment'),click('Increment'),observe('"name": "2"'),click('Reset'),observe('"name": "0"')],

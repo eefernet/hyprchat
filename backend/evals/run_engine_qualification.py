@@ -12,9 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
-import tarfile
 import time
 import uuid
 
@@ -25,10 +23,8 @@ import database as db
 import coder_jobs as controller
 from db import coder_jobs as jobs, coder_promotion
 from context_policy import DEFAULTS
-from coder_repository import Repository
-from coder_sandbox import Sandbox
 from coder_worker_runtime import WorkerStore
-from coder_ui_checks import run as run_interactions
+from engine_judge import evaluate
 from engine_cases import CASES, DEVELOPMENT
 from engine_campaign import CampaignPaused, freeze, interruption, exception_interruption, paused, collect_evaluator_caches
 
@@ -53,65 +49,6 @@ def configure(root,args):
 
 def save(path, value):
     temporary=path.with_suffix('.tmp'); temporary.write_text(json.dumps(value,indent=2,default=str)+'\n'); temporary.replace(path)
-
-
-def evaluate(root, job, case, followup=False):
-    directory=root/'assertions'/job['id']/uuid.uuid4().hex; directory.mkdir(parents=True)
-    artifact=job['candidate_artifact']
-    source=Path(artifact['storage_path'])
-    if hashlib.sha256(source.read_bytes()).hexdigest()!=artifact['sha256']: raise AssertionError('Candidate archive hash mismatch')
-    project=directory/'source'; project.mkdir(exist_ok=True)
-    with tarfile.open(source) as archive: archive.extractall(project,filter='data')
-    repository=Repository(project,directory/'repository',config.CONTEXT_SETTINGS['daedalus_exclude_dirs']); repository.refresh()
-    snapshot=repository.snapshot('Held-out evaluation source')
-    # Held-out assertions and evidence stay private, while dependency caches
-    # share the controller's project leases/GC across initial and follow-up
-    # evaluations. A separate cache per artifact otherwise grows without bound.
-    worker=WorkerStore(root/'evaluator-worker' if getattr(config,'_EVALUATION_COHORT','')=='reliability' else directory/'worker')
-    operation_id='evaluation-'+uuid.uuid4().hex
-    settings=config.CONTEXT_SETTINGS
-    payload={'settings':settings,'seconds_remaining':400,'calls_remaining':0,'revision_id':snapshot['revision'],
-             'project_id':job['project_id'], 'engine': 'openhands159' if getattr(config, '_EVALUATION_COHORT', '') == 'reliability' else 'legacy'}
-    worker.create(operation_id,job['id'],'check',payload); worker.update(operation_id,status='running',started=time.time())
-    if case['family']!='core':
-        flow={'kind':case['kind'],'command':case['command'],'toolkit':case.get('toolkit',''),
-              'steps':case['steps']+(case['followup_steps'] if followup else [])}
-        rows=run_interactions(worker,operation_id,repository,[flow])
-        return {'passed':all(r['passed'] for r in rows),'checks':rows,'archive_sha256':artifact['sha256']}
-    results=[]
-    from coder_project_runtime import contract, prepare_environment, sandbox_paths
-    runtime=directory/'runtime'; runtime.mkdir(exist_ok=True)
-    env={'PATH':os.environ.get('PATH','/usr/bin:/bin')}
-    for profile in contract(repository, managed_dependencies=payload['engine']=='openhands159')['profiles']:
-        setup=prepare_environment(worker,operation_id,project,profile,job['project_id'],env,runtime)
-        if any(not r['passed'] for r in setup): return {'passed':False,'setup':setup}
-    # Maven packages are deliberately rebuilt from the delivered source, not a builder's cache.
-    commands=[]
-    if (project/'pom.xml').exists(): commands.append(['mvn','-q','package'])
-    probes=list(case['probes'])
-    if followup and case['id'] not in {'dev-python','dev-java'}: probes.append({'args':['--version'],'stdout':'1.0\n'})
-    if followup and case['id']=='dev-python': probes.append({'args':['mul','-7','8'],'stdout':'-56\n'})
-    if followup and case['id']=='dev-java': probes.append({'args':['--loud','Ada'],'stdout':'HELLO, ADA!\n'})
-    def execute(command,stdin=''):
-        with Sandbox(command,cwd=project,writable=[project,runtime],readonly=sandbox_paths(project,env),environment=env) as box:
-            return subprocess.run(box.args,env=box.env,input=stdin,text=True,capture_output=True,timeout=120)
-    for command in commands:
-        result=execute(command)
-        if result.returncode:return {'passed':False,'build_error':result.stderr[-5000:]+result.stdout[-5000:]}
-    for probe in probes:
-        for name,content in probe.get('files',{}).items():(project/name).write_text(content)
-        result=execute(case['command']+probe.get('args',[]),probe.get('stdin',''))
-        errors=[]
-        if result.returncode!=probe.get('code',0):errors.append(f'exit {result.returncode}, expected {probe.get("code",0)}')
-        if 'stdout' in probe and result.stdout!=probe['stdout']:errors.append('stdout mismatch')
-        if 'json' in probe:
-            try: actual=json.loads(result.stdout)
-            except ValueError:actual=object()
-            if actual!=probe['json']:errors.append('JSON output mismatch')
-        if 'stderr_contains' in probe and probe['stderr_contains'].lower() not in result.stderr.lower():errors.append('stderr mismatch')
-        if probe.get('stderr_nonempty') and not result.stderr.strip():errors.append('missing error message on stderr')
-        results.append({'passed':not errors,'errors':errors,'stdout':result.stdout[-3000:],'stderr':result.stderr[-3000:]})
-    return {'passed':all(r['passed'] for r in results),'checks':results,'archive_sha256':artifact['sha256']}
 
 
 async def run(args):

@@ -196,3 +196,20 @@ def test_unverified_candidate_remains_accept_ready_and_does_not_greenwash_metada
     value = presentation(job)
     assert value['phase'] == 'Ready for review' and value['actions']['accept']['enabled']
     assert not value['actions']['resume']['enabled']
+
+
+def test_dynamic_desktop_result_requires_one_changed_label_in_the_same_session():
+    from coder_ui_contract import _matches, Unverified
+    target = {'kind': 'result', 'name': ''}
+    initial = [{'id': str(i), 'role': 'label', 'text': value, 'name': value, 'session_id': 'current'}
+               for i, value in enumerate(('Celsius', 'Ready'))]
+    converted = [initial[0], {**initial[1], 'text': '77.0', 'name': '77.0'}]
+    assert _matches(converted, target, initial_labels=initial) == [converted[1]]
+    names_only = [{k:v for k,v in n.items() if k != 'text'} for n in initial]
+    converted_names = [names_only[0], {**names_only[1], 'name':'77.0'}]
+    assert _matches(converted_names, target, initial_labels=names_only) == [converted_names[1]]
+    for ambiguous in (initial, [{**converted[0], 'text': 'updated'}, converted[1]],
+                      [initial[0], {**converted[1], 'id': 'replacement'}],
+                      [initial[0], {**converted[1], 'session_id': 'other'}]):
+        with pytest.raises(Unverified):
+            _matches(ambiguous, target, initial_labels=initial)

@@ -14,11 +14,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from context_policy import DEFAULTS
 
-TASK = ('Create a Python standard-library command-line program calc.py. '
-        'python3 calc.py add 2 3 prints 5 followed by a newline; sub 9 4 prints 5. '
-        'Accept negative integers. Successful operations exit 0. Invalid arguments print an error '
-        'to stderr and exit 2. Include unittest tests in test_calc.py and a README with usage. '
-        'No third-party dependencies.')
+from engine_cases import TASK
 
 
 def main():

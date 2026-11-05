@@ -198,7 +198,7 @@ def activation_matches(node, name):
         node.get('tag') in {'button', 'a', 'div', 'span'} and node.get('role') == 'button' and node.get('text') == name))
 
 
-def _matches(nodes, target, *, activation=False):
+def _matches(nodes, target, *, activation=False, initial_labels=()):
     candidates = [n for n in nodes if n.get('showing', True)]
     if activation:
         candidates = [n for n in candidates if activation_matches(n, target['name'])]
@@ -222,9 +222,31 @@ def _matches(nodes, target, *, activation=False):
                 identified = [n for n in candidates if n.get('name', '').lower() in {'result', 'output'} or
                               n.get('selector') in {'#result', '#output'}]
                 candidates = identified or [n for n in candidates if n.get('role') == 'label']
+                # Desktop label names can mirror their text. During this session only,
+                # use the unique label changed by setup if the label tree is stable.
+                if initial_labels and len(candidates) > 1 and not target.get('name'):
+                    candidates = changed_desktop_labels(initial_labels, candidates)
     if not candidates or not target.get('all') and len(candidates) != 1:
         raise Unverified(f'Expected {"one or more" if target.get("all") else "one"} suitable target for {target}; found {len(candidates)}.')
     return candidates
+
+
+def changed_desktop_labels(initial, candidates):
+    previous = {n['id']: n for n in initial if n.get('id') and n.get('role') == 'label'
+                and n.get('showing', True) and not n.get('interactive_ancestor')
+                and not n.get('activatable') and not n.get('editable')}
+    if previous.keys() != {n.get('id') for n in candidates}:
+        return candidates
+    changed = []
+    for node in candidates:
+        old = previous[node['id']]
+        if not node.get('session_id') or node['session_id'] != old.get('session_id'):
+            return candidates
+        # Qt labels without an AT-SPI Text interface expose their display
+        # through the accessible name. The desktop text reader does the same.
+        if node.get('text', node.get('name')) != old.get('text', old.get('name')):
+            changed.append(node)
+    return changed if len(changed) == 1 else candidates
 
 
 def _request(node):
@@ -285,7 +307,7 @@ def run(store, operation_id, repository, contract, context, bound=None):
             try:
                 bind_project_entrypoint(repository, flow, contract.get('entrypoint_task', '') + '\n' + payload.get('task', ''))
                 with session(store, operation_id, repository) as action:
-                    action({'action': 'launch', **{k: v for k, v in flow.items() if k != 'steps'}})
+                    launched = action({'action': 'launch', **{k: v for k, v in flow.items() if k != 'steps'}})
                     # Only successful observed flows supply setup. Stop before
                     # the action being verified, and never execute assertions.
                     setup = []
@@ -311,7 +333,8 @@ def run(store, operation_id, repository, contract, context, bound=None):
                             setup.append(request)
                     nodes = action({'action': 'observe'}).get('nodes', [])
                     button = _matches(nodes, criterion['action'], activation=True)[0]
-                    targets = _matches(nodes, criterion['target'])
+                    initial = launched.get('nodes', []) if flow['kind'] == 'desktop' else ()
+                    targets = _matches(nodes, criterion['target'], initial_labels=initial)
                     frozen = (bound or {}).get(criterion['id'])
                     if frozen:
                         actual = []

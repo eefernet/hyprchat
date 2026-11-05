@@ -97,7 +97,12 @@ def clean_environment(environment):
              'DOTNET_CLI_TELEMETRY_OPTOUT', 'PLAYWRIGHT_BROWSERS_PATH', 'PLAYWRIGHT_SKIP_BROWSER_GC', 'NODE_V8_COVERAGE',
              'NODE_OPTIONS', 'APP_DB_PATH', 'DATABASE_URL', 'DB_PATH', 'OLLAMA_API_BASE',
              'PIP_CACHE_DIR', 'npm_config_cache', 'npm_config_store_dir', 'YARN_CACHE_FOLDER', 'PNPM_HOME', 'COMPOSER_CACHE_DIR', 'BUNDLE_USER_CACHE', 'BUNDLE_PATH', 'MAVEN_OPTS', 'GRADLE_USER_HOME', 'NUGET_PACKAGES', 'AIDER_ANALYTICS_DISABLE', 'LITELLM_LOCAL_MODEL_COST_MAP', 'ALLOW_SHORT_CONTEXT_WINDOWS'}
-    return {k: str(v) for k, v in environment.items() if k in names or k.startswith('DAEDALUS_')}
+    clean = {k: str(v) for k, v in environment.items() if k in names or k.startswith('DAEDALUS_')}
+    # Only controller-instrumented project test rows request our named-test
+    # hook. Keep arbitrary host or project pytest plugins out of the sandbox.
+    if clean.get('DAEDALUS_TEST_IDS') == '1' and environment.get('PYTEST_PLUGINS') == 'daedalus_test_ids':
+        clean['PYTEST_PLUGINS'] = 'daedalus_test_ids'
+    return clean
 
 
 def toolchain_mounts(command):
@@ -137,7 +142,7 @@ class Sandbox(AbstractContextManager):
     of them. Runtime/cache directories are distinct from those trusted stores.
     """
     def __init__(self, command, *, cwd, writable=(), readonly=(), environment=None,
-                 network_urls=(), listen_port=None, runtime=None, short_tmp=False,
+                 network_urls=(), listen_port=None, guest_port=None, runtime=None, short_tmp=False,
                  aliases=(), timeout=None, memory_mib=None, managed_application=False, process_trace=None, runtime_profile=None, resource_group=None, public_network=True, controller_browser=True):
         self.command = list(command)
         self.cwd = Path(cwd).absolute()
@@ -152,6 +157,7 @@ class Sandbox(AbstractContextManager):
         self.environment = clean_environment(environment if environment is not None else {k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LC_ALL', 'TZ'}})
         self.urls = list(dict.fromkeys(network_urls))
         self.listen_port = listen_port
+        self.guest_port = guest_port if guest_port is not None else listen_port
         self.runtime = Path(runtime).absolute() if runtime else None
         # Chromium creates Unix sockets below TMPDIR (108-byte path ceiling).
         self.short_tmp = short_tmp or os.environ.get('HEPHAESTUS_EXECUTOR')=='docker'
@@ -256,7 +262,7 @@ class Sandbox(AbstractContextManager):
                     except OSError: pass
 
         self.servers.append(start_server(UnixServer(str(ipc / 'gateway.sock'), Gateway)))
-        if self.listen_port:
+        if self.listen_port is not None:
             class Forward(socketserver.BaseRequestHandler):
                 def handle(handler):
                     try:
@@ -265,7 +271,9 @@ class Sandbox(AbstractContextManager):
                             relay(handler.request, remote)
                     except OSError:
                         pass
-            self.servers.append(start_server(TCPServer(('127.0.0.1', self.listen_port), Forward)))
+            listener = TCPServer(('127.0.0.1', self.listen_port), Forward)
+            self.listen_port = listener.server_address[1]
+            self.servers.append(start_server(listener))
         environment = {k: self.translate_url(v) for k, v in self.environment.items()}
         environment.update(HOME=str(home), TMPDIR='/tmp/daedalus' if self.short_tmp else str(tmp), PYTHONNOUSERSITE='1',
             PYTHONDONTWRITEBYTECODE='1', CARGO_HOME=environment.get('CARGO_HOME', str(home / '.cargo')), GOPATH=environment.get('GOPATH', str(home / 'go')),
@@ -290,7 +298,7 @@ class Sandbox(AbstractContextManager):
             environment['DAEDALUS_RUNTIME_IMAGE'] = runtime_config['profiles'][profile_name]['image']
         spec = private / 'launch.json'
         spec.write_text(json.dumps({'command': self.command, 'cwd': str(self.cwd), 'environment': environment,
-                                    'ipc': str(ipc), 'listen_port': self.listen_port,
+                                    'ipc': str(ipc), 'listen_port': self.guest_port or self.listen_port,
                                     'trace_socket': str(ipc/'trace.sock') if docker and self.process_trace else None,
                                     'loopback_endpoints': list(endpoints) if self.environment.get('DAEDALUS_LOOPBACK_ENDPOINTS') == '1' else []}))
         module = Path(__file__).resolve()

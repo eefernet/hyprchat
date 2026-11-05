@@ -24,6 +24,13 @@ def test_environment_does_not_inherit_unknown_credentials():
     assert env == {'PATH': '/usr/bin'}
 
 
+def test_pytest_identity_hook_only_enters_instrumented_test_rows():
+    assert clean_environment({'PYTEST_PLUGINS':'daedalus_test_ids'})=={}
+    assert 'PYTEST_PLUGINS' not in clean_environment({'DAEDALUS_TEST_IDS':'1','PYTEST_PLUGINS':'other_plugin'})
+    allowed={'DAEDALUS_TEST_IDS':'1','PYTEST_PLUGINS':'daedalus_test_ids'}
+    assert clean_environment(allowed)==allowed
+
+
 @pytest.mark.skipif(not shutil.which('bwrap'), reason='Linux Codebox isolation integration')
 def test_modern_loopback_forwarding_grants_only_the_selected_endpoint(tmp_path):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
