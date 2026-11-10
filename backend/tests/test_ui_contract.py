@@ -9,6 +9,29 @@ import pytest
 import coder_ui_contract as contract
 
 
+def test_multi_input_examples_remain_distinct_and_inherited():
+    task = ('Create a web app. Inputs with ids amount and percent, button Calculate, output id total. '
+            'For amount 20 and percent 10, total displays exactly 22.00 without a currency symbol. '
+            'Reject negative values with a visible error.')
+    result = contract.freeze(task, mode='build_from_prompt')
+    probes = [c for c in result['criteria'] if c.get('probe_kind')]
+    assert len(probes) == 4
+    assert len([c for c in probes if c['probe_kind'] == 'negative_error']) == 2
+    assert next(c for c in probes if c['probe_kind'] == 'example')['expected'] == '22.00'
+    assert result['parser_version'] == 4 and any(not c['supported'] for c in result['criteria'])
+    next_task = 'Add a Reset button that clears the inputs and result. Preserve calculation and validation.'
+    edited = contract.freeze(next_task, {'ui_contract': result})
+    assert all(c in edited['criteria'] for c in probes)
+    assert len([c for c in edited['criteria'] if c.get('action', {}).get('name') == 'Reset']) == 2
+
+
+def test_multi_input_unsupported_qualifiers_do_not_become_positive_examples():
+    task = ('Create a web app. Inputs with ids amount and percent, button Calculate, output id total. '
+            'For amount 20 and percent 10, total displays exactly 22.00 unless disabled.')
+    result = contract.freeze(task)
+    assert not any(c.get('probe_kind') == 'example' for c in result['criteria'])
+
+
 @pytest.mark.parametrize('task,values', [
     ('Add a Reset button that clears the inputs and result.', ['', '']),
     ('Clicking Reset clears the input.', ['']),

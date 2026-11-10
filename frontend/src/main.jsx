@@ -1665,17 +1665,17 @@ function HyprChat(){
   // Load
   useEffect(()=>{
     if(!authReady){if(userGateOpen)dismissHyprLoader();return;}
+    const loadOrigin=hcCaptureUserContext();
     const dismissLoader=dismissHyprLoader;
     setTimeout(dismissLoader,5000); // fallback
     fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
-    fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(cs.length){
+    fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(loadOrigin.epoch!==hcCaptureUserContext().epoch)return;if(cs.length){
       // Seed last-model from most recent conversation if not set
       try{if(!localStorage.getItem("hc-last-model")&&cs[0]?.model)localStorage.setItem("hc-last-model",cs[0].model);}catch{}
       const isCouncil=v=>v==="1"||v===1||v===true;
-      setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
-      setActId(null);
-      setPanel("chat");
-      setLoadingConv(false);
+      // Login already resets selection. Late history must preserve navigation,
+      // drafts and any conversation opened or created while the request ran.
+      setConvs(current=>{const known=new Set(current.map(c=>c.id));return [...current,...cs.filter(c=>!known.has(c.id)).map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null}))];});
     }}).catch(()=>{});
     apiJson("/api/knowledge-bases").then(d=>setKbs(Array.isArray(d)?d:[])).catch(()=>{});
     apiJson("/api/tools").then(d=>setTools(Array.isArray(d)?d:[])).catch(()=>{});

@@ -61,6 +61,20 @@ def evaluate(state):
         from coder_engine_delivery import portability_checks
         failures.extend(row['reason'] for row in portability_checks(repository, 'working'))
         profile = discover(repository, state.get('execution_commands'))
+        # A plain `node file.js` may print TAP-looking prose, but it no longer
+        # supplies the runner-owned identities observed at baseline. Diagnose
+        # that loss before Finish, without treating this preflight as evidence.
+        from coder_test_ids import _runner
+        for baseline in state.get('baseline_test_commands', []):
+            package = baseline.get('cwd') or '.'
+            if (_runner(baseline.get('test_runner') or baseline.get('command', '')) == 'node'
+                    and any(name.startswith(package + '::') for name in state.get('required_tests', []))
+                    and not any(check.get('is_test') and (check.get('cwd') or '.') == package
+                        and _runner(check.get('test_runner') or check.get('command', '')) == 'node'
+                        for check in profile['checks'])):
+                failures.append('Required test reporting disappeared in package ' + package + '. Preserve the observed '
+                    'Node test-runner command ' + baseline['command'] + ' and its existing tests. Plain node file.js '
+                    'does not report trusted test identities. Add new tests without replacing the original test names.')
         ui_spec = None
         if state.get('ui_preflight_version') == 1:
             from coder_ui_preflight import inspect, emit

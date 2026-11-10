@@ -4,6 +4,14 @@ from copy import deepcopy
 from types import SimpleNamespace
 import pytest
 
+
+@pytest.mark.parametrize('command', ['export DISPLAY=:99; python app.py', 'DISPLAY=$DISPLAY python app.py',
+    'Xvfb :99 & python app.py', 'xvfb-run python app.py', 'QT_QPA_PLATFORM=offscreen python app.py'])
+def test_wrong_desktop_display_has_specific_actionable_diagnostic(command):
+    from coder_ui_session import desktop_launch_diagnostic
+    assert desktop_launch_diagnostic(command)
+    assert not desktop_launch_diagnostic('/usr/bin/python3 app.py')
+
 from coder_engine_transport import infer, TransportFailure
 from context_policy import DEFAULTS, resolve
 from .test_engine_reliability import operation

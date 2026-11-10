@@ -1,7 +1,7 @@
 """Literal UI clauses, with quoted values kept out of syntax normalization."""
 import re
 
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 NEGATIVE = re.compile(r"\b(?:not|never|don['’]t|doesn['’]t|unless|except|if|when|until|otherwise|or)\b", re.I)
 META = re.compile(r'^(?:(?:run|rerun|execute|update|add|write|keep|preserve|do not remove)\s+(?:the\s+|existing\s+|unrelated\s+|regression\s+|all\s+)*(?:tests?|checks?|README|npm|server logic)\b|(?:verify|assert|confirm|report|deliver|publish)\b)', re.I)
 
@@ -107,3 +107,47 @@ def parse(excerpt):
     # One unresolved item per original requirement, not one per failed regex.
     seen = set()
     return [row for row in rows if not ((key := 'unverified' if not row['supported'] else repr(row)) in seen or seen.add(key))]
+
+
+def parse_context(excerpt, task):
+    """Closed multi-input examples and named desktop controls from user wording.
+
+    Probe data may exercise a requested input class; expected calculation values
+    are always literal user values. Unknown qualifications stay unverified.
+    """
+    declaration = re.search(r'Inputs with ids ([\w-]+) and ([\w-]+), button ([\w-]+), output id ([\w-]+)\.', task)
+    desktop = re.search(r'A QLineEdit named ([\w-]+), a ([\w-]+) button, and a result QLabel that displays (?:only )?the numeric ([\w-]+) value to (one|two|three) decimal places?(?:, without units or a prefix)?\.', task)
+    if declaration and declaration[1] != declaration[2]:
+        inputs = [{'kind': 'input', 'selector': '#' + declaration[i]} for i in (1, 2)]
+        output = {'kind': 'element', 'selector': '#' + declaration[4]}
+        action = {'action': 'click', 'name': declaration[3]}
+        example = re.search(r'For ([\w-]+) (-?\d+(?:\.\d+)?) and ([\w-]+) (-?\d+(?:\.\d+)?), ([\w-]+) displays exactly (-?\d+(?:\.\d+)?)(?: without a currency symbol)?\.', task)
+        valid = example and {example[1], example[3]} == {declaration[1], declaration[2]} and example[5] == declaration[4]
+        base = {'supported': True, 'action': action, 'target': output, 'property': 'text'}
+        if excerpt == declaration[0]:
+            return [{**base, 'probe_kind': 'controls', 'inputs': inputs, 'expected': 'visible declared controls'}]
+        if valid:
+            values = {example[1]: example[2], example[3]: example[4]}
+            setup = [{'target': target, 'value': values[target['selector'][1:]]} for target in inputs]
+            if excerpt == example[0]:
+                return [{**base, 'probe_kind': 'example', 'setup': setup, 'expected': example[6]}]
+            if excerpt == 'Reject negative values with a visible error.':
+                return [{**base, 'probe_kind': 'negative_error', 'setup': setup,
+                         'invalid_target': target, 'expected': 'visible error', 'valid_expected': example[6]}
+                        for target in inputs]
+    if desktop:
+        field, button = desktop[1], desktop[2]
+        base = {'supported': True, 'action': {'action': 'click', 'name': button},
+                'target': {'kind': 'result'}, 'property': 'text'}
+        setup = [{'target': {'kind': 'input', 'name': field}, 'value': '0'}]
+        if excerpt == desktop[0]:
+            return [{**base, 'probe_kind': 'numeric_format', 'setup': setup,
+                     'expected': {'one': '1', 'two': '2', 'three': '3'}[desktop[4]]}]
+        if excerpt == f'Give the input accessibleName {field}.':
+            return [{**base, 'probe_kind': 'input_name', 'inputs': [setup[0]['target']],
+                     'expected': field}]
+        if excerpt == 'Show Error for invalid numbers.':
+            return [{**base, 'probe_kind': 'example', 'setup': [{**setup[0], 'value': 'not-a-number'}], 'expected': 'Error'}]
+        if excerpt == 'Keep the result label accessible name equal to its visible text.':
+            return [{'supported': False, 'reason': 'AT-SPI may expose a QLabel only through its accessible name. That alone cannot prove equality to independently observed visible text.'}]
+    return parse(excerpt)

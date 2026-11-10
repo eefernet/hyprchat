@@ -3,7 +3,8 @@
 The set starts with the passing tests of the revision an edit starts from (its baseline check) and
 grows with every newly passing test at each checkpoint. It never shrinks on its own: a required test
 may be edited, but not removed, skipped or broken. A revision that keeps every required test passing
-is *eligible*; one that loses any is rolled back to the last eligible revision (coder_policy7_ops).
+is eligible for verification. The modern controller repairs missing/failed tests within its existing
+allowance and retains an incomplete candidate if unresolved; acceptance remains revision-bound.
 
 Keys are ``<package cwd>::<test id>`` (ids from coder_test_ids), so a renamed check row or a changed
 command line does not hide a lost test. Worker-shared: imports nothing from the backend.
@@ -11,8 +12,45 @@ command line does not hide a lost test. Worker-shared: imports nothing from the 
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+import hashlib
+import json
 
 MAX_REQUIRED = 4000
+
+
+def ui_flow_signature(flow, *, expectations=True):
+    """Identity follows interactions, not array position; expectations stay reviewable.
+
+    An assertion-value edit may be legitimate, so it retains the scenario identity
+    but changes its full signature. Dropping a step or weakening equals to contains
+    changes the scenario itself. A desktop label can use its changing text as locator.
+    """
+    value = {k: flow[k] for k in ('kind', 'command', 'file_path', 'url', 'toolkit') if k in flow}
+    steps = []
+    for original in flow.get('steps', []):
+        step = {k: original[k] for k in ('action', 'selector', 'name', 'role', 'value', 'equals', 'contains') if k in original}
+        if not expectations:
+            if (flow.get('kind') == 'desktop' and step.get('action') == 'text'
+                    and 'equals' in step and step.get('name') == step['equals'] and not step.get('selector')):
+                step['name'] = {'expected_label': True}
+            for comparison in ('equals', 'contains'):
+                if comparison in step:
+                    step[comparison] = {'reviewed_separately': True}
+        steps.append(step)
+    value['steps'] = steps
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def ui_flow_changes(before, after):
+    def indexed(flows):
+        result = {}
+        for flow in flows:
+            result.setdefault(ui_flow_signature(flow, expectations=False), set()).add(ui_flow_signature(flow))
+        return result
+    old, new = indexed(before), indexed(after)
+    return {'removed_scenarios': sorted(old.keys() - new.keys()),
+            'added_scenarios': sorted(new.keys() - old.keys()),
+            'changed_expectations': sorted(k for k in old.keys() & new.keys() if not old[k] <= new[k])}
 
 
 def key(row, ident):

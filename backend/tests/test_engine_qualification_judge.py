@@ -6,6 +6,17 @@ from engine_cases import DEVELOPMENT
 from engine_judge import ui_checks
 
 
+def test_versioned_prompts_expose_exact_format_without_changing_private_inputs():
+    from engine_cases import DEVELOPMENT_V1, CASES, CASES_V1, PROMPT_BANK_VERSION
+    assert PROMPT_BANK_VERSION == 2
+    for old, new in zip(DEVELOPMENT_V1 + CASES_V1, DEVELOPMENT + CASES):
+        assert {k:v for k,v in old.items() if k != 'task'} == {k:v for k,v in new.items() if k != 'task'}
+    old = next(c for c in DEVELOPMENT_V1 if c['id'] == 'dev-qt')
+    new = next(c for c in DEVELOPMENT if c['id'] == 'dev-qt')
+    assert 'without units or a prefix' in new['task'] and 'without units or a prefix' not in old['task']
+    assert '77.0' not in new['task'] and '25' not in new['task']
+
+
 def test_reset_is_clicked_once_and_both_field_values_are_observed():
     case = next(c for c in DEVELOPMENT if c['id']=='dev-web')
     state = {}

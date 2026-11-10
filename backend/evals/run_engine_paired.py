@@ -16,7 +16,8 @@ def main():
     args=parser.parse_args()
     configs=[json.loads(p.read_text()) for p in (args.previous,args.candidate)]
     common=('model','model_digest','chat_model','chat_digest','profiles','settings','judge_sha256',
-            'judge_bank_sha256','sdk_version','limits','cache_policy')
+            'judge_bank_sha256','sdk_version','limits','cache_policy','judge_identity',
+            'prompt_bank_version','judge_adapter_sha256')
     if any(not configs[0].get(k) or configs[0][k]!=configs[1].get(k) for k in common):
         raise ValueError('The two arms have different or missing frozen model, resource or judge identities')
     if configs[0]['url']==configs[1]['url'] or configs[0]['release_id']==configs[1]['release_id']:

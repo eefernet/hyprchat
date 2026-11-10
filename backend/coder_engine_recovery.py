@@ -5,6 +5,39 @@ GENERATION_FAILURES = frozenset({'output_limit', 'missing_required_tool', 'malfo
     'malformed_tool_output', 'incomplete_response', 'context_overflow', 'upstream_service', 'network', 'timeout'})
 
 
+def execution_failure(result):
+    """SDK failure is not cured by passing tests on an unchanged checkpoint.
+
+    A normal Finish can defer dependency preparation to the controller, so
+    agent_finished=False alone is not a failure of the requested implementation.
+    """
+    status = str(result.get('execution_status', '')).lower().rsplit('.', 1)[-1]
+    if status not in {'stuck', 'error'}:
+        return None
+    return {'category': 'sdk_' + status, 'stage': 'coding',
+            'execution_status': result['execution_status'],
+            **({'activity_diagnostic': deepcopy(result['activity_diagnostic'])} if result.get('activity_diagnostic') else {}),
+            'reason': result.get('incomplete_reason') or 'SDK stopped before completing the request',
+            'next_action': 'Continue the original request from this checkpoint. Inspect the implementation and use '
+                           'file and execution tools to complete the requested change; repeatedly viewing the task '
+                           'list does not implement it. Run the changed behavior and its existing tests before Finish.'}
+
+
+def apply_execution_failure(result, patch, revision):
+    failure = execution_failure(patch)
+    if not failure:
+        return
+    from coder_check_outcomes import normalize, counts
+    row = normalize({'id': 'sdk-execution', 'passed': False, 'revision_id': revision,
+                     'classification': failure['category'], 'origin': 'controller',
+                     'reason': failure['reason'] + '. ' + failure['next_action'],
+                     'diagnostic': failure})
+    result['checks'] = [*[normalize(check) for check in result['checks']], row]
+    result['summary'] = incomplete(result['summary'], failure)
+    result['summary'].update(checks_ok=False, check_counts=counts(result['checks']))
+    result['summary']['failures'] = [row, *result['summary']['failures']]
+
+
 def incomplete(summary, failure):
     result = deepcopy(summary)
     result.update(checks_passed=False, accepted=False,

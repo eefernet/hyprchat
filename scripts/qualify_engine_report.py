@@ -11,18 +11,18 @@ import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend/evals'))
-from engine_cases import CASES, DEVELOPMENT, private_probes
+from engine_cases import CASES, CASES_V1, DEVELOPMENT, DEVELOPMENT_V1, private_probes
 from engine_cases_reliability import CASES as RELIABILITY
 
 
-def roster(cohort):
+def roster(cohort, bank_version=2):
     if cohort in {'everyday','breadth','pocket'}:
         from engine_cases_everyday import CASES as everyday, POCKET, breadth_cases
         if cohort == 'breadth':
             return breadth_cases(), 1
         return (everyday, 3) if cohort == 'everyday' else (POCKET, 1)
-    return {'classic': (CASES, 3), 'reliability': (RELIABILITY, 3),
-            'development': (DEVELOPMENT, 2)}[cohort]
+    return {'classic': (CASES if bank_version == 2 else CASES_V1, 3), 'reliability': (RELIABILITY, 3),
+            'development': (DEVELOPMENT if bank_version == 2 else DEVELOPMENT_V1, 2)}[cohort]
 
 
 def check_job(job, reliability, errors):
@@ -172,7 +172,20 @@ def assess(report, *, require_composer=False):
     cohort = (report.get('freeze') or {}).get('cohort', 'classic')
     if report.get('development') is True:
         cohort = 'development'
-    cases, repeats = roster(cohort)
+    bank_version = (report.get('freeze') or {}).get('prompt_bank_version', 1)
+    if bank_version not in (1, 2):
+        errors.append('unknown prompt bank version')
+    cases, repeats = roster(cohort, bank_version)
+    if bank_version == 2:
+        from engine_identity import validate
+        frozen = report.get('freeze') or {}
+        environment = frozen.get('environment') or {}
+        try:
+            validate(environment.get('judge_identity'), environment, cohort, frozen.get('bank_sha256'))
+            if not environment.get('judge_adapter_sha256'):
+                raise ValueError('missing judge adapter identity')
+        except (ValueError, KeyError, TypeError) as error:
+            errors.append('invalid frozen judge identity: ' + str(error))
     schedule = {(case['id'], rep):case for case in cases for rep in range(1, repeats+1)}
     totals = Counter(c['family'] for c in schedule.values())
     seen, jobs_seen, projects_seen, success_keys = set(), set(), set(), set()
@@ -197,6 +210,11 @@ def assess(report, *, require_composer=False):
             if not identity or identity in jobs_seen:
                 errors.append(f'{key}: missing or duplicate job ID')
             jobs_seen.add(identity)
+            # Failed builds may produce no archive for the private judge. Keep
+            # those as measured failures; any result that exists must be bound.
+            if bank_version == 2 and (job.get('held_out') is not None or trial.get('passed') is True) and (job.get('held_out') or {}).get('judge_identity_sha256') != (
+                    ((report.get('freeze', {}).get('environment') or {}).get('judge_identity') or {}).get('sha256')):
+                errors.append(f'{key}: private result has missing or conflicting judge identity')
             if composer:
                 conflicts.extend(conflicting_ui_evidence(job, case, index))
         if trial.get('passed') is not True:
@@ -270,7 +288,7 @@ def assess(report, *, require_composer=False):
         row['median_wall_seconds'] = statistics.median(seconds) if seconds else None
         row['p90_wall_seconds'] = seconds[math.ceil(.9*len(seconds))-1] if seconds else None
         row['successes_without_app_repair'] = sum(t.get('key') in success_keys and not any(j.get('repair_round') for j in t.get('jobs',[])) for t in trials)
-    return {'grader_version':2,'cohort':cohort,'complete':complete,'families':families,'failures':failures,
+    return {'grader_version':3,'cohort':cohort,'complete':complete,'families':families,'failures':failures,
             'invalid_report':errors,'confirmed_false_verifications':conflicts,
             'behavioral_gate_passed':behavioral,'rollout_behavior_gate_passed':passed,
             'user_workflow_gate_passed':passed and composer,'model':report.get('model'),'model_digest':report.get('model_digest')}
@@ -282,6 +300,8 @@ def compare(previous, candidate):
     after = assess(candidate, require_composer=True)
     constraints = ('model','model_digest','chat_model','chat_digest','profiles','settings','judge_sha256',
                    'judge_bank_sha256','sdk_version','limits','cache_policy')
+    if candidate['freeze'].get('prompt_bank_version', 1) == 2 or previous['freeze'].get('prompt_bank_version', 1) == 2:
+        constraints += ('judge_identity', 'prompt_bank_version', 'judge_adapter_sha256')
     old = previous['freeze']['environment']
     new = candidate['freeze']['environment']
     mismatches = [k for k in constraints if not old.get(k) or old[k] != new.get(k)]
@@ -336,7 +356,7 @@ if __name__ == '__main__':
         if args.compare:
             value['comparison'] = compare(json.loads(args.compare.read_text()), report)
     except (AttributeError, KeyError, TypeError, ValueError) as error:
-        value = {'grader_version':2,'rollout_behavior_gate_passed':False,'invalid_report':[f'Malformed report: {error}']}
+        value = {'grader_version':3,'rollout_behavior_gate_passed':False,'invalid_report':[f'Malformed report: {error}']}
     rendered = json.dumps(value, indent=2) + '\n'
     if args.output:
         args.output.write_text(rendered)

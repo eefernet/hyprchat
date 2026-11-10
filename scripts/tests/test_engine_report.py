@@ -47,6 +47,28 @@ def test_incomplete_campaign_cannot_qualify():
     assert not module.assess(data)['rollout_behavior_gate_passed']
 
 
+def test_failed_build_without_archive_remains_a_measured_failure(monkeypatch):
+    import engine_identity
+    monkeypatch.setattr(engine_identity, 'validate', lambda *args: None)
+    data = report()
+    data['freeze'] = {'prompt_bank_version': 2, 'environment': {
+        'judge_identity': {'sha256': 'judge'}, 'judge_adapter_sha256': 'adapter'}}
+    for trial in data['trials']:
+        for job in trial['jobs']:
+            job['held_out']['judge_identity_sha256'] = 'judge'
+    failed = data['trials'][0]
+    failed.update(passed=False, error='Build failed before an archive was produced')
+    del failed['jobs'][0]['held_out']
+    result = module.assess(data)
+    assert not result['invalid_report']
+    assert result['failures'][0]['trial'] == failed['key']
+    failed['jobs'][0]['held_out'] = {'judge_identity_sha256': 'stale'}
+    assert module.assess(data)['invalid_report']
+    del failed['jobs'][0]['held_out']
+    failed['passed'] = True
+    assert module.assess(data)['invalid_report']
+
+
 def test_stuck_sdk_cannot_pass_strict_grading_on_existing_green_checks():
     data=report()
     data['trials'][0]['jobs'][1]['last_patch']={'agent_finished':False,'execution_status':'stuck'}
@@ -145,7 +167,8 @@ def test_user_workflow_requires_verbatim_messages_exact_download_and_parent():
     data = report()
     data.update(entrypoint='daedalus-composer', model='local', model_digest='f'*64)
     for trial in data['trials']:
-        case = next(c for c in module.CASES if c['id']==trial['case'])
+        # This fixture has no bank version and represents a historical v1 report.
+        case = next(c for c in module.CASES_V1 if c['id']==trial['case'])
         for i, job in enumerate(trial['jobs']):
             prompt = case['followup'] if i else case['task']
             job.update(original_user_request=prompt, conversation_id=trial['key'], project_id=trial['key'],

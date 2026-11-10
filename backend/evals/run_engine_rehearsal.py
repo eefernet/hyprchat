@@ -13,7 +13,7 @@ from playwright.sync_api import sync_playwright
 
 from engine_cases import DEVELOPMENT
 from engine_cases_everyday import REHEARSAL
-from run_engine_chat import api, reopen, submit, await_job, archive_and_accept, save
+from run_engine_chat import api, reopen, submit, await_job, archive_and_accept, save, verify_judge
 
 
 def preview(page, job, case, out):
@@ -122,7 +122,7 @@ def working_edits(page, source, out, report, env):
         job=await_job(page,turn,previous,persist,env['job_seconds'])
         if job['source_revision_id']!=parent or api(page,versions)['accepted']['revision_id']!=accepted:
             raise RuntimeError('Follow-up inherited the wrong revision or changed the accepted pointer')
-        archive_and_accept(page,job,turn,case,index,out,env['judge_command'],persist,promote=bool(index))
+        archive_and_accept(page,job,turn,case,index,out,env['judge_command'],persist,promote=bool(index),judge_identity=env['judge_identity'])
         turn.update(source_revision=parent,revision=job['revision_id'],accepted_before=accepted)
         parent=job['revision_id']
         previous.add(job['id'])
@@ -149,6 +149,8 @@ def main():
         env=current
     if not env.get('isolated_candidate') or urlsplit(env['url']).port in (None,80,443,8000):
         raise ValueError('Use a disposable candidate origin')
+    import hashlib
+    verify_judge(env, 'rehearsal', hashlib.sha256(json.dumps(REHEARSAL, sort_keys=True).encode()).hexdigest())
     if args.output.exists():raise ValueError('Use a new rehearsal output')
     args.output.parent.mkdir(parents=True,exist_ok=True)
     report={'passed':False,'turns':[],'previews':{},'judge_sha256':env['judge_sha256']}

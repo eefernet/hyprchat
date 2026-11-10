@@ -227,6 +227,9 @@ class Sandbox(AbstractContextManager):
         self.temporary = tempfile.TemporaryDirectory(prefix='daedalus-sandbox-')
         private = Path(self.temporary.name)
         ipc = private / 'ipc'; ipc.mkdir(mode=0o700)
+        # Created by the namespace child before starting the trusted GUI server.
+        # A broker client PID alone does not establish that Docker has launched.
+        self.service_start_path = ipc / 'service.sock'
         runtime = self.runtime or private / 'runtime'
         runtime.mkdir(parents=True, exist_ok=True)
         home, tmp = runtime / 'home', runtime / 'tmp'

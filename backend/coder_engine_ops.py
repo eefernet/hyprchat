@@ -56,6 +56,8 @@ def execute(store, operation_id, repository):
         result.update(protected_restored=restored, inventory=repository.refresh(),
                       snapshot=repository.snapshot('Modern engine checkpoint', parent=payload['revision_id']),
                       model_digest=payload.get('model_digest', ''))
+        from coder_engine_recovery import execution_failure
+        result['execution_failure'] = execution_failure(result)
         if not result.get('agent_finished') and store.get(operation_id)['calls'] >= payload['calls_remaining']:
             store.update(operation_id, result=result)
             raise TimeoutError('Model-call allowance exhausted; the unverified checkpoint is retained')
@@ -113,13 +115,24 @@ def execute(store, operation_id, repository):
     result['baseline_test_files'] = sorted(files)
     result['summary'] = summarize(result['checks'], payload['revision_id'], required_interfaces)
     changed_tests = []
+    changed_ui_flows = {}
     if not payload.get('baseline') and payload.get('baseline_revision'):
         from coder_repository import safe_relative
         for path in payload.get('baseline_test_files', []):
             current = safe_relative(repository.root, path)
             original = repository.git('show', payload['baseline_revision'] + ':' + path)
             if not current.is_file() or current.read_bytes() != original:
+                if path == '.daedalus-ui.json':
+                    from coder_required_tests import ui_flow_changes
+                    try:
+                        changed_ui_flows = ui_flow_changes(json.loads(original), json.loads(current.read_bytes()) if current.is_file() else [])
+                    except (ValueError, TypeError, AttributeError):
+                        changed_ui_flows = {'invalid_manifest': True}
+                    if not any(changed_ui_flows.get(k) for k in ('removed_scenarios', 'changed_expectations', 'invalid_manifest')):
+                        continue
                 changed_tests.append(path)
+    if changed_ui_flows:
+        result['summary']['baseline_ui_flow_changes'] = changed_ui_flows
     if changed_tests:
         # Extending a feature can legitimately invalidate an old negative test.
         # Keep named-test regression checks, expose the changed expectations,
@@ -179,6 +192,8 @@ def summarize(checks, revision, required_interfaces=()):
                        lost_test_count=len(check['lost_tests']), log_tail=None)
             row['reason'] = ('Previously passing tests regressed. Restore these exact test identities, including their suite/package; '
                 'when the user changes an expected value, change the assertion while retaining the original test name. '
+                'UI scenario identities include the launch and ordered interaction steps: preserve the original scenarios '
+                'and append new flows instead of replacing old ones. Assertion-value edits remain subject to review. '
                 'Do not delete, skip, rename, or weaken unrelated assertions. Full diagnostics remain in the baseline-regressions check.')
         if '/srv/hephaestus/control/browsers/' in str(check.get('log_tail', '')):
             row['reason'] = (row.get('reason') or 'Project browser test failed.') + (' Project tests cannot use controller-only browser paths. '

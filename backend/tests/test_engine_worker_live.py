@@ -39,6 +39,10 @@ def model(mode):
                 if mode=='compaction' and not body.get('tools'):
                     result={'model':MODEL,'message':{'role':'assistant','content':'Earlier commands printed diagnostics. Continue and finish the task.'},
                             'done':True,'done_reason':'stop','prompt_eval_count':1000,'eval_count':30}
+                elif mode=='stuck' and not release.is_set():
+                    name='task_tracker'
+                    command=({'command':'plan','task_list':[{'title':'Implement the requested edit','status':'todo','notes':''}]}
+                             if len(calls)==1 else {'command':'view'})
                 elif mode=='environment_refresh' and len(calls)<=4:
                     if len(calls) in {1,3}:
                         version='six==1.16.0' if len(calls)==1 else 'six==1.17.0'

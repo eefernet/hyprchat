@@ -83,11 +83,39 @@ async def get(workflow_id):
         await connection.close()
 
 
+def request_identity(conversation_id, key):
+    return "cw3-" + hashlib.sha256(f"{db.current_user_id()}:{conversation_id}:{key}".encode()).hexdigest()[:24]
+
+
+async def record_chat_dispatch_attempt(conversation_id, message_id, response, *, allow_correction):
+    """Reserve one correction on the original user turn, including reconnects."""
+    connection = await db.get_db()
+    try:
+        await connection.execute('BEGIN IMMEDIATE')
+        rows = await connection.execute_fetchall(
+            "SELECT m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+            "WHERE m.id=? AND c.id=? AND c.user_id=? AND m.role='user'",
+            (message_id, conversation_id, db.current_user_id()))
+        if not rows:
+            raise LookupError('Original user message not found')
+        metadata = json.loads(rows[0]['metadata'] or '{}')
+        evidence = metadata.setdefault('daedalus_dispatch', {})
+        retry = bool(allow_correction and not evidence.get('correction_used'))
+        evidence.setdefault('first_unverified_response', response)
+        evidence['last_unverified_response'] = response
+        evidence['correction_used'] = bool(evidence.get('correction_used') or retry)
+        await connection.execute('UPDATE messages SET metadata=? WHERE id=?', (json.dumps(metadata), message_id))
+        await connection.commit()
+        return retry
+    finally:
+        await connection.close()
+
+
 async def create(conversation_id, task, mode, project_id, model, key, *,
                  source_job_id="", source_revision_id="", source_project_id="", policy_version=1,
                  visual_policy=None, request_options=None, parent_artifact_id="", inherited=None, source_pointer="", engine="openhands159"):
     owner = db.current_user_id()
-    identity = "cw3-" + hashlib.sha256(f"{owner}:{conversation_id}:{key}".encode()).hexdigest()[:24]
+    identity = request_identity(conversation_id, key)
     body = dict(task=task, mode=mode, project_id=project_id, model=model)
     if engine != 'legacy':
         body['engine'] = engine
@@ -185,6 +213,9 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
             for field in ('deliverable_contract_version', 'deliverable_contract', 'original_user_request', 'plan_finalization_version', 'ui_preflight_version'):
                 if field in (request_options or {}): job[field] = request_options[field]
             job['engine_behavior_version'] = (request_options or {}).get('engine_behavior_version', 0)
+        for field in ('chat_request_key', 'origin_message_id'):
+            if field in (request_options or {}):
+                job[field] = request_options[field]
         await connection.execute(
             "INSERT INTO coder_workflows(id,conversation_id,project_id,mode,state,user_task,workflow_version,job_json,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,3,?,?,?)", (identity, conversation_id, project_id, mode, "queued", task, json.dumps(job), now(), now()))

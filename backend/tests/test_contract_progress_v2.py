@@ -27,7 +27,7 @@ def test_exact_original_followup():
         ('Clear','Result','text','Ready'), ('Clear','Task','value','')}
     assert len({c['id'] for c in contract['criteria']}) == len(contract['criteria'])
     assert not any('tests' in c['request_excerpt'] or 'Verify a real' in c['request_excerpt'] for c in contract['criteria'])
-    assert contract['parser_version'] == 3
+    assert contract['parser_version'] == 4
 
 @pytest.mark.parametrize('quote', [('“','”'),('"','"'),("'","'"),('‘','’'),('`','`')])
 @pytest.mark.parametrize('value', ['', '0.00', ' Ready. not!  now ', 'A; B and C', 'never'])
@@ -190,7 +190,7 @@ def test_request_provenance_idempotency_and_restart(monkeypatch,tmp_path):
     async def scenario():
         first=await coder_jobs.create('conversation','Clicking Clear sets the result to "Wrong".',model='local',engine='openhands159',key='original',original_request=FOLLOWUP)
         assert first['ui_preflight_version']==1
-        assert first['original_user_request']==FOLLOWUP and first['ui_contract']['parser_version']==3
+        assert first['original_user_request']==FOLLOWUP and first['ui_contract']['parser_version']==4
         assert {c['expected'] for c in first['ui_contract']['criteria'] if c['supported']} == {'Ready', ''}
         # Literal storage remains authoritative even when model task disagrees.
         assert first['ui_contract']['entrypoint_task']==FOLLOWUP

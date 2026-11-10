@@ -1124,6 +1124,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     ephemeral = bool(getattr(req, "ephemeral", False))
 
     last_user_msg = ""
+    _user_message_id = None
     for m in reversed(req.messages):
         if m.get("role") == "user":
             last_user_msg = m.get("content", "")
@@ -1149,7 +1150,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             recent_user = await db.get_latest_user_message(conv_id)
             _recent_content = (recent_user or {}).get("content") or ""
             if not recent_user or (_recent_content != _content_to_save and _recent_content != last_user_msg):
-                await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
+                _user_message_id = await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
+            else:
+                _user_message_id = recent_user['id']
         except Exception:
             pass
 
@@ -1863,7 +1866,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             protocol = ("Persistent Daedalus execution mode: this replaces older manual tool-sequence instructions. "
                         "For requested code changes call start_coder_workflow once with the complete user task and appropriate mode/project. "
                         "For source questions call ask_project or start_coder_workflow(mode=ask_uploaded_project); questions never authorize editing. "
-                        "Report that the background job has started and end your reply. The progress card handles monitoring. "
+                        "Only after a successful workflow-tool receipt, report the saved job status and end your reply. "
+                        "A prose promise does not start a job. The progress card handles monitoring. "
                         "Use get_coder_workflow only for an explicit status question, and cancel_coder_workflow for Stop. "
                         "One OpenHands 1.59 conversation handles planning, coding and repairs on Hephaestus. The controller verifies independently. "
                         "Candidates are delivered for review, including clearly marked incomplete work. Only explicit owner acceptance promotes the exact reviewed revision. Do not claim success from starting a job.")
@@ -2015,6 +2019,22 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'prior_content': _continue_prior})}\n\n"
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
+    _dispatch_guard = None
+    if _persistent_coder:
+        if not _user_message_id:
+            yield f"data: {json.dumps({'type':'error','error':'The original user message could not be saved; no coding job was started.'})}\n\n"
+            return
+        from agents.coder_dispatch import DispatchGuard
+        _dispatch_guard = DispatchGuard(conv_id, _user_message_id, _content_to_save,
+            project_id=REQUEST_OPTIONS.get().get('project_id') or '',
+            new_project=REQUEST_OPTIONS.get().get('new_project', False))
+        REQUEST_OPTIONS.set({**REQUEST_OPTIONS.get(), 'user_message_id': _user_message_id,
+                             'origin_message_id': _assistant_msg_id})
+        _saved_dispatch = await _dispatch_guard.receipt()
+        if _saved_dispatch:
+            yield f"data: {json.dumps({'type':'token','content':_dispatch_guard.describe(_saved_dispatch)})}\n\n"
+            yield f"data: {json.dumps({'type':'done','model':req.model,'message_id':_assistant_msg_id})}\n\n"
+            return
     _text_fallback_done = False
     _native_cloud_tools = False
     if _is_cloud_provider and available_tool_names:
@@ -2514,7 +2534,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                             snip = thinking[-60:].replace("\n", " ")
                                             await events.emit(conv_id, "thought_done", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-2000:]})})
                                         yield f"data: {json.dumps({'type': 'clear'})}\n\n"
-                                        if content:
+                                        if content and not _persistent_coder:
                                             yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
                                             _streamed_content = True
                                         # Neutralize the current token: its text is already
@@ -2571,7 +2591,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 # are enabled. Tool-call rounds clear this
                                 # provisional text after parsing completes.
                                 _chunk_buf += token
-                                if len(_chunk_buf) >= 8 or chunk.get("done"):
+                                if not _persistent_coder and (len(_chunk_buf) >= 8 or chunk.get("done")):
                                     yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
                                     _streamed_content = True
                                     _chunk_buf = ""
@@ -2592,7 +2612,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 content += _lead_buf
                                 _chunk_buf += _lead_buf
                                 _lead_buf = ""
-                            if _chunk_buf:
+                            if _chunk_buf and not _persistent_coder:
                                 yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
                                 _streamed_content = True
                                 _chunk_buf = ""
@@ -2661,7 +2681,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             # user loses the partial answer they were watching.
             if _assistant_msg_id is not None and not _review_round:
                 try:
-                    _partial = (_turn_text + content) if _turn_text else content
+                    _partial = '' if _persistent_coder else ((_turn_text + content) if _turn_text else content)
                     _partial = _partial if _partial.strip() else ""
                     _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
                         else f"_[no response — {err_msg[:160]}]_"
@@ -2882,6 +2902,20 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     else:
                         _streamed_content = False
                 print("[CHAT]   tool-junk net: stripped mangled tool-call text from reply")
+
+        if _dispatch_guard:
+            if tool_calls:
+                # Prose before a tool is only a proposal, never a dispatch receipt.
+                content = msg['content'] = ''
+            else:
+                _verified_content, _correct_dispatch = await _dispatch_guard.review(
+                    content, can_retry=round_num + 1 < MAX_ROUNDS and not _review_round)
+                if _correct_dispatch:
+                    messages.append(msg)
+                    messages.append({'role':'system','content':_dispatch_guard.correction()})
+                    await events.emit(conv_id, 'status', {'status':'Checking the workflow dispatch before reporting progress'})
+                    continue
+                content = msg['content'] = _verified_content
 
         print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)} gen_tokens={gen_tokens} prompt_tokens={prompt_tokens}")
         # Phase 0.6: snapshot the assistant message at every round boundary.
@@ -3440,6 +3474,15 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 _est_prompt = sum(len(m.get("content", "")) for m in messages) // 4
                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
 
+            if _dispatch_guard and _round_tool_names & {'start_coder_workflow', 'ask_project'}:
+                _saved_dispatch = await _dispatch_guard.receipt()
+                _dispatch_text = (_dispatch_guard.describe(_saved_dispatch) if _saved_dispatch else
+                    'No new Daedalus job was started for this message. The workflow tool did not produce a matching '
+                    'saved job. Check its result before retrying.')
+                yield f"data: {json.dumps({'type':'token','content':_dispatch_text})}\n\n"
+                yield f"data: {json.dumps({'type':'done','model':req.model,'message_id':_assistant_msg_id})}\n\n"
+                return
+
             # Short-circuit: if ask_project succeeded as a non-change-request
             # in this round, stream the QA envelope's answer verbatim and exit
             # the agent loop. The QA run card already renders the rich grounded
@@ -3474,7 +3517,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             # never handed a false success. Q&A turns run ask_project (a tool), so
             # _tools_ran_this_turn>0 keeps them exempt.
             _phantom_hit = (
-                _is_v2_persona and bool(_active_project)
+                _is_v2_persona and not _persistent_coder and bool(_active_project)
                 and _tools_ran_this_turn == 0
                 and bool(_PHANTOM_CLAIM_RE.search(content))
             )

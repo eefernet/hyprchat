@@ -170,6 +170,34 @@ def provenance(directory, root):
     return list(imports.values()), assertions
 
 
+def provenance_diagnostic(directory, command, runner):
+    """Explain unbound execution without admitting advisory URLs as source bindings."""
+    jsdom = False
+    unbound = set()
+    for path in directory.glob('coverage-*.json'):
+        try:
+            data = json.loads(path.read_text())
+            for row in data.get('result', []):
+                executed = any(r.get('count', 0) > 0 for f in row.get('functions', []) for r in f.get('ranges', []))
+                url = row.get('url', '')
+                if not executed: continue
+                jsdom |= '/node_modules/jsdom/' in url
+                # Never expose query strings or local paths outside the project.
+                if not url or url.startswith(('http:', 'https:', 'about:')):
+                    unbound.add('anonymous' if not url else url.split(':', 1)[0] + ':')
+        except (OSError, ValueError, TypeError):
+            continue
+    kind = 'unsupported_dynamic_document' if jsdom else 'application_execution_unbound'
+    detail = ('JSDOM execution was observed, but inline document scripts are not bound to exact project bytes by this tracer. '
+              'This does not establish that the test used copied logic or that the actual HTML was executed. '
+              if jsdom else 'No executed application source or controller service traffic was bound to this check. ')
+    return {'category': kind, 'command': command, 'selected_test_runner': runner or command,
+            'jsdom_execution_observed': jsdom, 'unbound_script_kinds': sorted(unbound),
+            'reason': detail + 'Run a browser test against the real application or import its source module. '
+            'After adding a test, update and run the manifest default test command so it selects that test. '
+            'Reading source, a copied implementation, or a passing assertion alone does not prove application behavior.'}
+
+
 def run_checks(store, operation_id, repository, payload):
     from coder_worker_runtime import _boundary, changed_check_sources
     from coder_browser import browser_check

@@ -798,6 +798,7 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         # A printed runner summary is not proof of executed assertions.
         observed = assertions > 0
         row = {**c, 'exit_code': code, 'passed': code == 0, 'log': str(log), 'log_tail': tail,
+            'executed_command': command, 'selected_test_runner': c.get('test_runner') or command,
             'test_count': count, 'assertions_executed': assertions, 'coverage_observed': observed,
             'source_bindings': bindings, 'service_bindings': network, 'environment_fault': host_fault(code, tail)}
         if code and payload.get('engine') == 'openhands159':
@@ -850,6 +851,10 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         row['execution_succeeded'] = not assertion_failures and code == 0 and (c.get('phase') == 'launch' or observed and bool(actual or network))
         if code == 0 and not assertion_failures and observed and c.get('is_test') and c.get('evidence_types', ['behavior']) != ['documentation'] and not actual and not network:
             row.update(passed=False, failure_kind='missing_provenance')
+        if row.get('failure_kind') in {'missing_provenance', 'missing_coverage'}:
+            from coder_native_checks import provenance_diagnostic
+            diagnostic = provenance_diagnostic(local_evidence, command, c.get('test_runner'))
+            row.update(provenance_diagnostic=diagnostic, reason=diagnostic['reason'])
         fixture_error = audit_fixture_path_error(subprocess_diagnostics) if c.get('origin') == 'independent' and not row['passed'] else None
         if fixture_error:
             row.update(classification='audit_defect', audit_fixture_error=fixture_error,

@@ -66,7 +66,10 @@ def maintenance(root):
 
 
 def require_space(root, required=0):
-    collect(root, reserve=10*GIB+required)
+    # Command admission must be constant-time. The scheduled maintenance owner
+    # discovers/reclaims eligible caches under its locks; doing that here stalls
+    # every Docker launch at 80% usage, even when the reserve is available.
+    if required < 0: raise ValueError('Required storage cannot be negative')
     if shutil.disk_usage(root).free < 10*GIB+required:
         raise OSError('Hephaestus storage reserve reached; delete unused projects or application data before preparing more work')
 

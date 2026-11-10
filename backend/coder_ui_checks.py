@@ -21,6 +21,65 @@ class UIObservationFailure(RuntimeError):
         self.details = details
 
 
+@contextmanager
+def startup_preparation(store, operation_id):
+    """Share dependency preparation's durable time/attempt ledger across Resume."""
+    from coder_engine_environment import preparation
+    from coder_environment_publish import atomic_json
+    operation = store.get(operation_id)
+    path = store.root/'preparation-ledgers'/(operation['job_id'] + '.json')
+    ledger = json.loads(path.read_text()) if path.exists() else {'failures': {}, 'seconds': 0}
+    inflight = ledger.pop('inflight', None)
+    if inflight:
+        previous = store.get(inflight['operation_id'])
+        last_seen = previous.get('ended') or previous['payload'].get('_usage_checkpoint', {}).get('at', inflight['started'])
+        ledger['seconds'] += max(0, last_seen - inflight['started'])
+    limit = operation['payload']['settings'].get('daedalus_preparation_seconds', 600)
+    key = 'gui-startup'
+    if ledger['seconds'] >= limit or ledger['failures'].get(key, 0) >= 2:
+        raise TimeoutError('GUI preparation allowance exhausted')
+    began = time.monotonic()
+    ledger['failures'][key] = ledger['failures'].get(key, 0) + 1
+    ledger['inflight'] = {'key': key, 'operation_id': operation_id, 'started': time.time()}
+    path.parent.mkdir(parents=True, exist_ok=True); atomic_json(path, ledger)
+    try:
+        with preparation(store, operation_id):
+            payload = dict(store.get(operation_id)['payload'])
+            payload['_preparation_deadline'] = min(payload['_preparation_deadline'], time.time() + limit - ledger['seconds'])
+            store.update(operation_id, payload=payload)
+            yield
+        ledger['failures'][key] -= 1
+    finally:
+        ledger['seconds'] += time.monotonic() - began
+        ledger.pop('inflight', None); atomic_json(path, ledger)
+
+
+def wait_for_session(store, operation_id, process, started, ready, log):
+    """Charge broker admission to preparation; give the launched GUI 20 seconds."""
+    from coder_worker_runtime import _boundary
+    deadline = None
+    try:
+        with startup_preparation(store, operation_id):
+            while True:
+                _boundary(store, operation_id)
+                if process.poll() is not None:
+                    raise RuntimeError('GUI process exited before becoming ready')
+                if started.exists():
+                    if deadline is None: deadline = time.monotonic() + 20
+                    if ready.exists(): return
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise RuntimeError('GUI process did not become ready within 20 seconds')
+                time.sleep(.1)
+    except InterruptedError:
+        raise
+    except (TimeoutError, RuntimeError) as error:
+        limited = isinstance(error, TimeoutError)
+        raise UIObservationFailure({'error': str(error), 'environment_fault': True,
+            'category': 'preparation_limit' if limited else 'gui_startup',
+            'phase': 'startup', 'retryable': not limited,
+            'log_tail': log.read_text(errors='replace')[-2000:] if log.exists() else ''}) from error
+
+
 def _validate_legacy(value, behavior_version=0):
     if not isinstance(value, list) or len(value) > 12: raise ValueError('UI checks must be a list of at most twelve flows')
     for index, flow in enumerate(value):
@@ -236,12 +295,8 @@ def session(store, operation_id, repository):
                 if response.status_code != 200: raise UIObservationFailure(data)
                 return data
             try:
-                deadline=time.monotonic()+20
-                while not (runtime/'ready.json').exists():
-                    _boundary(store,operation_id)
-                    if process.poll() is not None or time.monotonic()>deadline:
-                        raise RuntimeError('GUI session unavailable: '+(directory/'session.log').read_text()[-2000:])
-                    time.sleep(.1)
+                wait_for_session(store, operation_id, process, box.service_start_path,
+                                 runtime/'ready.json', directory/'session.log')
                 yield action
             finally:
                 client.close(); stop_process(process)
@@ -307,9 +362,15 @@ def run(store, operation_id, repository, flows, *, origin='confirmed_interaction
             if diagnostic.get('environment_fault'):
                 row.update(environment_fault=True, classification='environment')
         if origin == 'project_interaction':
+            from coder_required_tests import ui_flow_signature
             manifest = repository.root / '.daedalus-ui.json' if repository is not None else None
+            outcome = 'passed' if row['passed'] else 'failed'
             row.update(is_test=True, phase='test', cwd='.',
-                       test_ids={'ids': {f'ui-flow:{index}': 'passed' if row['passed'] else 'failed'}},
+                       ui_flow_identity_version=1, ui_flow_sha256=ui_flow_signature(flow),
+                       test_ids={'ids': {'ui-scenario:' + ui_flow_signature(flow, expectations=False): outcome},
+                                 # Preserve old saved identities on resumed modern jobs.
+                                 # New baseline sets use semantic ids only.
+                                 'aggregates': {f'ui-flow:{index}': outcome}},
                        test_files=[{'path': '.daedalus-ui.json', 'sha256': hashlib.sha256(manifest.read_bytes()).hexdigest()}] if manifest and manifest.is_file() else [])
         rows.append(row); store.event(operation_id,'ui_verification',check=row)
     return rows

@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import subprocess
@@ -28,6 +29,17 @@ def free_port():
     with socket.socket() as connection:
         connection.bind(('127.0.0.1', 0))
         return connection.getsockname()[1]
+
+
+def desktop_launch_diagnostic(command):
+    """Explain common display mistakes; runtime window/PID binding is authoritative."""
+    if re.search(r'\b(?:Xvfb|xvfb-run)\b', command):
+        return 'Do not start another X server. Inherit the controller-owned DISPLAY.'
+    if re.search(r'\bDISPLAY\s*=', command):
+        return 'Do not override DISPLAY. The controller selects the display used by interaction checks and preview.'
+    if re.search(r'\bQT_QPA_PLATFORM\s*=\s*[\"\x27]?(?:offscreen|minimal)\b', command):
+        return 'Offscreen Qt cannot verify a visible desktop. Inherit the controller display and accessibility environment.'
+    return ''
 
 
 def stop_session(process):
@@ -62,11 +74,14 @@ class UISession:
         self.behavior_version = int(os.environ.get('DAEDALUS_ENGINE_BEHAVIOR_VERSION', '0'))
         self.session_id = ''
         self.application_processes = []
+        self.application_root = None
         display = next(f':{n}' for n in range(91, 191) if not Path(f'/tmp/.X11-unix/X{n}').exists())
         self.env = {**os.environ, 'DISPLAY': display, 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON': '1',
                     'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '0', 'GTK_A11Y': 'atspi',
                     'GSETTINGS_BACKEND': 'memory'}
-        xserver = self.spawn(['Xvfb', display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], 'xvfb')
+        # The readiness probe briefly becomes the only X client. Keep the server
+        # stable when it disconnects so Openbox cannot race an automatic reset.
+        xserver = self.spawn(['Xvfb', display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-noreset'], 'xvfb')
         deadline = time.monotonic()+10
         while True:
             if Path('/tmp/.X11-unix/X'+display[1:]).exists():
@@ -142,7 +157,33 @@ class UISession:
             if process in self.processes: self.processes.remove(process)
         self.kind = None
         self.application_processes = []
+        self.application_root = None
         self.env.pop('JAVA_TOOL_OPTIONS', None)
+
+    def desktop_binding(self):
+        """Mapped X windows belonging to this launch, on the preview's display."""
+        import psutil
+        pids = set()
+        if self.application_root and self.application_root.poll() is None:
+            try:
+                parent = psutil.Process(self.application_root.pid)
+                pids = {parent.pid, *(p.pid for p in parent.children(recursive=True))}
+            except psutil.NoSuchProcess:
+                pass
+        clients = subprocess.run(['xprop', '-root', '_NET_CLIENT_LIST'], env=self.env,
+                                 capture_output=True, text=True, timeout=2)
+        windows = []
+        for window in re.findall(r'0x[0-9a-fA-F]+', clients.stdout)[:100]:
+            properties = subprocess.run(['xprop', '-id', window, '_NET_WM_PID'], env=self.env,
+                                        capture_output=True, text=True, timeout=2)
+            pid = re.search(r'_NET_WM_PID\(CARDINAL\)\s*=\s*(\d+)', properties.stdout)
+            if not pid or int(pid[1]) not in pids:
+                continue
+            info = subprocess.run(['xwininfo', '-id', window], env=self.env,
+                                  capture_output=True, text=True, timeout=2)
+            if re.search(r'Map State:\s*IsViewable\b', info.stdout):
+                windows.append({'window': window, 'pid': int(pid[1])})
+        return {'display': self.env['DISPLAY'], 'windows': windows}
 
     def _perform(self, request):
         action = request.get('action')
@@ -156,6 +197,11 @@ class UISession:
             if kind not in {'web', 'desktop'}: raise ValueError('Choose web or desktop')
             file_page = kind == 'web' and str(request.get('url', '')).startswith('file://')
             if not request.get('command') and not file_page: raise ValueError('A launch command is required')
+            if self.behavior_version >= 2 and kind == 'desktop':
+                diagnostic = desktop_launch_diagnostic(request.get('command', ''))
+                if diagnostic:
+                    raise UIFailure({'error': diagnostic, 'category': 'desktop_display_mismatch',
+                                     'display': self.env['DISPLAY']})
             self.kind = kind
             if self.behavior_version >= 1 and kind == 'desktop':
                 # GUI verification uses the visible Xvfb platform. Unit-test
@@ -166,6 +212,7 @@ class UISession:
                     '-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper '
                     '-Djava.library.path=/usr/lib/jni')
             app = self.spawn(['bash', '-c', request['command']], 'application') if request.get('command') else None
+            self.application_root = app
             if kind == 'web':
                 from playwright.sync_api import sync_playwright
                 # The controller driver and project tests may pin different
@@ -198,28 +245,51 @@ class UISession:
             else:
                 deadline = time.monotonic()+25
                 while True:
-                    if app.poll() is not None: raise RuntimeError('Application exited: '+self.log_tail())
+                    if app.poll() is not None:
+                        tail = self.log_tail()
+                        if self.behavior_version >= 2 and re.search(r'could not connect to display|cannot open display|no display name', tail, re.I):
+                            raise UIFailure({'error': 'The application could not connect to its display. Inherit the controller DISPLAY and do not start another Xvfb.',
+                                             'category': 'desktop_display_mismatch', 'display': self.env['DISPLAY'], 'log_tail': tail})
+                        raise RuntimeError('Application exited: '+tail)
                     observed = self.perform({'action':'observe'})
                     if any(n.get('showing') and n['role'] not in {'application','desktop frame'}
                            for n in observed.get('nodes',[])):
                         break
-                    if time.monotonic()>deadline: raise RuntimeError('Application launched but no visible accessible window appeared: '+self.log_tail())
+                    if time.monotonic()>deadline:
+                        if self.behavior_version >= 2:
+                            raise UIFailure({'error': 'No accessible application window is mapped on the controller display. Inherit DISPLAY and accessibility settings; do not start another Xvfb or use offscreen rendering.',
+                                             'category': 'desktop_display_mismatch', 'display_binding': observed.get('display_binding')})
+                        raise RuntimeError('Application launched but no visible accessible window appeared: '+self.log_tail())
                     time.sleep(.2)
             return self.perform({'action': 'observe'})
         if not self.kind: raise ValueError('Launch an application first')
         if self.kind == 'desktop':
+            binding = self.desktop_binding() if self.behavior_version >= 2 else None
+            if binding is not None and not binding['windows'] and action != 'observe':
+                raise UIFailure({'error': 'The application has no mapped window on the controller display.',
+                                 'category': 'desktop_display_mismatch', 'display_binding': binding})
             response = subprocess.run(['/usr/bin/python3', str(Path(__file__).with_name('coder_accessibility.py'))],
-                input=json.dumps({**request, '_behavior_version': self.behavior_version}), text=True, capture_output=True, env=self.env, timeout=15)
+                input=json.dumps({**request, '_behavior_version': self.behavior_version,
+                    **({'_display_pids': [w['pid'] for w in binding['windows']]} if binding is not None else {})}),
+                text=True, capture_output=True, env=self.env, timeout=15)
             try: result = json.loads(response.stdout)
             except ValueError: raise RuntimeError(response.stderr[-2000:] or 'Accessibility service returned no data')
             if response.returncode:
                 if self.behavior_version >= 1: raise UIFailure({**result, 'session_id': self.session_id})
                 raise ValueError(result.get('error', 'Accessibility action failed'))
+            if binding is not None:
+                result['display_binding'] = binding
             return result
         if action == 'observe':
             return {'url': self.page.url, 'title': self.page.title(),
+                    'native_validation': self.page.locator('body').evaluate('''body => Array.from(body.querySelectorAll('input,textarea,select'))
+                      .filter(el => el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) && el.validity && !el.validity.valid && el.validationMessage)
+                      .map(el => ({id:el.id,message:el.validationMessage})).slice(0,50)'''),
+                    'visible_text_nodes': self.page.locator('body').evaluate('''body => Array.from(body.querySelectorAll('*'))
+                      .filter(el => !el.children.length && !el.matches('input,textarea,select,script,style') && el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))
+                      .map(el => el.innerText || '').filter(Boolean).slice(0,500)'''),
                     'accessibility': self.page.locator('body').aria_snapshot()[:14000],
-                    'nodes': self.page.locator('body').evaluate('''body => Array.from(body.querySelectorAll('input,textarea,select,button,output,label,[role],[id]')).slice(0,500).map(el => {
+                    'nodes': self.page.locator('body').evaluate('''(body, strict) => Array.from(body.querySelectorAll('input,textarea,select,button,output,label,[role],[id]')).slice(0,500).map(el => {
                       const tag=el.tagName.toLowerCase();
                       const editable=el.matches('input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]),textarea') && !el.disabled && !el.readOnly;
                       const labels=el.labels ? Array.from(el.labels).map(x=>x.innerText).join(' ').trim() : '';
@@ -227,8 +297,8 @@ class UISession:
                       let selector;
                       if(el.id) selector='#'+CSS.escape(el.id);
                       else { let n=el,parts=[]; while(n && n!==body) { parts.unshift(n.tagName.toLowerCase()+':nth-child('+(Array.from(n.parentElement.children).indexOf(n)+1)+')');n=n.parentElement; } selector='body > '+parts.join(' > '); }
-                      return {selector,tag,name,role:el.getAttribute('role')||(tag==='label'?'label':tag==='output'?'output':editable?'textbox':tag==='button'?'button':tag),editable,interactive_ancestor:!!el.parentElement?.closest('button,[role=button],input,textarea'),activatable:el.matches('button,input[type=button],input[type=submit],[role=button]')&&!el.disabled,showing:!!el.getClientRects().length,text:el.innerText||'',...(editable?{value:el.value}:{})};
-                    })''')}
+                      return {selector,tag,name,role:el.getAttribute('role')||(tag==='label'?'label':tag==='output'?'output':editable?'textbox':tag==='button'?'button':tag),editable,interactive_ancestor:!!el.parentElement?.closest('button,[role=button],input,textarea'),activatable:el.matches('button,input[type=button],input[type=submit],[role=button]')&&!el.disabled,showing:strict?el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}):!!el.getClientRects().length,text:el.innerText||'',...(editable?{value:el.value}:{})};
+                    })''', self.behavior_version >= 2)}
         if action == 'reload': self.page.reload(wait_until='domcontentloaded')
         elif action == 'screenshot':
             path = self.directory/'browser.png'; self.page.screenshot(path=str(path)); return {'screenshot': str(path)}

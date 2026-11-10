@@ -60,6 +60,9 @@ def perform(request):
             return
         try:
             row = {'id': path, 'name': node.name or '', 'role': node.getRoleName()}
+            if request.get('_behavior_version', 0) >= 2:
+                try: row['pid'] = node.get_process_id()
+                except (AttributeError, NotImplementedError): row['pid'] = None
             row['interactive_ancestor'] = interactive_ancestor
             row['showing'] = node.getState().contains(pyatspi.STATE_SHOWING)
             row['editable'] = node.getState().contains(pyatspi.STATE_EDITABLE)
@@ -81,6 +84,11 @@ def perform(request):
         except Exception:
             return
     visit(desktop, 'desktop')
+    if request.get('_behavior_version', 0) >= 2:
+        # AT-SPI shares a bus with every display in the private session. Only
+        # controls from this launch's mapped windows may prove visible behavior.
+        allowed = set(request.get('_display_pids', []))
+        nodes = [(row, node) for row, node in nodes if row.get('pid') in allowed]
     action = request.get('action', 'observe')
     if action == 'observe':
         return {'nodes': [r for r, _ in nodes if (not request.get('role') or r['role'] == request['role'])

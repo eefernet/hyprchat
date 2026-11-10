@@ -1,4 +1,7 @@
 """Qualification specifications and held-out assertions. Never mounted in agent sandboxes."""
+from copy import deepcopy
+
+PROMPT_BANK_VERSION = 2
 TASK = ('Create a Python standard-library command-line program calc.py. '
         'python3 calc.py add 2 3 prints 5 followed by a newline; sub 9 4 prints 5. '
         'Accept negative integers. Successful operations exit 0. Invalid arguments print an error '
@@ -55,6 +58,13 @@ DEVELOPMENT = [
      {'action':'fill','name':'Celsius','value':'-40'},click('Convert'),label('-40.0')],toolkit='qt'),
 ]
 
+# Preserve the original wording for historical reports. Assertions are unchanged.
+DEVELOPMENT_V1 = deepcopy(DEVELOPMENT)
+for case in DEVELOPMENT:
+    if case['id'] == 'dev-qt':
+        case['task'] = case['task'].replace('the numeric Fahrenheit value to one decimal place.',
+            'only the numeric Fahrenheit value to one decimal place, without units or a prefix.')
+
 CORE = [
  cli('csv-totals','Build totals.py using Python stdlib. It accepts one CSV filepath with header category,amount and prints a JSON object mapping each category to the sum as a two-decimal string. Amounts may be negative decimal numbers. Empty CSV with just a header produces {}. Invalid amounts exit 2 with an error on stderr.', ['python3','totals.py'],[
      {'files':{'rows.csv':'category,amount\nA,1.10\nB,-2.00\nA,2.35\n'},'args':['rows.csv'],'json':{'A':'3.45','B':'-2.00'}},
@@ -108,3 +118,10 @@ DESKTOP = [
     'Add a Decrement button allowing negative values. Preserve Increment and Reset.',[click('Decrement'),observe('"name": "-1"')],toolkit='swing'),
 ]
 CASES=CORE+WEB+DESKTOP
+CASES_V1 = deepcopy(CASES)
+for case in CASES:
+    if case['id'] == 'web-distance':
+        case['task'] = case['task'].replace('display three decimals, including negative values.',
+            'display only the converted number with three decimals, without labels or units, including negative values.')
+    if case['id'] in {'qt-counter', 'gtk-counter', 'swing-counter'}:
+        case['task'] += ' The count label must contain only the integer, without a prefix or units.'

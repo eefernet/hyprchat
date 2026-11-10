@@ -82,6 +82,44 @@ def test_request_receipts_survive_restart_without_repeating_instructions(tmp_pat
         finally:conversation.close()
 
 
+def test_saved_task_tracker_stall_can_resume_once_in_same_sdk_conversation(tmp_path):
+    from openhands.sdk import Agent, Conversation, LLM
+    from openhands.sdk.tool import Tool
+    from openhands.tools.task_tracker import TaskTrackerTool
+    from coder_engine_runtime import send_request
+    from coder_engine_recovery import execution_failure
+    from .test_engine_worker_live import model, MODEL
+    root=tmp_path/'project';root.mkdir();identity=uuid.uuid4()
+    with model('stuck') as (url,received,release,calls):
+        agent=Agent(llm=LLM(model='ollama_chat/'+MODEL,base_url=url,max_input_tokens=65536,
+                           max_output_tokens=16384,reasoning_effort=None,num_retries=0),
+                    tools=[Tool(name=TaskTrackerTool.name)])
+        def conversation():
+            return Conversation(agent=agent,workspace=root,conversation_id=identity,
+                persistence_dir=tmp_path/'sessions',visualizer=None,max_iteration_per_run=20,delete_on_close=False)
+        conv=conversation()
+        try:
+            assert send_request(conv,'original','Implement the edit, then finish.','unused')
+            conv.run()
+            failure=execution_failure({'execution_status':str(conv.state.execution_status)})
+            assert failure and failure['category']=='sdk_stuck'
+            views=len(calls)
+            assert 5 <= views < 20
+        finally:conv.close()
+        release.set()
+        conv=conversation()
+        try:
+            assert not send_request(conv,'original','DO NOT REPLAY','unused')
+            assert send_request(conv,'repair','unused','Continue from the retained checkpoint: '+failure['next_action'])
+            assert not send_request(conv,'repair','unused','DO NOT REPEAT REPAIR')
+            conv.run()
+            assert str(conv.state.execution_status).lower().endswith('.finished')
+            assert len(calls)==views+1  # No repeated reads/actions from the stalled turn.
+            messages=[e for e in conv.state.events if (getattr(e,'sender','') or '').startswith('daedalus-operation:')]
+            assert len(messages)==2
+        finally:conv.close()
+
+
 def test_long_conversation_output_limit_recovery_recounts_real_template(tmp_path,monkeypatch):
     import os
     if not os.environ.get('DAEDALUS_TOKENIZER_DIR'):pytest.skip('Requires pinned assets')

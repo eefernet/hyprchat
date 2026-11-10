@@ -63,7 +63,7 @@ def _targets(text):
 
 def freeze(task, source=None, *, mode='edit_project', source_revision=''):
     """Freeze literal requests once. Execution never reparses persisted contracts."""
-    from coder_ui_parser import PARSER_VERSION, clauses, parse, action_name, tokenize
+    from coder_ui_parser import PARSER_VERSION, clauses, parse_context, action_name, tokenize
     source = source or {}
     previous = source.get('ui_contract') or {}
     criteria = deepcopy(previous.get('criteria', []))
@@ -78,8 +78,9 @@ def freeze(task, source=None, *, mode='edit_project', source_revision=''):
     # this, generated tests can affirm the wrong Clear value on the first build.
     if mode not in {'build_from_prompt', 'edit_project'} or not (ui_source or _UI.search(task) or any(action_name(*tokenize(c)) for c in excerpts)):
         return result
-    parsed = [(excerpt, parse(excerpt)) for excerpt in excerpts]
-    key = lambda item: json.dumps([item.get('action'), item.get('target'), item.get('property')], sort_keys=True)
+    parsed = [(excerpt, parse_context(excerpt, entrypoint_task + ('\n' + task if task != entrypoint_task else ''))) for excerpt in excerpts]
+    key = lambda item: json.dumps([item.get('action'), item.get('target'), item.get('property'),
+                                   item.get('probe_kind'), item.get('setup'), item.get('invalid_target')], sort_keys=True)
     expectations = {}
     for _, items in parsed:
         for item in items:
@@ -100,7 +101,8 @@ def freeze(task, source=None, *, mode='edit_project', source_revision=''):
                 logical = lambda t: {k:v for k,v in t.items() if k != 'source_selector'}
                 if old.get('id') == item['id']: continue
                 if (item['supported'] and old.get('supported') and old.get('action') == item['action']
-                        and logical(old.get('target', {})) == logical(item['target'])):
+                        and logical(old.get('target', {})) == logical(item['target'])
+                        and all(old.get(k) == item.get(k) for k in ('probe_kind', 'setup', 'invalid_target'))):
                     if old.get('expected') == item.get('expected') and old.get('property') == item.get('property'):
                         retained.append(old)
                         history.append({'kind': 'reaffirmed', 'criterion_id': old['id'], 'request_excerpt': excerpt})
@@ -291,6 +293,81 @@ def seed_inputs(action, nodes, targets, before, expected, setup):
     return before
 
 
+def run_probe(action, criterion, launched):
+    """Controller-owned input assignments and observations, never flow assertions."""
+    kind = criterion['probe_kind']
+    initial = launched.get('nodes', [])
+    evidence = []
+    def observe(): return action({'action': 'observe'})
+    def fill(target, value):
+        node = _matches(observe().get('nodes', []), target)[0]
+        if not node.get('editable'): raise Unverified('The declared input is not editable.')
+        request = {'action': 'fill', **_request(node), 'value': value}
+        action(request)
+        actual = _read(action, node, 'value')
+        evidence.append({'action': request, 'observed_value': actual})
+        if actual != value: raise Unverified('The requested input value was not retained.')
+    def click():
+        button = _matches(observe().get('nodes', []), criterion['action'], activation=True)[0]
+        request = {'action': 'click', **_request(button)}
+        action(request); evidence.append({'action': request})
+    def result():
+        nodes = observe().get('nodes', [])
+        target = _matches(nodes, criterion['target'], initial_labels=initial)[0]
+        return _read(action, target, 'text')
+    if kind in {'controls', 'input_name'}:
+        nodes = observe().get('nodes', [])
+        for target in criterion['inputs']:
+            node = _matches(nodes, target)[0]
+            if not node.get('editable'): return False, 'The requested input is not editable.', [{'node': node}]
+        _matches(nodes, criterion['action'], activation=True)
+        if kind == 'controls': _matches(nodes, criterion['target'])
+        return True, 'Declared visible controls were resolved by their user-specified identities.', [{'nodes': nodes}]
+    for step in criterion['setup']: fill(step['target'], step['value'])
+    if kind == 'negative_error':
+        click()
+        valid = result()
+        if valid != criterion['valid_expected']:
+            return False, f'The valid setup produced {valid!r}, expected {criterion["valid_expected"]!r}.', evidence
+        before = observe().get('visible_text_nodes')
+        if before is None: raise Unverified('The controller did not expose independently visible error text.')
+        fill(criterion['invalid_target'], '-1')
+        click()
+        deadline = time.monotonic() + 2
+        pattern = re.compile(r'\b(?:error|invalid|negative|positive)\b|at least|greater than|non.?negative|below zero', re.I)
+        while True:
+            observation = observe()
+            after = observation.get('visible_text_nodes', [])
+            changed = [text for text in after if text not in before and pattern.search(text)]
+            if changed or time.monotonic() >= deadline: break
+            time.sleep(.1)
+        evidence.append({'visible_text_before': before, 'visible_text_after': after})
+        if not changed and observation.get('native_validation'):
+            evidence.append({'native_validation': observation['native_validation']})
+            return None, 'Browser-native validity errors were observed, but visibility of the browser validation popup is not independently verified.', evidence
+        return bool(changed), 'A new visible validation error is required for each negative input.', evidence
+    if kind == 'numeric_format':
+        values = []
+        for value in ('0', '1'):
+            fill(criterion['setup'][0]['target'], value); click()
+            values.append(result())
+        expected = re.compile(r'-?\d+\.\d{' + criterion['expected'] + r'}')
+        ok = all(expected.fullmatch(v) for v in values) and len(set(values)) > 1
+        return bool(ok), f'Expected changing numeric-only results with {criterion["expected"]} decimal places; observed {values!r}.', evidence + [{'results': values}]
+    try: before = result()
+    except Unverified: before = None  # A dynamic desktop label may resolve only after activation.
+    click()
+    deadline = time.monotonic() + 2
+    while True:
+        after = result()
+        if after == criterion['expected'] or time.monotonic() >= deadline: break
+        time.sleep(.1)
+    if before == criterion['expected']:
+        raise Unverified('The target already had the expected value; a no-op cannot prove this example.')
+    evidence.append({'before': before, 'after': after})
+    return after == criterion['expected'], f'Expected {criterion["expected"]!r}; observed {after!r}.', evidence
+
+
 def run(store, operation_id, repository, contract, context, bound=None):
     from coder_ui_checks import session, bind_project_entrypoint
     payload = store.get(operation_id)['payload']
@@ -308,6 +385,12 @@ def run(store, operation_id, repository, contract, context, bound=None):
                 bind_project_entrypoint(repository, flow, contract.get('entrypoint_task', '') + '\n' + payload.get('task', ''))
                 with session(store, operation_id, repository) as action:
                     launched = action({'action': 'launch', **{k: v for k, v in flow.items() if k != 'steps'}})
+                    if criterion.get('probe_kind'):
+                        passed, reason, evidence = run_probe(action, criterion, launched)
+                        row.update(status='unverified' if passed is None else 'passed' if passed else 'failed', reason=reason,
+                                   evidence=[{'revision_id': revision, 'launch_revision_id': recipe['revision_id'],
+                                              'launch': {k: v for k, v in flow.items() if k != 'steps'}, 'observations': evidence}])
+                        break
                     # Only successful observed flows supply setup. Stop before
                     # the action being verified, and never execute assertions.
                     setup = []
@@ -375,7 +458,7 @@ def run(store, operation_id, repository, contract, context, bound=None):
                     attempts.append(str(error))
                     break  # Another recipe cannot repair the controller environment.
                 attempts.append(str(error))
-        if row['status'] == 'unverified':
+        if row['status'] == 'unverified' and not row['evidence']:
             row['reason'] = '; '.join(dict.fromkeys(attempts))[:4000] or 'No controller-observed interaction setup is available.'
         rows.append(row)
         store.event(operation_id, 'ui_contract_verification', criterion=row)

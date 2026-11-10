@@ -18,6 +18,7 @@ import tarfile
 import threading
 import time
 import tempfile
+import uuid
 from fastapi import Request
 
 from coder_repository import Repository, safe_relative, validate_links
@@ -948,7 +949,9 @@ def install_routes(app, projects_root, *, engine="openhands159"):
                             upload_mb: int = DEFAULTS["daedalus_upload_mb"],extracted_mb: int = DEFAULTS["daedalus_extracted_mb"],free_mb: int = DEFAULTS["daedalus_min_free_mb"]):
         if min(upload_mb,extracted_mb,free_mb)<1: raise HTTPException(422,"Invalid storage allowance")
         path=source_path(job_id,checksum); path.parent.mkdir(parents=True,exist_ok=True)
-        temporary=path.with_suffix(".part")
+        # A lost response can overlap a receipt probe and a retry. Each stream
+        # owns its temporary file; only a validated exact checksum is published.
+        temporary=path.with_name(path.name + '.' + uuid.uuid4().hex + '.part')
         try:
             size=0; hasher=hashlib.sha256()
             with temporary.open("wb") as output:

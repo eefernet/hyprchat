@@ -16,8 +16,8 @@ import time
 from urllib.parse import urlsplit
 import zipfile
 
-from playwright.sync_api import sync_playwright
-from engine_cases import CASES as CLASSIC, DEVELOPMENT
+from playwright.sync_api import sync_playwright, Error as PlaywrightError
+from engine_cases import CASES as CLASSIC, DEVELOPMENT, PROMPT_BANK_VERSION
 from engine_cases_everyday import CASES as EVERYDAY, POCKET, breadth_cases
 
 TERMINAL = {'ready_for_review','completed','failed','blocked','cancelled','waiting_for_input'}
@@ -34,22 +34,106 @@ def save(path, data):
     temp.replace(path)
 
 
-def api(page, path):
+def _get(page, path):
     return page.evaluate("""async path => {
-      const response = await fetch(path);
+      const response = await fetch(path, {signal: AbortSignal.timeout(15000)});
       if (!response.ok) throw Error(path+' HTTP '+response.status);
       return response.json();
     }""", path)
 
 
+def api(page, path):
+    """Only read-only polling may retry; prompt POSTs keep their intent journal."""
+    origin = urlsplit(page.url)[:2]
+    for attempt in range(3):
+        try:
+            if urlsplit(page.url)[:2] != origin:
+                raise CampaignInterrupted('Qualification origin changed during polling')
+            result = _get(page, path)
+            if attempt:
+                expected = getattr(page, '_qualification_user', None)
+                current = _get(page, '/api/users/current')['user']['id']
+                if expected is None or current != expected:
+                    raise CampaignInterrupted('Profile identity changed or is unavailable after polling recovery')
+                record = getattr(page, '_record_recovery', None)
+                if record: record({'path': path, 'attempts': attempt + 1, 'at': time.time()})
+            return result
+        except PlaywrightError as error:
+            transient = re.search(r'Failed to fetch|fetch failed|NetworkError|Load failed|ERR_CONNECTION|TimeoutError|signal.*timed out', str(error), re.I)
+            if not transient or attempt == 2:
+                raise CampaignInterrupted('Read-only polling interrupted: ' + str(error)[:1000]) from error
+            page.wait_for_timeout(500 * (attempt + 1))
+
+
+def completed_reply(conv, message):
+    """Server delivery completion follows awaited tools; never infer it from prose."""
+    messages = conv.get('messages', [])
+    index = next((i for i, m in enumerate(messages) if str(m['id']) == str(message['id'])), None)
+    if index is None: return None
+    following = messages[index + 1:]
+    if any(m['role'] == 'user' for m in following): return None
+    replies = [m for m in following if m['role'] == 'assistant']
+    if len(replies) != 1: return None
+    metadata = replies[0].get('metadata') or {}
+    return replies[0] if metadata.get('delivery_status') == 'completed' and metadata.get('in_progress') is False else None
+
+
+def verify_judge(environment, cohort, bank_sha256):
+    """Fail before opening the browser, even on a resumed campaign."""
+    from engine_identity import validate
+    command = environment['judge_command']
+    argv = command['argv'] if isinstance(command, dict) else command
+    adapter = Path(environment['judge_adapter_path']).resolve()
+    if (str(adapter) not in argv or hashlib.sha256(adapter.read_bytes()).hexdigest()
+            != environment.get('judge_adapter_sha256')):
+        raise ValueError('Judge transport adapter differs from the frozen environment')
+    result = subprocess.run(argv, input=json.dumps({'kind': 'identity'}) + '\n',
+                            text=True, capture_output=True, timeout=120)
+    if result.returncode:
+        raise CampaignInterrupted('Cannot verify private judge identity: ' + result.stderr[-1500:])
+    identity = json.loads(result.stdout)
+    validate(identity, environment, cohort, bank_sha256)
+    return identity
+
+
+def verify_coding_model(job, environment):
+    if job.get('engine') != 'openhands159' or job.get('model') != environment['model']:
+        raise CampaignInterrupted('Coding model identity diverged from frozen deployment')
+    if job.get('model_digest') == environment['model_digest']:
+        return
+    # Source admission can fail before model resolution. Retain that first user
+    # outcome as a workflow failure, without retrying its prompt or inventing a
+    # model identity. Missing identity after any execution remains an interruption.
+    if (not job.get('model_digest') and job.get('state') == 'blocked'
+            and (job.get('failure') or {}).get('stage') in {'queued', 'source_preparation'}
+            and job.get('calls_used') == 0 and not job.get('operation_calls')
+            and not job.get('last_patch') and not job.get('candidate_artifact')):
+        raise RuntimeError('Workflow stopped before coding: ' + (job.get('blocker') or 'Source admission failed'))
+    raise CampaignInterrupted('Coding model identity diverged from frozen deployment')
+
+
 def select_agent(page):
     page.get_by_role('button',name='New Chat',exact=True).click()
-    page.get_by_role('button',name='Agents',exact=True).first.click()
-    name = page.get_by_text(re.compile(r'^(?:🏛️?\s*)?Daedalus$')).first
-    card = name.locator("xpath=ancestor::div[.//button[normalize-space()='Use Agent']][1]")
-    card.get_by_role('button',name='Use Agent').click()
+    active = page.locator('.hc-app-header .hc-chip').filter(has_text=re.compile(r'Agent\s*(?:🏛️?\s*)?Daedalus'))
+    for attempt in range(2):
+        page.get_by_role('button',name='Agents',exact=True).first.click()
+        name = page.get_by_text(re.compile(r'^(?:🏛️?\s*)?Daedalus$')).first
+        card = name.locator("xpath=ancestor::div[.//button[normalize-space()='Use Agent']][1]")
+        try:
+            card.get_by_role('button',name='Use Agent').click()
+            break
+        except PlaywrightError as error:
+            if active.is_visible():
+                break
+            # Late account hydration can return to Chat after opening Agents.
+            # Recover only this observable pre-submit navigation, once. A
+            # missing profile in an otherwise visible agent list still fails.
+            returned_to_chat = (page.locator('textarea:visible').is_visible()
+                                and page.get_by_role('button',name='Use Agent',exact=True).count() == 0)
+            if attempt or ('detached' not in str(error).lower() and not returned_to_chat):
+                raise
     page.locator('textarea:visible').wait_for()
-    page.get_by_text(re.compile(r'Daedalus')).first.wait_for()
+    active.wait_for()
 
 
 def attach(page, files):
@@ -164,6 +248,10 @@ def await_job(page, turn, earlier, persist, allowance):
     route_deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         conv = api(page,f'/api/conversations/{cid}')
+        identity = {key: conv.get(key) for key in ('id', 'user_id', 'model_config_id')}
+        if identity['id'] != cid or turn.get('conversation_identity', identity) != identity:
+            raise CampaignInterrupted('Saved conversation/profile identity changed during polling')
+        turn.setdefault('conversation_identity', identity)
         messages = [m for m in conv['messages'] if m['role']=='user' and m['content']==turn['prompt']]
         if len(messages)>1:
             raise RuntimeError('Duplicate saved user messages')
@@ -173,6 +261,8 @@ def await_job(page, turn, earlier, persist, allowance):
             raise RuntimeError('One user turn created multiple workflows')
         if new and messages:
             j = new[0]
+            if j.get('conversation_id') != cid or turn.get('job_id', j['id']) != j['id']:
+                raise CampaignInterrupted('Saved workflow identity changed during polling')
             if str(j.get('chat_request_key')) != str(messages[0]['id']) or j.get('original_user_request')!=turn['prompt']:
                 raise RuntimeError('Workflow is not bound to the exact user message')
             if turn.get('job_id') != j['id']:
@@ -181,16 +271,50 @@ def await_job(page, turn, earlier, persist, allowance):
             if j['state'] in TERMINAL:
                 turn['workflow_ids'] = [j['id']]
                 return j
+        if not new and messages:
+            reply = completed_reply(conv, messages[0])
+            if reply:
+                # Re-read after the server's terminal delivery marker so a
+                # workflow committed between our two GETs cannot be missed.
+                current = api(page, f'/api/coder/workflows?conversation_id={cid}')
+                if any(j['id'] not in earlier and j.get('workflow_version') == 3 for j in current):
+                    continue
+                turn.update(message_id=messages[0]['id'], response_id=reply['id'],
+                            dispatch_outcome='completed_without_workflow')
+                persist()
+                raise RuntimeError('Daedalus chat completed without starting a workflow for this message')
         if not new and time.monotonic()>=route_deadline:
             raise RuntimeError('Daedalus chat did not start a workflow within ten minutes')
         page.wait_for_timeout(1500)
     raise CampaignInterrupted('Workflow deadline reached. Inspect the existing job before resuming')
 
 
-def archive_and_accept(page, job, turn, case, index, path, judge, persist, *, promote=True):
+def require_verified_controller(job):
+    """Private behavior cannot authorize acceptance of a failed controller result."""
+    summary = job.get('verification_summary') or {}
+    patch = job.get('last_patch') or {}
+    status = str(patch.get('execution_status', '')).rsplit('.', 1)[-1].lower()
+    if (summary.get('checks_ok') is not True or not job.get('revision_id')
+            or summary.get('revision_id') != job['revision_id'] or summary.get('incomplete_reason')
+            or patch.get('agent_finished') is False and status in {'stuck', 'error'}
+            or any(c.get('status') == 'failed' or c.get('supported') and c.get('status') != 'passed'
+                   for c in summary.get('criteria', []))):
+        raise RuntimeError('Controller verification failed, stale or incomplete; revision cannot qualify for acceptance or follow-up')
+
+
+def archive_and_accept(page, job, turn, case, index, path, judge, persist, *, promote=True, judge_identity=None):
     if not job.get('candidate_artifact'):
-        failure = (job.get('failure') or {}).get('category')
+        details = job.get('failure') or {}
+        failure = details.get('category')
         blocker = job.get('blocker') or ''
+        preparation = details.get('preparation') or []
+        if isinstance(preparation, dict): preparation = [preparation]
+        if not isinstance(preparation, list): preparation = []
+        if job.get('state') == 'blocked' and failure == 'environment' and (
+                details.get('stage') == 'source_preparation' or any(
+                    isinstance(d, dict) and d.get('category') == 'preparation_limit' and d.get('retryable') is False
+                    for d in preparation)):
+            raise RuntimeError('Workflow exhausted bounded preparation: ' + blocker)
         if failure in {'environment','network','worker_interrupted','upstream_service'} or any(
                 token in blocker for token in ('IsolationUnavailable','Mount is outside','No space left on device')):
             raise CampaignInterrupted('Candidate infrastructure: ' + blocker)
@@ -218,7 +342,8 @@ def archive_and_accept(page, job, turn, case, index, path, judge, persist, *, pr
     job['composer'] = {k:turn[k] for k in ('prompt','message_id','workflow_ids','download_sha256')}
     if 'held_out' not in turn:
         request = dict(job_id=job['id'],project_id=job['project_id'],archive=str(archive.resolve()),
-                       sha256=digest, case=case['id'],followup=bool(index))
+                       sha256=digest, case=case['id'],followup=bool(index),
+                       judge_identity_sha256=(judge_identity or {}).get('sha256'))
         if isinstance(judge, dict):
             # Stream the archive to an independent Linux judge (e.g. via SSH).
             # It receives no path into the browser machine or the coding workspace.
@@ -243,6 +368,8 @@ def archive_and_accept(page, job, turn, case, index, path, judge, persist, *, pr
         turn['held_out'] = json.loads(checked.stdout)
         persist()
     job['held_out'] = turn['held_out']
+    if not judge_identity or job['held_out'].get('judge_identity_sha256') != judge_identity['sha256']:
+        raise CampaignInterrupted('Private verdict belongs to a different judge identity')
     if job['held_out'].get('archive_sha256') != digest:
         raise CampaignInterrupted('Private verdict belongs to a different downloaded archive')
     if job['held_out'].get('passed') is not True or not job['held_out'].get('checks') or any(
@@ -250,6 +377,7 @@ def archive_and_accept(page, job, turn, case, index, path, judge, persist, *, pr
         raise RuntimeError('Private downloaded application check failed')
     if not promote:
         return
+    require_verified_controller(job)
     versions = f"/api/coder/projects/{job['project_id']}/versions"
     if api(page,versions)['accepted']['revision_id'] != job['revision_id']:
         region = locator.locator("xpath=ancestor::*[.//button[normalize-space()='Accept this build']][1]")
@@ -277,9 +405,10 @@ def run(args):
     cases = BANKS[args.cohort]
     reps = {'development':2,'pocket':1,'breadth':1}.get(args.cohort,3)
     schedule = [(case,i) for i in range(1,reps+1) for case in cases]
-    freeze = {'cohort':args.cohort,'environment':env,'bank_sha256':hashlib.sha256(
+    freeze = {'cohort':args.cohort,'prompt_bank_version':PROMPT_BANK_VERSION,'environment':env,'bank_sha256':hashlib.sha256(
         json.dumps(cases,sort_keys=True).encode()).hexdigest(),
         'runner_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    identity = verify_judge(env, args.cohort, freeze['bank_sha256'])
     report = json.loads(path.read_text()) if path.exists() else dict(freeze=freeze,trials=[],
               entrypoint='daedalus-composer',model=env['model'],model_digest=env['model_digest'],complete=False)
     if report['freeze']!=freeze:
@@ -300,6 +429,11 @@ def run(args):
         page.goto(base,wait_until='domcontentloaded')
         page.get_by_role('button',name='Sign In',exact=True).click()
         page.get_by_role('button',name='Sign In',exact=True).wait_for(state='hidden')
+        page._qualification_user = api(page, '/api/users/current')['user']['id']
+        def record_recovery(event):
+            report.setdefault('read_only_recoveries', []).append(event)
+            persist()
+        page._record_recovery = record_recovery
         if args.slot and args.slot not in {f"{c['id']}-{i}" for c,i in schedule}:
             raise ValueError('Unknown frozen trial slot')
         for case,rep in schedule:
@@ -323,6 +457,7 @@ def run(args):
                     cid=prepare_upload(page,case,trial,persist,env['job_seconds'])
                 for index,prompt in enumerate([case['task'],case['followup']]):
                     if index < len(trial['jobs']) and trial['jobs'][index].get('exact_acceptance_verified'):
+                        require_verified_controller(trial['jobs'][index])
                         continue
                     if index==len(trial['turns']):
                         trial['turns'].append({})
@@ -341,12 +476,11 @@ def run(args):
                     else:
                         trial['jobs'][index]=job
                     persist()
-                    if job.get('engine')!='openhands159' or job.get('model_digest')!=env['model_digest'] or job.get('model')!=env['model']:
-                        raise CampaignInterrupted('Coding model identity diverged from frozen deployment')
+                    verify_coding_model(job, env)
                     expected_mode='edit_project' if index or case.get('upload') else 'build_from_prompt'
                     if job['mode']!=expected_mode or index and job.get('source_revision_id')!=trial['jobs'][0].get('revision_id'):
                         raise RuntimeError('Chat selected the wrong workflow or parent revision')
-                    archive_and_accept(page,job,turn,case,index,path,env['judge_command'],persist)
+                    archive_and_accept(page,job,turn,case,index,path,env['judge_command'],persist,judge_identity=identity)
                     persist()
                 trial['passed']=True
             except CampaignInterrupted:
@@ -367,7 +501,7 @@ def run(args):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--resume-driver', help='Development only: record a browser adapter correction while preserving submitted turns')
+    parser.add_argument('--resume-driver', help='Development only: record a driver correction while preserving submitted turns')
     parser.add_argument('--slot', help='Run one frozen slot, for interleaved paired comparisons')
     parser.add_argument('--environment',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)

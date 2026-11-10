@@ -16,6 +16,7 @@ from coder_sandbox_agent import model_bridge
 from coder_engine_ops import prepare
 from coder_engine_tokens import MODEL_DIGEST
 from context_policy import DEFAULTS
+from engine_protocol_checkpoint import CASES, freeze, load, admit
 
 ADD=[{'type':'function','function':{'name':'add','description':'Add two integers.',
       'parameters':{'type':'object','properties':{'a':{'type':'integer'},'b':{'type':'integer'}},'required':['a','b']}}}]
@@ -36,9 +37,10 @@ def main():
     parser.add_argument('--model',default='qwen3.6-35b-a3b-gguf:latest')
     parser.add_argument('--limits',type=int,nargs='+',default=[4096,8192,16384])
     parser.add_argument('--settings',type=Path,help='Frozen candidate Settings for a single release configuration')
+    parser.add_argument('--resume',action='store_true',help='Retain completed outcomes and continue only undispatched probes')
+    parser.add_argument('--adopt-checkpoint',type=Path,help='Original immutable manifest for a pre-checkpoint runner interruption')
     args=parser.parse_args();root=args.output.resolve();root.mkdir(parents=True,exist_ok=True)
     path=root/'report.json'
-    if path.exists():raise ValueError('Use a new matrix directory; never overwrite a prior result')
     lock=(root.parent/'inference-evaluation.lock').open('a');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     store=WorkerStore(root/'worker')
     report={'model':args.model,'digest':MODEL_DIGEST,'context':65536,'temperature':.2,'thinking':True,'seed':None,'rows':[]}
@@ -49,6 +51,10 @@ def main():
         if args.limits != [policy.num_predict] or resolve('compaction', saved).num_predict != policy.num_predict:
             raise ValueError('Release protocol limits must match saved coding and compaction settings')
         report.update(context=policy.num_ctx, settings=saved)
+    report=load(path,report,freeze(__file__,args.ollama,args.limits),store,
+                resume=args.resume,adopt=args.adopt_checkpoint)
+    save(path,report)
+    completed={(r['output_limit'],r['repeat'],r['case']) for r in report['rows']}
     for output in args.limits:
         settings={**DEFAULTS,'context_compaction':'on','openhands_num_ctx':65536,
                   'daedalus_role_contexts':{'builder':65536,'compaction':65536},
@@ -57,11 +63,12 @@ def main():
         if args.settings:
             settings=saved
         for repeat in range(3):
-            for name in ('native_tool','tool_continuation','large_edit','reasoning','compaction','termination'):
+            for name in CASES:
+                if (output,repeat+1,name) in completed:continue
                 identity=f'{output}-{repeat+1}-{name}'
                 payload={'engine':'openhands159','engine_behavior_version':1,'policy_version':8,'settings':settings,'model':args.model,'model_digest':MODEL_DIGEST,
                          'ollama_url':args.ollama,'seconds_remaining':600,'calls_remaining':12}
-                store.create(identity,'protocol','code',payload);store.update(identity,status='running',started=time.time())
+                admit(store,identity,payload,report,lambda:save(path,report))
                 row={'case':name,'output_limit':output,'repeat':repeat+1,'started':time.time(),'passed':False}
                 try:
                     prepare(store,identity)

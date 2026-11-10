@@ -154,7 +154,7 @@ def inherited_protection(source, requested):
     return list(dict.fromkeys([*[p for p in (source or {}).get('protected_files', []) if p not in grounded], *requested]))
 
 
-async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None, source_pointer="", engine="", ui_checks=None, original_request=None):
+async def create(conversation_id, task, mode="build_from_prompt", project_id="", model="", key="", *, visual_review=None, visual_model=None, execution_commands=None, protected_files=None, source_pointer="", engine="", ui_checks=None, original_request=None, chat_request_key=None, origin_message_id=None):
     mode = "edit_project" if mode == "fix_uploaded_project" else mode
     if mode not in ("build_from_prompt", "edit_project", "ask_uploaded_project"):
         raise ValueError("Unknown workflow mode")
@@ -222,9 +222,11 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
         literal_request = task if original_request is None else original_request
         from coder_ui_contract import VERSION, freeze, recipes, original_source
         contract_source = await original_source(source, store.get)
-        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'ui_preflight_version': 1, 'engine_behavior_version': 1, 'ui_contract_version': VERSION,
+        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'ui_preflight_version': 1, 'engine_behavior_version': 2, 'ui_contract_version': VERSION,
             'ui_contract': freeze(literal_request, contract_source, mode=mode, source_revision=source_revision),
             'ui_contract_context': recipes((source or {}).get('checks', [])) or (source or {}).get('ui_contract_context', [])}
+    if chat_request_key is not None:
+        contract_options.update(chat_request_key=chat_request_key, origin_message_id=origin_message_id)
     job = await store.create(conversation_id, task, mode, project_id, chosen_model, key or uuid.uuid4().hex,
         source_job_id=source["id"] if source else "", source_revision_id=source_revision if source else "",
         source_project_id=(project.get("openhands_project_id") or project_id) if project and not source else "",
@@ -472,28 +474,40 @@ async def route_tool(name, args, conversation_id, events):
         return json.dumps({'error': RETIRED_ENGINE, 'workflow_id': job['id']})
     if name in starts:
         conv = await db.get_conversation(conversation_id)
-        latest_user = next((m for m in reversed((conv or {}).get("messages", [])) if m.get("role") == "user"), {})
+        options = REQUEST_OPTIONS.get()
+        request_id = options.get('user_message_id')
+        latest_user = next((m for m in reversed((conv or {}).get("messages", [])) if m.get("role") == "user"
+                            and (request_id is None or str(m.get('id')) == str(request_id))), {})
+        if request_id is not None and not latest_user:
+            return json.dumps({'error': 'The original user message is unavailable; no job was started.'})
         task = args.get("task") or args.get("question") or latest_user.get("content") or ""
         key = str(latest_user.get("id") or hashlib.sha256(task.encode()).hexdigest())
-        if job and (job["state"] in store.ACTIVE or job.get("chat_request_key") == key):
-            return json.dumps({"workflow_id": job["id"], "state": job["state"], "message": "The background job owns execution. Report its status; do not repeat workflow tools."})
+        existing = await store.get(store.request_identity(conversation_id, key))
+        if existing:
+            return json.dumps({"workflow_id": existing["id"], "state": existing["state"],
+                               "message": "This user message already has a saved job. Reattach to it; do not dispatch again."})
+        if job and job["state"] in store.ACTIVE:
+            return json.dumps({"workflow_id": job["id"], "state": job["state"], "request_started": False,
+                               "message": "An earlier background job is still active. No new job was started for this message."})
         if not enabled:
             return None
         project = await db.get_coding_project_by_conv(conversation_id)
-        options = REQUEST_OPTIONS.get()
         target = options.get("project_id")
         project_id = target or args.get("project_id") or (project or {}).get("id", "")
-        mode = args.get("mode") or ("ask_uploaded_project" if name == "ask_project" else "edit_project" if project_id else "build_from_prompt")
+        mode = ("ask_uploaded_project" if name == "ask_project" else
+                args.get("mode") or ("edit_project" if project_id else "build_from_prompt"))
         if options.get("new_project") and name != "ask_project":
             mode = "build_from_prompt"
+        if target and not options.get('new_project') and mode == 'build_from_prompt':
+            return json.dumps({'error': 'A project is selected for this request. Use edit_project, or explicitly select New project.'})
         if mode == "build_from_prompt":
             project_id = ""
+        origin = next((m for m in reversed((conv or {}).get('messages', [])) if m.get('role') == 'assistant'), {})
         job = await create(conversation_id, task, mode, project_id, key=key, original_request=latest_user.get('content') or '',
+                           chat_request_key=key, origin_message_id=options.get('origin_message_id', origin.get('id')),
                            visual_review=options.get("visual_review", args.get("visual_review")),
                            visual_model=options.get("visual_model"),
                            source_pointer="accepted" if options.get("source_pointer") == "accepted" else "")
-        origin = next((m for m in reversed((conv or {}).get('messages', [])) if m.get('role') == 'assistant'), {})
-        job = await store.save(job["id"], chat_request_key=key, origin_message_id=origin.get('id'))
         if events: await events.emit(conversation_id, "tool_start", {"tool": name, "workflow_id": job["id"], "status": "Daedalus job started"})
         if events: await events.emit(conversation_id, "tool_end", {"tool": name, "workflow_id": job["id"], "status": "Running in background; progress reconnects after refresh"})
         return json.dumps({"workflow_id": job["id"], "state": job["state"], "message": "Job started in background. The job controller handles planning, coding, checks, and candidate delivery for explicit owner acceptance. Tell the user it has started; do not launch additional tools for this job."})
@@ -580,18 +594,8 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
             expected = ""
         if expected:
             source_url = worker_base(job) + f"/jobs/{job['id']}/source/{expected}"
-            present = await _worker_request(job["id"], "GET", source_url, timeout=15)
-            if present.status_code == 404:
-                async def chunks():
-                    with path.open("rb") as source_file:
-                        while chunk := source_file.read(1024 * 1024):
-                            yield chunk
-                # A failed upload blocks safely; Continue opens a fresh stream.
-                uploaded = await _HTTP.put(source_url, content=chunks(),timeout=120,params={
-                    "upload_mb":settings["daedalus_upload_mb"],"extracted_mb":settings["daedalus_extracted_mb"],"free_mb":settings["daedalus_min_free_mb"]})
-                uploaded.raise_for_status()
-            else:
-                present.raise_for_status()
+            from coder_source_upload import ensure_source
+            await ensure_source(store, _HTTP, job['id'], source_url, path, expected, settings)
             payload["source_archive_sha256"] = expected
     response = await _worker_request(job["id"], "POST", worker_url(job), json=payload, timeout=30)
     response.raise_for_status()

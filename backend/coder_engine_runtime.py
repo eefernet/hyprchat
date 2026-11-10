@@ -39,6 +39,30 @@ def repair_count(path, configured):
     return max(previous, min(2, int(configured)))
 
 
+def regression_context(payload):
+    """Controller-observed baseline, available before edits and on every repair.
+
+    These are the project's existing tests, never private evaluator assertions.
+    Do not silently truncate the required identities: the normal context policy
+    owns an oversized request just as it owns any other coding input.
+    """
+    if not payload.get('required_tests'):
+        return ''
+    return ('\n\nExisting regression tests that must remain executable under their original identities:\n' +
+            json.dumps({'baseline_revision': payload.get('baseline_revision'),
+                        'current_revision': payload.get('revision_id'),
+                        'required_tests': payload['required_tests'],
+                        'test_files': payload.get('baseline_test_files', []),
+                        'test_commands': payload.get('baseline_test_commands', [])}) +
+            '\nPreserve these tests and their reporting commands while adding coverage. A plain Node assertion '
+            'script run with node --test may report its filename as the test identity. Keep that script and its '
+            'node --test command; add named tests in a separate file if needed. Running node file.js instead '
+            'does not report trusted identities, even if its assertions pass. Do not rename or wrap an existing '
+            'file-level test into new named tests merely to change reporting. UI scenario identities follow their launch '
+            'and interaction steps, not array position. Keep existing UI scenarios and append new flows; do not replace '
+            'an error scenario with a new feature scenario. Read the baseline test files before editing them.')
+
+
 def run(store, operation_id, repository):
     if importlib.metadata.version('openhands-sdk') != SDK_VERSION:
         raise ValueError('This engine requires its isolated OpenHands 1.59.0 worker')
@@ -101,6 +125,8 @@ def run(store, operation_id, repository):
              'denials': repair_count(state_path, payload.get('repair_round', 0)), 'nudges': 0,
              'command_seconds': settings['daedalus_command_seconds'],
              'execution_commands': payload.get('execution_commands') or {},
+             'baseline_test_commands': payload.get('baseline_test_commands', []),
+             'required_tests': payload.get('required_tests', []),
              'plan_finalization_version': payload.get('plan_finalization_version', 0),
              'ui_preflight_version': payload.get('ui_preflight_version', 0),
              'ui_directory': str(store.root / 'tool-output'),
@@ -109,6 +135,7 @@ def run(store, operation_id, repository):
         state.update({k: previous[k] for k in ('finalizing', 'passed', 'finish_seen') if k in previous})
     state_path.write_text(json.dumps(state))
     events = 0
+    activity = {'tool_counts': {}, 'recent_tools': [], 'trailing_task_tracker': 0}
     from coder_source_activity import Observer
     observer = Observer(repository.root, directory / 'source-activity.json',
         lambda **data: store.event(operation_id, 'source_activity', **data), repository.excludes) if payload.get('progress_version') == 1 else None
@@ -125,6 +152,10 @@ def run(store, operation_id, repository):
             state['plan'] = (data.get('observation') or {}).get('task_list', [])
             state_path.write_text(json.dumps(state))
         if data.get('kind') == 'ActionEvent':
+            name = str(data.get('tool_name') or 'unknown')
+            activity['tool_counts'][name] = activity['tool_counts'].get(name, 0) + 1
+            activity['recent_tools'] = [*activity['recent_tools'], name][-12:]
+            activity['trailing_task_tracker'] = activity['trailing_task_tracker'] + 1 if name == 'task_tracker' else 0
             state = json.loads(state_path.read_text())
             state['finish_seen'] = (data.get('tool_name') == 'finish' or
                                     (data.get('action') or {}).get('kind') == 'FinishAction')
@@ -186,10 +217,15 @@ def run(store, operation_id, repository):
             'belong in .daedalus-ui.json using file_path. '
             'Use standard test runners and assertion APIs (such as Python unittest or Node node:assert/strict); '
             'printing success messages is not an executed assertion. '
+            'Test the actual imported application code or its running interface. Do not copy application functions '
+            'into test helpers and assert against those copies. Mock DOM objects plus duplicated event handlers '
+            'do not verify the application. For a plain HTML app, exercise the real page through UI flows or a '
+            'declared browser test; these are preferable to a second implementation of its logic in the tests. '
             'Use the tools to perform work. Call finish when the requested implementation and checks are done. '
             'Final acceptance is performed separately on an immutable copy.\n\nREQUEST:\n' + payload['task'])
     if payload.get('repair_feedback'):
         task += '\n\nFresh verification failures to repair:\n' + json.dumps(payload['repair_feedback'])
+    task += regression_context(payload)
     criteria = [row for row in (payload.get('ui_contract') or {}).get('criteria', []) if row.get('supported')]
     if criteria:
         task += ('\n\nLiteral user-request UI outcomes (not private evaluator assertions):\n' +
@@ -223,6 +259,17 @@ def run(store, operation_id, repository):
                  'editable inputs and result labels; displayed result text may change independently. Use value to '
                  'read editable inputs, text for labels. Visible GUI launch commands must not set QT_QPA_PLATFORM=offscreen. '
                  'Offscreen settings belong only to unit-test commands.')
+    if payload.get('engine_behavior_version', 0) >= 2:
+        task = task.replace('Assign stable accessible names to editable inputs and result labels; displayed result text may change independently.',
+                            'Assign stable accessible names to editable inputs. Follow the user\'s requested result-label naming; when the name must mirror visible text, keep them synchronized.')
+        task += ('\nDesktop launch commands inherit the controller-owned DISPLAY and accessibility environment. '
+                 'Do not assign DISPLAY, run Xvfb/xvfb-run, or start another DBus session. The controller binds '
+                 'accessible controls to your application windows on the same display as its preview. '
+                 'After adding or replacing tests, run the manifest default test command and confirm it selects '
+                 'the intended tests. Inline HTML executed by JSDOM has unsupported source provenance; use a '
+                 'browser test against the actual application or import its real source module. Reading an HTML '
+                 'file alone does not establish execution. Task-list updates alone do not implement or verify work; '
+                 'follow planning with a concrete file edit or execution, keeping each tool action bounded.')
     store.event(operation_id, 'tool_mode', engine=ENGINE, sdk_version=SDK_VERSION,
                 profile=payload.get('tool_profile', 'native'), thinking=thinking_mode)
     try:
@@ -231,6 +278,7 @@ def run(store, operation_id, repository):
             feedback = 'Continue the same request from the saved project and conversation. Use tools; reconcile task_tracker statuses before finish, including repaired work.\n'
             if payload.get('repair_feedback'):
                 feedback += 'Repair these observed failures:\n' + json.dumps(payload['repair_feedback'])
+            feedback += regression_context(payload)
             if payload.get('builder_guidance'):
                 feedback += '\nEnvironment feedback:\n' + payload['builder_guidance']
             send_request(conversation, operation_id, task, feedback)
@@ -244,7 +292,12 @@ def run(store, operation_id, repository):
         return {'engine': ENGINE, 'sdk_version': SDK_VERSION, 'agent_finished': finished,
                 'execution_status': status, 'session_id': str(session_id), 'events': events,
                 'hook_denials': state['denials'], 'hook_nudges': state['nudges'],
+                **({'activity_diagnostic': activity} if payload.get('engine_behavior_version', 0) >= 2 else {}),
                 'incomplete_reason': '' if finished else state.get('reason', 'Agent stopped before verified completion'),
                 'hook_denied_unresolved': not state['passed'] and state['denials'] > 0}
     finally:
-        conversation.close()
+        try:
+            if payload.get('engine_behavior_version', 0) >= 2:
+                store.event(operation_id, 'execution_activity', **activity)
+        finally:
+            conversation.close()

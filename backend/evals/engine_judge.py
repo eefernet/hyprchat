@@ -268,10 +268,18 @@ def main():
     if os.environ.get('HEPHAESTUS_STORE_ROLE') != 'test' or not (root/'qualification-judge').is_file():
         raise ValueError('A separate marked qualification store is required')
     request = json.loads(sys.stdin.buffer.readline(16384))
+    from engine_identity import receipt
+    settings = json.loads(args.settings.read_text())
+    identity = receipt(settings)
+    if request.get('kind') == 'identity':
+        print(json.dumps(identity))
+        return
+    if request.get('judge_identity_sha256') != identity['sha256']:
+        raise ValueError('Submitted archive does not name this frozen judge identity')
     if not re.fullmatch(r'cw3-[a-f0-9]+', request['job_id']):
         raise ValueError('Invalid submitted job identity')
     case = next(c for c in DEVELOPMENT + CASES + EVERYDAY + POCKET + REHEARSAL + breadth_cases() if c['id']==request['case'])
-    config.CONTEXT_SETTINGS = {**DEFAULTS, **json.loads(args.settings.read_text())}
+    config.CONTEXT_SETTINGS = {**DEFAULTS, **settings}
     limit = config.CONTEXT_SETTINGS['daedalus_upload_mb']*1024**2
     with tempfile.NamedTemporaryFile(dir=root) as archive:
         size = 0
@@ -283,7 +291,8 @@ def main():
         archive.flush()
         job = {'id':request['job_id'], 'project_id':request['project_id'],
                'candidate_artifact':{'sha256':request['sha256'], 'storage_path':archive.name}}
-        print(json.dumps(evaluate(root,job,case,request['followup'])))
+        print(json.dumps({**evaluate(root,job,case,request['followup']),
+                          'judge_identity_sha256': identity['sha256']}))
 
 
 if __name__=='__main__':
