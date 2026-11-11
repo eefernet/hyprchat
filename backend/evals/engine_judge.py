@@ -186,6 +186,25 @@ def cli_checks(worker, operation, project, case, followup, runtime, repo):
     return checks
 
 
+ADMISSION_WAIT = 150
+
+
+def admit(store, identity, job_id, payload, *, seconds=ADMISSION_WAIT, clock=time.monotonic, sleep=time.sleep):
+    """Create the judge's private check, waiting out a short maintenance hold.
+
+    Nothing has executed while this waits: the operation row does not exist until create succeeds, so waiting
+    cannot rerun or alter a verdict. On exhaustion the interruption is reported as such, never as a failed app.
+    """
+    deadline = clock() + seconds
+    while True:
+        try:
+            return store.create(identity, job_id, 'check', payload)
+        except BlockingIOError:
+            if clock() >= deadline:
+                raise TimeoutError('Judge admission allowance exhausted during VM maintenance; no assertion ran') from None
+            sleep(min(.5, max(0, deadline - clock())))
+
+
 def evaluate(root, job, case, followup=False):
     import config
     from hephaestus_scope import scope
@@ -220,7 +239,7 @@ def evaluate(root, job, case, followup=False):
             # The worker collector honors leases and retains logs and source.
             from coder_engine_cache import collect
             removed = collect(store, limit_bytes=0)
-        store.create(identity, job['id'], 'check', {'settings': settings, 'seconds_remaining': 400,
+        admit(store, identity, job['id'], {'settings': settings, 'seconds_remaining': 400,
                      'calls_remaining': 0, 'revision_id': snapshot['revision'], 'project_id': job['project_id'],
                      'engine': 'openhands159', 'engine_behavior_version': 1})
         store.update(identity, status='running', started=time.time())
@@ -278,7 +297,8 @@ def main():
         raise ValueError('Submitted archive does not name this frozen judge identity')
     if not re.fullmatch(r'cw3-[a-f0-9]+', request['job_id']):
         raise ValueError('Invalid submitted job identity')
-    case = next(c for c in DEVELOPMENT + CASES + EVERYDAY + POCKET + REHEARSAL + breadth_cases() if c['id']==request['case'])
+    from engine_cases_native import CASES as NATIVE
+    case = next(c for c in DEVELOPMENT + CASES + EVERYDAY + POCKET + REHEARSAL + breadth_cases() + NATIVE if c['id']==request['case'])
     config.CONTEXT_SETTINGS = {**DEFAULTS, **settings}
     limit = config.CONTEXT_SETTINGS['daedalus_upload_mb']*1024**2
     with tempfile.NamedTemporaryFile(dir=root) as archive:

@@ -493,9 +493,10 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "start_coder_workflow",
-            "description": "Start a Coder Bot v2 workflow using the backend router. Modes: build_from_prompt uses OpenHands after planning; fix_uploaded_project uses Aider for existing uploaded-project edits; ask_uploaded_project uses read-only ProjectQA.",
+            "description": "Start a Daedalus coding job. Modes: build_from_prompt starts a new project; edit_project changes, extends or fixes the project this conversation already has; ask_uploaded_project answers a read-only question about it.",
             "parameters": {"type": "object", "properties": {
-                "mode": {"type": "string", "description": "build_from_prompt | fix_uploaded_project | ask_uploaded_project"},
+                "mode": {"type": "string", "description": "build_from_prompt | edit_project | ask_uploaded_project"},
+                "new_project": {"type": "boolean", "description": "Set true with build_from_prompt only when this conversation already has a project and the user asked for a separate, unrelated one."},
                 "task": {"type": "string", "description": "The user's build, fix, or question task."},
                 "project_id": {"type": "string", "description": "Optional uploaded project id. If omitted, uses the active project for this conversation."},
                 "language": {"type": "string", "description": "Optional primary language for new builds."},

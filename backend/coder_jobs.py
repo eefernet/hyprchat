@@ -222,7 +222,7 @@ async def create(conversation_id, task, mode="build_from_prompt", project_id="",
         literal_request = task if original_request is None else original_request
         from coder_ui_contract import VERSION, freeze, recipes, original_source
         contract_source = await original_source(source, store.get)
-        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'ui_preflight_version': 1, 'engine_behavior_version': 2, 'ui_contract_version': VERSION,
+        contract_options = {'deliverable_contract_version': 1, 'deliverable_contract': freeze_deliverables(literal_request, (source or {}).get('deliverable_contract')), 'original_user_request': literal_request, 'plan_finalization_version': 1, 'ui_preflight_version': 1, 'engine_behavior_version': 3, 'ui_contract_version': VERSION,
             'ui_contract': freeze(literal_request, contract_source, mode=mode, source_revision=source_revision),
             'ui_contract_context': recipes((source or {}).get('checks', [])) or (source or {}).get('ui_contract_context', [])}
     if chat_request_key is not None:
@@ -500,6 +500,11 @@ async def route_tool(name, args, conversation_id, events):
             mode = "build_from_prompt"
         if target and not options.get('new_project') and mode == 'build_from_prompt':
             return json.dumps({'error': 'A project is selected for this request. Use edit_project, or explicitly select New project.'})
+        if name != "ask_project":
+            from coder_followup_guard import refusal
+            refused = refusal(args, options, project)
+            if refused:
+                return json.dumps({'error': refused, 'request_started': False})
         if mode == "build_from_prompt":
             project_id = ""
         origin = next((m for m in reversed((conv or {}).get('messages', [])) if m.get('role') == 'assistant'), {})
@@ -569,6 +574,9 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
                "settings": settings, "seconds_remaining": seconds, "calls_remaining": calls,
                "revision_id": job.get("revision_id", ""), **extra}
     payload["baseline_revision"] = job.get("baseline_revision","")
+    from coder_request_view import original
+    if kind == 'code' and original(job):
+        payload['original_user_request'] = original(job)
     if job.get('policy_version', 1) >= 7:
         from coder_scope import effective_task
         payload.update(task=effective_task(job), original_task=effective_task(job))

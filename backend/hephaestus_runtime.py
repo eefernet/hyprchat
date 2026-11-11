@@ -85,6 +85,9 @@ def docker_args(spec, config):
     return args
 
 
+ADMISSION_WAIT = 60.0
+
+
 class Broker:
     def __init__(self, root, config):
         self.root, self.config = Path(root), config
@@ -93,6 +96,9 @@ class Broker:
         self.reserved = 0
         self.groups = {}
         self.cancelled = set()
+        self.unconfirmed = {}     # containers whose stop is unconfirmed; their reservations are still held
+        self.reaped_at = 0.0
+        self.waiting = set()      # launches waiting for admission: no row, no reservation, nothing dispatched
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, scope TEXT, fingerprint TEXT, status TEXT, created REAL, result TEXT)')
 
@@ -120,12 +126,16 @@ class Broker:
         if not IDENTITY.fullmatch(identity): raise ValueError('Invalid execution identity')
         with self.connect() as db:
             row=db.execute('SELECT * FROM executions WHERE id=?',(identity,)).fetchone()
-        if row is None: return {'stopped':True,'status':'not_dispatched'}
+        if row is None:
+            # A launch still waiting for admission must not start after its caller was told it never ran.
+            if identity in self.waiting: self.cancelled.add(identity)
+            return {'stopped':True,'status':'not_dispatched'}
         if row['scope']!=scope: raise ValueError('Execution belongs to another scope')
         if row['status'] not in {'queued','running','stop_unconfirmed'}: return {'stopped':True,'status':row['status']}
         self.cancelled.add(identity)
         until=time.monotonic()+55
         while time.monotonic()<until:
+            if row['status']=='stop_unconfirmed' or identity in self.unconfirmed: self.reap()
             with self.connect() as db:
                 status=db.execute('SELECT status FROM executions WHERE id=?',(identity,)).fetchone()[0]
             if status not in {'queued','running','stop_unconfirmed'}:
@@ -146,18 +156,31 @@ class Broker:
         finally: ready.close()
 
     def execute(self, spec, connection, emit):
-        from hephaestus_inventory import lock
-        with lock(ROOT, 'admission', exclusive=False, blocking=False):
-            return self._execute(spec, connection, emit)
+        from hephaestus_admission import AdmissionAbandoned, admitted
+        identity, seconds = spec.get('id'), spec.get('timeout', 900)
+        # Maintenance holds admission for moments. Wait for it, inside this launch's own deadline, never beyond.
+        allowance = min(ADMISSION_WAIT, seconds) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds > 0 else ADMISSION_WAIT
+        self.waiting.add(identity); dispatched = False
+        try:
+            with admitted(ROOT, seconds=allowance, alive=lambda: identity not in self.cancelled and self.connected(connection)) as waited:
+                self.waiting.discard(identity)
+                if identity in self.cancelled:
+                    raise AdmissionAbandoned('Cancelled while waiting for VM maintenance')
+                dispatched = True
+                return self._execute(spec, connection, emit, waited=waited)
+        finally:
+            self.waiting.discard(identity)
+            # A cancel that arrived during the wait has done its work; it must not linger for a later launch.
+            if not dispatched: self.cancelled.discard(identity)
 
-    def _execute(self, spec, connection, emit):
+    def _execute(self, spec, connection, emit, waited=0.0):
         args = docker_args(spec, self.config)
         seconds = spec.get('timeout', 900)
         application = spec.get('managed_application') is True
         if not isinstance(seconds, (float, int)) or not (0 < seconds <= 86400 or (seconds == 0 and application)):
             raise ValueError('Invalid execution deadline')
         if application and spec.get('memory_mib',3072)>1024: raise ValueError('Application sessions are limited to 1 GiB')
-        deadline = time.monotonic()+seconds if seconds else float('inf')
+        deadline = time.monotonic()+max(0.0, seconds-waited) if seconds else float('inf')
         memory = spec.get('memory_mib', 3072)*1024**2
         group = execution_group(spec)
         self.reserve_identity(spec)
@@ -167,6 +190,7 @@ class Broker:
         try:
             with self.condition:
                 while group not in self.groups and self.reserved+memory > 5*GIB:
+                    self.reap()
                     if spec['id'] in self.cancelled or not self.connected(connection): raise InterruptedError('Execution cancelled while queued')
                     if time.monotonic() >= deadline: raise TimeoutError('Execution deadline expired while queued')
                     self.condition.wait(.2)
@@ -259,7 +283,13 @@ class Broker:
                         raise RuntimeError(removal.stderr[-2000:])
                 except (OSError, subprocess.TimeoutExpired, RuntimeError) as error:
                     self.update(spec['id'],'stop_unconfirmed',{'error':str(error)[-2000:]})
-                    # Keep the reservation until restart recovery proves it stopped.
+                    # The container may still be alive: keep its reservation. Close what this launch owns, and
+                    # let the reaper return the reservation once the container is confirmed gone.
+                    if tracer is not None and tracer.poll() is None: tracer.terminate()
+                    if barrier is not None:
+                        barrier.close();Path(spec['trace_socket']).unlink(missing_ok=True)
+                    from hephaestus_reaper import remember
+                    remember(self, spec['id'], group=group, memory=memory, unit=group_unit(spec), reserved=reserved, outcome=outcome)
                     raise RuntimeError('Container termination is unconfirmed: '+str(error)[-2000:]) from error
                 try: process.wait(timeout=5)
                 except subprocess.TimeoutExpired: process.kill(); process.wait()
@@ -269,15 +299,22 @@ class Broker:
             if barrier is not None:
                 barrier.close();Path(spec['trace_socket']).unlink(missing_ok=True)
             self.update(spec['id'], 'succeeded' if outcome['exit_code'] == 0 else 'failed', outcome)
-            if reserved:
-                with self.condition:
-                    self.groups[group]['users'] -= 1
-                    if not self.groups[group]['users']:
-                        self.reserved -= memory; del self.groups[group]
-                        subprocess.run(['systemctl','stop',group_unit(spec)],capture_output=True,timeout=20)
-                        (Path('/run/systemd/system')/group_unit(spec)).unlink(missing_ok=True)
-                    self.condition.notify_all()
+            if reserved: self.release(group, memory, group_unit(spec))
         emit({'result': outcome})
+
+    def release(self, group, memory, unit):
+        """Return one user's share of a resource group; the last user frees the memory and stops the slice."""
+        with self.condition:
+            self.groups[group]['users'] -= 1
+            if not self.groups[group]['users']:
+                self.reserved -= memory; del self.groups[group]
+                subprocess.run(['systemctl','stop',unit],capture_output=True,timeout=20)
+                (Path('/run/systemd/system')/unit).unlink(missing_ok=True)
+            self.condition.notify_all()
+
+    def reap(self, force=False):
+        from hephaestus_reaper import reap
+        return reap(self, force=force)
 
     def recover(self):
         """No client survives a broker restart. Stop only this broker's recorded operations."""
@@ -311,7 +348,10 @@ def serve():
                 broker.execute(request, self.connection, emit)
             except (BrokenPipeError, ConnectionResetError): pass
             except Exception as error:
-                try: emit({'result': {'exit_code': 125, 'failure_category': 'environment', 'error': str(error)}})
+                from hephaestus_admission import AdmissionAbandoned, AdmissionBusy
+                # Both mean no execution row exists; the caller's cancel confirms it as status not_dispatched.
+                waiting = {'dispatched': False, 'failure_category': 'admission_busy'} if isinstance(error, (AdmissionBusy, AdmissionAbandoned)) else {}
+                try: emit({'result': {'exit_code': 125, 'failure_category': 'environment', **waiting, 'error': str(error)}})
                 except OSError: pass
     class Server(socketserver.ThreadingUnixStreamServer):
         daemon_threads = True

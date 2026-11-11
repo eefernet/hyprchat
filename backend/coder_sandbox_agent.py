@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from coder_sandbox import Sandbox, IsolationUnavailable
+from coder_sandbox import Sandbox, IsolationUnavailable, NotDispatched
 
 
 @contextmanager
@@ -248,7 +248,12 @@ def run_isolated(store, operation_id, repository):
                 return {'engine': 'openhands159', 'agent_finished': True, 'hook_denials': denials,
                         'execution_status': 'checklist_ended', 'incomplete_reason': ''}
             if not output.is_file():
-                raise IsolationUnavailable('SDK child did not return a checkpoint: ' + log.read_text(errors='replace')[-1500:])
+                tail = log.read_text(errors='replace')[-1500:]
+                if box.stop() == 'not_dispatched':
+                    # The broker's own ledger has no execution for this launch (maintenance held admission, or the
+                    # request was refused before start). The log tail is shown for context and proves nothing.
+                    raise NotDispatched('The worker did not start this step. Nothing ran and no model calls were used. ' + tail)
+                raise IsolationUnavailable('SDK child did not return a checkpoint: ' + tail)
             result = json.loads(output.read_text())
             if result.get('error'):
                 kind = result.get('error_type')

@@ -223,6 +223,8 @@ def run(store, operation_id, repository):
             'declared browser test; these are preferable to a second implementation of its logic in the tests. '
             'Use the tools to perform work. Call finish when the requested implementation and checks are done. '
             'Final acceptance is performed separately on an immutable copy.\n\nREQUEST:\n' + payload['task'])
+    from coder_request_view import render as request_view
+    task += request_view(payload)
     if payload.get('repair_feedback'):
         task += '\n\nFresh verification failures to repair:\n' + json.dumps(payload['repair_feedback'])
     task += regression_context(payload)
@@ -270,6 +272,11 @@ def run(store, operation_id, repository):
                  'browser test against the actual application or import its real source module. Reading an HTML '
                  'file alone does not establish execution. Task-list updates alone do not implement or verify work; '
                  'follow planning with a concrete file edit or execution, keeping each tool action bounded.')
+    if payload.get('engine_behavior_version', 0) >= 3:
+        task += ('\nFor C and C++ projects that use CMake, register tests with enable_testing() and add_test() so that '
+                 'ctest --test-dir build runs them; each test is its own executable or a real test framework. '
+                 'A test target in a Makefile is not counted as a test run. When the user names a binary at a path, '
+                 'make the documented build produce it at exactly that path.')
     store.event(operation_id, 'tool_mode', engine=ENGINE, sdk_version=SDK_VERSION,
                 profile=payload.get('tool_profile', 'native'), thinking=thinking_mode)
     try:

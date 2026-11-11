@@ -269,6 +269,10 @@ def discover(repository, explicit=None, proposals=None):
         if (root / 'CMakeLists.txt').exists():
             toolchains += ['cmake', 'ctest']
             add('setup', 'cmake -S . -B build'); add('build', 'cmake --build build'); add('test', 'ctest --test-dir build --output-on-failure')
+            if (root / 'Makefile').exists():
+                # A hand-written Makefile beside CMake often builds the binary the request names at the
+                # project root. Build it too; its `test` target is never test evidence.
+                toolchains.append('make'); add('build', 'make')
         elif (root / 'Makefile').exists():
             toolchains.append('make'); add('build', 'make')
             if re.search(r'^test\s*:', (root / 'Makefile').read_text(), re.M):

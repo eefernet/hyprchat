@@ -98,6 +98,7 @@ async def deliver(tmp_path, job, revision, members, candidate=True):
 
 def test_download_routes_send_the_readable_name_and_keep_storage_identity(monkeypatch, tmp_path):
     setup(monkeypatch, tmp_path)
+    pytest.importorskip('chromadb')        # the route modules need the app host's dependencies, absent on the worker
     from routes.artifacts import download_artifact_ep
     from routes.downloads import archive_contents, download_file_endpoint
     async def scenario():
@@ -139,6 +140,7 @@ def test_two_projects_with_one_title_keep_distinct_stored_files(monkeypatch, tmp
 
 
 def test_a_naming_failure_never_costs_a_delivery(monkeypatch, tmp_path):
+    pytest.importorskip('chromadb')
     setup(monkeypatch, tmp_path)
     import db.coder_download_names as names
     async def broken(*args): raise RuntimeError('database is locked')

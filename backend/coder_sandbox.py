@@ -29,6 +29,15 @@ class IsolationUnavailable(RuntimeError):
     failure_category = 'environment'
 
 
+class StopUnconfirmed(IsolationUnavailable):
+    """The broker could not confirm a container stopped. Its writer may still be alive."""
+
+
+class NotDispatched(IsolationUnavailable):
+    """The broker confirmed this execution never started: nothing ran and nothing was charged."""
+    failure_category = 'not_dispatched'
+
+
 def relay(left, right):
     """Bounded idle lifetime; closing either endpoint closes the tunnel."""
     try:
@@ -176,6 +185,7 @@ class Sandbox(AbstractContextManager):
         self.cache_lease = None
         self.shared_leases = []
         self.execution_identity = None
+        self.stop_status = None
 
     def translate_url(self, value):
         for i, original in enumerate(self.urls):
@@ -386,20 +396,32 @@ class Sandbox(AbstractContextManager):
         self.env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
         return self
 
+    def stop(self):
+        """Ask the broker to stop this execution. Returns its status ('not_dispatched' when it never started).
+
+        The answer comes from the broker's own ledger over its socket, so the workload cannot forge it.
+        """
+        if not self.execution_identity:
+            return self.stop_status
+        identity,scope=self.execution_identity
+        try:
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(60)
+                connection.connect(os.environ.get('HEPHAESTUS_BROKER_SOCKET','/run/hephaestus/broker.sock'))
+                connection.sendall(json.dumps({'action':'cancel','id':identity,'scope':scope}).encode()+b'\n')
+                with connection.makefile('rb') as reader: result=json.loads(reader.readline(65536))
+                if not result.get('result',{}).get('stopped'): raise RuntimeError('Container stop is unconfirmed')
+                self.stop_status=result['result'].get('status')
+        except (OSError,ValueError,RuntimeError) as error:
+            raise StopUnconfirmed('Hephaestus could not confirm the writer stopped: '+str(error)) from error
+        finally:
+            self.execution_identity=None
+        return self.stop_status
+
     def __exit__(self, *exception):
         stop_error = None
-        if self.execution_identity:
-            identity,scope=self.execution_identity
-            try:
-                with socket.socket(socket.AF_UNIX) as connection:
-                    connection.settimeout(60)
-                    connection.connect(os.environ.get('HEPHAESTUS_BROKER_SOCKET','/run/hephaestus/broker.sock'))
-                    connection.sendall(json.dumps({'action':'cancel','id':identity,'scope':scope}).encode()+b'\n')
-                    with connection.makefile('rb') as reader: result=json.loads(reader.readline(65536))
-                    if not result.get('result',{}).get('stopped'): raise RuntimeError('Container stop is unconfirmed')
-            except (OSError,ValueError,RuntimeError) as error:
-                stop_error=IsolationUnavailable('Hephaestus could not confirm the writer stopped: '+str(error))
-            self.execution_identity=None
+        try: self.stop()
+        except StopUnconfirmed as error: stop_error=error
         for server, thread in reversed(self.servers):
             server.shutdown(); server.server_close(); thread.join(timeout=2)
         if self.temporary:

@@ -1,18 +1,5 @@
 <details open>
-<summary>Unreleased — UI refresh</summary>
-
-- **Simpler Daedalus settings** — one coding engine handles planning, building and repairs on Hephaestus. Choose a chat model and a coding model; older job history remains readable.
-- **Consistent service names** — Hephaestus now appears in Service Monitor and project actions, with existing uptime history preserved.
-
-- **A clearer interface** — refined sidebar, headings, theme previews, and shared surfaces, while keeping the familiar composer and existing animated backgrounds.
-- **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
-- **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.
-- **Visual fixes** — composer focus feedback, Send/Stop shape changes, interface-font persistence, and consistent update notices.
-
-</details>
-
-<details open>
-<summary>Alpha v18.2.1 — Oct 27, 2026</summary>
+<summary>Alpha v18.2.1 — Nov 12, 2026</summary>
 
 > Clearer coding results, safer follow-up edits, and a new home for running your projects.
 
@@ -22,12 +9,22 @@
 - **Accept the version you want** — mark a build as accepted while keeping later edits separate. Accepted projects stay available to download.
 - **Easier follow-up edits** — continue from the latest build, even before accepting it, or choose your accepted version as the starting point.
 - **Safer changes** — protect tests that already pass and check that requests to add tests actually produce new ones. Improved recovery prevents empty projects from being offered for acceptance.
+- **Simpler Daedalus settings** — one coding engine handles planning, building and repairs on Hephaestus. Choose a chat model and a coding model; older job history remains readable.
 - **More reliable builds** — improved Java packaging, coding performance, and Stop/Continue recovery, with clearer job cards and fewer confusing status messages.
 
 ## Hephaestus & Application Previews
 
 - **Codebox retired; Hephaestus added** — code execution, coding agents, document generation, and application previews now run in isolated Docker containers for more consistent environments.
 - **Keep applications running** — keep supported previews running, stop or restart them, and view their logs. Saved application data survives restarts; temporary previews close after 15 minutes.
+- **Consistent service names** — Hephaestus now appears in Service Monitor and project actions, with existing uptime history preserved.
+
+## UI and other fun stuff
+
+- **A clearer interface** — refined sidebar, headings, theme previews, and shared surfaces, while keeping the familiar composer and existing animated backgrounds.
+- **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
+- **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.
+- **Visual fixes** — composer focus feedback, Send/Stop shape changes, interface-font persistence, and consistent update notices.
+
 
 </details>
 

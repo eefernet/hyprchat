@@ -60,6 +60,9 @@ def controls():
          'dev-web', labels=('working', 'broken'), followup=True)
     pair('qt', {'app.py': _QT.replace('CLEAR', 'i.clear()')}, {'app.py': _QT.replace('CLEAR', 'pass')},
          'dev-qt', labels=('working', 'broken'), followup=True)
+    from judge_controls_native import pairs
+    for kind, good, broken, case in pairs():
+        pair(kind, good, broken, case, followup=True)
     return rows
 
 

@@ -249,7 +249,7 @@ def execute(root, op_id):
                             shutil.rmtree(path)
                             if row['kind']=='test_environment':
                                 # The acknowledged copy is durable on HyprChat.
-                                (control(root)/'evidence-outbox'/(row['id']+'.tar.gz')).unlink(missing_ok=True)
+                                for suffix in ('.tar.gz','.tar.pending','.tar.pending.json'):(control(root)/'evidence-outbox'/(row['id']+suffix)).unlink(missing_ok=True)
                         outcome['status']='removed'
                 except (OSError,RuntimeError,ValueError) as error:outcome.update(status='skipped',reason=str(error)[:400])
                 op.setdefault('results',[]).append(outcome);op.pop('intent',None);atomic(record,op)
@@ -357,39 +357,11 @@ def prepare_archives(root):
         path=resource_path(root,row['path'])
         if not path.exists() or row.get('archive',{}).get('verified') or not row.get('completed_at'):continue
         if any(row['id']!=g['id'] and path.is_relative_to(root/g['path']) for g in groups):continue
-        try:
-            with lock(root,'admission',blocking=False),lock(root,'resource:'+row['id'],blocking=False):
-                if _active_under(root,path,registry):continue
-                if any(subprocess.run(['systemctl','is-active','--quiet',unit]).returncode==0 for unit in row.get('services',[])):continue
-                target=outbox/(row['id']+'.tar.gz');metadata=outbox/(row['id']+'.json')
-                fingerprint=evidence_fingerprint(path)
-                record=read(metadata)
-                if not target.exists() or record.get('fingerprint')!=fingerprint:
-                    import io
-                    files=[];tmp=target.with_suffix('.pending')
-                    with tarfile.open(tmp,'w:gz') as archive:
-                        for directory,dirs,names in os.walk(path,followlinks=False):
-                            dirs[:]=[name for name in dirs if name not in EVIDENCE_EXCLUDED
-                                     and not (Path(directory)/name).is_symlink() and not (Path(directory)/name/'pyvenv.cfg').exists()]
-                            for name in names:
-                                file=Path(directory)/name
-                                if file.is_symlink() or not file.is_file():continue
-                                relative=str(file.relative_to(path));sha=hashlib.sha256()
-                                with file.open('rb') as handle:
-                                    for chunk in iter(lambda:handle.read(1024**2),b''):sha.update(chunk)
-                                files.append({'path':relative,'bytes':file.stat().st_size,'sha256':sha.hexdigest()})
-                                archive.add(file,arcname='evidence/'+relative,recursive=False)
-                        body=json.dumps({'resource':row['id'],'source':row['path'],'files':files},indent=2).encode()
-                        member=tarfile.TarInfo('manifest.json');member.size=len(body);archive.addfile(member,io.BytesIO(body))
-                    if evidence_fingerprint(path)!=fingerprint:raise RuntimeError('Test evidence changed during archival')
-                    tmp.chmod(0o600);tmp.replace(target)
-                    digest=hashlib.sha256()
-                    with target.open('rb') as handle:
-                        for chunk in iter(lambda:handle.read(1024**2),b''):digest.update(chunk)
-                    record={'id':row['id'],'source':row['path'],'identity':identity(path),'fingerprint':fingerprint,'sha256':digest.hexdigest(),'bytes':target.stat().st_size}
-                    atomic(metadata,record)
-                records.append(record)
-        except BlockingIOError:continue
+        from hephaestus_archive import archive_environment
+        idle=lambda:not _active_under(root,path,registry) and not any(
+            subprocess.run(['systemctl','is-active','--quiet',unit]).returncode==0 for unit in row.get('services',[]))
+        record=archive_environment(root,row,path,outbox,idle=idle,fingerprint=evidence_fingerprint,identity=identity,excluded=EVIDENCE_EXCLUDED)
+        if record:records.append(record)
     return records
 
 

@@ -338,6 +338,7 @@ def bind_project_entrypoint(repository, flow, task):
 
 
 def run(store, operation_id, repository, flows, *, origin='confirmed_interaction'):
+    from coder_sandbox import IsolationUnavailable
     payload = store.get(operation_id)['payload']
     validate(flows, payload.get('engine_behavior_version', 0), preflight_version=payload.get('ui_preflight_version', 0))
     revision=payload['revision_id']
@@ -355,6 +356,11 @@ def run(store, operation_id, repository, flows, *, origin='confirmed_interaction
                 if diagnostic: diagnostic['flow_index'] = index
         except (InterruptedError, TimeoutError):
             raise
+        except IsolationUnavailable as failure:
+            # For example a container whose stop could not be confirmed. The application did not cause this,
+            # so it must not be sent to repair as an interaction failure.
+            error=str(failure)
+            diagnostic={'category':'environment','environment_fault':True,'phase':'isolation','flow_index':index,'step_index':step_index}
         except Exception as failure:
             error=str(failure)
             if payload.get('engine_behavior_version', 0) >= 1:
