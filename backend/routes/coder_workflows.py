@@ -164,5 +164,9 @@ async def checkpoint(workflow_id: str):
         raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     if not job.get("revision_id") or job["state"] not in {"blocked","waiting_for_input","cancelled","ready_for_review"}:
         raise HTTPException(409,"Stop the job before exporting an unverified checkpoint")
+    from coder_naming import base_for, download_name
+    project = await db.get_coding_project(job["project_id"]) if job.get("project_id") else None
+    # download_name admits only [a-z0-9.-], so the hand-built header below cannot be broken by a title.
+    name = download_name((project or {}).get("download_slug") or base_for(job), "unverified")
     return await stream_worker_file(coder_jobs.worker_url(job)+"/checkpoint?revision="+job["revision_id"],
-        "application/gzip",f"unverified-{job['id']}-{job['revision_id']}.tar.gz")
+        "application/gzip", name)

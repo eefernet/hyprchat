@@ -680,6 +680,20 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
 
 
 
+async def _readable_name(job, archive, candidate):
+    """Name the download after the project; the stored file, its URL and artifacts.filename stay as they are."""
+    try:
+        from coder_naming import base_for, download_name, title_of
+        from db.coder_download_names import assign
+        base, version = await assign(job.get("project_id") or "", job["id"], await asyncio.to_thread(base_for, job, archive))
+        return {"download_name": download_name(base, "review" if candidate else "accepted", version),
+                "download_base": base, "download_version": version, "project_title": title_of(base)}
+    except Exception as error:
+        # A name is a convenience. It must never cost a delivery.
+        print(f"[CODER] readable download name unavailable for {job.get('id')}: {type(error).__name__}: {error}")
+        return {}
+
+
 async def _deliver(job, result, *, candidate=False):
     from coder_check_evidence import runnable
     accepted = job.get("acceptance") or {}
@@ -723,12 +737,14 @@ async def _deliver(job, result, *, candidate=False):
         partial.replace(destination)
     finally:
         partial.unlink(missing_ok=True)
+    readable = await _readable_name(job, destination, candidate)
     try:
         publish = store.finish_candidate if candidate else store.finish_artifact
         artifact = await publish(job["id"], job["revision_id"], artifact_id=artifact_id,
             filename=filename, url=f"/api/downloads/{filename}", kind="archive", mime_type="application/gzip",
+            **({"title": readable["download_name"]} if readable else {}),
             storage_path=str(destination), size_bytes=destination.stat().st_size, sha256=result["sha256"], exists_status="present", status="review_candidate" if candidate else "accepted",
-            metadata={"revision_id": job["revision_id"], "acceptance": accepted, "workflow_version": 3,
+            metadata={"revision_id": job["revision_id"], "acceptance": accepted, "workflow_version": 3, **readable,
                 "policy_version":job.get("policy_version",1),"project_id":job["project_id"],
                 "parent_artifact_id":job.get("parent_artifact_id",""),"source_revision_id":job.get("source_revision_id",""),
                 "requirements":job.get("requirements",[]),"visual_review":job.get("visual_review",{}),

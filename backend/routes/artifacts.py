@@ -159,7 +159,8 @@ async def download_artifact_ep(artifact_id: str):
     filepath, safe_name = artifact_path_for_row(artifact)
     if not filepath:
         raise HTTPException(404, "Artifact file is missing")
-    download_name = os.path.basename(artifact.get("filename") or "") or safe_name
+    from coder_naming import display_name_for
+    download_name = display_name_for(artifact) or os.path.basename(artifact.get("filename") or "") or safe_name
     return FileResponse(filepath, filename=download_name)
 
 

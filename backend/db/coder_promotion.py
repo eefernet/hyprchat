@@ -36,10 +36,20 @@ JOB_OR_UPLOAD = ("CASE WHEN COALESCE(openhands_project_id,'')='' OR substr(openh
 BACKFILL_VERSION = 2   # PRAGMA user_version step; database.init_db's step 1 runs first
 
 
+def accepted_name(metadata):
+    """The candidate's readable name without its review suffix; None when the candidate had none."""
+    from coder_naming import download_name
+    try:
+        return download_name(metadata["download_base"], "accepted", metadata.get("download_version") or 1)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 async def migrate(connection):
     """Additive: pointer columns and promotion log, both backfilled from existing jobs (the pointers only once)."""
     existing = {r[1] for r in await connection.execute_fetchall("PRAGMA table_info(coding_projects)")}
-    for name, definition in POINTER_COLUMNS.items():
+    from db.coder_download_names import COLUMN
+    for name, definition in {**POINTER_COLUMNS, **COLUMN}.items():
         if name not in existing:
             await connection.execute(f"ALTER TABLE coding_projects ADD COLUMN {name} {definition}")
     await connection.executescript("""
@@ -348,11 +358,13 @@ async def accept(project_id, revision_id):
         if previous:
             artifact = previous
         else:
+            readable = accepted_name(source.get("metadata") or {})
             artifact = await db.add_artifact(_connection=connection, conversation_id=job["conversation_id"], workflow_id=job["id"],
                 artifact_id=artifact_id, filename=accepted_path.name, url=f"/api/downloads/{accepted_path.name}", kind="archive",
                 mime_type="application/gzip", storage_path=str(accepted_path), size_bytes=accepted_path.stat().st_size,
-                sha256=sha256, exists_status="present", status="accepted",
-                metadata={**(source.get("metadata") or {}), "revision_id": revision_id, "accepted_by": "user",
+                sha256=sha256, exists_status="present", status="accepted", **({"title": readable} if readable else {}),
+                metadata={**{k: v for k, v in (source.get("metadata") or {}).items() if k != "download_name"},
+                          **({"download_name": readable} if readable else {}), "revision_id": revision_id, "accepted_by": "user",
                           "delivery_status": "accepted", "source_artifact_id": source.get("id", "")})
             if not artifact:
                 raise ValueError("Artifact registration failed")

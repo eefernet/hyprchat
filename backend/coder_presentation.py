@@ -24,6 +24,15 @@ NOT_VERIFIED = ('Daedalus ran the build, the project\'s own tests and the comman
                 'submit, performance or security.')
 
 
+def project_name(job):
+    """The delivered project's title, else the person's own first clause, never an internal id."""
+    from coder_naming import slug, title_of
+    for artifact in (job.get('artifact'), job.get('candidate_artifact')):
+        title = ((artifact or {}).get('metadata') or {}).get('project_title')
+        if title: return title
+    return job.get('project_name') or title_of(slug(job.get('original_user_request') or job.get('user_task') or '')) or 'Daedalus project'
+
+
 def presentation(job):
     state = job['state']
     from coder_check_outcomes import current, counts
@@ -82,7 +91,7 @@ def presentation(job):
     empty = bool(revision) and job.get('mode') == 'build_from_prompt' and (revision == job.get('baseline_revision')
                                 or (summary.get('revision_id') == revision and 'checks' in summary and not summary['checks']))
     accept_ready = job.get('engine') == 'openhands159' and state == 'ready_for_review' and bool(candidate.get('id')) and bool(revision) and not empty
-    return {'phase': phase, 'detail': detail, 'project_name': job.get('project_name') or 'Daedalus project',
+    return {'phase': phase, 'detail': detail, 'project_name': project_name(job),
         **({'check_counts': counts(rows)} if job.get('engine') == 'openhands159' else {}),
         'not_verified': (('See the requirement evidence for failed or unverified UI outcomes. Passing checks cover only the observed interactions; other behavior needs your review.'
                          if job.get('ui_contract_version') else NOT_VERIFIED)

@@ -261,3 +261,42 @@ def test_reconnect_does_not_follow_up_an_already_accepted_failed_controller_job(
     result = json.loads((tmp_path/'report.json').read_text())['trials'][0]
     assert result['finished'] and not result['passed'] and len(result['turns']) == 1
     assert 'Controller verification' in result['error']
+
+
+class ReopenPage:
+    """Two conversations share one sidebar title; only the id tells them apart."""
+    def __init__(self, messages, *, loads=True):
+        self.messages, self.loads, self.hash, self.waited = messages, loads, None, []
+    def evaluate(self, script, argument=None):
+        assert 'kind=chat' in script
+        self.hash = argument
+    def locator(self, selector):
+        page = self
+        class Row:
+            def wait_for(self, **kwargs):
+                page.waited.append((selector, kwargs.get('state')))
+                if not page.loads: raise PlaywrightError('Timeout 20000ms exceeded')
+        return Row()
+    def wait_for_function(self, script, **kwargs): self.waited.append(('hash-cleared', None))
+
+
+def test_reopen_uses_the_conversation_id_never_the_sidebar_title(monkeypatch):
+    conversation = {'id': 'conv-b', 'title': 'Plain HTML JavaScript Tip Calculator Code Example',
+                    'messages': [{'id': 40, 'role': 'assistant'}, {'id': 41, 'role': 'user'}]}
+    monkeypatch.setattr(driver, 'api', lambda page, path: conversation)
+    page = ReopenPage(conversation['messages'])
+    driver.reopen(page, 'conv-b')
+    assert page.hash == 'conv-b' and page.waited == [('#saved-message-41', 'attached')]
+    empty = ReopenPage([])
+    monkeypatch.setattr(driver, 'api', lambda page, path: {'id': 'conv-b', 'messages': []})
+    driver.reopen(empty, 'conv-b')
+    assert empty.waited == [('hash-cleared', None)]
+
+
+def test_reopen_failure_is_an_interruption_and_never_a_guess(monkeypatch):
+    monkeypatch.setattr(driver, 'api', lambda page, path: {'id': 'conv-b', 'messages': [{'id': 41}]})
+    with pytest.raises(driver.CampaignInterrupted, match='Cannot reopen'):
+        driver.reopen(ReopenPage([{'id': 41}], loads=False), 'conv-b')
+    monkeypatch.setattr(driver, 'api', lambda page, path: {'id': 'someone-else', 'messages': []})
+    with pytest.raises(driver.CampaignInterrupted, match='not available'):
+        driver.reopen(ReopenPage([]), 'conv-b')

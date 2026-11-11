@@ -11,18 +11,10 @@ import re
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend/evals'))
-from engine_cases import CASES, CASES_V1, DEVELOPMENT, DEVELOPMENT_V1, private_probes
-from engine_cases_reliability import CASES as RELIABILITY
+from engine_cases import private_probes
 
 
-def roster(cohort, bank_version=2):
-    if cohort in {'everyday','breadth','pocket'}:
-        from engine_cases_everyday import CASES as everyday, POCKET, breadth_cases
-        if cohort == 'breadth':
-            return breadth_cases(), 1
-        return (everyday, 3) if cohort == 'everyday' else (POCKET, 1)
-    return {'classic': (CASES if bank_version == 2 else CASES_V1, 3), 'reliability': (RELIABILITY, 3),
-            'development': (DEVELOPMENT if bank_version == 2 else DEVELOPMENT_V1, 2)}[cohort]
+from engine_cohorts import floor as cohort_floor, roster
 
 
 def check_job(job, reliability, errors):
@@ -264,7 +256,7 @@ def assess(report, *, require_composer=False):
             success_keys.add(key)
     if seen != schedule.keys():
         errors.append('incomplete case/repetition roster')
-    floor = 1.0 if cohort in ('development','pocket','breadth') else .8
+    floor = cohort_floor(cohort)
     families = {family:{'successes':successes[family], 'runs':observed[family], 'expected':count,
                         'rate':successes[family]/count, 'passed':successes[family]/count >= floor}
                 for family, count in totals.items()}

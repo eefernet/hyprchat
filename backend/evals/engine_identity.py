@@ -10,8 +10,7 @@ def digest(value):
 
 
 def receipt(settings, *, root=None, runtime_path='/etc/hephaestus/runtime.json'):
-    from engine_cases import CASES, DEVELOPMENT, PROMPT_BANK_VERSION
-    from engine_cases_everyday import CASES as everyday, POCKET, REHEARSAL, breadth_cases
+    from engine_cases import PROMPT_BANK_VERSION
     root = Path(root or Path(__file__).resolve().parents[2]).resolve()
     manifest_bytes = (root / 'qualification-files.json').read_bytes()
     manifest = json.loads(manifest_bytes)
@@ -30,8 +29,7 @@ def receipt(settings, *, root=None, runtime_path='/etc/hephaestus/runtime.json')
         components[name] = value
     runtime = json.loads(Path(runtime_path).read_text())
     profiles = {k: runtime['profiles'][k]['image'] for k in ('core', 'languages')}
-    banks = dict(development=DEVELOPMENT, classic=CASES, everyday=everyday,
-                 pocket=POCKET, breadth=breadth_cases(), rehearsal=REHEARSAL)
+    from engine_cohorts import IDENTITY as banks
     value = dict(version=1, release_id=hashlib.sha256(manifest_bytes).hexdigest()[:18],
                  manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
                  components=components, components_sha256=digest(components),

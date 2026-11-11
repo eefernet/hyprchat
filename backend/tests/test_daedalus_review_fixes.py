@@ -46,14 +46,6 @@ def test_explicit_protected_file_changes_are_restored(tmp_path):
     assert restore_protected(repo, baseline, ['README.md']) == []
 
 
-def test_explicit_visual_request_excludes_negated_requests():
-    from coder_visual import required
-    assert required('Include visual verification of this web page')
-    assert required('Review the screenshots')
-    assert not required('Do not perform visual review')
-    assert not required('Skip visual verification')
-
-
 def test_continue_waits_for_cancelled_controller_to_exit(monkeypatch, tmp_path):
     import config
     import database as db

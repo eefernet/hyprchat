@@ -5,7 +5,6 @@ import subprocess
 import sys
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from coder_criteria import deliverables
 from coder_project_runtime import failure_class
 from context_policy import coding_allocation
 
@@ -19,15 +18,6 @@ from context_policy import coding_allocation
 ])
 def test_failure_precedence(row, expected):
     assert failure_class(row) == expected
-
-
-def test_requested_deliverables_and_negation():
-    assert deliverables('Add browser regression checks and a README.') == {'tests', 'documentation'}
-    assert deliverables('No tests. Include documentation.') == {'documentation'}
-    assert deliverables('Build a calculator without tests or documentation.') == set()
-    assert deliverables('Without network access, include tests and documentation.') == {'tests', 'documentation'}
-    assert deliverables('No tests and add a README.') == {'documentation'}
-    assert deliverables('Tests are not required; document usage.') == {'documentation'}
 
 
 @pytest.mark.parametrize('configured,remaining,reserve', [(120, 120, 30), (120, 29, 14), (8, 3, 1), (120, 1, 0), (1, 0, 0)])
@@ -122,13 +112,6 @@ def test_node_caught_assertion_and_expected_exception(tmp_path):
     assert len(failures) == 1 and failures[0]['actual'] == 2
 
 
-def test_scoped_audit_count_and_endpoint_punctuation():
-    from coder_audit_hygiene import requested_endpoints, web_audit_faults
-    assert ('GET', '/api/tasks') in requested_endpoints('Use GET /api/tasks. Then POST /api/tasks.')
-    text = "# DAEDALUS_APP_URL\nmine = [r for r in rows if r['id'] == created['id']]\nassert len(mine) == 1\n"
-    assert not web_audit_faults('test.py', text)
-
-
 def test_swallowed_unittest_assertion_is_retained(tmp_path):
     from coder_native_checks import PYTHON_TRACE
     from coder_assertion_outcomes import PYTHON_OUTCOMES, read_outcomes
@@ -159,13 +142,6 @@ def test_node_async_expected_failure_does_not_mask_unrelated_failure(tmp_path):
     assert len(failures) == 1 and failures[0]['actual'] == 3
 
 
-def test_retained_criteria_preserve_parent_identity():
-    from coder_criteria import criteria
-    rows = criteria('', [{'id':'o2','text':'Keep alphabetical ties','evidence_types':['behavior']}],
-                    [{'parent_id':'o1','action':'retain','active_outcome_ids':['o2']}])
-    assert rows[0]['parent_ids']==['o1'] and rows[0]['owners']==['o2']
-
-
 def test_cancel_before_dispatch_fences_a_delayed_start(tmp_path):
     from coder_worker_runtime import WorkerStore,launch
     from context_policy import DEFAULTS
@@ -177,10 +153,6 @@ def test_cancel_before_dispatch_fences_a_delayed_start(tmp_path):
     assert store.get('op')['pid'] is None and store.get('op')['calls']==0
     with pytest.raises(ValueError):store.create('op','other-job','code',{})
     with pytest.raises(ValueError):store.cancel_before_dispatch('op','other-job')
-
-
-def test_named_unittest_is_an_explicit_test_obligation():
-    assert 'tests' in deliverables('Add a unittest test_calc.py and README.')
 
 
 def test_cancel_and_completion_account_usage_once(monkeypatch,tmp_path):

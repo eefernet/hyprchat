@@ -460,7 +460,7 @@ async def finish_artifact(workflow_id, revision_id, **artifact_fields):
                                      (workflow_id,workflow_id,revision_id,artifact["id"],now(),project_id,db.current_user_id()))
         else:
             await connection.execute("INSERT INTO coding_projects(id,user_id,name,description,language,file_manifest,last_plan,conversation_id,openhands_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                                     (project_id,db.current_user_id(),"Daedalus project",job["user_task"],"","[]","",job["conversation_id"],workflow_id,now(),now()))
+                                     (project_id,db.current_user_id(),(job.get("user_task") or "").strip().splitlines()[0][:100] if (job.get("user_task") or "").strip() else "Daedalus project",job["user_task"],"","[]","",job["conversation_id"],workflow_id,now(),now()))
             await connection.execute("UPDATE coding_projects SET accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=? WHERE id=?", (workflow_id,revision_id,artifact["id"],project_id))
         await advance_working(connection, project_id, workflow_id, revision_id, artifact["id"])
         if not keep_user_choice:

@@ -550,7 +550,7 @@ def services(store, op_id, root, definitions, environment, folder, *, probe=Fals
                     # Submitting is not the requested workflow: edit, drag, delete, persist, literal text (direct URL).
                     from coder_workflow_guard import workflow_rows
                     payload = store.get(op_id)['payload']
-                    task = (payload.get('policy7_job') or {}).get('user_task') or (payload.get('policy7_job') or {}).get('task') or payload.get('original_task') or payload.get('task') or ''
+                    task = payload.get('original_task') or payload.get('task') or ''
                     rows.extend(workflow_rows(service, url, settings, task))
         yield env, rows
     finally:

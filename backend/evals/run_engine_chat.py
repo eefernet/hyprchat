@@ -17,11 +17,11 @@ from urllib.parse import urlsplit
 import zipfile
 
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
-from engine_cases import CASES as CLASSIC, DEVELOPMENT, PROMPT_BANK_VERSION
-from engine_cases_everyday import CASES as EVERYDAY, POCKET, breadth_cases
+from engine_cases import PROMPT_BANK_VERSION
+import engine_cohorts
 
 TERMINAL = {'ready_for_review','completed','failed','blocked','cancelled','waiting_for_input'}
-BANKS = {'classic':CLASSIC,'development':DEVELOPMENT,'everyday':EVERYDAY,'pocket':POCKET,'breadth':breadth_cases()}
+BANKS = engine_cohorts.COMPOSER
 
 
 class CampaignInterrupted(RuntimeError):
@@ -232,14 +232,20 @@ def prepare_upload(page, case, trial, persist, allowance):
 
 
 def reopen(page, conversation):
+    """Open the saved conversation by its id. Sidebar titles repeat when prompts repeat, so a title cannot identify it."""
     data = api(page, f'/api/conversations/{conversation}')
-    if page.get_by_role('button',name='Show conversations').is_visible():
-        page.get_by_role('button',name='Show conversations').click()
-    rows = page.locator('.conv-row').filter(has=page.get_by_text(data['title'],exact=True))
-    rows.first.wait_for(state='visible',timeout=20000)
-    if rows.count()!=1:
-        raise CampaignInterrupted('Cannot identify the saved conversation uniquely in the sidebar')
-    rows.click()
+    if data.get('id') != conversation:
+        raise CampaignInterrupted('Saved conversation is not available to this profile')
+    saved = [m['id'] for m in data.get('messages', []) if m.get('id')]
+    try:
+        # The application's own source-link route: it loads the conversation and then clears the hash.
+        page.evaluate("id => { window.location.hash = '#source?kind=chat&id=' + encodeURIComponent(id); }", conversation)
+        if saved:
+            page.locator(f'#saved-message-{saved[-1]}').wait_for(state='attached', timeout=20000)
+        else:
+            page.wait_for_function("() => !window.location.hash", timeout=20000)
+    except PlaywrightError as error:
+        raise CampaignInterrupted('Cannot reopen the saved conversation: ' + str(error)[:500]) from error
 
 
 def await_job(page, turn, earlier, persist, allowance):
@@ -403,7 +409,7 @@ def run(args):
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     path = root/'report.json'
     cases = BANKS[args.cohort]
-    reps = {'development':2,'pocket':1,'breadth':1}.get(args.cohort,3)
+    reps = engine_cohorts.repeats(args.cohort)
     schedule = [(case,i) for i in range(1,reps+1) for case in cases]
     freeze = {'cohort':args.cohort,'prompt_bank_version':PROMPT_BANK_VERSION,'environment':env,'bank_sha256':hashlib.sha256(
         json.dumps(cases,sort_keys=True).encode()).hexdigest(),
@@ -493,7 +499,7 @@ def run(args):
             print(key,'PASS' if trial['passed'] else 'FAIL',trial.get('error',''),flush=True)
         browser.close()
     report['complete']=len(report['trials'])==len(schedule) and all(t.get('finished') for t in report['trials'])
-    floor=1 if args.cohort in ('development','pocket','breadth') else .8
+    floor=engine_cohorts.floor(args.cohort)
     report['behavioral_gate_passed']=all(sum(t['passed'] for t in report['trials'] if t['family']==f)>=
         floor*sum(c['family']==f for c,_ in schedule) for f in {c['family'] for c in cases})
     persist()

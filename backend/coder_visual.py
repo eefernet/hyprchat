@@ -1,17 +1,7 @@
 """Revision-bound captures and measured layout findings on managed services."""
 from __future__ import annotations
 
-import re
 import time
-
-
-def required(task):
-    for clause in re.split(r'[.!?;\n]', task or ''):
-        for match in re.finditer(r'\b(?:visual|screenshot)\s+(?:review|verification|inspection)\b|\b(?:review|inspect|verify)\s+(?:the\s+)?screenshots\b', clause, re.I):
-            prefix = clause[:match.start()].lower()
-            if not re.search(r"\b(?:no|not|never|skip|without|don't|do not)\b[^,]{0,45}$", prefix):
-                return True
-    return False
 
 
 def capture(store, op, service, url, path, candidates=()):
@@ -104,32 +94,3 @@ def capture_browser(folder, row, payload, candidates, url, path):
             row.update(skipped=False, classification='application_defect', environment_fault=False,
                        reason='; '.join(d['summary'] for d in row['layout_defects']))
     return row
-
-
-def measure(store, op, payload, findings):
-    from coder_worker_runtime import operation_repo
-    from coder_project_runtime import contract, run_revision
-    candidates = {}
-    for check in payload.get('evidence', {}).get('checks', []):
-        if check.get('kind') != 'policy7_browser' or check.get('revision_id') != payload['revision_id']:
-            continue
-        shots = {s['evidence']['id']: s['viewport'] for s in check.get('screenshots', [])}
-        rows = [{**f, 'viewport': shots[f['screenshot_id']]} for f in findings if f.get('screenshot_id') in shots
-                and f.get('selector') and f.get('category') in {'clipping', 'overflow', 'overlap'}]
-        if rows:
-            candidates.setdefault(check['service_id'], []).extend(rows)
-    if not candidates:
-        return []
-    current = store.get(op)
-    store.update(op, payload={**current['payload'], 'visual_measurements': candidates})
-    repo = operation_repo(store, current)
-    job = payload.get('policy7_job', {})
-    result = run_revision(store, op, repo, contract(repo, job.get('execution_commands')),
-                          project_id=payload['project_id'], checks=[])
-    observed = {c.get('service_id') for c in result['checks'] if c.get('kind') == 'policy7_browser'}
-    for service in candidates.keys() - observed:
-        result['checks'].append({'id': 'visual:' + service, 'origin': 'controller', 'phase': 'visual',
-            'passed': False, 'skipped': True, 'optional_visual': not payload.get('visual_required'),
-            'classification': 'environment', 'revision_id': payload['revision_id'],
-            'reason': 'The service could not be started for visual measurement'})
-    return result['checks']

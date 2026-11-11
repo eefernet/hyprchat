@@ -25,12 +25,12 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   const resumable=['blocked','waiting_for_input','ready_for_review','cancelled'].includes(job.state);
   const disabledReason=continueReason(job);
   const calls=(job.calls_used||0)+(job.operation_calls||0);
-  const facts=[job.model,`${elapsedLabel(elapsed)} elapsed`,job.call_limit?`${calls} of ${job.call_limit} model calls`:`${calls} model call${calls===1?'':'s'}`,job.inventory?.files?`${job.inventory.files} files`:''].filter(Boolean).join(' · ');
+  const facts=[job.model,`${elapsedLabel(elapsed)} elapsed`,job.call_limit?`${calls} of ${job.call_limit} model calls`:`${calls} model call${calls===1?'':'s'}`,job.inventory?.files?`${job.inventory.files} files`:'',job.revision_id?`revision ${job.revision_id.slice(0,8)}`:''].filter(Boolean).join(' · ');
   const artifact=job.artifact||job.candidate_artifact;
   const accept=job.presentation?.actions?.accept,detail=job.presentation?.detail||'';
   const label=detail?`${status} · ${detail}`:status;
   const controls=<>{active?<button style={button} disabled={busy||job.state==='cancelling'} onClick={()=>action('cancel')}>{job.state==='cancelling'?'Stopping…':'Stop'}</button>:resumable&&!(accept?.enabled&&disabledReason)?<button style={button} disabled={busy||!!disabledReason||!!job.scope_question&&!clarification.trim()} title={disabledReason} onClick={()=>action('resume',resumeVisual,clarification)}>{job.engine==='openhands159'?'Resume':'Continue'}</button>:null}{!active&&resumable&&job.engine==='openhands159'&&needsMoreAllowance(job)&&!disabledReason&&<button style={button} disabled={busy||!!job.scope_question&&!clarification.trim()} onClick={()=>action('resume',resumeVisual,clarification,'new_allowance')}>Continue with more allowance</button>}</>;
-  const downloads=<>{artifact&&<a style={button} href={userScopedUrl(`/api/artifacts/${artifact.id}/download`)} download>{job.artifact?'Download accepted project':'Download candidate'}</a>}
+  const downloads=<>{artifact&&<a style={button} href={userScopedUrl(`/api/artifacts/${artifact.id}/download`)} download title={artifact.metadata?.download_name?`Saves as ${artifact.metadata.download_name}`:undefined}>{job.artifact?'Download accepted project':'Download candidate'}</a>}
     {!artifact&&resumable&&job.revision_id&&<a style={button} href={userScopedUrl(`/api/coder/workflows/${job.id}/checkpoint`)} download>Download checkpoint</a>}
     {accept?.enabled&&job.project_id&&<button style={{...button,borderColor:t.acc,color:t.acc}} disabled={busy} title="Mark this exact revision as the project's accepted version" onClick={()=>action('accept')}>Accept this build</button>}</>;
   // A fixed list of what passing checks do not cover, so "checks passed" is never read as "verified".

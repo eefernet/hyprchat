@@ -66,20 +66,6 @@ def test_an_undeclared_script_binary_is_an_application_defect_not_a_sandbox_faul
     assert failure_class(row) != 'environment'
 
 
-def test_http_audits_are_told_about_state_assumptions_and_unrequested_endpoints():
-    from coder_audit_hygiene import show_failing_line, web_audit_faults
-    request = 'GET /api/tasks - list\nPOST /api/tasks\nPUT /api/tasks/:id\nDELETE /api/tasks/:id'
-    audit = ('import os, requests\nAPP_URL = os.environ["DAEDALUS_APP_URL"]\n'
-             'tasks = requests.get(f"{APP_URL}/api/tasks").json()\nassert len(tasks) == 1\n'
-             'requests.get(f"{APP_URL}/api/tasks/{task_id}")\nrequests.put(f"{APP_URL}/api/tasks/{task_id}", json={})\n')
-    faults = web_audit_faults('test_behavior.py', audit, request)
-    assert len(faults) == 2 and 'exact number' in faults[0] and 'GET /api/tasks/{task_id}' in faults[1] and 'PUT' not in faults[1].split('Use ONLY')[0]
-    assert not web_audit_faults('test_cli.py', 'assert len(rows) == 1\n', request)
-    assert not web_audit_faults('t.py', audit.replace('assert len(tasks) == 1\n', '').replace('requests.get(f"{APP_URL}/api/tasks/{task_id}")\n', ''), request)
-    handler = 'try:\n    run()\nexcept Exception as e:\n    print(f"Test failed: {e}")\n'
-    assert 'traceback.print_exc()' in show_failing_line(handler) and show_failing_line(show_failing_line(handler)).count('print_exc') == 1
-
-
 # Code audit 2026-09-21: findings traced by reading the gate, one regression each.
 
 
@@ -170,19 +156,6 @@ def test_a_finished_question_is_not_labelled_needs_attention():
 # Live run 2026-09-22, kanban-live (cw3-67ef448bf0c65aeecc02cb55): the path regex stopped at the first quote inside an
 # f-string interpolation, so DELETE /api/tasks/{created_task['id']} read as an unrequested endpoint and BOTH audit
 # corrections were spent on a valid audit.
-def test_interpolated_ids_in_audit_urls_are_the_requested_wildcard_endpoints():
-    from coder_audit_hygiene import web_audit_faults
-    request = 'GET /api/tasks\nPOST /api/tasks\nPUT /api/tasks/:id\nDELETE /api/tasks/:id'
-    audit = ('import os, requests\nAPP_URL = os.environ["DAEDALUS_APP_URL"]\n'
-             'created = requests.post(f"{APP_URL}/api/tasks", json={"title": "probe"}).json()\n'
-             'requests.put(f"{APP_URL}/api/tasks/{created[\'id\']}", json={"status": "done"})\n'
-             'requests.delete(f"{APP_URL}/api/tasks/{created["id"]}")\n'
-             'requests.get(f"{APP_URL}/api/tasks")\n'
-             'tid = created["id"]\nrequests.put(f"{APP_URL}/api/tasks/{tid}", json={})\n')
-    assert web_audit_faults('test_behavior.py', audit, request) == []
-    unrequested = audit + 'requests.get(f"{APP_URL}/api/tasks/{created[\'id\']}/history")\n'
-    faults = web_audit_faults('test_behavior.py', unrequested, request)
-    assert len(faults) == 1 and 'GET /api/tasks/{created[\'id\']}/history' in faults[0]
 
 
 # Live run 2026-09-22, node-mdtoc (cw3-4de01cc04fa7c9de6ca24a74): the audit misread its own fixture (## Conclusion at

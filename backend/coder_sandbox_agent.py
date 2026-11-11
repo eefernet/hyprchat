@@ -254,9 +254,16 @@ def run_isolated(store, operation_id, repository):
                 kind = result.get('error_type')
                 exception = TimeoutError if kind == 'TimeoutError' else ValueError if kind == 'ValueError' else RuntimeError
                 raise exception(result['error'])
-            return {k: v for k, v in result.items() if k in {
-                'engine', 'sdk_version', 'agent_finished', 'execution_status', 'incomplete_reason', 'session_id', 'events', 'hook_denials', 'hook_nudges',
-                'hook_denied_unresolved'}}
+            return checkpoint_result(result)
+
+
+def checkpoint_result(result):
+    """What the parent accepts from the child's result file: fixed fields, plus a bounded activity summary."""
+    from coder_activity_diagnostic import bounded
+    activity = bounded(result.get('activity_diagnostic'))
+    return {**{k: v for k, v in result.items() if k in {
+        'engine', 'sdk_version', 'agent_finished', 'execution_status', 'incomplete_reason', 'session_id', 'events', 'hook_denials', 'hook_nudges',
+        'hook_denied_unresolved'}}, **({'activity_diagnostic': activity} if activity else {})}
 
 
 def relay_events(store, operation_id, runtime, cursor):
@@ -274,7 +281,12 @@ def relay_events(store, operation_id, runtime, cursor):
             try: event = json.loads(line)
             except ValueError: continue
             kind, data = event.get('type'), event.get('data', {})
-            if kind in {'source_activity', 'agent', 'browser_action', 'browser_diagnostic', 'builder_nudge', 'builder_stalled',
+            if kind == 'execution_activity':
+                from coder_activity_diagnostic import bounded
+                activity = bounded(data)
+                if activity: store.event(operation_id, kind, **activity, authority='untrusted_agent_diagnostic')
+                continue
+            if kind in {'source_activity', 'agent', 'browser_action', 'browser_diagnostic',
                         'tool_mode_fallback', 'text_tool_fallback', 'compaction', 'usage', 'stop_hook', 'tool_mode',
                         'narration_turn', 'ui_preflight'} and isinstance(data, dict):
                 event_data = data.get('event') or {}

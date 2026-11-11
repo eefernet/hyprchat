@@ -84,6 +84,7 @@ WATCHED = {
     "backend/coder_native_checks.py": ("Native Checks", REMOTE_BACKEND, True),
     "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
     "backend/db/coder_promotion.py": ("Coding Project Versions", REMOTE_DB, True),
+    "backend/db/coder_download_names.py": ("Coding Download Names", REMOTE_DB, True),
     "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
     "backend/routes/coder_promotion.py": ("Coding Versions API", REMOTE_ROUTES, True),
     **{path:("Coding Worker", REMOTE_HEPHAESTUS, False) for path in WORKER_FILES},
