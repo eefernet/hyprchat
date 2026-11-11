@@ -179,6 +179,16 @@ def validate(value, behavior_version=0, *, preflight_version=0):
     return value
 
 
+def workspace_bound_commands(flows, root):
+    """Flow commands naming this session's workspace cannot be replayed on the controller's fresh copy."""
+    roots = {str(Path(root)), str(Path(root).resolve())}
+    return [{'category': 'ui_flow_schema', 'flow_index': index, 'step_index': None,
+             'reason': 'command contains this session\'s workspace path, which does not exist where the controller '
+                       'replays the flow. Use project-relative paths, for example .venv/bin/python app.py.'}
+            for index, flow in enumerate(flows if isinstance(flows, list) else [])
+            if isinstance(flow, dict) and isinstance(flow.get('command'), str) and any(r in flow['command'] for r in roots)]
+
+
 def replay(flow, action, *, strict=False, deadline=None):
     """Replay one flow; never retry mutating actions or proceed after a failure."""
     observations = []; assertions = interactions = behavioral = 0; step_index = None

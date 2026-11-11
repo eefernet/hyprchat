@@ -199,15 +199,20 @@ def summarize(checks, revision, required_interfaces=()):
             row['reason'] = (row.get('reason') or 'Project browser test failed.') + (' Project tests cannot use controller-only browser paths. '
                 'Use the declared Playwright package and normal chromium.launch() resolution without executablePath. '
                 'Declare the dependency and document npx playwright install chromium (or python -m playwright install chromium).')
-        if not row['reason'] and row['classification'] == 'missing_provenance':
-            row['reason'] = ('Assertions ran, but verification did not observe them exercising application code or its running service. '
-                             'Test the actual imported application or launch it and assert its behavior; duplicated logic and mocks alone do not verify the application. '
-                             'For a web browser test, navigate to the controller-injected DAEDALUS_APP_URL '
-                             '(static web) or DAEDALUS_<SERVICE_ID>_URL (declared service). Read that environment '
-                             'variable before starting a fallback server, and start the fallback only when it is absent. '
-                             'A test-owned server or hardcoded localhost URL is outside the observed endpoint, even '
-                             'if its page and assertions work. For file:// interactions use file_path in .daedalus-ui.json. '
-                             'Declare all test dependencies and a reproducible command.')
+        if row['classification'] == 'missing_provenance':
+            endpoint = ('For a web browser test, navigate to the controller-injected DAEDALUS_APP_URL '
+                        '(static web) or DAEDALUS_<SERVICE_ID>_URL (declared service). Read that environment '
+                        'variable before starting a fallback server, and start the fallback only when it is absent. '
+                        'A test-owned server or hardcoded localhost URL is outside the observed endpoint, even '
+                        'if its page and assertions work. For file:// interactions use file_path in .daedalus-ui.json. '
+                        'Declare all test dependencies and a reproducible command.')
+            if not row['reason']:
+                row['reason'] = ('Assertions ran, but verification did not observe them exercising application code or its running service. '
+                                 'Test the actual imported application or launch it and assert its behavior; duplicated logic and mocks alone do not verify the application. '
+                                 + endpoint)
+            elif 'DAEDALUS_APP_URL' not in row['reason']:
+                # A provenance diagnostic explains what was unbound; the model still needs the observed endpoint.
+                row['reason'] = row['reason'].rstrip() + ' ' + endpoint
         elif not row['reason'] and row['classification'] == 'missing_coverage':
             row['reason'] = 'The command exited successfully, but no executed test assertions were observed. Run a supported test suite with real assertions against the application.'
         feedback.append(row)

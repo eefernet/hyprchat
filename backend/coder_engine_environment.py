@@ -269,5 +269,6 @@ def refresh(store, operation_id, repository, manifests, environment, folder):
                 'Use prepare_environment again only after changing declared dependencies. '
                 'Browser installation commands belong in the downloaded project setup instructions.')
         python = repository.root / '.venv/bin/python'
-        if python.is_file(): response['python'] = str(python)
+        # Project-relative: the controller replays commands on a fresh copy, where this workspace path does not exist.
+        if python.is_file(): response['python'] = '.venv/bin/python'
     return response

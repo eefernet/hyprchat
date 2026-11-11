@@ -15,7 +15,7 @@ import uuid
 
 import requests
 
-from coder_ui_checks import UIFlowValidationError, UIObservationFailure, interfaces, replay, validate
+from coder_ui_checks import UIFlowValidationError, UIObservationFailure, interfaces, replay, validate, workspace_bound_commands
 
 
 class _Cancelled(BaseException):
@@ -41,6 +41,8 @@ def inspect(root, directory, commands=None):
         except (ValueError, UnicodeError) as error:
             raise UIFlowValidationError([{'reason': 'UI manifest is not valid JSON: ' + str(error)[:500]}]) from error
         validate(flows, 1, preflight_version=1)
+        bound = workspace_bound_commands(flows, root)
+        if bound: raise UIFlowValidationError(bound)
     if required and not flows:
         raise UIFlowValidationError([{'reason': 'Missing UI flows for ' + ', '.join(required) + '. Create .daedalus-ui.json with real control interactions and text/value assertions, then use check_flows before Finish.'}])
     with repository.connect() as db:
