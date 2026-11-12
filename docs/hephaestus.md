@@ -1,6 +1,6 @@
 # Hephaestus execution VM
 
-Hephaestus is live on pve2 as **VM118**, serving `192.168.1.201`. The matching HyprChat backend and frontend are deployed. The verified old Codebox CT115 and its 51 GiB disk were deleted after all 16 migration gates passed. Daedalus uses OpenHands 1.59; the current Qwen3.6 model and inference settings are retained.
+Hephaestus is the execution VM that replaced the old Codebox container: one Proxmox guest (`<hephaestus-ip>`, port 8585 for the sandbox API and 8587 for the engine worker) that HyprChat's backend and frontend talk to. Daedalus uses OpenHands 1.59 on it; the model and inference settings come from HyprChat Settings.
 
 ## Provisioning
 
@@ -17,7 +17,7 @@ The installer checks IDs across VMs and containers, records a unique ownership t
 
 Inside the VM, `scripts/hephaestus/bootstrap.sh` configures Docker from its official Debian repository, records exact package versions, installs QEMU Guest Agent, and mounts the serial-labelled data disk at `/srv/hephaestus` with XFS project quotas. Initial formatting requires both a completely blank disk and `--initialize-new-data-disk`. A changed UUID, occupied disk or unexpected filesystem fails closed. A completed rerun preserves data and running services. SSH host keys are retained across cloud-init instance changes, including the DHCP-to-static-IP cutover.
 
-`python3 scripts/hephaestus/install.py --source /path/to/hyprchat --ollama-url http://192.168.1.110:11434` stages an immutable source release, hash-checked Python locks, image identities, matching Playwright browsers and the existing pinned Qwen tokenizer/template. It does not modify the model. Activating another release requires drained executions and stopped pinned applications; unchanged releases are not restarted. Only the modern worker is provisioned. Application compatibility checks precede retirement of any existing legacy service.
+`python3 scripts/hephaestus/install.py --source /path/to/hyprchat --ollama-url http://<ollama-host>:11434` stages an immutable source release, hash-checked Python locks, image identities, matching Playwright browsers and the existing pinned Qwen tokenizer/template. It does not modify the model. Activating another release requires drained executions and stopped pinned applications; unchanged releases are not restarted. Only the modern worker is provisioned. Application compatibility checks precede retirement of any existing legacy service.
 
 ## Runtime layout and boundaries
 
@@ -46,7 +46,7 @@ Temporary previews expire after 15 minutes. **Keep running** retains the selecte
 
 ## Operations and upgrades
 
-Codebox CT115 and its disk were retired after the Hephaestus migration. Ordinary installer reruns never delete guests. The old guest retirement helpers have been removed.
+The legacy Codebox guest is retired once the migration gates pass. Ordinary installer reruns never delete guests. The old guest retirement helpers have been removed.
 
 Hephaestus uses pve2's installer SSH key in `/var/lib/hephaestus-installer/id_ed25519`. Connect to the VM address recorded in the installer state. `deploy_monitor.py` refuses mutable execution-worker copies; use a complete immutable release. Drain coding, document operations and previews before activation, then verify the matching application and stop any retired worker. Rollback resources remain protected while referenced.
 

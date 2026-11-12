@@ -80,7 +80,7 @@ fi
 last="down"; softfail=0
 # Keep box DNS working during the outage even if openvpn was killed hard (so its
 # down-script never restored a public resolver). searxng stays fail-closed.
-printf 'nameserver 1.1.1.1\nnameserver 192.168.1.1\n' > /etc/resolv.conf
+printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 
 if [ "$fails" -ge "$MAX_FAILS" ] && [ "$now" -lt "$cooldown_until" ]; then
     log "in cooldown ($((cooldown_until - now))s left, $fails consecutive failures) — skipping re-roll"

@@ -268,28 +268,6 @@ class _CmdCaptureHTTP:
         return _R({"exit_code": 0, "stdout": self.stdout, "stderr": ""})
 
 
-def test_indexer_path_join_preserves_dotfiles():
-    from agents import project_indexer
-    http = _CmdCaptureHTTP(stdout="X=1")
-
-    _run(project_indexer._read_file(http, "/root/projects/p", "./.env.example"))
-
-    assert any("/root/projects/p/.env.example" in c for c in http.commands), http.commands
-
-
-def test_indexer_prioritizes_entrypoints_over_small_files():
-    from agents import project_indexer
-    lines = ["20 ./tiny1.cfg", "30 ./tiny2.cfg", "120000 ./src/core/engine.py",
-             "500 ./src/main.py", "90000 ./src/big_module.py"]
-    http = _CmdCaptureHTTP(stdout="\n".join(lines))
-
-    paths = _run(project_indexer._list_source_files(http, "/root/projects/p", cap=3))
-
-    # Entrypoint first despite being small; then largest files. The old
-    # `sort -n | head` would have returned the three smallest files.
-    assert paths == ["./src/main.py", "./src/core/engine.py", "./src/big_module.py"]
-
-
 def test_v2_name_match_word_boundary():
     import tools
     assert tools._v2_name_match("🏛️ Daedalus")

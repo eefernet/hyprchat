@@ -189,7 +189,7 @@ def recover(root):
         dropin.write_text(state['old_dropin'])
     run(['systemctl','daemon-reload'])
     run(['systemctl','restart',state['service']])
-    wait_ready(state['service'],state.get('url','http://100.122.119.50:8000'),path='/api/users')
+    wait_ready(state['service'],state.get('url',os.environ.get('HYPRCHAT_URL','http://127.0.0.1:8000')),path='/api/users')
     journal.unlink()
     return True
 
@@ -282,7 +282,7 @@ def main():
     p.add_argument('--release')
     p.add_argument('--service',default='hyprchat')
     p.add_argument('--acceptance',nargs='+',help='Executable and arguments; failure triggers rollback')
-    p.add_argument('--url',default='http://100.122.119.50:8000')
+    p.add_argument('--url',default=os.environ.get('HYPRCHAT_URL','http://127.0.0.1:8000'),help='Service URL for readiness checks (HYPRCHAT_URL)')
     a=p.parse_args()
     if a.action=='prepare':
         if not a.source:p.error('--source is required')

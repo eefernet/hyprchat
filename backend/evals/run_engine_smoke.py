@@ -1,5 +1,6 @@
 """Isolated, real-worker development scenario. Never changes HyprChat settings."""
 from __future__ import annotations
+import os
 
 import argparse
 import hashlib
@@ -20,7 +21,7 @@ from engine_cases import TASK
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--worker', default='http://127.0.0.1:8587')
-    parser.add_argument('--ollama', default='http://192.168.1.110:11434')
+    parser.add_argument('--ollama', default=os.environ.get('OLLAMA_URL','http://127.0.0.1:11434'))
     parser.add_argument('--model', default='qwen3.6-35b-a3b-gguf:latest')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()

@@ -1,13 +1,17 @@
 # SearXNG VPN egress and recovery
 
-SearXNG is **CT 114 on pve2 (`192.168.1.101`)**, with static address
-`192.168.1.56/24` and gateway `192.168.1.1`. Access it through `pct exec 114`
-or `pct enter 114` on pve2; a separate SearXNG root login is unnecessary.
-HyprChat (`192.168.1.120`) uses search on port 8888 and the Python web proxy
-on port 8899. Both services run as the `searxng` user (currently UID 999).
+SearXNG runs in its own Proxmox container (called "the container" below) with
+a static LAN address (`<searxng-ip>`) and the LAN gateway (`<gateway-ip>`).
+Access it through `pct exec <ctid>` or `pct enter <ctid>` on the Proxmox host;
+a separate SearXNG root login is unnecessary. HyprChat (`<hyprchat-ip>`) uses
+search on port 8888 and the Python web proxy on port 8899. Both services run as the `searxng` user (currently UID 999).
 
 These are versioned copies of installed infrastructure files. They are not
 auto-deployed by `deploy_monitor.py`.
+
+The kill switch requires `SEARXNG_LAN_CIDR` (your LAN, e.g. `10.0.0.0/24`) in
+its environment; the web proxy allows only `ALLOWED_CLIENTS` (default
+`127.0.0.1`, set it to the HyprChat address).
 
 | File | Installed path |
 |---|---|
@@ -24,7 +28,7 @@ services start. Proton profiles and credentials remain in
 ## Routing and process ownership
 
 - Main-table traffic (including OpenVPN's connection to its server) needs the
-  LAN gateway. Persist `gw=192.168.1.1` in CT 114's `net0` configuration,
+  LAN gateway. Persist `gw=<gateway-ip>` in the container's `net0` configuration,
   preserving its other attributes. Proxmox generates the guest interface file.
 - UID 999 receives mark `0x1`. Priority 100 routes it through table 100, which
   contains the LAN route and either a VPN default or an unreachable default.
@@ -74,9 +78,9 @@ connecting. HTTPS uses CONNECT; TLS remains between HyprChat and the site.
 After installing and testing this proxy, HyprChat's private `.env` can contain:
 
 ```dotenv
-SEARXNG_URL=http://192.168.1.56:8888
-HYPRCHAT_OUTBOUND_PROXY=http://192.168.1.56:8899
-HYPRCHAT_TRUSTED_WEB_PROXY=http://192.168.1.56:8899
+SEARXNG_URL=http://<searxng-ip>:8888
+HYPRCHAT_OUTBOUND_PROXY=http://<searxng-ip>:8899
+HYPRCHAT_TRUSTED_WEB_PROXY=http://<searxng-ip>:8899
 ```
 
 The trusted URL must exactly match the configured outbound proxy. This explicit
@@ -89,7 +93,7 @@ Remove the trust value and restart HyprChat before rolling back proxy validation
 ## Pinned release and compatibility patch
 
 The 2026-10-05 deployment upgrades the February build `272833136` to upstream
-`d48c4b555421e824342c51d68482dd0898e54d0f` (2026.10.4), plus the tracked
+`<release>e824342c51d68482dd0898e54d0f` (2026.10.4), plus the tracked
 [`brave-html-fallback.patch`](patches/brave-html-fallback.patch). Brave currently
 serves some result pages with function-wrapped Svelte data that the pinned
 upstream JSON parser cannot read. The narrow fallback reads rendered web/news
@@ -97,8 +101,8 @@ HTML; it never executes JavaScript. Unknown HTML fails explicitly. The reported
 version includes `+dirty` because this local patch is applied.
 
 The new source and Python environment are isolated under
-`/usr/local/searxng/releases/d48c4b555421/{src,venv}`. Production uses a separate
-cache at `/var/cache/searxng/d48c4b555421`, selected by `TMPDIR` in uWSGI and
+`/usr/local/searxng/releases/<release>/{src,venv}`. Production uses a separate
+cache at `/var/cache/searxng/<release>`, selected by `TMPDIR` in uWSGI and
 `/etc/systemd/system/searxng.service.d/30-release.conf`. Old source/environment
 paths remain intact. Settings preserve existing engine enablement, categories,
 and custom names where supported; new upstream engines remain disabled.
@@ -133,7 +137,7 @@ Make a private backup of the CT configuration, installed files, root crontab,
 and SearXNG settings before replacing them. Transfer these files to pve2 and
 use `pct push 114 <host-file> <installed-path> --perms 0755` for shell scripts
 (`0644` for units/drop-ins). Run `bash -n` on scripts, then
-`systemd-analyze verify` on the units and `systemctl daemon-reload` inside CT 114.
+`systemd-analyze verify` on the units and `systemctl daemon-reload` inside the container.
 
 Suspend the watchdog timer and the hourly rotation entry during maintenance.
 Install and apply the routing protection **before** adding a missing gateway.
@@ -148,7 +152,7 @@ with `use_default_settings: true`, merely listing an engine does not necessarily
 enable it. Enable engines based on live results; individual VPN exits can still
 receive upstream denials or rate limits.
 
-## Verification (inside CT 114 unless noted)
+## Verification (inside the container unless noted)
 
 ```bash
 systemctl is-active protonvpn-rotate searxng searxng-web-proxy searxng-vpn-watchdog.timer
@@ -174,19 +178,19 @@ independent timed restore before stopping the tunnel. Always restore in a
 `finally`/trap path as well. This is a bounded outage check, not continuous leak
 monitoring.
 
-From HyprChat (CT 120), verify an actual query, not only `/healthz`:
+From the HyprChat host, verify an actual query, not only `/healthz`:
 
 ```bash
-curl -sS --max-time 12 'http://192.168.1.56:8888/search?q=latest+US+news&format=json'
+curl -sS --max-time 12 'http://<searxng-ip>:8888/search?q=latest+US+news&format=json'
 ```
 
 An HTTP 200 response with zero results and engine connection errors is an
 upstream failure. It does not establish that SearXNG works or that credentials
 have expired.
 
-## Rollback of the 2026-10-05 deployment
+## Rollback of a deployment
 
-Private CT 114 backups are in `/root/searxng-backup-20261005`; the prior source
+Keep private container backups (for example `/root/searxng-backup-<date>`); the prior source
 and environment remain at `/usr/local/searxng/{searxng-src,searx-pyenv}`.
 To roll back only SearXNG, stop its service, restore `etc/searxng/settings.yml`
 and `etc/searxng/uwsgi.ini` from that backup, remove only the new
@@ -194,8 +198,8 @@ and `etc/searxng/uwsgi.ini` from that backup, remove only the new
 drop-ins. Ensure settings remain readable by the actual `searxng` group. The
 hardened proxy and DNS guard work with the old SearXNG release and can stay.
 
-HyprChat backups are in `/opt/hyprchat/backups/searxng-20261005`: the four
-changed backend files, `.env`, and `frontend-dist/`. Restore those files and
+Keep a matching HyprChat backup (the changed backend files, `.env`, and
+`frontend-dist/`). Restore those files and
 restart `hyprchat` to roll back its deployment. Do not restore a whole backend
 tree over unrelated changes. Validate `/api/health` and a real search afterward.
 If reverting the proxy itself, remove `HYPRCHAT_TRUSTED_WEB_PROXY` and restart

@@ -757,7 +757,6 @@ _TOOL_ICONS = {
     "get_coder_workflow": ("activity", "📊 Checking Coder workflow"),
     "cancel_coder_workflow": ("x-circle", "🛑 Cancelling Coder workflow"),
     "ask_project": ("help-circle", "❓ Investigating project"),
-    "project_indexer": ("database", "📚 Indexing project"),
     "run_tests": ("code", "🧪 Running tests"),
     "lint_code": ("code", "🧹 Linting code"),
     "git_init": ("terminal", "📁 Initializing git"),

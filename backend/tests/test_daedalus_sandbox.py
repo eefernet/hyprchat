@@ -13,7 +13,7 @@ from coder_sandbox import Sandbox, clean_environment, public_connection
 
 
 def test_private_network_and_non_http_ports_are_rejected():
-    for host, port in [('127.0.0.1', 80), ('192.168.1.201', 443), ('169.254.169.254', 80), ('::1', 443), ('example.com', 22)]:
+    for host, port in [('127.0.0.1', 80), ('10.0.0.10', 443), ('169.254.169.254', 80), ('::1', 443), ('example.com', 22)]:
         with pytest.raises(ValueError):
             public_connection(host, port)
 
@@ -78,7 +78,7 @@ try:
  result['host_write']=True
 except OSError: result['host_write']=False
 try:
- socket.create_connection(('192.168.1.201',8586),timeout=1).close()
+ socket.create_connection((os.environ.get('HEPHAESTUS_PROBE_HOST','127.0.0.1'),8586),timeout=1).close()
  result['worker_reachable']=True
 except OSError: result['worker_reachable']=False
 print(json.dumps(result))

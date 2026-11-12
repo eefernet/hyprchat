@@ -53,6 +53,7 @@ def main(argv=None):
     parser.add_argument('--vmid', type=int)
     parser.add_argument('--storage', default='local-lvm')
     parser.add_argument('--bridge', default='vmbr0')
+    parser.add_argument('--nameserver', default=os.environ.get('HEPHAESTUS_NAMESERVER', '1.1.1.1'), help='Guest resolver handed to cloud-init')
     parser.add_argument('--ssh-public-key', type=Path)
     parser.add_argument('--state-dir', type=Path, default=Path('/var/lib/hephaestus-installer'))
     parser.add_argument('--plan', action='store_true', help='Read-only inventory; do not create files or guests')
@@ -133,7 +134,7 @@ def main(argv=None):
     if not record.get('configured'):
         # Cloud images include cloud-init; the guest bootstrap installs the guest agent over SSH.
         run('qm', 'set', vmid, '--boot', 'order=scsi0', '--ciuser', 'root', '--sshkeys', public_key,
-            '--ipconfig0', 'ip=dhcp', '--nameserver', '192.168.1.1')
+            '--ipconfig0', 'ip=dhcp', '--nameserver', args.nameserver)
         record['configured'] = True; save(path, record)
     if 'running' not in run('qm', 'status', vmid): run('qm', 'start', vmid)
     if not args.provision_only:

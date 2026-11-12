@@ -87,7 +87,7 @@ This repo includes a homelab helper for creating a companion ComfyUI and voice
 container:
 
 ```bash
-bash scripts/create-comfyui-lxc.sh 115 192.168.1.115
+bash scripts/create-comfyui-lxc.sh <ctid> <ip>   # gateway defaults to <first three octets>.1
 ```
 
 Run it on the Proxmox host. It prints the second-phase commands to run inside

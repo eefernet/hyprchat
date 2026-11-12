@@ -7908,13 +7908,13 @@ function HyprChat(){
         {settingSection("Endpoints",null,
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,300px),1fr))",gap:12}}>
             {[
-              ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
-              [serviceLabel("codebox"),codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
-              ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.47:5678","External workflow automation"],
-              ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.56:8888","Search and research backend"],
-              ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://192.168.1.115:8188","Stable Diffusion image generation (optional)"],
-              ["Voice STT",sttUrl,setSttUrl,"http://192.168.1.115:8001","Speech-to-text — Speaches/Whisper (optional)"],
-              ["Voice TTS",ttsUrl,setTtsUrl,"http://192.168.1.115:8880","Text-to-speech — Kokoro (optional)"],
+              ["Ollama",ollamaUrl,setOllamaUrl,"http://127.0.0.1:11434","Model inference and model manager"],
+              [serviceLabel("codebox"),codeboxUrl,setCodeboxUrl,"http://127.0.0.1:8585","Tool execution and project upload bridge"],
+              ["N8N",n8nUrl,setN8nUrl,"http://127.0.0.1:5678","External workflow automation"],
+              ["SearXNG",searxngUrl,setSearxngUrl,"http://127.0.0.1:8888","Search and research backend"],
+              ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://127.0.0.1:8188","Stable Diffusion image generation (optional)"],
+              ["Voice STT",sttUrl,setSttUrl,"http://127.0.0.1:8001","Speech-to-text — Speaches/Whisper (optional)"],
+              ["Voice TTS",ttsUrl,setTtsUrl,"http://127.0.0.1:8880","Text-to-speech — Kokoro (optional)"],
             ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr)",gap:12,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,marginBottom:5}}>
                 <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700}}>{label}</span>

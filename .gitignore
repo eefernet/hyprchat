@@ -85,7 +85,6 @@ anthropic_api_key*
 *_TOKEN*
 # Tokenizer source files contain no credentials.
 !backend/coder_engine_tokens.py
-!scripts/prepare_engine_tokenizer.py
 
 # -------------------------
 # AI agent local files

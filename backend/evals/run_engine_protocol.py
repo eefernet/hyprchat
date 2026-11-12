@@ -33,7 +33,7 @@ def main():
         raise RuntimeError('Protocol qualification requires Python assertions enabled')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--ollama',default='http://192.168.1.110:11434')
+    parser.add_argument('--ollama',default=os.environ.get('OLLAMA_URL','http://127.0.0.1:11434'))
     parser.add_argument('--model',default='qwen3.6-35b-a3b-gguf:latest')
     parser.add_argument('--limits',type=int,nargs='+',default=[4096,8192,16384])
     parser.add_argument('--settings',type=Path,help='Frozen candidate Settings for a single release configuration')

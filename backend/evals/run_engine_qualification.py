@@ -202,7 +202,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--worker',default='http://127.0.0.1:8587')
-    parser.add_argument('--ollama',default='http://192.168.1.110:11434')
+    parser.add_argument('--ollama',default=os.environ.get('OLLAMA_URL','http://127.0.0.1:11434'))
     parser.add_argument('--model',default='qwen3.6-35b-a3b-gguf:latest')
     parser.add_argument('--development',action='store_true'); parser.add_argument('--repeats',type=int,default=3)
     parser.add_argument('--case',default='')

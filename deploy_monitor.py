@@ -193,7 +193,6 @@ WATCHED = {
     "backend/hyprfit.py":           ("HyprFit",          REMOTE_BACKEND,            True),
     "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
     "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),
-    "backend/agents/project_indexer.py":("Project Indexer",    REMOTE_AGENTS, True),
     "backend/agents/language_adapters.py":("Language Adapters", REMOTE_AGENTS, True),
     "backend/agents/assistant.py":      ("Assistant Agent",    REMOTE_AGENTS, True),
     "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),

@@ -4,15 +4,19 @@
 # Run this on the Proxmox HOST (not inside a container)
 #
 # Usage:
-#   bash create-lxc.sh [CTID] [IP]
-#   bash create-lxc.sh 120 192.168.1.120
+#   bash create-lxc.sh <CTID> <IP> [GATEWAY]
+#   bash create-lxc.sh 120 10.0.0.120          # gateway defaults to <first three octets>.1
 # ============================================================
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CTID=${1:-120}
-IP=${2:-"192.168.1.120"}
-GW="192.168.1.1"
+CTID=${1:-}
+IP=${2:-}
+if [ -z "$CTID" ] || [ -z "$IP" ]; then
+    echo "Usage: bash create-lxc.sh <CTID> <IP> [GATEWAY]" >&2
+    exit 2
+fi
+GW=${3:-"${IP%.*}.1"}
 HOSTNAME="hyprchat"
 STORAGE="local-lvm"      # Change if your storage differs
 TEMPLATE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
@@ -101,10 +105,15 @@ fi
 read -r -p "Create companion ComfyUI + Voice LXC now? [y/N] " CREATE_COMFY
 if [[ "$CREATE_COMFY" =~ ^[Yy]$ ]]; then
     read -r -p "ComfyUI CTID [115]: " COMFY_CTID
-    read -r -p "ComfyUI IP [192.168.1.115]: " COMFY_IP
+    read -r -p "ComfyUI IP: " COMFY_IP
     COMFY_CTID=${COMFY_CTID:-115}
-    COMFY_IP=${COMFY_IP:-192.168.1.115}
-    if [ -x "$SCRIPT_DIR/create-comfyui-lxc.sh" ] || [ -f "$SCRIPT_DIR/create-comfyui-lxc.sh" ]; then
+    if [ -z "$COMFY_IP" ]; then
+        echo "[!] No ComfyUI IP given; run scripts/create-comfyui-lxc.sh <CTID> <IP> later."
+        CREATE_COMFY=n
+    fi
+    if [ -z "$COMFY_IP" ]; then
+        :
+    elif [ -x "$SCRIPT_DIR/create-comfyui-lxc.sh" ] || [ -f "$SCRIPT_DIR/create-comfyui-lxc.sh" ]; then
         bash "$SCRIPT_DIR/create-comfyui-lxc.sh" "$COMFY_CTID" "$COMFY_IP"
     else
         echo "[!] scripts/create-comfyui-lxc.sh not found. Run it later from this repo to create the companion media LXC."

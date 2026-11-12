@@ -7,7 +7,7 @@ import urllib.parse
 
 LISTEN_HOST = os.getenv("LISTEN_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "8899"))
-ALLOWED_CLIENTS = {x.strip() for x in os.getenv("ALLOWED_CLIENTS", "127.0.0.1,192.168.1.120").split(",") if x.strip()}
+ALLOWED_CLIENTS = {x.strip() for x in os.getenv("ALLOWED_CLIENTS", "127.0.0.1").split(",") if x.strip()}
 ALLOWED_PORTS = {int(x) for x in os.getenv("ALLOWED_PORTS", "80,443").split(",") if x.strip().isdigit()}
 MAX_HEADER = 65536
 CONNECT_TIMEOUT = 12

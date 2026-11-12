@@ -173,7 +173,7 @@ def write(path, text, mode=0o644):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source',type=Path,default=Path(__file__).resolve().parents[2])
-    parser.add_argument('--ollama-url',default=os.environ.get('OLLAMA_URL','http://192.168.1.110:11434'))
+    parser.add_argument('--ollama-url',default=os.environ.get('OLLAMA_URL','http://127.0.0.1:11434'))
     args=parser.parse_args()
     if os.geteuid()!=0 or output('hostname','-s')!='hephaestus': raise SystemExit('Run inside Hephaestus as root')
     install_lock=Path('/etc/hephaestus/install.lock').open('a')

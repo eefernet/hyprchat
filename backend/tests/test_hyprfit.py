@@ -169,7 +169,7 @@ def test_remote_rescan_with_ssh_persists_detected_cuda(monkeypatch):
         "sched_spread": True,
     }
     ssh = {
-        "ollama_scan_ssh_host": "192.168.1.110",
+        "ollama_scan_ssh_host": "192.0.2.10",
         "ollama_scan_ssh_port": 22,
         "ollama_scan_ssh_user": "root",
         "ollama_scan_ssh_auth_mode": "key",
@@ -177,10 +177,10 @@ def test_remote_rescan_with_ssh_persists_detected_cuda(monkeypatch):
     }
     client = _FakeOllamaClient()
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", client, ssh))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.0.2.10:11434", client, ssh))
 
     assert result["target"] == "ollama"
-    assert result["ollama_url"] == "http://192.168.1.110:11434"
+    assert result["ollama_url"] == "http://192.0.2.10:11434"
     assert result["ollama_reachable"] is True
     assert result["detection_mode"] == "remote_ssh_detector"
     assert result["persisted"] is True
@@ -192,9 +192,9 @@ def test_remote_rescan_with_ssh_persists_detected_cuda(monkeypatch):
     assert result["profile"]["system_ram_gb"] == 64
     assert any("nvidia-smi" in call for call in ssh_calls)
     assert client.urls == [
-        "http://192.168.1.110:11434/api/version",
-        "http://192.168.1.110:11434/api/tags",
-        "http://192.168.1.110:11434/api/ps",
+        "http://192.0.2.10:11434/api/version",
+        "http://192.0.2.10:11434/api/tags",
+        "http://192.0.2.10:11434/api/ps",
     ]
 
 
@@ -233,7 +233,7 @@ def test_remote_rescan_without_ssh_config_requires_scan_setup(monkeypatch):
         "backend": "cuda",
     }
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient()))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.0.2.10:11434", _FakeOllamaClient()))
 
     assert result["target"] == "ollama"
     assert result["ollama_reachable"] is True
@@ -255,7 +255,7 @@ def test_remote_rescan_ssh_failure_keeps_saved_profile(monkeypatch):
         "backend": "cuda",
     }
     ssh = {
-        "ollama_scan_ssh_host": "192.168.1.110",
+        "ollama_scan_ssh_host": "192.0.2.10",
         "ollama_scan_ssh_port": 22,
         "ollama_scan_ssh_user": "root",
         "ollama_scan_ssh_auth_mode": "key",
@@ -263,7 +263,7 @@ def test_remote_rescan_ssh_failure_keeps_saved_profile(monkeypatch):
     }
     monkeypatch.setattr(hyprfit, "detect_remote_hardware_profile", lambda _settings: (_ for _ in ()).throw(hyprfit.RemoteHardwareScanError("Permission denied")))
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient(fail=True), ssh))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.0.2.10:11434", _FakeOllamaClient(fail=True), ssh))
 
     assert result["target"] == "ollama"
     assert result["ollama_reachable"] is False
@@ -298,14 +298,14 @@ def test_remote_rescan_ssh_cpu_fallback_does_not_persist(monkeypatch):
         "unified_memory": False,
     }
     ssh = {
-        "ollama_scan_ssh_host": "192.168.1.110",
+        "ollama_scan_ssh_host": "192.0.2.10",
         "ollama_scan_ssh_port": 22,
         "ollama_scan_ssh_user": "root",
         "ollama_scan_ssh_auth_mode": "key",
         "ollama_scan_ssh_key_path": "/root/.ssh/id_ed25519",
     }
 
-    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.168.1.110:11434", _FakeOllamaClient(), ssh))
+    result = _run(hyprfit.resolve_hardware_rescan(saved, "http://192.0.2.10:11434", _FakeOllamaClient(), ssh))
 
     assert result["target"] == "ollama"
     assert result["ollama_reachable"] is True
@@ -325,10 +325,10 @@ def test_ollama_scan_ssh_settings_masks_password_and_derives_host():
         "ollama_scan_ssh_password": "secret",
     }
 
-    public = hyprfit.clean_ollama_scan_ssh_settings(raw, "http://192.168.1.110:11434")
-    private = hyprfit.clean_ollama_scan_ssh_settings(raw, "http://192.168.1.110:11434", include_password=True)
+    public = hyprfit.clean_ollama_scan_ssh_settings(raw, "http://192.0.2.10:11434")
+    private = hyprfit.clean_ollama_scan_ssh_settings(raw, "http://192.0.2.10:11434", include_password=True)
 
-    assert public["ollama_scan_ssh_host"] == "192.168.1.110"
+    assert public["ollama_scan_ssh_host"] == "192.0.2.10"
     assert public["ollama_scan_ssh_port"] == 2222
     assert public["ollama_scan_ssh_has_password"] is True
     assert "ollama_scan_ssh_password" not in public
