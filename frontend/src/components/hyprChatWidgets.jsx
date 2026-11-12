@@ -1,3 +1,4 @@
+import HephaestusStorage from './HephaestusStorage.jsx';
 import PanelHeader from './PanelHeader.jsx';
 import SelectionControl from './SelectionControl.jsx';
 import ActionMenu from './ActionMenu.jsx';
@@ -5,7 +6,7 @@ import LibrarySearchPanel from '../panels/LibrarySearchPanel.jsx';
 import {workspaceSections,workspaceSection,workspaceSubviews,workspaceSectionLabel} from '../workspaceNavigation.js';
 import {WorkspaceOverview,WorkspaceSources,WorkspaceDaily,WorkspaceDefaults,WorkspaceDefaultSummary,WorkspaceContentDialog} from './workspaceComponents.jsx';
 import {chatActivity, activityDetail, activityText} from "../chatActivity.js";
-import {activityVisual, summaryChips} from "../chatActivityVisual.js";
+import {activityVisual, summaryChips, playfulPhase, activityVerbOrder} from "../chatActivityVisual.js";
 import usePresence from "../usePresence.js";
 import "./chatActivity.css";
 import {apiJson} from "../api.js";
@@ -148,7 +149,10 @@ function ThinkingPreview({text}){
 }
 
 
-export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t}){
+import {ActivityLabel,PlayfulStatusContext} from './ActivityLabel.jsx';
+export {ActivityLabel,PlayfulStatusContext};
+
+export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t,messageKey=""}){
   const state=chatActivity({events,savedEvents,live,content,status});
   const [expanded,setExpanded]=useState(false);
   const [following,setFollowing]=useState(true);
@@ -182,7 +186,7 @@ export function ChatActivity({events=[],savedEvents=[],live=false,content="",sta
   const chips=state.active?[]:summaryChips(state);
   const header=<>
     <span key={visual.icon} aria-hidden="true" className="hc-activity-icon"><span className="hc-activity-badge"><Icon/></span></span>
-    <span key={state.label} className="hc-activity-label">{state.label}</span>
+    <ActivityLabel label={state.label} phase={state.phase} active={state.active} seed={messageKey}/>
     {preview&&<ThinkingPreview key={thought.id} text={preview}/>}
     {chips.length>0&&<span className="hc-activity-chips">{chips.map((chip,i)=><span key={chip} className="hc-activity-chip" style={{"--i":i}}>{chip}</span>)}</span>}
     {expandable&&<span className="hc-activity-chevron hc-chevron" data-open={expanded?"true":"false"} aria-hidden="true"><IC.ChevDown/></span>}
@@ -212,6 +216,7 @@ export function ChatActivity({events=[],savedEvents=[],live=false,content="",sta
 const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
   const [expanded,setExpanded]=useState(streaming);
   const [copied,setCopied]=useState(false);
+  const bodyId=React.useId();
   useEffect(()=>{setExpanded(streaming);},[streaming]);
   if(!plan) return null;
   const bc=streaming?`${t.acc}66`:`${t.acc}38`;
@@ -223,14 +228,16 @@ const PlanPanel = ({plan,t,streaming,md,onCopy})=>{
     onCopy&&onCopy();
   };
   return <div className="hc-reveal" style={{marginBottom:6,borderRadius:"var(--hc-radius-card)",border:`1px solid ${bc}`,background:bg,overflow:"hidden",maxWidth:"100%",boxShadow:streaming?`0 0 0 1px ${t.acc}55`:"none",transition:"border-color var(--hc-dur-3) var(--hc-ease-out),box-shadow var(--hc-dur-3) var(--hc-ease-out),background-color var(--hc-dur-3) var(--hc-ease-out)"}}>
-    <div onClick={()=>setExpanded(p=>!p)} className={`hc-live-head${streaming?" is-active":""}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
-      <span className={`hc-run-icon${streaming?" is-active":""}`} style={{fontSize:"var(--hc-text-control)",lineHeight:1}}>📐</span>
-      <span style={{fontWeight:600,fontSize:"var(--hc-text-secondary)",color:tc}}>Architecture Plan</span>
-      {streaming&&<span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.6,fontStyle:"italic"}}>building…</span>}
+    <div className={`hc-live-head${streaming?" is-active":""}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer",userSelect:"none",borderBottom:expanded?`1px solid ${bc}`:"none"}}>
+      <button type="button" aria-expanded={expanded} aria-controls={bodyId} onClick={()=>setExpanded(p=>!p)} className="hc-plan-toggle">
+        <span className="hc-run-icon" aria-hidden="true"><IC.Layers/></span>
+        <span>Architecture Plan</span>
+        {streaming&&<span style={{opacity:.7,fontWeight:400}}>building…</span>}
+        <span className="hc-chevron" data-open={expanded?"true":"false"} aria-hidden="true"><IC.ChevDown/></span>
+      </button>
       <button onClick={copy} title="Copy plan" style={{marginLeft:"auto",background:copied?`${t.ok}22`:"transparent",border:`1px solid ${copied?t.ok:`${tc}33`}`,color:copied?t.ok:tc,padding:"2px 8px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontFamily:"inherit",cursor:"pointer",fontWeight:600,opacity:.85}}>{copied?"copied":"copy"}</button>
-      <span style={{fontSize:"var(--hc-text-secondary)",color:tc,opacity:.45,marginLeft:4}}>{expanded?"▴":"▾"}</span>
     </div>
-    {expanded&&<div style={{padding:"10px 14px",fontSize:"var(--hc-text-secondary)",lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
+    {expanded&&<div id={bodyId} style={{padding:"10px 14px",fontSize:"var(--hc-text-secondary)",lineHeight:1.65,color:t.dim,maxHeight:420,overflowY:"auto"}}>
       {md?<MDWrap>{md(plan)}</MDWrap>:<pre style={{margin:0,whiteSpace:"pre-wrap",fontFamily:"inherit",color:t.dim}}>{plan}</pre>}
     </div>}
   </div>;
@@ -1660,117 +1667,109 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
 }
 
 // ============================================================
-function SandboxSection({t,btnS,labelS,notify,addActivity,updateActivity}){
-  const [sbInfo,setSbInfo]=useState(null);
-  const [cleanupPreview,setCleanupPreview]=useState(null),[previewError,setPreviewError]=useState("");
-  const previewCleanup=async()=>{try{setCleanupPreview(await apiJson("/api/settings/cleanup-preview"));setPreviewError("");}catch(e){if(e.name!=="AbortError")setPreviewError(e.message);}};
-  const [cleanupDays,setCleanupDays]=useState(30);
-  const [cleaning,setCleaning]=useState(false);
-  const [cleanResult,setCleanResult]=useState(null);
-  const [cbCleaning,setCbCleaning]=useState(false);
-  const [cbResult,setCbResult]=useState(null);
-  const fmtBytes=(b)=>{if(!b)return"0 B";if(b<1024)return`${b} B`;if(b<1048576)return`${(b/1024).toFixed(1)} KB`;return`${(b/1048576).toFixed(1)} MB`;};
-  useEffect(()=>{
-    fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{setSbInfo(d);setCleanupDays(d.file_cleanup_days??30);}).catch(()=>{});
+function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActivity}){
+  const [sbInfo,setSbInfo]=useState(null),[cleanupDays,setCleanupDays]=useState(30);
+  const [cleanupPreview,setCleanupPreview]=useState(null),[localError,setLocalError]=useState("");
+  const [vmInfo,setVmInfo]=useState(null),[vmLoading,setVmLoading]=useState(false);
+  const [loading,setLoading]=useState(false),[saving,setSaving]=useState(false);
+  const [cleaning,setCleaning]=useState(false),[cleanResult,setCleanResult]=useState(null);
+  const fmtBytes=(bytes)=>{
+    if(bytes==null)return "—";
+    const units=["B","KiB","MiB","GiB","TiB"];
+    const i=bytes>0?Math.min(Math.floor(Math.log(bytes)/Math.log(1024)),units.length-1):0;
+    return `${i?(bytes/1024**i).toFixed(1):bytes} ${units[i]}`;
+  };
+  const refreshLocal=useCallback(async(signal)=>{
+    setLoading(true);setLocalError("");
+    try{
+      const [info,preview]=await Promise.all([
+        apiJson("/api/settings",{signal}),apiJson("/api/settings/cleanup-preview",{signal}),
+      ]);
+      if(!signal?.aborted){setSbInfo(info);setCleanupDays(info.file_cleanup_days??30);setCleanupPreview(preview);}
+    }catch(e){if(e.name!=="AbortError")setLocalError(e.message);}
+    finally{if(!signal?.aborted)setLoading(false);}
   },[]);
-  const saveCleanupDays=async(v)=>{
-    setCleanupDays(v);
-    await fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({file_cleanup_days:v})})
-      .then(r=>notify&&notify({type:r.ok?"success":"error",text:r.ok?"Cleanup schedule saved":"Cleanup schedule failed",duration:2500}))
-      .catch(()=>notify&&notify({type:"error",text:"Cleanup schedule failed"}));
+  const refreshVm=useCallback(async(signal)=>{
+    setVmLoading(true);
+    try{
+      const info=await apiJson("/api/settings/cleanup-preview?target=hephaestus",{signal});
+      if(!signal?.aborted)setVmInfo(info);
+    }catch(e){if(e.name!=="AbortError")setVmInfo({status:"unavailable",message:e.message});}
+    finally{if(!signal?.aborted)setVmLoading(false);}
+  },[]);
+  useEffect(()=>{
+    if(!active)return;
+    const controller=new AbortController();
+    refreshLocal(controller.signal);refreshVm(controller.signal);
+    return ()=>controller.abort();
+  },[active,refreshLocal,refreshVm]);
+  const saveCleanupDays=async(value)=>{
+    setSaving(true);
+    try{
+      await apiJson("/api/settings",{method:"PATCH",body:{file_cleanup_days:value}});
+      setCleanupDays(value);
+      notify?.({type:"success",text:"Local cleanup schedule saved",duration:2500});
+    }catch(e){notify?.({type:"error",text:"Could not save local cleanup schedule",detail:e.message});}
+    finally{setSaving(false);}
   };
   const cleanNow=async()=>{
     setCleaning(true);setCleanResult(null);
-    const activityId=addActivity&&addActivity({name:"Sandbox cleanup",kind:"cleanup",message:"Cleaning sandbox outputs...",pct:25});
-    try{const r=await fetch(`${API}/api/settings/cleanup-now`,{method:"POST"});const d=await r.json();setCleanResult(d);
-      if(!r.ok||d.error)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-      updateActivity&&updateActivity(activityId,{status:"done",message:`Deleted ${d.deleted||0} files`,pct:100});
-      notify&&notify({type:"success",text:"Sandbox cleanup complete",detail:`Deleted ${d.deleted||0} files.`});
-      const r2=await fetch(`${API}/api/settings`);const d2=await r2.json();setSbInfo(d2);
-    }catch(e){setCleanResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Sandbox cleanup failed",detail:e.message||"Failed"});}
-    setCleaning(false);
-  };
-  const cleanCodebox=async()=>{
-    setCbCleaning(true);setCbResult(null);
-    const activityId=addActivity&&addActivity({name:"Codebox cleanup",kind:"cleanup",message:"Cleaning Codebox files...",pct:25});
-    try{const r=await fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"});const d=await r.json();setCbResult(d);
-      if(!r.ok||d.error)throw new Error(d.detail||d.error||`HTTP ${r.status}`);
-      updateActivity&&updateActivity(activityId,{status:"done",message:`Deleted ${d.deleted||0} files`,pct:100});
-      notify&&notify({type:"success",text:"Codebox cleanup complete",detail:`Deleted ${d.deleted||0} files.`});
-    }catch(e){setCbResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Codebox cleanup failed",detail:e.message||"Failed"});}
-    setCbCleaning(false);
-  };
-  const cleanAll=async()=>{
-    setCleaning(true);setCbCleaning(true);setCleanResult(null);setCbResult(null);
-    const activityId=addActivity&&addActivity({name:"Cleanup all",kind:"cleanup",message:"Cleaning sandbox and Codebox...",pct:20});
+    const activityId=addActivity?.({name:"Local temporary-file cleanup",kind:"cleanup",message:"Cleaning released local temporary files…",pct:25});
     try{
-      const [r1,r2]=await Promise.all([
-        fetch(`${API}/api/settings/cleanup-now`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Sandbox failed"})),
-        fetch(`${API}/api/settings/cleanup-codebox`,{method:"POST"}).then(r=>r.json()).catch(()=>({error:"Codebox failed"})),
-      ]);
-      setCleanResult(r1);setCbResult(r2);
-      const hasErr=r1.error||r2.error;
-      updateActivity&&updateActivity(activityId,{status:hasErr?"error":"done",message:hasErr?"Cleanup finished with errors":"Cleanup complete",error:hasErr||null,pct:100});
-      notify&&notify({type:hasErr?"warning":"success",text:hasErr?"Cleanup finished with errors":"Cleanup complete",detail:hasErr||"Sandbox and Codebox cleaned."});
-      const r3=await fetch(`${API}/api/settings`);const d3=await r3.json();setSbInfo(d3);
-    }catch(e){setCleanResult({error:e.message||"Failed"});updateActivity&&updateActivity(activityId,{status:"error",error:e.message||"Failed",message:"Cleanup failed"});notify&&notify({type:"error",text:"Cleanup failed",detail:e.message||"Failed"});}
-    setCleaning(false);setCbCleaning(false);
+      const result=await apiJson("/api/settings/cleanup-now",{method:"POST"});
+      if(result.error)throw new Error(result.error);
+      setCleanResult(result);
+      updateActivity?.(activityId,{status:"done",message:`Deleted ${result.deleted||0} temporary files`,pct:100});
+      notify?.({type:"success",text:"Local cleanup complete",detail:`Deleted ${result.deleted||0} temporary files.`});
+      await refreshLocal();
+    }catch(e){
+      setCleanResult({error:e.message});
+      updateActivity?.(activityId,{status:"error",error:e.message,message:"Local cleanup failed"});
+      notify?.({type:"error",text:"Local cleanup failed",detail:e.message});
+    }finally{setCleaning(false);}
   };
-  const INTERVALS=[
-    {label:"Every week",days:7},{label:"Every 2 weeks",days:14},
-    {label:"Monthly (default)",days:30},{label:"Every 3 months",days:90},
-    {label:"Every 6 months",days:180},{label:"Yearly",days:365},
-    {label:"Never",days:0},
+  const intervals=[
+    {label:"1 week",days:7},{label:"2 weeks",days:14},{label:"1 month (default)",days:30},
+    {label:"3 months",days:90},{label:"6 months",days:180},{label:"1 year",days:365},{label:"Never",days:0},
   ];
-  return <div style={{marginBottom:20}}>
-    <label style={labelS}>Sandbox & File Cleanup</label>
-    <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"10px 14px",marginBottom:10,fontSize:"var(--hc-text-secondary)"}}>
-      <div style={{display:"flex",flexWrap:"wrap",gap:"6px 20px",marginBottom:sbInfo?.sandbox_dir?6:0}}>
-        {sbInfo?.sandbox_dir&&<div style={{color:t.mut}}>
-          <span style={{color:t.acc}}>📁 </span>
-          <span style={{fontFamily:"var(--hc-font-code)",fontSize:"var(--hc-text-secondary)",color:t.dim,wordBreak:"break-all"}}>{sbInfo.sandbox_dir}</span>
-        </div>}
+  const panel={border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"clamp(12px, 2vw, 22px)",minWidth:0};
+  const prose={color:t.mut,fontSize:"var(--hc-text-secondary)",lineHeight:1.55,margin:"8px 0 14px"};
+  const metrics={display:"flex",flexWrap:"wrap",gap:"8px 24px",fontSize:"var(--hc-text-secondary)",marginBottom:16};
+  const legacyCount=cleanupPreview?.reasons?.["unresolved legacy output"]||0;
+  return <div style={{display:"grid",gap:20}}>
+    <p style={{...prose,margin:0}}>HyprChat stores your files and history. Hephaestus runs your code in Docker containers.</p>
+    <section aria-labelledby="local-storage-title" style={panel}>
+      <h3 id="local-storage-title" style={{margin:0,fontSize:"var(--hc-text-control)",color:t.acc}}>HyprChat · Local files</h3>
+      <p style={prose}>The local “sandbox” is an output folder on the HyprChat server. It holds generated files and project downloads before they are saved or delivered. It is separate from the containers that run your projects.</p>
+      <div style={metrics} aria-live="polite">
+        <span>Output files: <strong>{cleanupPreview?.preserved??sbInfo?.sandbox_file_count??"—"}</strong></span>
+        <span>Output storage: <strong>{fmtBytes(cleanupPreview?.retained_bytes??sbInfo?.sandbox_size_bytes)}</strong></span>
       </div>
-      <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
-        <div><span style={{color:t.mut}}>Files: </span><span style={{fontWeight:700,color:t.text}}>{sbInfo?.sandbox_file_count??"—"}</span></div>
-        <div><span style={{color:t.mut}}>Size: </span><span style={{fontWeight:700,color:t.text}}>{sbInfo!=null?fmtBytes(sbInfo.sandbox_size_bytes):"—"}</span></div>
-        <div><span style={{color:t.mut}}>Venv: </span><span style={{fontWeight:700,color:sbInfo?.sandbox_venv_ready?t.ok:t.mut}}>{sbInfo?.sandbox_venv_ready?"✓ Ready":"building..."}</span></div>
+      <p style={prose}>Saved artifacts, uploads, knowledge bases, and chat history stay on HyprChat. They are not included in these output totals or removed by this cleanup.</p>
+      <div style={{...labelS,marginBottom:6}}>Local temporary-file retention</div>
+      <p style={{...prose,marginTop:0,marginBottom:8}}>Automatically remove released temporary files after:</p>
+      <div role="group" aria-label="Local temporary-file retention" style={{display:"flex",flexWrap:"wrap",gap:6}}>
+        {intervals.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)} disabled={saving||loading||!sbInfo} aria-pressed={cleanupDays===iv.days}
+          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:"var(--hc-text-control)"}}>{iv.label}</button>)}
       </div>
-    </div>
-    <div style={{marginBottom:8}}>
-      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Reclaim released temporary files after:</div>
-      <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-        {INTERVALS.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)}
-          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:"var(--hc-text-control)"}}>
-          {iv.label}
-        </button>)}
+      <p style={prose}>{cleanupDays===0?"Automatic cleanup of local temporary files is off. Manual cleanup is still available.":"Only released temporary files are eligible. Files still in use or linked to saved work are kept."} This setting does not control VM cleanup.</p>
+      <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+        <button onClick={()=>refreshLocal()} disabled={loading||cleaning||saving} style={btnS(t.acc)}>{loading?"Refreshing…":"Refresh cleanup preview"}</button>
+        <button onClick={cleanNow} disabled={cleaning||loading||!cleanupPreview||!!localError||!cleanupPreview.reclaimable_files} style={btnS(t.warm)}>{cleaning?"Cleaning…":"Clean released temporary files"}</button>
       </div>
-      {cleanupDays===0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,marginTop:4}}>⚠ Files will never be cleaned automatically. Clean manually when needed.</div>}
-    </div>
-    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-      <button onClick={previewCleanup} style={btnS(t.acc)}>Preview sandbox cleanup</button>
-      <button onClick={cleanNow} disabled={cleaning} style={btnS(t.warm)}>Clean released temporary files</button>
-      <button onClick={cleanAll} disabled={cleaning||cbCleaning} style={{...btnS(t.err),opacity:(cleaning||cbCleaning)?0.6:1}}>
-        {(cleaning||cbCleaning)?<><Spinner size={12}/> Cleaning…</>:<><IC.Trash/> Clean All</>}
-      </button>
-      {previewError&&<p role="alert">{previewError}</p>}
-      {cleanupPreview&&<div style={{width:'100%',fontSize:"var(--hc-text-secondary)"}}>
-        <p>{fmtBytes(cleanupPreview.reclaimable_bytes)} reclaimable in {cleanupPreview.reclaimable_files} temporary files. {fmtBytes(cleanupPreview.retained_bytes-cleanupPreview.reclaimable_bytes)} retained.</p>
-        {Object.entries(cleanupPreview.reasons||{}).map(([reason,count])=><div key={reason}>{reason}: {count}</div>)}
+      {localError&&<p role="alert" style={{...prose,color:t.err}}>Local storage status could not be refreshed: {localError}</p>}
+      {cleanupPreview&&<div style={{...prose,marginBottom:0}} aria-live="polite">
+        <div>{fmtBytes(cleanupPreview.reclaimable_bytes)} can be reclaimed from {cleanupPreview.reclaimable_files} temporary files. {fmtBytes(Math.max(0,cleanupPreview.retained_bytes-cleanupPreview.reclaimable_bytes))} will be kept.</div>
+        {legacyCount>0&&<div style={{marginTop:8}}>{legacyCount} older output file{legacyCount===1?" is":"s are"} kept because their ownership could not be confirmed.</div>}
       </div>}
-      {cleanResult&&!cleanResult.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.ok}}>
-        ✓ Sandbox: {cleanResult.deleted} file{cleanResult.deleted!==1?"s":""}{cleanResult.freed_bytes>0?`, freed ${fmtBytes(cleanResult.freed_bytes)}`:""}
-      </span>}
-      {cbResult&&!cbResult.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.ok}}>
-        ✓ Codebox: {cbResult.deleted} item{cbResult.deleted!==1?"s":""}{cbResult.freed_bytes>0?`, freed ${fmtBytes(cbResult.freed_bytes)}`:""}
-      </span>}
-      {cleanResult?.skipped&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>↷ {cleanResult.skipped}</span>}
-      {cleanResult?.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>✕ {cleanResult.error}</span>}
-      {cbResult?.error&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.err}}>✕ Codebox: {cbResult.error}</span>}
-    </div>
-    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6,lineHeight:1.5}}>
-      Tool-generated files (code outputs, downloads) are stored in <code style={{background:`${t.surface}`,padding:"1px 5px",borderRadius:"var(--hc-radius-sm)",fontSize:"var(--hc-text-secondary)"}}>{sbInfo?.sandbox_outputs_dir||"sandbox/outputs/"}</code> and cleaned automatically. User uploads and knowledge base files are never auto-deleted.
-    </div>
+      {cleanResult&&<p role={cleanResult.error?"alert":"status"} style={{...prose,color:cleanResult.error?t.err:t.ok}}>{cleanResult.error||`Removed ${cleanResult.deleted||0} local temporary files; freed ${fmtBytes(cleanResult.freed_bytes)}.`}</p>}
+      <details style={{...prose,marginBottom:0}}>
+        <summary style={{cursor:"pointer",color:t.dim}}>Local storage details</summary>
+        <p style={{overflowWrap:"anywhere"}}>Output folder: <code>{sbInfo?.sandbox_outputs_dir||"Not loaded"}</code></p>
+        {Object.entries(cleanupPreview?.reasons||{}).filter(([reason])=>reason!=="unresolved legacy output").map(([reason,count])=><div key={reason}>{reason}: {count}</div>)}
+      </details>
+    </section>
+    <HephaestusStorage info={vmInfo} loading={vmLoading} onRefresh={refreshVm} t={t} btnS={btnS} active={active}/>
   </div>;
 }
 

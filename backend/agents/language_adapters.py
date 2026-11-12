@@ -24,8 +24,6 @@ class LanguageAdapter:
     package_rules: list[str] | None = None
     source_extensions: list[str] | None = None
     ignored_dirs: list[str] | None = None
-    aider_test_cmd: str = ""
-    aider_lint_cmd: str = ""
     safe_lint: bool = False
     isolated_verification: dict | None = None
 
@@ -51,12 +49,12 @@ COMMON_IGNORES = [
 ]
 
 # Host-level package-manager config redirectors. Any of these set in the
-# Codebox service environment (systemd Environment=, pip.conf companions,
+# Hephaestus service environment (systemd Environment=, pip.conf companions,
 # shell profiles) silently changes what a project build installs — or breaks
 # it outright, as PIP_CONSTRAINT pointing at a missing file did. Project
 # verification must see the project, not the host. Mirrored in
 # openhands_worker.py (_HERMETIC_UNSET_VARS) — keep both lists in sync; the
-# worker deploys standalone to Codebox and cannot import this module.
+# worker deploys standalone to Hephaestus and cannot import this module.
 HERMETIC_UNSET_VARS = [
     "PIP_CONSTRAINT",
     "PIP_CONFIG_FILE",
@@ -407,8 +405,6 @@ def python_adapter(manifest: list[str]) -> LanguageAdapter:
         ],
         source_extensions=[".py"],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd=aider_pytest_cmd,
-        aider_lint_cmd=build_cmd if not has_pyproject and not has_requirements else PY_VENV_GUARD + py_compile,
         safe_lint=True,
         isolated_verification=_isolated_contract(
             applicable=isolated_applicable,
@@ -463,8 +459,6 @@ def node_adapter(manifest: list[str], language: str) -> LanguageAdapter:
         package_rules=["Do not package node_modules, dist, build, .next, or cache directories."],
         source_extensions=[".ts", ".tsx", ".js", ".jsx"] if is_ts else [".js", ".jsx"],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd=test_cmd,
-        aider_lint_cmd=lint_cmd,
         safe_lint=bool(lint_cmd),
         isolated_verification=isolated,
     )
@@ -493,8 +487,6 @@ def html_adapter(manifest: list[str]) -> LanguageAdapter:
         ],
         source_extensions=[".html", ".css", ".js", ".jsx", ".svg"],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd="",
-        aider_lint_cmd=js_lint,
         safe_lint=True,
         isolated_verification=_isolated_contract(
             applicable=False,
@@ -516,8 +508,6 @@ def rust_adapter(manifest: list[str]) -> LanguageAdapter:
         package_rules=["Do not package target/."],
         source_extensions=[".rs"],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd="cargo test --quiet" if has_cargo else "",
-        aider_lint_cmd="cargo clippy --quiet" if has_cargo else "",
         safe_lint=bool(has_cargo),
         isolated_verification=_isolated_contract(
             applicable=has_cargo,
@@ -556,8 +546,6 @@ def go_adapter(manifest: list[str]) -> LanguageAdapter:
         package_rules=["Do not package bin/, dist/, or coverage outputs."],
         source_extensions=[".go"],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd="go test ./..." if has_mod else "",
-        aider_lint_cmd="go vet ./..." if has_mod else "",
         safe_lint=has_mod,
         isolated_verification=_isolated_contract(
             applicable=has_mod,
@@ -618,8 +606,6 @@ def java_adapter(manifest: list[str]) -> LanguageAdapter:
         package_rules=["Do not package target/, build/, out/, or .gradle/."],
         source_extensions=[".java", ".kt"],
         ignored_dirs=COMMON_IGNORES + [".gradle", "out"],
-        aider_test_cmd=test_cmd,
-        aider_lint_cmd="",
         safe_lint=False,
         isolated_verification=_isolated_contract(
             applicable=has_maven or has_gradle,
@@ -680,10 +666,8 @@ def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
         package_rules=["Do not package build/, dist/, out/, coverage, or compiler outputs."],
         source_extensions=[".cpp", ".cc", ".cxx", ".hpp", ".h"] if is_cpp else [".c", ".h"],
         ignored_dirs=COMMON_IGNORES + ["out"],
-        aider_test_cmd=test_cmd,
         # Only the pure -fsyntax-only sweeps are safe as a lint; cmake and make
         # both mutate the tree (build dirs / arbitrary recipes).
-        aider_lint_cmd=build_cmd if not (has_cmake or has_make) else "",
         safe_lint=not (has_cmake or has_make),
         isolated_verification=_isolated_contract(
             applicable=has_cmake,
@@ -698,7 +682,7 @@ def c_cpp_adapter(manifest: list[str], language: str) -> LanguageAdapter:
     )
 
 
-# .NET SDK lives at /root/.dotnet on Codebox; service shells may not have it
+# .NET SDK lives at /root/.dotnet on Hephaestus; service shells may not have it
 # on PATH, so every dotnet command exports it first (mirrors reviewer.py).
 _DOTNET_ENV = ('export PATH="$PATH:/root/.dotnet:$HOME/.dotnet" && '
                'export DOTNET_CLI_TELEMETRY_OPTOUT=1')
@@ -727,8 +711,6 @@ def csharp_adapter(manifest: list[str]) -> LanguageAdapter:
         package_rules=["Do not package bin/, obj/, or NuGet cache directories."],
         source_extensions=[".cs", ".csproj", ".sln"],
         ignored_dirs=COMMON_IGNORES + ["bin", "obj"],
-        aider_test_cmd=test_cmd,
-        aider_lint_cmd=build_cmd,
         safe_lint=True,
         isolated_verification=_isolated_contract(
             applicable=True,
@@ -752,8 +734,6 @@ def generic_adapter(manifest: list[str], language: str = "generic") -> LanguageA
         package_rules=["Exclude generated dependency, build, cache, and VCS directories from downloads."],
         source_extensions=[],
         ignored_dirs=COMMON_IGNORES,
-        aider_test_cmd="",
-        aider_lint_cmd="",
         safe_lint=False,
         isolated_verification=_isolated_contract(
             applicable=False,

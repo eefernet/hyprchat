@@ -44,3 +44,34 @@ test('summary chips match the former joined summary text', () => {
   assert.deepEqual(summaryChips(state('complete', {tools: 1, entries: [{kind: 'tool'}]})), ['1 tool']);
   assert.deepEqual(summaryChips(state('complete')), []);
 });
+
+test('Lantern verb pools are complete and deterministic without nearby repeats',async()=>{
+  const {ACTIVITY_VERBS,activityVerbOrder,activityDisplayLabel}=await import('./chatActivityVisual.js');
+  const sizes={writing:60,thinking:60,searching:18,tool:18,starting:12};
+  const all=Object.values(ACTIVITY_VERBS).flat();
+  assert.equal(new Set(all).size,all.length);
+  for(const [phase,count] of Object.entries(sizes)){
+    assert.equal(ACTIVITY_VERBS[phase].length,count);
+    const words=activityVerbOrder(phase,'message-123');
+    assert.deepEqual(words,activityVerbOrder(phase,'message-123'));
+    assert.notDeepEqual(words,activityVerbOrder(phase,'other-message'));
+    const label=phase[0].toUpperCase()+phase.slice(1),recent=[];
+    for(let tick=0;tick<count*2;tick++){
+      const word=activityDisplayLabel({phase,label,active:true},'message-123',tick);
+      assert.ok(!recent.includes(word));recent.push(word);if(recent.length>6)recent.shift();
+    }
+  }
+});
+
+test('fun labels preserve precise, disabled and settled activity states',async()=>{
+  const {activityDisplayLabel}=await import('./chatActivityVisual.js');
+  for(const [phase,label] of [['reviewing','Reviewing 2/3'],['tool','Reading file'],['searching','Searching knowledge'],['failed','Tool failed'],['stopped','Stopped'],['complete','Activity'],['voting','council voting']]){
+    assert.equal(activityDisplayLabel({phase,label,active:true},'m',2),label);
+  }
+  for(const phase of ['starting','thinking','writing','searching','tool']){
+    const label=phase[0].toUpperCase()+phase.slice(1);
+    assert.equal(activityDisplayLabel({phase,label,active:false},'m',2),label);
+    assert.equal(activityDisplayLabel({phase,label,active:true},'m',2,false),label);
+  }
+  assert.notEqual(activityDisplayLabel({phase:'streaming',label:'streaming',active:true},'m',0),'streaming');
+});

@@ -2,21 +2,20 @@ import React, {useEffect, useId, useState} from 'react';
 import {API} from '../session.js';
 import './daedalusSettings.css';
 
-const roles=['chat','architect','builder','reviewer','acceptance','qa','fixer','aider','compaction','visual'];
+const roles=['chat','builder','qa','compaction','visual'];
 const thinkingModes=['inherit','off','on','low','medium','high'];
 const span=seconds=>{const n=Number(seconds);return !(n>0)?'this long':n<90?`${n} seconds`:n<5400?`about ${Math.round(n/60)} minutes`:`about ${+(n/3600).toFixed(1)} hours`;};
 // [key, accessible name, visible label, unit, hint]. The accessible names are stable identifiers: the browser test finds fields by them.
 const groups={
   context:[
     ['openhands_num_ctx','Daedalus context window','Context window','tokens','Shared by every coding stage. 0 inherits the global context window.'],
-    ['generation_num_predict','Completion allowance','Completion allowance','tokens','Reserved for each model response.'],
+    ['generation_num_predict','Completion allowance','Default completion allowance','tokens','Used when no stage output override is set. Effective coding values are shown below.'],
     ['context_headroom_percent','Context headroom (%)','Context headroom','%','Kept free for request overhead.'],
     ['context_compaction_threshold','Compact at (%)','Compact at','%','Older turns are summarized once this share of the working input is used.'],
   ],
   budget:[
-    ['daedalus_job_seconds','Execution allowance (seconds)','Execution allowance','sec',value=>`A job pauses at its checkpoint after ${span(value)}; Continue grants another allowance.`],
-    ['daedalus_model_calls','Model calls per allowance','Model calls per allowance','calls','Shared by planning, coding, compaction and review. Evidence-gated builds hold back about a quarter for verification.'],
-    ['daedalus_attempt_turns','Turns per coding attempt','Turns per coding attempt','turns','The builder returns to verification after this many model turns.'],
+    ['daedalus_job_seconds','Execution allowance (seconds)','Execution allowance','sec',value=>`A job pauses after ${span(value)}. Resume preserves usage; additional allowance requires a separate action.`],
+    ['daedalus_model_calls','Model calls per allowance','Model calls per allowance','calls','Shared by coding, planning, repairs and compaction. Granting more allowance does not reset the repair limit.'],
     ['daedalus_command_seconds','Command timeout (seconds)','Command timeout','sec','Longest a single build or test command may run.'],
   ],
   browser:[
@@ -37,11 +36,7 @@ const sources={daedalus:'Daedalus window',global:'global context'};
 
 const payload=(values,exclusions)=>({
   ...Object.fromEntries(fields.map(([key])=>[key,Number(values[key])])),
-  aider_num_ctx:0,
-  daedalus_v3_enabled:!!values.daedalus_v3_enabled,
   daedalus_visual_review:!!values.daedalus_visual_review,
-  daedalus_policy7_edits:!!values.daedalus_policy7_edits,
-  daedalus_policy7_builds:!!values.daedalus_policy7_builds,
   daedalus_visual_model:values.daedalus_visual_model||'',
   daedalus_browser_viewports:values.daedalus_browser_viewports,
   daedalus_compaction:values.daedalus_compaction,
@@ -51,7 +46,7 @@ const payload=(values,exclusions)=>({
   helper_contexts:Object.fromEntries(Object.entries(values.helper_contexts||{}).map(([key,value])=>[key,Number(value)])),
   daedalus_exclude_dirs:exclusions.split(',').map(value=>value.trim()).filter(Boolean),
 });
-const loaded=data=>({...data,daedalus_role_contexts:{...data.daedalus_role_contexts,aider:data.daedalus_role_contexts?.aider||data.aider_num_ctx||0}});
+const loaded=data=>({...data});
 const effective=resolved=>!resolved?'—':resolved.error||`${resolved.num_ctx?.toLocaleString()||'—'} tokens · output ${resolved.num_predict?.toLocaleString()||'—'} · from ${resolved.source?.startsWith('stage:')?'stage override':sources[resolved.source]||'inherited'}`;
 
 function Section({title,hint,children}){
@@ -110,25 +105,14 @@ export default function DaedalusSettings({t,font,onSaved}){
   };
   const grid=group=><div className="ds-grid">{groups[group].map(field=><NumberField key={field[0]} field={field} value={values[field[0]]} onChange={set}/>)}</div>;
   // Same arithmetic as context_policy.resolve, so the numbers match what the worker will use.
-  const context=body.openhands_num_ctx,headroom=Math.ceil(context*body.context_headroom_percent/100),room=context-body.generation_num_predict-headroom;
+  const context=body.daedalus_role_contexts.builder||body.openhands_num_ctx||Number(values.default_num_ctx),
+    output=body.daedalus_role_outputs.builder||body.generation_num_predict,
+    headroom=Math.ceil(context*body.context_headroom_percent/100),room=context-output-headroom;
   const mode=(values.daedalus_compaction||'inherit')==='inherit'?values.context_compaction:values.daedalus_compaction;
   const compacting=['on','true','1'].includes(String(mode).toLowerCase());
-  const persistent=!!values.daedalus_v3_enabled;
   return <div className="ds-root" style={vars}>
-    <Section title="Workflow" hint="How new coding jobs run. Jobs already in progress keep the workflow they started with.">
-      <div className="ds-toggles">
-        <Toggle label="Persistent jobs" chip="Experimental" checked={persistent} onChange={value=>set('daedalus_v3_enabled',value)}
-          description="New coding jobs run in the background with checkpoints, Stop and Continue, and recovery after a restart."/>
-        <div className="ds-nested">
-          <Toggle label="Evidence-gated repairs and edits" chip="Experimental" disabled={!persistent} checked={!!values.daedalus_policy7_edits} onChange={value=>set('daedalus_policy7_edits',value)}
-            description="Uploaded projects and follow-up edits are verified with executed tests, an independent audit and a review."/>
-          <Toggle label="Evidence-gated new builds" chip="Experimental" disabled={!persistent} checked={!!values.daedalus_policy7_builds} onChange={value=>set('daedalus_policy7_builds',value)}
-            description="New projects are built by an agent that compiles and runs the code as it works, then verified the same way."/>
-        </div>
-      </div>
-      <p className="ds-note">{persistent
-        ?'Evidence-gated jobs are delivered as Ready for review, or Build incomplete when the result does not run. None is marked Complete yet: that needs trusted proof for each requirement, and generated tests guide repairs but do not count as proof. Review the changes and test coverage before relying on them.'
-        :'Evidence gating needs persistent jobs. With persistent jobs off, new coding jobs use the legacy workflow.'}</p>
+    <Section title="Workflow" hint="OpenHands 1.59 · runs on Hephaestus">
+      <p className="ds-note">Daedalus plans, builds and repairs in one coding conversation. Jobs run in the background with checkpoints and Stop/Resume. Independent checks run before delivery; you decide whether to Accept the reviewed revision.</p>
     </Section>
 
     <Section title="Context" hint="How much the coding model can read and write in one call.">
@@ -142,7 +126,7 @@ export default function DaedalusSettings({t,font,onSaved}){
         :!(room>0)?<span className="ds-help ds-err">The completion allowance and headroom leave no room for input. Raise the context window or lower the completion allowance.</span>
         :<div className="ds-stats">
           <div className="ds-stat"><b>{room.toLocaleString()}</b><span>Working input per call</span></div>
-          <div className="ds-stat"><b>{body.generation_num_predict.toLocaleString()}</b><span>Reserved for output</span></div>
+          <div className="ds-stat"><b>{output.toLocaleString()}</b><span>Reserved for coding output</span></div>
           {compacting?<div className="ds-stat"><b>{Math.floor(room*body.context_compaction_threshold/100).toLocaleString()}</b><span>Compaction starts at</span></div>
             :<div className="ds-stat"><b>{room.toLocaleString()}</b><span>Compaction off · job pauses at</span></div>}
         </div>}
@@ -183,7 +167,7 @@ export default function DaedalusSettings({t,font,onSaved}){
     <Section title="Advanced" hint="Per-stage overrides. Leave these alone unless one stage needs a different window.">
       <details className="ds-more"><summary><span className="ds-more-title">Stage context overrides and effective values</span><span className="ds-help">Give one stage its own context window, output allowance or thinking mode. Empty fields inherit.</span></summary>
         <div className="ds-more-body">{roles.map(role=>{const resolved=values.resolved_contexts?.[role];return <div key={role} className="ds-stage">
-          <div className="ds-stage-name"><strong>{role==='qa'?'QA':role}</strong><span className={resolved?.error?'ds-help ds-err':'ds-help'}>{effective(resolved)}</span></div>
+          <div className="ds-stage-name"><strong>{({qa:'Project Q&A',builder:'Coding',chat:'Daedalus chat',compaction:'Compaction',visual:'Visual review'})[role]}</strong><span className={resolved?.error?'ds-help ds-err':'ds-help'}>{effective(resolved)}</span></div>
           <label className="ds-mini">Context<input aria-label={`${role} context override`} type="number" min="0" step="1" placeholder="Inherit" value={values.daedalus_role_contexts?.[role]||''} onChange={e=>nested('daedalus_role_contexts',role,e.target.value)}/></label>
           <label className="ds-mini">Output<input aria-label={`${role} output override`} type="number" min="0" step="1" placeholder="Inherit" value={values.daedalus_role_outputs?.[role]||''} onChange={e=>nested('daedalus_role_outputs',role,e.target.value)}/></label>
           <label className="ds-mini">Thinking<select aria-label={`${role} thinking override`} value={values.daedalus_role_thinking?.[role]||'inherit'} onChange={e=>nested('daedalus_role_thinking',role,e.target.value)}>

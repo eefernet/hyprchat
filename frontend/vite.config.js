@@ -13,6 +13,11 @@ import {fileURLToPath} from 'node:url';
 //               app.mount("/") static mount.
 export default defineConfig({
   base: './',
+  // noVNC probes WebCodecs with top-level await in its lazy preview chunk.
+  // Keep the application's existing target; unsupported browsers fail only
+  // when opening that optional preview, where the import error is displayed.
+  esbuild: { supported: { 'top-level-await': true } },
+  optimizeDeps: { esbuildOptions: { supported: { 'top-level-await': true } } },
   plugins: [react(), {
     name: 'version-pwa-shell',
     apply: 'build',

@@ -1,0 +1,13 @@
+ARG DOTNET_IMAGE
+ARG BASE_IMAGE
+FROM ${DOTNET_IMAGE} AS dotnet
+FROM ${BASE_IMAGE}
+COPY --from=dotnet /usr/share/dotnet /usr/share/dotnet
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    composer=2.8.8-1+deb13u3 bundler=2.6.7-2 && \
+    npm install --global pnpm@10.6.5 yarn@1.22.22 && \
+    ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet && \
+    dpkg-query -W > /usr/local/share/hephaestus-packages.txt && \
+    npm list --global --depth=0 > /usr/local/share/hephaestus-npm-tools.txt && \
+    rm -rf /var/lib/apt/lists/* /root/.npm
+ENV DOTNET_ROOT=/usr/share/dotnet DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1

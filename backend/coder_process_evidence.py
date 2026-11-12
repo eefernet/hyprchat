@@ -25,7 +25,7 @@ class TraceUnavailable(RuntimeError):
 def trace_command(command, path):
     tracer = shutil.which('strace')
     if not tracer:
-        raise TraceUnavailable('Compiled audit execution requires strace on Codebox')
+        raise TraceUnavailable('Compiled audit execution requires strace on Hephaestus')
     return [tracer, '-f', '-q', '--decode-pids=pidns', '-yy', '-s', '65536', '-o', str(path), '-e',
             'trace=execve,execveat,clone,clone3,fork,vfork,chdir,fchdir,open,openat,openat2', *command]
 

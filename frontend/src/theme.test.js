@@ -20,3 +20,14 @@ test('selected monospace font applies to interface and code without changing UI 
     assert.equal(tokens['--hc-ui-scale'],1.5);
   }
 });
+
+test('theme-derived code tokens meet 4.5:1 across all UI themes',()=>{
+  const lum=hex=>hex.slice(1).match(/../g).map(x=>parseInt(x,16)/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4).reduce((s,x,i)=>s+x*[.2126,.7152,.0722][i],0);
+  for(const theme of Object.values(UI_THEMES)){
+    const tokens=presentationTokens(theme,'mono','mono');
+    for(const [key,color] of Object.entries(tokens).filter(([key])=>key.startsWith('--code-'))){
+      const a=lum(color),b=lum(theme.bgDeep);
+      assert.ok((Math.max(a,b)+.05)/(Math.min(a,b)+.05)>=4.5,`${theme.name}: ${key}`);
+    }
+  }
+});

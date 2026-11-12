@@ -83,6 +83,8 @@ openai_api_key*
 anthropic_api_key*
 *_API_KEY*
 *_TOKEN*
+# Tokenizer source files contain no credentials.
+!backend/coder_engine_tokens.py
 
 # -------------------------
 # AI agent local files

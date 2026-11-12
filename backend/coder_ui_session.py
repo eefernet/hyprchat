@@ -1,0 +1,377 @@
+"""Private Xvfb/DBus application session used by tools, evaluation and previews.
+
+This process must be launched inside coder_sandbox.Sandbox. It exposes no host
+filesystem or network service. Browser pages execute here; the HyprChat browser
+receives pixels, not application HTML or scripts.
+"""
+import argparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+import threading
+import uuid
+
+
+class UIFailure(ValueError):
+    def __init__(self, details):
+        super().__init__(details['error'])
+        self.details = details
+
+
+def free_port():
+    with socket.socket() as connection:
+        connection.bind(('127.0.0.1', 0))
+        return connection.getsockname()[1]
+
+
+def desktop_launch_diagnostic(command):
+    """Explain common display mistakes; runtime window/PID binding is authoritative."""
+    if re.search(r'\b(?:Xvfb|xvfb-run)\b', command):
+        return 'Do not start another X server. Inherit the controller-owned DISPLAY.'
+    if re.search(r'\bDISPLAY\s*=', command):
+        return 'Do not override DISPLAY. The controller selects the display used by interaction checks and preview.'
+    if re.search(r'\bQT_QPA_PLATFORM\s*=\s*[\"\x27]?(?:offscreen|minimal)\b', command):
+        return 'Offscreen Qt cannot verify a visible desktop. Inherit the controller display and accessibility environment.'
+    return ''
+
+
+def stop_session(process):
+    """Stop this owned session, including children that started new process groups."""
+    import psutil
+    try:
+        descendants = psutil.Process(process.pid).children(recursive=True) if process.poll() is None else []
+    except psutil.NoSuchProcess:
+        descendants = []
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=1)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try: os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        process.wait()
+    for child in reversed(descendants):
+        try: child.terminate()
+        except psutil.NoSuchProcess: pass
+    _, remaining = psutil.wait_procs(descendants, timeout=.2)
+    for child in remaining:
+        try: child.kill()
+        except psutil.NoSuchProcess: pass
+    psutil.wait_procs(remaining, timeout=.2)
+
+
+class UISession:
+    def __init__(self, directory, vnc_port=None):
+        self.directory = Path(directory); self.directory.mkdir(parents=True, exist_ok=True)
+        self.processes, self.playwright, self.browser, self.page = [], None, None, None
+        self.kind = None
+        self.behavior_version = int(os.environ.get('DAEDALUS_ENGINE_BEHAVIOR_VERSION', '0'))
+        self.session_id = ''
+        self.application_processes = []
+        self.application_root = None
+        display = next(f':{n}' for n in range(91, 191) if not Path(f'/tmp/.X11-unix/X{n}').exists())
+        self.env = {**os.environ, 'DISPLAY': display, 'QT_LINUX_ACCESSIBILITY_ALWAYS_ON': '1',
+                    'QT_ACCESSIBILITY': '1', 'NO_AT_BRIDGE': '0', 'GTK_A11Y': 'atspi',
+                    'GSETTINGS_BACKEND': 'memory'}
+        # The readiness probe briefly becomes the only X client. Keep the server
+        # stable when it disconnects so Openbox cannot race an automatic reset.
+        xserver = self.spawn(['Xvfb', display, '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-noreset'], 'xvfb')
+        deadline = time.monotonic()+10
+        while True:
+            if Path('/tmp/.X11-unix/X'+display[1:]).exists():
+                probe = subprocess.run(['xprop','-root'],env=self.env,capture_output=True,timeout=2)
+                if probe.returncode == 0:
+                    break
+            if xserver.poll() is not None or time.monotonic() > deadline:
+                self.close()
+                raise RuntimeError('Xvfb did not become ready')
+            time.sleep(.1)
+        manager = self.spawn(['openbox'], 'window-manager')
+        deadline = time.monotonic()+10
+        while True:
+            probe = subprocess.run(['xprop','-root','_NET_SUPPORTING_WM_CHECK'], env=self.env,
+                                   capture_output=True, text=True, timeout=2)
+            if 'window id #' in probe.stdout: break
+            if manager.poll() is not None or time.monotonic()>deadline:
+                details = self.directory / 'window-manager.log'
+                tail = details.read_text(errors='replace')[-1200:] if details.is_file() else ''
+                self.close()
+                raise RuntimeError(f'The desktop window manager did not become ready (exit={manager.poll()}, display={display}): {tail}')
+            time.sleep(.1)
+        if vnc_port:
+            self.spawn(['x11vnc', '-display', display, '-localhost', '-rfbport', str(vnc_port),
+                        '-nopw', '-forever', '-shared', '-noxdamage'], 'vnc')
+
+    def spawn(self, command, name):
+        process = subprocess.Popen(command, env=self.env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        path=self.directory/(name+'.log')
+        def collect():
+            with process.stdout:
+                while chunk:=process.stdout.read1(32768):
+                    if path.exists() and path.stat().st_size>=1024**2:
+                        path.replace(path.with_suffix('.log.1'))
+                    with path.open('ab') as log: log.write(chunk)
+        threading.Thread(target=collect,daemon=True).start()
+        self.processes.append(process)
+        return process
+
+    def perform(self, request):
+        guarded = self.behavior_version >= 1
+        launching = request.get('action') == 'launch' and not self.kind
+        if guarded and launching:
+            self.session_id = uuid.uuid4().hex
+        if guarded and self.kind == 'desktop' and request.get('selector') and request.get('session_id') != self.session_id:
+            raise UIFailure({'error': 'This desktop node reference belongs to another session. Observe the current session again.',
+                             'category': 'stale_session', 'requested': request, 'session_id': self.session_id})
+        before = len(self.processes)
+        try:
+            result = self._perform(request)
+        except Exception as error:
+            if guarded and launching:
+                tail = self.log_tail()
+                self.close_application(self.processes[before:])
+                raise UIFailure({'error': str(error), 'category': 'application_startup', **getattr(error, 'details', {}),
+                                 'requested': request, 'log_tail': tail, 'session_id': self.session_id}) from error
+            raise
+        if guarded:
+            if request.get('action') == 'launch': self.application_processes = self.processes[before:]
+            result['session_id'] = self.session_id
+            for node in result.get('nodes', []): node['session_id'] = self.session_id
+        return result
+
+    def close_application(self, processes):
+        for resource, method in ((self.browser, 'close'), (self.playwright, 'stop')):
+            if resource:
+                try: getattr(resource, method)()
+                except Exception: pass  # Continue terminating the failed application.
+        self.browser = self.playwright = self.page = None
+        for process in reversed(processes):
+            stop_session(process)
+            if process in self.processes: self.processes.remove(process)
+        self.kind = None
+        self.application_processes = []
+        self.application_root = None
+        self.env.pop('JAVA_TOOL_OPTIONS', None)
+
+    def desktop_binding(self):
+        """Mapped X windows belonging to this launch, on the preview's display."""
+        import psutil
+        pids = set()
+        if self.application_root and self.application_root.poll() is None:
+            try:
+                parent = psutil.Process(self.application_root.pid)
+                pids = {parent.pid, *(p.pid for p in parent.children(recursive=True))}
+            except psutil.NoSuchProcess:
+                pass
+        clients = subprocess.run(['xprop', '-root', '_NET_CLIENT_LIST'], env=self.env,
+                                 capture_output=True, text=True, timeout=2)
+        windows = []
+        for window in re.findall(r'0x[0-9a-fA-F]+', clients.stdout)[:100]:
+            properties = subprocess.run(['xprop', '-id', window, '_NET_WM_PID'], env=self.env,
+                                        capture_output=True, text=True, timeout=2)
+            pid = re.search(r'_NET_WM_PID\(CARDINAL\)\s*=\s*(\d+)', properties.stdout)
+            if not pid or int(pid[1]) not in pids:
+                continue
+            info = subprocess.run(['xwininfo', '-id', window], env=self.env,
+                                  capture_output=True, text=True, timeout=2)
+            if re.search(r'Map State:\s*IsViewable\b', info.stdout):
+                windows.append({'window': window, 'pid': int(pid[1])})
+        return {'display': self.env['DISPLAY'], 'windows': windows}
+
+    def _perform(self, request):
+        action = request.get('action')
+        if action == 'diagnostics': return {'log_tail': self.log_tail()}
+        if action == 'reset':
+            self.close_application(self.application_processes)
+            return {'closed': True}
+        if action == 'launch':
+            if self.kind: raise ValueError('Close the session before launching another application')
+            kind = request.get('kind')
+            if kind not in {'web', 'desktop'}: raise ValueError('Choose web or desktop')
+            file_page = kind == 'web' and str(request.get('url', '')).startswith('file://')
+            if not request.get('command') and not file_page: raise ValueError('A launch command is required')
+            if self.behavior_version >= 2 and kind == 'desktop':
+                diagnostic = desktop_launch_diagnostic(request.get('command', ''))
+                if diagnostic:
+                    raise UIFailure({'error': diagnostic, 'category': 'desktop_display_mismatch',
+                                     'display': self.env['DISPLAY']})
+            self.kind = kind
+            if self.behavior_version >= 1 and kind == 'desktop':
+                # GUI verification uses the visible Xvfb platform. Unit-test
+                # commands may separately opt into offscreen execution.
+                self.env.pop('QT_QPA_PLATFORM', None)
+            if kind == 'desktop' and request.get('toolkit') == 'swing':
+                self.env['JAVA_TOOL_OPTIONS'] = ('-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar '
+                    '-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper '
+                    '-Djava.library.path=/usr/lib/jni')
+            app = self.spawn(['bash', '-c', request['command']], 'application') if request.get('command') else None
+            self.application_root = app
+            if kind == 'web':
+                from playwright.sync_api import sync_playwright
+                # The controller driver and project tests may pin different
+                # Playwright versions. Only the driver inherits this cache;
+                # self.env retains the project's environment for its process.
+                previous = os.environ.get('PLAYWRIGHT_BROWSERS_PATH')
+                os.environ['PLAYWRIGHT_BROWSERS_PATH'] = os.environ.get('DAEDALUS_CONTROLLER_BROWSERS_PATH', previous or '/root/.cache/ms-playwright')
+                try:
+                    self.playwright = sync_playwright().start()
+                finally:
+                    if previous is None: os.environ.pop('PLAYWRIGHT_BROWSERS_PATH', None)
+                    else: os.environ['PLAYWRIGHT_BROWSERS_PATH'] = previous
+                executable = self.playwright.chromium.executable_path
+                if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+                    raise UIFailure({'error': 'The controller browser is missing or not executable; repair the worker browser installation.',
+                        'category': 'environment', 'environment_fault': True, 'phase': 'browser_preparation',
+                        'managed_path': executable})
+                self.browser = self.playwright.chromium.launch(headless=False, env=self.env,
+                    args=['--no-sandbox', '--disable-dev-shm-usage'])
+                self.page = self.browser.new_page(viewport={'width': 1200, 'height': 720})
+                self.page.set_default_timeout(10000)
+                url = request.get('url') or 'http://127.0.0.1:8000'
+                deadline = time.monotonic()+25
+                while True:
+                    try:
+                        self.page.goto(url, timeout=3000, wait_until='domcontentloaded'); break
+                    except Exception:
+                        if time.monotonic() > deadline or app is not None and app.poll() is not None: raise
+                        time.sleep(.2)
+            else:
+                deadline = time.monotonic()+25
+                while True:
+                    if app.poll() is not None:
+                        tail = self.log_tail()
+                        if self.behavior_version >= 2 and re.search(r'could not connect to display|cannot open display|no display name', tail, re.I):
+                            raise UIFailure({'error': 'The application could not connect to its display. Inherit the controller DISPLAY and do not start another Xvfb.',
+                                             'category': 'desktop_display_mismatch', 'display': self.env['DISPLAY'], 'log_tail': tail})
+                        raise RuntimeError('Application exited: '+tail)
+                    observed = self.perform({'action':'observe'})
+                    if any(n.get('showing') and n['role'] not in {'application','desktop frame'}
+                           for n in observed.get('nodes',[])):
+                        break
+                    if time.monotonic()>deadline:
+                        if self.behavior_version >= 2:
+                            raise UIFailure({'error': 'No accessible application window is mapped on the controller display. Inherit DISPLAY and accessibility settings; do not start another Xvfb or use offscreen rendering.',
+                                             'category': 'desktop_display_mismatch', 'display_binding': observed.get('display_binding')})
+                        raise RuntimeError('Application launched but no visible accessible window appeared: '+self.log_tail())
+                    time.sleep(.2)
+            return self.perform({'action': 'observe'})
+        if not self.kind: raise ValueError('Launch an application first')
+        if self.kind == 'desktop':
+            binding = self.desktop_binding() if self.behavior_version >= 2 else None
+            if binding is not None and not binding['windows'] and action != 'observe':
+                raise UIFailure({'error': 'The application has no mapped window on the controller display.',
+                                 'category': 'desktop_display_mismatch', 'display_binding': binding})
+            response = subprocess.run(['/usr/bin/python3', str(Path(__file__).with_name('coder_accessibility.py'))],
+                input=json.dumps({**request, '_behavior_version': self.behavior_version,
+                    **({'_display_pids': [w['pid'] for w in binding['windows']]} if binding is not None else {})}),
+                text=True, capture_output=True, env=self.env, timeout=15)
+            try: result = json.loads(response.stdout)
+            except ValueError: raise RuntimeError(response.stderr[-2000:] or 'Accessibility service returned no data')
+            if response.returncode:
+                if self.behavior_version >= 1: raise UIFailure({**result, 'session_id': self.session_id})
+                raise ValueError(result.get('error', 'Accessibility action failed'))
+            if binding is not None:
+                result['display_binding'] = binding
+            return result
+        if action == 'observe':
+            return {'url': self.page.url, 'title': self.page.title(),
+                    'native_validation': self.page.locator('body').evaluate('''body => Array.from(body.querySelectorAll('input,textarea,select'))
+                      .filter(el => el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) && el.validity && !el.validity.valid && el.validationMessage)
+                      .map(el => ({id:el.id,message:el.validationMessage})).slice(0,50)'''),
+                    'visible_text_nodes': self.page.locator('body').evaluate('''body => Array.from(body.querySelectorAll('*'))
+                      .filter(el => !el.children.length && !el.matches('input,textarea,select,script,style') && el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))
+                      .map(el => el.innerText || '').filter(Boolean).slice(0,500)'''),
+                    'accessibility': self.page.locator('body').aria_snapshot()[:14000],
+                    'nodes': self.page.locator('body').evaluate('''(body, strict) => Array.from(body.querySelectorAll('input,textarea,select,button,output,label,[role],[id]')).slice(0,500).map(el => {
+                      const tag=el.tagName.toLowerCase();
+                      const editable=el.matches('input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=checkbox]):not([type=radio]),textarea') && !el.disabled && !el.readOnly;
+                      const labels=el.labels ? Array.from(el.labels).map(x=>x.innerText).join(' ').trim() : '';
+                      const name=el.getAttribute('aria-label') || (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map(id=>document.getElementById(id)?.innerText||'').join(' ').trim() || labels || (tag==='button' ? el.innerText : '');
+                      let selector;
+                      if(el.id) selector='#'+CSS.escape(el.id);
+                      else { let n=el,parts=[]; while(n && n!==body) { parts.unshift(n.tagName.toLowerCase()+':nth-child('+(Array.from(n.parentElement.children).indexOf(n)+1)+')');n=n.parentElement; } selector='body > '+parts.join(' > '); }
+                      return {selector,tag,name,role:el.getAttribute('role')||(tag==='label'?'label':tag==='output'?'output':editable?'textbox':tag==='button'?'button':tag),editable,interactive_ancestor:!!el.parentElement?.closest('button,[role=button],input,textarea'),activatable:el.matches('button,input[type=button],input[type=submit],[role=button]')&&!el.disabled,showing:strict?el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}):!!el.getClientRects().length,text:el.innerText||'',...(editable?{value:el.value}:{})};
+                    })''', self.behavior_version >= 2)}
+        if action == 'reload': self.page.reload(wait_until='domcontentloaded')
+        elif action == 'screenshot':
+            path = self.directory/'browser.png'; self.page.screenshot(path=str(path)); return {'screenshot': str(path)}
+        else:
+            target = (self.page.locator(request['selector']) if request.get('selector') else
+                      self.page.get_by_role(request.get('role', 'button'), name=request.get('name', ''), exact=True))
+            if action == 'click': target.click()
+            elif action == 'fill': target.fill(str(request.get('value', '')))
+            elif action == 'text': return {'text': target.inner_text(),
+                'input_control': target.evaluate("el => el.matches('input,textarea,select,[contenteditable=true]')")}
+            elif action == 'value': return {'value': target.input_value()}
+            elif action == 'press': target.press(str(request['value']))
+            else: raise ValueError('Unsupported browser action')
+        return self.perform({'action': 'observe'})
+
+    def log_tail(self):
+        path = self.directory/'application.log'
+        if not path.exists(): return ''
+        with path.open('rb') as stream:
+            stream.seek(0, 2); stream.seek(max(0, stream.tell()-4000))
+            return stream.read().decode(errors='replace')
+
+    def close(self):
+        self.close_application(list(self.processes))
+
+
+def serve(args):
+    # Chromium crash handlers and accessibility daemons may double-fork.
+    # Keep them owned by this session so its supervisor can terminate them.
+    if sys.platform == 'linux':
+        import ctypes
+        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), 'Cannot establish UI session child ownership')
+    # Allow scoped supervisors to stop the session and all application children.
+    def stop(signum, frame): raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    session = UISession(args.directory, args.vnc_port)
+    if args.launch:
+        session.perform(json.loads(Path(args.launch).read_text()))
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            try:
+                length = int(self.headers.get('content-length', '0'))
+                if not 0 < length <= 16000: raise ValueError('Invalid action size')
+                request = json.loads(self.rfile.read(length))
+                if request.get('action') == 'reset' and request.get('_operation_id') != os.environ.get('DAEDALUS_UI_OPERATION'):
+                    raise ValueError('UI reset belongs to a different operation')
+                data = session.perform(request)
+                status = 200
+            except Exception as error:
+                data, status = {**getattr(error, 'details', {'error': str(error)}),
+                                'log_tail': getattr(error, 'details', {}).get('log_tail', session.log_tail() if session.kind else '')}, 422
+            body = json.dumps(data).encode(); self.send_response(status)
+            self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+    server = HTTPServer(('127.0.0.1', args.port), Handler)
+    server.timeout = .5
+    (Path(args.directory)/'ready.json').write_text(json.dumps({'port': server.server_port, 'pid': os.getpid(),
+        'operation_id': os.environ.get('DAEDALUS_UI_OPERATION', '')}))
+    deadline = time.monotonic()+args.seconds if args.seconds else float('inf')
+    try:
+        while time.monotonic() < deadline: server.handle_request()
+    finally:
+        server.server_close(); session.close()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--directory', required=True)
+    parser.add_argument('--port', type=int, default=0)
+    parser.add_argument('--seconds', type=int, default=900)
+    parser.add_argument('--vnc-port', type=int)
+    parser.add_argument('--launch')
+    serve(parser.parse_args())

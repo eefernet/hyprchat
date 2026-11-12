@@ -1,4 +1,45 @@
 <details open>
+<summary>Alpha v18.2.1 — Nov 12, 2026</summary>
+
+> Clearer coding results, safer follow-up edits, and a new home for running your projects.
+
+## Daedalus
+
+- **Clearer build results** — see which checks passed, what still needs review, and what Daedalus couldn't verify.
+- **Accept the version you want** — mark a build as accepted while keeping later edits separate. Accepted projects stay available to download.
+- **Easier follow-up edits** — continue from the latest build, even before accepting it, or choose your accepted version as the starting point.
+- **Safer changes** — protect tests that already pass and check that requests to add tests actually produce new ones. Improved recovery prevents empty projects from being offered for acceptance.
+- **Simpler Daedalus settings** — one coding engine handles planning, building and repairs on Hephaestus. Choose a chat model and a coding model; older job history remains readable.
+- **More reliable builds** — improved Java packaging, coding performance, and Stop/Continue recovery, with clearer job cards and fewer confusing status messages.
+
+## Hephaestus & Application Previews
+
+- **Codebox retired; Hephaestus added** — code execution, coding agents, document generation, and application previews now run in isolated Docker containers for more consistent environments.
+- **Keep applications running** — keep supported previews running, stop or restart them, and view their logs. Saved application data survives restarts; temporary previews close after 15 minutes.
+- **Consistent service names** — Hephaestus now appears in Service Monitor and project actions, with existing uptime history preserved.
+
+## UI and other fun stuff
+
+- **A clearer interface** — refined sidebar, headings, theme previews, and shared surfaces, while keeping the familiar composer and existing animated backgrounds.
+- **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
+- **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.
+- **Visual fixes** — composer focus feedback, Send/Stop shape changes, interface-font persistence, and consistent update notices.
+- **Compact Daedalus cards** — the inline job card now shows one live line ("Writing public/app.js", "Running npm test", "Thinking"), a stage bar with per-stage times, the three newest actions and folded plan, checks and files. Finished jobs get a one-sentence verdict plus the failing check instead of a wall of lists.
+- **Daedalus strip stays in its chat** — the job strip above the composer no longer carries the previous chat's job into a new chat; job rows are scoped to the open conversation and cleared the moment you switch.
+- **HTML replies go to the preview, not the sandbox** — ordinary chat now tells the model to put a web page in one html fence (rendered live in the side pane) instead of writing it to disk through `execute_code` or a `write_file` that plain chat does not have. A turn whose tool rounds have filled the context window stops with a readable "Context window full" message, a cut-off tool call is explained with the token count, and the reason is kept on the message after a reload.
+- **Workbench pane** — a resizable side pane beside the chat with Activity, Plan, Checks, Files and Preview tabs replaces the job details drawer. It opens on its own when a running job turns out to be a web app (turn that off under Settings → Previews).
+- **Live HTML preview** — HTML code blocks get a Preview button that runs the page in a sandboxed frame beside the chat, updating as the reply streams. Full pages open automatically; switch between fill, tablet and phone widths, allow or block CDN libraries, and download the file.
+
+
+## Housekeeping
+
+- **Dead code removed** — the legacy upload project indexer (`backend/agents/project_indexer.py`, nothing called it), four unreferenced evaluation helpers (`coder_fixtures`, `frozen_environment`, `inference_meter`, `preview_qa`), `scripts/prepare_engine_tokenizer.py` (the Hephaestus installer owns tokenizer pinning) and two unused frontend harnesses.
+- **Superseded doc removed** — `docs/reliability-upgrade.md` was a one-off October deployment record; `docs/daedalus-workflows.md` documents the staged-release flow.
+- **`.env.example` refreshed** — stale OpenHands/Aider/Fixer/Architect variables are gone, the engine worker port is `8587` like the code, and the variables the backend actually reads but nobody had documented are listed (`DAEDALUS_ENGINE_URL`, `HEPHAESTUS_*`, `HYPRCHAT_TRUSTED_WEB_PROXY`, `QUICK_SEARCH_TIMEOUT`/`RANKING`, `RAG_RETRIEVAL_DEADLINE_SECONDS`, `HYPRCHAT_DEPLOY_QUALIFICATION`).
+
+</details>
+
+<details>
 <summary>Alpha v18.2 — Oct 26, 2026</summary>
 
 > Workspace project hubs, effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.

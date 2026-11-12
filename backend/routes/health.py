@@ -30,7 +30,14 @@ async def _check_service(name: str, url: str, timeout: float = 8) -> dict:
         if r.status_code < 400:
             # Degraded if response > 3s
             status = "degraded" if ms > 3000 else "ok"
-            return {"status": status, "response_ms": ms}
+            result={"status": status, "response_ms": ms}
+            if name=='codebox':
+                try:
+                    if r.json().get('runtime')=='hephaestus':
+                        result['runtime']='hephaestus'
+                        if r.json().get('status')!='ok': result.update(status='error',error='Hephaestus broker is unavailable')
+                except ValueError: pass
+            return result
         return {"status": "error", "response_ms": ms, "error": f"HTTP {r.status_code}"}
     except httpx.TimeoutException:
         ms = int((time.time() - t0) * 1000)

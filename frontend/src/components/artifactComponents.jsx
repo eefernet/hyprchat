@@ -788,7 +788,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
             <button onClick={()=>setCanvasOpen(true)} style={gridBtn(t.pink)}>✏️ Edit</button>}
           <button onClick={async()=>{const d=await action("use-in-chat");onUseInChat?.(d.attachment);}} style={gridBtn(t.acc)}>Use in chat</button>
           <button onClick={async()=>{const d=await action("send-to-research");notify&&notify({type:"success",text:"Research started",detail:d.report_id||d.id||"",duration:2500});}} style={gridBtn(t.pink)}>Research</button>
-          <button onClick={async()=>{const d=await action("fork-to-codebox");notify&&notify({type:"success",text:"Copied to Codebox",detail:d.path,duration:3000});}} style={gridBtn(t.warm)}>Codebox</button>
+          <button onClick={async()=>{const d=await action("fork-to-codebox");notify&&notify({type:"success",text:"Copied to Hephaestus",detail:d.path,duration:3000});}} style={gridBtn(t.warm)}>Hephaestus</button>
           <button onClick={async()=>{await action("revise",{title:`${a.title||a.filename} revision`});onRefreshList?.();}} style={gridBtn(t.f1)}>Revise</button>
           <button onClick={async()=>{const d=await action("check-file");await onPatch?.(a.id,{});notify&&notify({type:"success",text:"File health checked",detail:d.exists_status||"",duration:1800});}} style={gridBtn(t.mut)}>Check file</button>
         </div>

@@ -1,4 +1,9 @@
 """Public failure categories; detail remains in the original evidence."""
+import re
+
+# The exception type name at the start of the text, as the worker formats it. A workload can print anything
+# into a log tail, but it cannot choose the type of the supervisor's exception.
+NOT_DISPATCHED = re.compile(r'(?:runtimeerror: )?notdispatched: ')
 
 def malformed_native_call(error):
     text=str(error).lower()
@@ -8,7 +13,10 @@ def malformed_native_call(error):
 def classify_failure(error, stage, *, recovery_attempted=False):
     text=str(error).lower()
     category,action='operation_failed','Inspect the recorded evidence before continuing.'
-    if malformed_native_call(error) or 'multiple tool calls' in text:
+    if NOT_DISPATCHED.match(text):
+        # Raised only after the broker's own ledger confirmed no execution exists for the launch.
+        category,action='not_dispatched','The worker was busy with maintenance and did not start this step. Nothing ran and no model calls were used. Continue to try again.'
+    elif malformed_native_call(error) or 'multiple tool calls' in text:
         category,action='tool_protocol','The model returned an invalid tool call. Continue with another local model or inspect tool-protocol evidence.'
     elif 'input exceeds' in text or 'input budget' in text or 'input-budget' in text:
         category,action='input_budget','Narrow the review input or adjust its context in Settings; response-format retries cannot fix this.'

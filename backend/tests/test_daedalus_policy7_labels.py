@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from coder_policy7_evidence import requested_interfaces, decide
-from coder_skeletons import SKELETONS, files_for
 from coder_workflow_guard import workflow_rows, workflow_steps, column_names
 from evals.policy7_fixtures import MEDIUM_TASK
 
@@ -79,19 +77,6 @@ def test_sweep3_medium_missing_accessible_labels_fail_the_interface_row():
     assert all(r['environment_fault'] and r['classification'] == 'environment' and not r['passed'] for r in down)
 
 
-def test_requested_interface_rows_classified_unverified_reach_repair():
-    # Verified read-only on the sweep3 tree: a failing interface:* row is classified `unverified_interface`,
-    # which no branch of decide() routed, so the job parked as a candidate instead of repairing.
-    check = {'id': 'interface:#save', 'origin': 'controller', 'passed': False, 'classification': 'unverified_interface',
-             'interface_status': 'unresolved', 'evidence_types': [], 'outcomes': [], 'revision_id': 'r1',
-             'log_tail': 'The request names #save but no delivered source file defines or handles it.',
-             'reason': 'Requested interface #save could not be resolved from source; runtime proof is required'}
-    job = {'checks': [check], 'repair_round': 0, 'revision_id': 'r1'}
-    result = decide(job, {'outcomes': []}, {})
-    assert result['action'] == 'repair', result
-    assert [c['id'] for c in result['feedback']] == ['interface:#save']
-
-
 def test_sweep3_kanban_drag_falls_back_to_the_requested_column_headings():
     assert column_names(KANBAN_TASK) == ['Todo', 'In Progress', 'Done']
     assert column_names('Build a CLI that prints word counts') == []
@@ -101,15 +86,6 @@ def test_sweep3_kanban_drag_falls_back_to_the_requested_column_headings():
     assert seen['interfaces']['columns'] == ['Todo', 'In Progress', 'Done'] and rows
     source = (Path(__file__).resolve().parents[1] / 'coder_workflow_guard.py').read_text()
     assert 'ancestor::*[self::section or self::div or self::article][1]' in source
-
-
-def test_sweep3_skeleton_placeholders_are_unmistakable_and_versioned():
-    express = files_for('express-sqlite', {})
-    assert express['public/app.js'].splitlines()[0].startswith('// PLACEHOLDER: replace this whole file')
-    assert "test('PLACEHOLDER — replace with the requested API tests'" in express['tests/api.test.js']
-    react = files_for('react-fastapi-sqlite', {})
-    assert react['tests/test_browser.py'].splitlines()[0].startswith('# PLACEHOLDER: replace this whole file')
-    assert SKELETONS['express-sqlite']['version'] >= 2 and SKELETONS['react-fastapi-sqlite']['version'] >= 2
 
 
 def test_fix4_kanban_drag_drops_onto_the_innermost_zone_not_the_outer_column():
@@ -195,3 +171,5 @@ def test_fix6_medium_per_item_buttons_the_request_names_must_exist_on_a_created_
     rows = workflow_rows({'id': 'app', 'cwd': '.'}, 'http://127.0.0.1:1', {}, task, prober=prober)
     row = next(r for r in rows if r['id'] == 'interface:labels:app')
     assert row['passed'] is False and row['missing_per_item'] == ['Edit', 'Delete'] and 'for each item' in row['reason']
+
+from coder_check_evidence import requested_interfaces

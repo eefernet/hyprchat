@@ -182,3 +182,16 @@ def test_restore_history_is_owner_scoped_and_blocked_during_generation(tmp_path,
         with pytest.raises(HTTPException) as exc:await message_reviews(mid)
         assert exc.value.status_code==404
     asyncio.run(run())
+
+
+def test_error_reason_is_kept_on_the_persisted_row(capture):
+    # conv-5f8704bb8897 (2026-11-12): a reload showed only "generation failed" after a cut-off tool call.
+    save,_=capture
+    drain(source(INIT,{'type':'token','content':'Here is the page'},
+                 {'type':'error','error':'Context window full: about 3,369 of 3,550 tokens are used'}))
+    assert save.call_args.args[1]=='Here is the page\n\n_[interrupted: Context window full: about 3,369 of 3,550 tokens are used]_'
+    assert save.call_args.args[2]['delivery_status']=='failed'
+    drain(source(INIT,{'type':'error','error':'llama-server  returned\ninvalid tool call arguments'}))
+    assert save.call_args.args[1]=='_[No response — llama-server returned invalid tool call arguments]_'
+    drain(source(INIT,{'type':'error'}))
+    assert save.call_args.args[1]=='_[No response; generation failed.]_'

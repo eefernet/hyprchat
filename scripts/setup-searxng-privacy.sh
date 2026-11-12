@@ -2,10 +2,10 @@
 # Harden an existing SearXNG host for HyprChat.
 #
 # Required env:
-#   HYPRCHAT_IP=192.168.1.120
+#   HYPRCHAT_IP=<hyprchat-ip>
 #
 # Optional env:
-#   DEV_IP=192.168.1.x          # may access SearXNG :8888, not proxy :8899
+#   DEV_IP=<dev-machine-ip>     # may access SearXNG :8888, not proxy :8899
 #   PROTON_OPENVPN=auto|true|false
 #
 # Proton assets, when used, must already exist on this host:

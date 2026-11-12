@@ -223,7 +223,7 @@ Idea: <IDEA>"""
 
 
 async def enhance_prompt(http, idea: str, *, model: str = "",
-                         timeout: int = 45) -> tuple[str, str, str] | None:
+                         timeout: int = 45, image_preferences: dict | None = None) -> tuple[str, str, str] | None:
     """Expand a short idea into an (prompt, negative, model) SDXL triple via
     the local LLM. Pure LLM call — works even when ComfyUI is unconfigured.
 
@@ -235,8 +235,10 @@ async def enhance_prompt(http, idea: str, *, model: str = "",
     idea = (idea or "").strip()[:600]
     if not idea:
         return None
+    compose_model = (image_preferences["settings"]["image_chat_compose_model"]
+                     if image_preferences is not None else config.IMAGE_CHAT_COMPOSE_MODEL)
     model = (model_providers.reject_cloud((model or "").strip())
-             or model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
+             or model_providers.reject_cloud(compose_model or "")
              or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
              or config.DEFAULT_MODEL)
     prompt_text = _ENHANCE_PROMPT_TEMPLATE.replace("<IDEA>", idea)

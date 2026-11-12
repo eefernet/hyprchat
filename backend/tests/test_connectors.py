@@ -175,7 +175,6 @@ def test_execute_openapi_tool_supports_extra_query(monkeypatch):
     assert "hyprchat-test" in result
 
 
-
 def test_mcp_http_exchange_sends_protocol_version_header(monkeypatch):
     server = {
         "id": "mcp-h", "name": "HTTP MCP", "transport": "streamable_http",
@@ -217,7 +216,6 @@ def test_mcp_http_exchange_sends_protocol_version_header(monkeypatch):
     assert seen["tools/list"]["mcp-protocol-version"] == "2025-03-26"
     assert seen["tools/list"]["mcp-session-id"] == "sess-123"
     assert seen["notifications/initialized"]["mcp-protocol-version"] == "2025-03-26"
-
 
 
 def test_resolve_server_url():

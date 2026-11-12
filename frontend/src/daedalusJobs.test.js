@@ -71,3 +71,36 @@ test('scope clarification is sent only for a job awaiting an answer and keeps ca
  assert.deepEqual(resumeJobBody({},'unchanged','stale answer'),{});
  assert.deepEqual(resumeJobBody(job,'on',''),{candidate_revision:'saved',visual_review:true});
 });
+test('a passing build asks for review and never reads as Complete',()=>{
+ const base={state:'ready_for_review',candidate_artifact:{metadata:{runnable:true}}};
+ assert.equal(jobStatusLabel({...base,verification_summary:{checks_passed:true}}),'Checks passed — please review');
+ assert.equal(jobStatusLabel({...base,verification_summary:{checks_ok:true,exercised:false}}),'Built, not exercised');
+ assert.equal(jobStatusLabel({...base,verification_summary:{checks_ok:false}}),'Ready for review');
+ assert.deepEqual(codingRequestFields({daedalus_source_pointer:'accepted'},{persona_name:'Daedalus'}),{daedalus_source_pointer:'accepted'});
+});
+test('a rolled-back candidate is ready for review, never checks-passed',()=>{
+ assert.equal(jobStatusLabel({state:'ready_for_review',verification_summary:{rolled_back:true,checks_passed:true}}),'Ready for review');
+});
+
+test('modern resume preserves allowance unless the owner explicitly grants more',()=>{
+  assert.equal(resumeJobBody({engine:'openhands159'}).budget_mode,'preserve');
+  assert.equal(resumeJobBody({engine:'openhands159'},'unchanged','','new_allowance').budget_mode,'new_allowance');
+  assert.equal(resumeJobBody({engine:'legacy'}).budget_mode,undefined);
+});
+
+test('incomplete recovery never inherits a green badge or offers irrelevant allowance', async()=>{
+ const {needsMoreAllowance}=await import('./daedalusJobs.js');
+ const job={engine_behavior_version:1,state:'ready_for_review',failure:{category:'output_limit'},
+  verification_summary:{incomplete_reason:'Generation stopped',checks_ok:true,checks_passed:false},candidate_artifact:{metadata:{checks_passed:true}}};
+ assert.equal(jobStatusLabel(job),'Build incomplete — please review');
+ assert.equal(needsMoreAllowance(job),false);
+ assert.equal(needsMoreAllowance({...job,stop_limit:'model_calls'}),true);
+ assert.equal(needsMoreAllowance({...job,stop_limit:'job_seconds'}),true);
+ assert.equal(needsMoreAllowance({...job,stop_limit:'application_repairs'}),false);
+});
+
+test('normalized activity events cannot overwrite workflow identity or state',()=>{
+  const job={id:'workflow',state:'coding',revision_id:'reviewed'};
+  const result=applyJobEvent(job,{seq:2,type:'activity',data:{id:'file-event',state:'completed',path:'app.js'}},1);
+  assert.equal(result.job.id,'workflow');assert.equal(result.job.state,'coding');assert.equal(result.job.revision_id,'reviewed');assert.equal(result.lastSequence,2);
+});

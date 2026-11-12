@@ -1,4 +1,4 @@
-"""Policy-7 regressions exercise boundaries and real processes, without inference."""
+"""Shared verification regressions exercise boundaries and real processes, without inference."""
 import copy
 import json
 import os
@@ -11,8 +11,6 @@ import pytest
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from coder_policy7 import Experiment, acceptance, audit_checks, make_brief
-from coder_patch_runtime import inference_bridge, select_files, readonly_command
 from coder_project_runtime import contract, failure_class, run_revision
 from coder_repository import Repository
 from coder_worker_runtime import WorkerStore, _boundary
@@ -59,76 +57,6 @@ def test_audit_path_errors_never_become_application_repairs():
     assert failure_class({**row, 'log_tail': "OSError: [Errno 30] Read-only file system: 'fixture.txt'"}) == 'audit_defect'
 
 
-def test_outcome_coverage_is_bound_to_exact_revision_and_check():
-    outcomes = [{'id': 'o1', 'text': 'API works'}, {'id': 'o2', 'text': 'README and tests'}]
-    verdict = {'scope_complete': True, 'outcomes': [{'id': o['id'], 'status': 'passed'} for o in outcomes]}
-    check = {'id': 'x', 'execution_id': 'run:x', 'revision_id': 'current', 'passed': True,
-             'coverage_observed': True, 'origin': 'independent', 'outcomes': ['o1'],
-             'evidence_types': ['behavior'], 'execution_succeeded': True, 'source_bindings': [{'path': 'app.py', 'sha256': 'a'*64}]}
-    assert not acceptance(outcomes, [check], verdict, 'current')['accepted']
-    assert not acceptance(outcomes[:1], [check], verdict, 'different')['accepted']
-    summary = acceptance(outcomes[:1], [check], verdict, 'current')
-    assert not summary['accepted']  # generated audit cannot supply trusted behavior coverage
-    assert summary['outcomes'][0]['missing_evidence'] == ['behavior']
-
-
-def test_draft_obligations_cannot_disappear_from_new_brief():
-    answer = {'outcomes': ['New feature'], 'batches': [{'task': 'Add it'}]}
-    with pytest.raises(ValueError, match='inheritance disposition'):
-        make_brief(answer, 'New feature', ['Original missing UI'])
-    brief = make_brief({**answer, 'inheritance': [{'parent_id': 'o1', 'action': 'retain'}]},
-                       'New feature', ['Original missing UI'])
-    assert [o['text'] for o in brief['outcomes']] == ['Original missing UI', 'New feature']
-
-
-def test_context_selection_keeps_complete_files(tmp_path):
-    (tmp_path / 'small.py').write_text('VALUE=3')
-    (tmp_path / 'huge.py').write_text('VALUE=3\n' * 10000)
-    files, omitted = select_files(tmp_path, 'huge small', 100)
-    assert files == ['small.py'] and omitted == ['huge.py']
-
-
-def test_bridge_rejects_model_change_and_accounts_internal_retries(tmp_path):
-    _, store = fixture(tmp_path, {})
-    def chat(store, op, role, messages, **kwargs):
-        _boundary(store, op, model_call=True)
-        return 'patch'
-    with inference_bridge(store, 'check', 'builder', chat) as (url, errors):
-        body = {'model': 'other', 'messages': [], 'stream': False}
-        assert requests.post(url + '/api/chat', json=body).status_code == 400
-        body['model'] = 'local'
-        assert requests.post(url + '/api/chat', json=body).json()['message']['content'] == 'patch'
-        assert requests.post(url + '/api/chat', json=body).status_code == 400
-    assert store.get('check')['calls'] == 1
-    assert any('allowance' in error['message'] for error in errors)
-
-
-@pytest.mark.skipif(not shutil.which('bwrap'), reason='Codebox sandbox test')
-def test_readonly_audit_cannot_mutate_project(tmp_path):
-    import subprocess
-    source = tmp_path / 'subject.py'; source.write_text('VALUE=1')
-    audit = tmp_path / 'audit'; audit.mkdir()
-    command = [sys.executable, '-c', f'from pathlib import Path; Path({str(source)!r}).write_text("changed")']
-    result = subprocess.run(readonly_command(command, [audit]), capture_output=True)
-    assert result.returncode != 0
-    assert source.read_text() == 'VALUE=1'
-
-
-def test_repeated_narration_returns_candidate_and_counters_survive_restart(tmp_path):
-    def chat(*args, **kwargs):
-        return json.dumps({'outcomes': ['Fix ledger'], 'batches': [{'task': 'Fix ledger'}]})
-    calls = []
-    def editor(*args, **kwargs):
-        calls.append('Now let me inspect the README')
-        return {'changed': []}
-    experiment = Experiment(tmp_path / 'job', 'Fix ledger', model='local', ollama_url='http://unused', editor=editor, chat=chat)
-    result = experiment.run()
-    assert result['state'] == 'candidate' and len(calls) == 2 and result['recovery_used']
-    restored = Experiment(tmp_path / 'job', editor=editor, chat=chat)
-    assert restored.job['recovery_used'] and restored.job['repair_round'] == 0
-    assert Path(result['artifact']['path']).is_file()
-
-
 def test_zero_tests_cannot_supply_coverage(tmp_path):
     repo, store = fixture(tmp_path, {'test_empty.py': 'print("passed")'})
     profile = {'profiles': [], 'services': [], 'checks': [{'id': 'test', 'command': 'python3 test_empty.py', 'phase': 'test', 'is_test': True}]}
@@ -137,7 +65,7 @@ def test_zero_tests_cannot_supply_coverage(tmp_path):
     assert result['checks'][0]['failure_kind'] == 'missing_coverage'
 
 
-@pytest.mark.skipif(not shutil.which('bwrap'), reason='Codebox sandbox test')
+@pytest.mark.skipif(not (shutil.which('bwrap') or os.environ.get('HEPHAESTUS_EXECUTOR')=='docker'), reason='Linux isolated execution required')
 def test_sentinel_import_and_list_assertion_run_against_real_source(tmp_path):
     repo, store = fixture(tmp_path, {'subject.py': 'MISSING=object()\ndef items(): return [1,2,3]\n'})
     audit = tmp_path / 'audit'; audit.mkdir()
@@ -147,26 +75,6 @@ def test_sentinel_import_and_list_assertion_run_against_real_source(tmp_path):
     result = run_revision(store, 'check', repo, profile, project_id='project', audit_source=audit, checks=checks)
     assert result['passed'], result
     assert any(b['path'] == 'subject.py' for b in result['checks'][0]['source_bindings'])
-
-
-def test_audit_metadata_cannot_embed_a_replacement_application(tmp_path):
-    (tmp_path / 'audit.json').write_text(json.dumps({'checks': [{'command': 'python3 subject.py', 'outcomes': ['o1']}]}))
-    with pytest.raises(ValueError, match='under'):
-        audit_checks(tmp_path, [{'id': 'o1'}])
-
-
-@pytest.mark.skipif(not Path('/opt/openhands-worker/aider-venv/bin/aider').exists(), reason='Installed Codebox Aider contract')
-def test_real_pinned_cli_applies_patch_through_counted_text_bridge(tmp_path):
-    from coder_patch_runtime import edit
-    repo, store = fixture(tmp_path, {'subject.py': 'VALUE = 1\n'})
-    def response(store, op, role, messages, **kwargs):
-        _boundary(store, op, model_call=True)
-        assert any('VALUE = 1' in str(m) for m in messages)
-        return 'subject.py\n```python\n<<<<<<< SEARCH\nVALUE = 1\n=======\nVALUE = 2\n>>>>>>> REPLACE\n```'
-    result = edit(store, 'check', repo.root, 'Set VALUE to 2', chat=response)
-    assert repo.root.joinpath('subject.py').read_text() == 'VALUE = 2\n', result
-    assert result['changed'] == ['subject.py']
-    assert store.get('check')['calls'] == 1
 
 
 def test_shared_dependency_cache_reuses_project_across_jobs(tmp_path):
@@ -205,47 +113,6 @@ def test_mutation_of_extensionless_source_is_rejected(tmp_path):
     assert (repo.root / 'bin/tool').read_text() == 'original'
 
 
-def test_explicit_draft_fork_uses_archive_not_mutable_workspace(tmp_path):
-    parent = Experiment(tmp_path / 'parent', 'Original requirement', model='local', ollama_url='http://unused', files={'app.py': 'VALUE=1'})
-    parent.step()
-    parent.save(state='candidate', brief={'outcomes': [{'id': 'o1', 'text': 'Original requirement'}]})
-    parent.package()
-    (parent.repo.root / 'app.py').write_text('VALUE=999')
-    artifact = parent.job['artifact']
-    child = Experiment.fork(parent, tmp_path / 'child', 'New feature', revision_id=artifact['revision_id'], artifact_sha256=artifact['sha256'])
-    assert (child.repo.root / 'app.py').read_text() == 'VALUE=1'
-    assert child.job['inherited'] == ['Original requirement']
-    assert child.job['source_revision'] != child.job['expected_accepted_revision']
-    with pytest.raises(ValueError, match='Exact'):
-        Experiment.fork(parent, tmp_path / 'wrong', 'New feature', revision_id='stale', artifact_sha256=artifact['sha256'])
-
-
-def test_stop_acknowledgement_resumes_with_persisted_repair_limits(tmp_path):
-    experiment = Experiment(tmp_path / 'job', 'Fix app', model='local', ollama_url='http://unused')
-    experiment.step()
-    experiment.save(state='editing', repair_round=2, audit_corrections=1, recovery_used=True, operation='cancelled-op')
-    experiment.store.create('cancelled-op', experiment.job['id'], 'code', {'request_key': 'x'})
-    experiment.store.update('cancelled-op', status='cancelled', started=time.time(), ended=time.time(), calls=3)
-    restarted = Experiment(tmp_path / 'job')
-    restarted.resume()
-    assert restarted.job['state'] == 'editing' and not restarted.job['operation']
-    assert restarted.job['repair_round'] == 2 and restarted.job['audit_corrections'] == 1
-    assert restarted.job['recovery_used'] and restarted.job['calls'] == 3
-
-
-def test_saved_working_patch_with_unchanged_later_batch_reaches_checks(tmp_path):
-    """Rehearsal: Python repair passed independently but no-change stopped review."""
-    experiment = Experiment(tmp_path / 'job', 'Fix ledger and document it', model='local', ollama_url='http://unused',
-        files={'ledger.py': 'VALUE=1'}, editor=lambda *a, **kw: {'changed': []})
-    experiment.step()
-    experiment.save(state='editing', brief={'outcomes': [{'id': 'o1', 'text': 'Fix ledger'}],
-        'batches': [{'task': 'Fix ledger'}, {'task': 'Document it'}]}, batch=1,
-        last_patch={'changed': ['ledger.py', 'README.md']})
-    experiment.step()
-    assert experiment.job['state'] == 'checking'
-    assert not experiment.job['recovery_used'] and experiment.job['repair_round'] == 0
-
-
 def test_cli_launch_is_a_bounded_command_not_a_server(tmp_path):
     repo, store = fixture(tmp_path, {'hello.py': 'print("hello")'})
     profile = contract(repo, {'packages': {'.': {'launch': 'python3 hello.py'}}})
@@ -271,13 +138,3 @@ def test_setup_never_runs_under_assertion_tracing(tmp_path, monkeypatch):
         {'PATH': os.environ['PATH'], 'PYTHONPATH': '/instrumentation', 'NODE_V8_COVERAGE': '/coverage',
          'DAEDALUS_PROVENANCE': '/bindings'}, logs)
     assert observed and not ({'PYTHONPATH', 'NODE_V8_COVERAGE', 'DAEDALUS_PROVENANCE'} & observed[0].keys())
-
-
-def test_candidate_does_not_reuse_verification_of_an_older_revision(tmp_path):
-    experiment = Experiment(tmp_path / 'job', 'Make app work', model='local', ollama_url='http://unused', files={'app.py': 'VALUE=1'})
-    experiment.step()
-    experiment.save(state='candidate', brief={'outcomes': [{'id': 'o1', 'text': 'Works'}]},
-        verification_summary={'revision_id': 'old', 'accepted': False, 'outcomes': [{'id': 'o1', 'status': 'passed'}]})
-    experiment.package()
-    assert experiment.job['verification_summary']['revision_id'] == experiment.job['revision_id']
-    assert experiment.job['verification_summary']['outcomes'][0]['status'] == 'unverified'

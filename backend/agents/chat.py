@@ -11,6 +11,7 @@ import traceback
 from datetime import datetime
 
 import config
+import image_settings
 import context_policy
 import database as db
 import model_providers
@@ -41,6 +42,47 @@ _LEAK_TRANSITION_MARKERS = ("<|channel|>", "<channel|>", "<|message|>")
 # Line-anchored fence counter: CoT prose often *mentions* ``` mid-line
 # ("followed by a ```chart block"), which must not count as a real fence.
 _FENCE_LINE_RE = re.compile(r"(?m)^[ \t]*```")
+
+
+CONTEXT_FULL_SHARE = 0.92
+
+
+def context_exhausted(prev_prompt_tokens, prev_gen_tokens, appended_tokens, num_ctx, share=CONTEXT_FULL_SHARE):
+    """True when the previous round's observed usage plus what was appended since leaves no room for a reply.
+
+    Observed counts come from Ollama (prompt_eval_count/eval_count); without them nothing is known, so never block.
+    """
+    try:
+        num_ctx = int(num_ctx or 0)
+        used = int(prev_prompt_tokens or 0) + int(prev_gen_tokens or 0) + int(appended_tokens or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(num_ctx > 0 and prev_prompt_tokens and used >= num_ctx * share)
+
+
+def context_full_message(used, num_ctx):
+    return (f"Context window full: about {int(used):,} of {int(num_ctx):,} tokens are used by this turn's tool calls, "
+            "so the model cannot answer in the remaining space. Start a new chat, shorten the task, "
+            "or raise the chat context size in Settings.")
+
+
+_TRUNCATED_TOOL_CALL_MARKERS = ("invalid tool call arguments", "unexpected end of json input", "unexpected eof in tool call")
+
+
+def truncated_tool_call_error(error, used, num_ctx):
+    """Readable message for llama-server's cut-off tool-call JSON (generation stopped at the window), else None."""
+    low = str(error or "").lower()
+    if not any(marker in low for marker in _TRUNCATED_TOOL_CALL_MARKERS):
+        return None
+    try:
+        used, num_ctx = int(used or 0), int(num_ctx or 0)
+    except (TypeError, ValueError):
+        used, num_ctx = 0, 0
+    where = f" (context window full: {used:,} of {num_ctx:,} tokens)" if num_ctx and used >= num_ctx * CONTEXT_FULL_SHARE else \
+        (f" ({used:,} of {num_ctx:,} tokens used)" if num_ctx and used else "")
+    return ("The model's tool call was cut off before its arguments were complete" + where +
+            ". Start a new chat, ask for a smaller result, or raise the chat context size in Settings. "
+            f"Original: {str(error)[:160]}")
 
 
 def _merge_stream_tool_calls(collected: list, incoming) -> list:
@@ -683,8 +725,7 @@ def detect_template_family(model_name: str) -> str:
 CODEAGENT_TOOLS_SET = {"execute_code", "run_shell", "write_file", "read_file",
                        "list_files", "download_file", "download_project", "delete_file",
                        "search_files", "diff_files", "git_init", "git_diff", "git_commit",
-                       "run_tests", "lint_code", "resume_project", "run_review",
-                       "run_acceptance_review", "run_fixer", "run_aider_fix",
+                       "run_tests", "lint_code", "resume_project",
                        "start_coder_workflow", "get_coder_workflow",
                        "cancel_coder_workflow", "ask_project"}
 
@@ -716,7 +757,6 @@ _TOOL_ICONS = {
     "get_coder_workflow": ("activity", "📊 Checking Coder workflow"),
     "cancel_coder_workflow": ("x-circle", "🛑 Cancelling Coder workflow"),
     "ask_project": ("help-circle", "❓ Investigating project"),
-    "project_indexer": ("database", "📚 Indexing project"),
     "run_tests": ("code", "🧪 Running tests"),
     "lint_code": ("code", "🧹 Linting code"),
     "git_init": ("terminal", "📁 Initializing git"),
@@ -745,8 +785,8 @@ _PHANTOM_CORRECTION = (
     "SYSTEM: You told the user you made changes (e.g. 'added', 'implemented', "
     "'created'), but you called NO tools this turn — so NOTHING was actually changed "
     "on disk. A real change to this project REQUIRES a tool call. Do ONE of these NOW:\n"
-    "  (a) call run_aider_fix(task='...') for the existing/uploaded project, or "
-    "generate_code/write_file for genuinely new files, to ACTUALLY make the change; or\n"
+    "  (a) call start_coder_workflow(task='...') for this project, or "
+    "write_file for a single standalone file, to ACTUALLY make the change; or\n"
     "  (b) if you cannot or should not change anything, tell the user plainly that you "
     "have NOT made any changes yet, and why.\n"
     "Do not claim work you did not perform."
@@ -797,35 +837,10 @@ _PLAN_PROJECT_AUTO_BUILD_MARKERS = (
 )
 
 
-def _plan_project_file_ref_count(tool_result: str) -> int:
-    text = tool_result or ""
-    return sum(
-        text.count(ext)
-        for ext in (".py", ".js", ".ts", ".html", ".go", ".rs")
-    )
 
 
-def _plan_project_should_nudge_generate_code(tool_result: str) -> bool:
-    """Only legacy/plain Architect plans need the chat-loop generate_code nudge."""
-    text = tool_result or ""
-    if len(text) <= 1000:
-        return False
-    lower = text.lower()
-    if any(marker.lower() in lower for marker in _PLAN_PROJECT_AUTO_BUILD_MARKERS):
-        return False
-    return _plan_project_file_ref_count(text) >= 3
 
 
-def _qa_run_qualifies(run: dict, stream_started_at: str) -> bool:
-    """True when a qa run can be streamed verbatim as this turn's answer:
-    succeeded, not a change request, has an answer, and was created by THIS
-    stream — a stale qa run from a previous turn must never be replayed."""
-    if (run.get("started_at") or "") < (stream_started_at or ""):
-        return False
-    env = run.get("result_envelope") or {}
-    return (run.get("status") == "succeeded"
-            and not env.get("looks_like_change_request")
-            and bool((env.get("answer") or "").strip()))
 
 
 def _next_action_from_blocked_result(tool_result: str) -> str:
@@ -850,69 +865,21 @@ def _next_action_from_blocked_result(tool_result: str) -> str:
     # Hard cap reached → summarize for the user instead of looping a tool.
     if "hard cap" in low or "ship as-is" in low or "ship anyway" in low:
         return "respond to the user: summarize changes, state the remaining issue, and ask whether to ship as-is"
-    if "run_aider_fix" in text:
-        return "run_aider_fix(...)"
-    if "run_review" in text:
-        return "run_review(...)"
-    if "run_fixer" in text and "do not call run_fixer" not in low:
-        return "run_fixer(...)"
-    return "respond to the user with the blocked state and ask for guidance"
+    return "respond with the saved job status; project execution is owned by the modern controller"
 
-
-async def _mark_latest_uploaded_workflow_blocked(conv_id: str) -> None:
-    if not conv_id:
-        return
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id)
-        if wf and wf.get("mode") == "fix_uploaded_project" and wf.get("state") != "blocked":
-            await db.update_coder_workflow(
-                wf.get("id", ""),
-                state="blocked",
-                active_run_id=wf.get("active_run_id") or "",
-                artifact_status="not_ready",
-            )
-    except Exception as e:
-        print(f"[CHAT] blocked-loop workflow update failed (non-fatal): {e}")
 
 
 async def _is_active_uploaded_manual_loop(conv_id: str, tool_names: list[str]) -> bool:
-    if not conv_id or not tool_names:
+    if not conv_id or not tool_names or not all(name in _UPLOAD_MANUAL_TOOLS for name in tool_names):
         return False
-    if not all((name or "") in _UPLOAD_MANUAL_TOOLS for name in tool_names):
-        return False
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id)
-    except Exception as e:
-        print(f"[CHAT] duplicate-loop workflow lookup failed (non-fatal): {e}")
-        return False
-    if not wf or wf.get("mode") != "fix_uploaded_project":
-        return False
-    return (wf.get("state") or "").lower() not in _TERMINAL_WORKFLOW_STATES
+    from db import coder_jobs as jobs
+    latest = await db.get_latest_coder_workflow(conv_id)
+    job = await jobs.get(latest['id']) if latest and latest.get('workflow_version') == 3 else None
+    return bool(job and job.get('engine') == 'openhands159' and job['state'] in jobs.ACTIVE)
 
 
 async def _next_uploaded_workflow_action(conv_id: str) -> str:
-    project_id = ""
-    try:
-        wf = await db.get_latest_coder_workflow(conv_id) if conv_id else None
-        project_id = (wf or {}).get("project_id") or ""
-        runs = await db.get_runs_by_conversation(conv_id, limit=10) if conv_id else []
-    except Exception as e:
-        print(f"[CHAT] duplicate-loop next-action lookup failed (non-fatal): {e}")
-        runs = []
-    project_arg = f'project_id="{project_id}"' if project_id else "project_id=<active_project_id>"
-    latest = runs[0] if runs else {}
-    role = latest.get("role") or ""
-    run_id = latest.get("id") or ""
-    env = latest.get("result_envelope") or {}
-    env_status = (env.get("status") or "").lower()
-
-    if role == "aider.fix":
-        return f"run_review({project_arg})"
-    if role == "reviewer" and env_status == "clean":
-        return f"run_acceptance_review({project_arg})"
-    if role in {"reviewer", "acceptance"} and run_id:
-        return f'run_aider_fix(project_id="{project_id}", issue_run_id="{run_id}")' if project_id else f'run_aider_fix(issue_run_id="{run_id}")'
-    return f"run_review({project_arg})"
+    return "get_coder_workflow() to inspect progress; use Stop before requesting independent edits"
 
 
 async def _duplicate_manual_tool_summary(conv_id: str, tool_names: list[str]) -> str:
@@ -1196,8 +1163,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     """
     conv_id = req.conversation_id
     ephemeral = bool(getattr(req, "ephemeral", False))
+    image_preferences = await image_settings.get_snapshot() if config.COMFYUI_URL else image_settings.legacy_snapshot()
 
     last_user_msg = ""
+    _user_message_id = None
     for m in reversed(req.messages):
         if m.get("role") == "user":
             last_user_msg = m.get("content", "")
@@ -1223,7 +1192,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             recent_user = await db.get_latest_user_message(conv_id)
             _recent_content = (recent_user or {}).get("content") or ""
             if not recent_user or (_recent_content != _content_to_save and _recent_content != last_user_msg):
-                await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
+                _user_message_id = await db.add_message(conv_id, "user", _content_to_save, metadata=_user_meta)
+            else:
+                _user_message_id = recent_user['id']
         except Exception:
             pass
 
@@ -1249,6 +1220,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         req.model = _routed_model
         _routed_from_auto = _routed_model
 
+    if req.persona_id and config.PLANNING_MODEL:
+        routing_persona = next((c for c in await db.get_model_configs() if c['id'] == req.persona_id), None)
+        if routing_persona and _v2_name_match(routing_persona.get('name')):
+            req.model = config.PLANNING_MODEL
     _model_provider, _provider_model_name = model_providers.split_model_id(req.model)
     _is_cloud_provider = _model_provider in model_providers.CLOUD_PROVIDERS
 
@@ -1608,6 +1583,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "Start every ```chart / ```pygraph / ```mermaid fence on its own new line, and put a newline after the closing fence. "
             "Colors auto-pick from the active theme palette. Use charts for quantitative comparisons or trends "
             "instead of dumping raw numbers or ASCII art.\n"
+            "- **Web pages / HTML demos**: put the complete HTML document (inline `<style>` and `<script>`) "
+            "in ONE ```html code fence in your reply. The chat renders it live in a sandboxed preview pane beside "
+            "the conversation, so the user sees the page as you write it. Do not write HTML to disk with "
+            "`execute_code`, do not base64 it, and do not look for `write_file` — it is not available in ordinary chat.\n"
             "- **Callouts**: start a blockquote with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, "
             "`> [!WARNING]`, or `> [!CAUTION]` to render a coloured admonition box. Subsequent `> ` lines are body. "
             "Use these for important caveats, tips, or warnings — don't over-use.\n"
@@ -1635,7 +1614,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 + (
                     "An automatic enhancer expands your prompt with photographic detail before "
                     "rendering — keep the prompt short and focused on what to depict.\n"
-                    if config.IMAGE_CHAT_AUTO_ENHANCE else ""
+                    if image_preferences["settings"]["image_chat_auto_enhance"] else ""
                 ) +
                 "If you are roleplaying a persona with a described appearance, you can send photos of "
                 "yourself: call `generate_image` describing yourself (matching your persona's "
@@ -1695,7 +1674,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             messages.append({"role":"system","content":"Active Daedalus project: "+json.dumps({
                 "project_id":_active_project["id"],"name":_active_project["name"],
                 "accepted_revision":_active_project.get("accepted_revision_id","")})+
-                ". Follow-up changes use this project's accepted revision with mode edit_project. Questions use ask_project. "
+                ". Follow-up changes use this project's working candidate with mode edit_project. Questions use ask_project. "
                 "Project IDs are registry identities, not filesystem paths. The controller owns workspaces and revisions."})
         else:
             messages.append({"role":"system","content":"No project is selected for this request. Start requested new work with mode build_from_prompt."})
@@ -1721,55 +1700,12 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 _ap_lines.append(f"  - {_f}")
             if len(_ap_files) > 25:
                 _ap_lines.append(f"  - ... and {len(_ap_files) - 25} more")
-        if _is_v2_persona:
-            _ap_lines.append(
-                "\n## How to handle this project\n"
-                f"**The project lives at `{_ap_path}` — already extracted on disk. "
-                f"NEVER mkdir a new directory. NEVER use the display name "
-                f"('{_active_project.get('name', '?')}') as a path. ALWAYS pass "
-                f"`{_ap_path}` to any tool that takes a project_dir or path.**\n\n"
-                "1. **For QUESTIONS** about the code (\"how does X work?\", \"walk me "
-                "through Y\", \"show me Z\", \"break down W line by line\", \"what does "
-                "this do?\"): your VERY FIRST tool call MUST be `ask_project(question='...')`. "
-                "Do NOT call list_files, read_file, search_files, run_review, run_shell, "
-                "or download_project. The ProjectQA agent reads the code, finds what's "
-                "relevant, and produces a grounded answer with file:line citations in "
-                "ONE round. Hand-rolling read_file across many files is the v1 "
-                "antipattern that wastes rounds.\n"
-                "2. **For CHANGE REQUESTS — DEFAULT TO write_file, NOT generate_code.** "
-                "Only call generate_code when the user is genuinely asking you to add "
-                "3+ NEW files or do a major refactor. For ALL of these, use read_file + "
-                "write_file:\n"
-                "   - User pastes 1–5 lines of code (\"the fix is `x.foo()`\", \"replace "
-                "Y with Z\", \"use this API call\") → read_file the relevant file(s) → "
-                "write_file with the change.\n"
-                "   - 1–3 file tweaks, bug fixes, refactors of an existing function, "
-                "additions of small features.\n"
-                "   - Anything where you'd touch fewer than ~3 files.\n"
-                f"   When you DO need generate_code, pass `project_id='{_ap_id}'` so the "
-                f"Builder amends in place instead of scaffolding fresh. NEVER pass a "
-                f"task description that says \"create a complete X\" or \"build a Y\" "
-                f"for a project that already exists — that triggers a scaffold rebuild "
-                f"and clobbers the existing code.\n"
-                "3. **For BUG REPORTS** (\"the tests are failing\", \"it crashes when "
-                f"...\"): call `run_review(project_dir='{_ap_path}')` first — the "
-                f"Reviewer runs the build/tests and tells you what's broken. If the "
-                f"reviewer comes back clean but the user still reports a runtime bug "
-                f"(crashes, UI not updating, error that compiles fine): read the "
-                f"relevant 1–3 files and write_file the targeted fix. Do NOT call "
-                f"generate_code for runtime bugs.\n"
-                "4. **Do NOT auto-package or download** the project unless the user "
-                "explicitly asks for the tarball/zip. They already uploaded it."
-            )
-        else:
-            # Ordinary code-capable path — keep the existing
-            # read_file -> write_file/generate_code flow outside Daedalus.
-            _ap_lines.append(
-                "\nIf the user reports a bug, error, or asks for changes to this project: "
-                "use read_file on the relevant files first to see the current code, then fix "
-                "with write_file (small changes) or generate_code with project_id="
-                f"'{_ap_id}' (large changes). Do NOT start a new project."
-            )
+        _ap_lines.append(
+            "\nIf the user reports a bug, error, or asks for changes to this project: "
+            "use read_file on the relevant files first to see the current code, then fix "
+            "with start_coder_workflow(mode=edit_project, project_id="
+            f"'{_ap_id}' (large changes). Do NOT start a new project."
+        )
         messages.append({"role": "system", "content": "\n".join(_ap_lines)})
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
@@ -1965,7 +1901,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             gateway = {"start_coder_workflow", "get_coder_workflow", "cancel_coder_workflow", "ask_project"}
             available_tool_names -= CODEAGENT_TOOLS_SET - gateway
             ollama_tools = [tool for tool in ollama_tools if tool.get("function",{}).get("name") in available_tool_names]
-            ollama_tools = [{**tool,"function":{**tool["function"],"description":"Start a persistent local coding job once. The controller handles planning, coding, checks, and Acceptance in the background. Questions use ask_uploaded_project and never authorize editing."}}
+            ollama_tools = [{**tool,"function":{**tool["function"],"description":"Start a persistent local coding job once. The controller handles planning, coding, checks, and candidate delivery in the background. Questions use ask_uploaded_project and never authorize editing."}}
                             if tool.get("function",{}).get("name") == "start_coder_workflow" else tool for tool in ollama_tools]
             for tool in ollama_tools:
                 if tool.get("function",{}).get("name")=="start_coder_workflow":
@@ -1976,10 +1912,11 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             protocol = ("Persistent Daedalus execution mode: this replaces older manual tool-sequence instructions. "
                         "For requested code changes call start_coder_workflow once with the complete user task and appropriate mode/project. "
                         "For source questions call ask_project or start_coder_workflow(mode=ask_uploaded_project); questions never authorize editing. "
-                        "Report that the background job has started and end your reply. The progress card handles monitoring. "
+                        "Only after a successful workflow-tool receipt, report the saved job status and end your reply. "
+                        "A prose promise does not start a job. The progress card handles monitoring. "
                         "Use get_coder_workflow only for an explicit status question, and cancel_coder_workflow for Stop. "
-                        "The controller owns separate Architect and Builder model turns, verification, repair, and fresh Acceptance. "
-                        "Only the completed workflow's accepted artifact is a delivered result. Do not claim success from starting a job.")
+                        "One OpenHands 1.59 conversation handles planning, coding and repairs on Hephaestus. The controller verifies independently. "
+                        "Candidates are delivered for review, including clearly marked incomplete work. Only explicit owner acceptance promotes the exact reviewed revision. Do not claim success from starting a job.")
             messages.append({"role":"system","content":protocol})
 
     # Inject visualization hint for non-coder chats that have execute_code.
@@ -1993,7 +1930,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "and data transformation. When a visual aid would genuinely help, compute the "
             "numbers with execute_code, then emit an inline ```chart or ```pygraph fence using "
             "the computed values. Use ```mermaid fences for diagrams and `$...$` / `$$...$$` "
-            "for math. Do not save image files for charts or diagrams.\n"
+            "for math. Do not save image files for charts or diagrams. For an HTML page or interactive "
+            "demo, emit a ```html fence in the reply instead of saving a file.\n"
         )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += _viz_hint
@@ -2058,67 +1996,15 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
     # Inject tool-use system prompt when full codeagent tools are available
     if _has_full_codeagent and not _persistent_coder:
-        tool_sys = "\n\n## CODING AGENT PROTOCOL (MANDATORY)\n"
-
-        if "generate_code" in available_tool_names:
-            if _is_v2_persona:
-                # Daedalus discipline: the Architect always runs first. Do NOT
-                # offer the "skip planning for simple builds" shortcut — the
-                # tools.py gate also blocks a fresh generate_code with no plan.
-                tool_sys += (
-                    "### PRIMARY WORKFLOW: plan_project THEN generate_code\n"
-                    "ALWAYS call plan_project first to produce the structured plan, then "
-                    "call generate_code to build it. Do NOT skip planning, even for builds "
-                    "that look simple. generate_code builds entire projects autonomously. "
-                    "For incomplete Builder results, call generate_code again with the "
-                    "same project_id and a task naming the missing files; do NOT switch "
-                    "to manual file tools unless the user explicitly asks for a manual "
-                    "fallback.\n\n"
-                )
-            else:
-                tool_sys += (
-                    "### PRIMARY WORKFLOW: plan_project or generate_code\n"
-                    "For simple, self-contained builds, you may skip plan_project and call "
-                    "generate_code directly with a COMPLETE task description. When you do "
-                    "that, include exactly one short visible sentence before the tool call: "
-                    "\"This is simple enough to build directly, so I'll skip a separate plan "
-                    "and start CodeAgent.\" For larger, ambiguous, multi-screen, or "
-                    "architecture-sensitive builds, call plan_project first, then "
-                    "generate_code. generate_code builds entire projects autonomously. "
-                    "Call it ONCE. If it fails, use write_file + run_shell.\n\n"
-                )
-
-        if _is_v2_persona:
-            tool_sys += (
-                "### RULES\n"
-                "1. FIRST response MUST be a tool call: plan_project for a new build, "
-                "or generate_code when continuing a partial Builder result.\n"
-                "2. NEVER write code in chat text — use the Builder via generate_code "
-                "for project creation.\n"
-                "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
-                "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
-                "5. After Builder success: run_review, then acceptance, then delivery. STOP.\n\n"
-                "### AVOID\n"
-                "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
-                "- Do NOT use input() — no stdin available.\n"
-                "- Do NOT repeat failed commands without changing something.\n"
-            )
-        else:
-            tool_sys += (
-                "### RULES\n"
-                "1. FIRST response MUST be a tool call. Exception: for a simple direct "
-                "generate_code build, include the one-sentence skip-plan note and the "
-                "generate_code tool call in the same response.\n"
-                "2. NEVER write code in chat text — use execute_code, write_file, or generate_code.\n"
-                "3. execute_code = run code directly (NO stdin, NO sys.argv). For scripts with args: write_file + run_shell.\n"
-                "4. When code fails: read the error, fix the ROOT CAUSE, try DIFFERENTLY.\n"
-                "5. After success: download_file/download_project, then summarize for user. STOP.\n\n"
-                "### AVOID\n"
-                "- Do NOT start dev servers (npm start, flask run) — they hang forever.\n"
-                "- Do NOT use input() — no stdin available.\n"
-                "- Do NOT repeat failed commands without changing something.\n"
-            )
-
+        tool_sys = (
+            "\n\n## Coding tools\n"
+            "For a project build or edit, call start_coder_workflow once with the full user request. "
+            "For project questions use ask_project. The background controller owns planning, implementation, "
+            "verification and candidate delivery; owner acceptance is explicit. "
+            "For standalone calculations or small file tasks use execute_code, write_file and run_shell as appropriate. "
+            "Commands have no interactive stdin. Do not repeat an unchanged failing command. "
+            "Report only observed results and expose saved downloads after success."
+        )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += tool_sys
         else:
@@ -2180,6 +2066,22 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'prior_content': _continue_prior})}\n\n"
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
+    _dispatch_guard = None
+    if _persistent_coder:
+        if not _user_message_id:
+            yield f"data: {json.dumps({'type':'error','error':'The original user message could not be saved; no coding job was started.'})}\n\n"
+            return
+        from agents.coder_dispatch import DispatchGuard
+        _dispatch_guard = DispatchGuard(conv_id, _user_message_id, _content_to_save,
+            project_id=REQUEST_OPTIONS.get().get('project_id') or '',
+            new_project=REQUEST_OPTIONS.get().get('new_project', False))
+        REQUEST_OPTIONS.set({**REQUEST_OPTIONS.get(), 'user_message_id': _user_message_id,
+                             'origin_message_id': _assistant_msg_id})
+        _saved_dispatch = await _dispatch_guard.receipt()
+        if _saved_dispatch:
+            yield f"data: {json.dumps({'type':'token','content':_dispatch_guard.describe(_saved_dispatch)})}\n\n"
+            yield f"data: {json.dumps({'type':'done','model':req.model,'message_id':_assistant_msg_id})}\n\n"
+            return
     _text_fallback_done = False
     _native_cloud_tools = False
     if _is_cloud_provider and available_tool_names:
@@ -2232,8 +2134,40 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     # disconnect/error snapshots never lose the text the user already has.
     _turn_text = _continue_prior
 
+    async def _persist_stream_failure(err_msg, content_now):
+        # Persist whatever streamed before the failure and clear the
+        # in_progress flag — otherwise the stub reloads empty/stale and the
+        # user loses the partial answer they were watching.
+        if _assistant_msg_id is None or _review_round:
+            return
+        try:
+            _partial = '' if _persistent_coder else ((_turn_text + content_now) if _turn_text else content_now)
+            _partial = _partial if _partial.strip() else ""
+            _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
+                else f"_[no response — {err_msg[:160]}]_"
+            await db.save_chat_delivery(_assistant_msg_id, content=_final,
+                                        metadata={"in_progress": False, "stream_error": True, "stream_error_text": err_msg[:300]})
+        except Exception as _pe:
+            print(f"[CHAT]   partial-persist failed (non-fatal): {_pe}")
+
     _gen_speed = 0.0  # tokens/sec of the most recent generation round
+    _last_round_usage = (0, 0)  # (prompt_tokens, gen_tokens) Ollama reported for the previous round
+    _round_start_len = len(messages)
     for round_num in range(MAX_ROUNDS):
+        if round_num > 0:
+            _last_round_usage = (prompt_tokens, gen_tokens)
+            # Tool results appended since the previous request are not in its counts;
+            # the assistant turn itself is (it was that round's generation).
+            _appended = context_policy.estimate_tokens({"messages": [m for m in messages[_round_start_len:] if m.get("role") != "assistant"]})
+            _used = _last_round_usage[0] + _last_round_usage[1] + _appended
+            if context_exhausted(_last_round_usage[0], _last_round_usage[1], _appended, model_options.get("num_ctx")):
+                _full_msg = context_full_message(_used, model_options.get("num_ctx"))
+                print(f"[CHAT]   Context exhausted before round {round_num}: {_full_msg}")
+                await _persist_stream_failure(_full_msg, "")
+                await events.emit(conv_id, "error", {"status": _full_msg[:200]})
+                yield f"data: {json.dumps({'type': 'error', 'error': _full_msg})}\n\n"
+                return
+        _round_start_len = len(messages)
         content = ""
         thinking = ""
         tool_calls = []
@@ -2551,7 +2485,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 await events.emit(conv_id, "tool_end", {"tool": "processing", "status": _corrupt_msg, "icon": "alert"})
                                 yield f"data: {json.dumps({'type': 'error', 'error': _corrupt_msg})}\n\n"
                                 return
-                            await events.emit(conv_id, "error", {"status": f"Ollama: {_ollama_err[:120]}"})
+                            _used_now = (prompt_tokens or _last_round_usage[0]) + _live_gen_tokens
+                            _ollama_err = truncated_tool_call_error(_ollama_err, _used_now, model_options.get("num_ctx")) or _ollama_err
+                            await _persist_stream_failure(_ollama_err, content)
+                            await events.emit(conv_id, "error", {"status": f"Ollama: {_ollama_err[:200]}"})
                             yield f"data: {json.dumps({'type': 'error', 'error': _ollama_err})}\n\n"
                             return
 
@@ -2679,7 +2616,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                             snip = thinking[-60:].replace("\n", " ")
                                             await events.emit(conv_id, "thought_done", {"status": f"💭 {snip}...", "detail": json.dumps({"thinking": thinking[-2000:]})})
                                         yield f"data: {json.dumps({'type': 'clear'})}\n\n"
-                                        if content:
+                                        if content and not _persistent_coder:
                                             yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
                                             _streamed_content = True
                                         # Neutralize the current token: its text is already
@@ -2736,7 +2673,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 # are enabled. Tool-call rounds clear this
                                 # provisional text after parsing completes.
                                 _chunk_buf += token
-                                if len(_chunk_buf) >= 8 or chunk.get("done"):
+                                if not _persistent_coder and (len(_chunk_buf) >= 8 or chunk.get("done")):
                                     yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
                                     _streamed_content = True
                                     _chunk_buf = ""
@@ -2757,7 +2694,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 content += _lead_buf
                                 _chunk_buf += _lead_buf
                                 _lead_buf = ""
-                            if _chunk_buf:
+                            if _chunk_buf and not _persistent_coder:
                                 yield f"data: {json.dumps({'type': 'token', 'content': _chunk_buf})}\n\n"
                                 _streamed_content = True
                                 _chunk_buf = ""
@@ -2821,19 +2758,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             elif not _is_cloud_provider and ("input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower):
                 err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
                            f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
-            # Persist whatever streamed before the failure and clear the
-            # in_progress flag — otherwise the stub reloads empty/stale and the
-            # user loses the partial answer they were watching.
-            if _assistant_msg_id is not None and not _review_round:
-                try:
-                    _partial = (_turn_text + content) if _turn_text else content
-                    _partial = _partial if _partial.strip() else ""
-                    _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
-                        else f"_[no response — {err_msg[:160]}]_"
-                    await db.save_chat_delivery(_assistant_msg_id, content=_final,
-                                            metadata={"in_progress": False, "stream_error": True})
-                except Exception as _pe:
-                    print(f"[CHAT]   partial-persist failed (non-fatal): {_pe}")
+            await _persist_stream_failure(err_msg, content)
             await events.emit(conv_id, "error", {"status": f"{_provider_label}: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
@@ -3014,7 +2939,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     _compose_model = (model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
                                       or config.DEFAULT_MODEL)
                 else:
-                    _compose_model = (model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
+                    _compose_model = (model_providers.reject_cloud(image_preferences["settings"]["image_chat_compose_model"] or "")
                                       or model_providers.reject_cloud(req.model or "")
                                       or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
                                       or config.DEFAULT_MODEL)
@@ -3047,6 +2972,20 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     else:
                         _streamed_content = False
                 print("[CHAT]   tool-junk net: stripped mangled tool-call text from reply")
+
+        if _dispatch_guard:
+            if tool_calls:
+                # Prose before a tool is only a proposal, never a dispatch receipt.
+                content = msg['content'] = ''
+            else:
+                _verified_content, _correct_dispatch = await _dispatch_guard.review(
+                    content, can_retry=round_num + 1 < MAX_ROUNDS and not _review_round)
+                if _correct_dispatch:
+                    messages.append(msg)
+                    messages.append({'role':'system','content':_dispatch_guard.correction()})
+                    await events.emit(conv_id, 'status', {'status':'Checking the workflow dispatch before reporting progress'})
+                    continue
+                content = msg['content'] = _verified_content
 
         print(f"[CHAT] Round {round_num}: content={len(content)} thinking={len(thinking)} tool_calls={len(tool_calls)} gen_tokens={gen_tokens} prompt_tokens={prompt_tokens}")
         # Phase 0.6: snapshot the assistant message at every round boundary.
@@ -3108,7 +3047,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 # and near-duplicate checks. ask_project is also exempted
                 # because Q&A is naturally multi-turn (follow-up questions
                 # often share keywords/topics).
-                _LOOP_TOOLS = {"run_review", "run_acceptance_review", "run_fixer", "run_aider_fix", "ask_project"}
+                _LOOP_TOOLS = {"ask_project", "get_coder_workflow"}
                 _all_loop_tools = bool(_tc_names_dup) and all(
                     n in _LOOP_TOOLS for n in _tc_names_dup
                 )
@@ -3145,7 +3084,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     if _dup_break_count >= 2:
                         if await _is_active_uploaded_manual_loop(conv_id, _tc_names_dup):
                             print("[CHAT]   Repeated uploaded-project manual tool duplicate — stopping turn")
-                            await _mark_latest_uploaded_workflow_blocked(conv_id)
                             _dup_summary = await _duplicate_manual_tool_summary(conv_id, _tc_names_dup)
                             yield f"data: {json.dumps({'type': 'token', 'content': _dup_summary})}\n\n"
                             if _assistant_msg_id is not None:
@@ -3384,6 +3322,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 kb_ids=_kb,
                                 artifact_message_id=_assistant_msg_id,
                                 persona_context=_persona_context,
+                                image_preferences=image_preferences,
                                 workspace_id=effective_workspace["id"] if effective_workspace else None,
                             )
                             _tc[0] = len(r) if r else 0
@@ -3494,7 +3433,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
                         print(f"[CHAT]   Repeated BLOCKED tool result for {tool_name} — stopping turn")
-                        await _mark_latest_uploaded_workflow_blocked(conv_id)
                         _blocked_summary = await _blocked_tool_summary(conv_id, tool_name, tool_result)
                         yield f"data: {json.dumps({'type': 'token', 'content': _blocked_summary})}\n\n"
                         if _assistant_msg_id is not None:
@@ -3516,19 +3454,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         await events.emit(conv_id, "complete", {"status": "Complete (blocked)"})
                         yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'blocked': True})}\n\n"
                         return
-
-                    # After legacy/plain plan_project: nudge model to use generate_code
-                    # for large projects. Daedalus plan_project already hands off to
-                    # Builder/Review/Acceptance, so a second nudge would duplicate work.
-                    if tool_name == "plan_project" and _plan_project_should_nudge_generate_code(tool_result):
-                        _file_refs = _plan_project_file_ref_count(tool_result)
-                        messages.append({"role": "tool", "content": (
-                            "SYSTEM: This is a large project with multiple files. "
-                            "Use generate_code to build it — the coding agent will implement "
-                            "the entire plan autonomously. Pass the full task description and "
-                            "language. After it finishes, review the output, run tests, and deliver."
-                        )})
-                        print(f"[CHAT]   plan_project returned large plain plan ({_file_refs} file refs) — nudging to generate_code")
 
                     # Track generate_code failures — temporarily disable code-block-rescue
                     if tool_name == "generate_code" and tool_result.startswith("ERROR"):
@@ -3620,6 +3545,15 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 _est_prompt = sum(len(m.get("content", "")) for m in messages) // 4
                 yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
 
+            if _dispatch_guard and _round_tool_names & {'start_coder_workflow', 'ask_project'}:
+                _saved_dispatch = await _dispatch_guard.receipt()
+                _dispatch_text = (_dispatch_guard.describe(_saved_dispatch) if _saved_dispatch else
+                    'No new Daedalus job was started for this message. The workflow tool did not produce a matching '
+                    'saved job. Check its result before retrying.')
+                yield f"data: {json.dumps({'type':'token','content':_dispatch_text})}\n\n"
+                yield f"data: {json.dumps({'type':'done','model':req.model,'message_id':_assistant_msg_id})}\n\n"
+                return
+
             # Short-circuit: if ask_project succeeded as a non-change-request
             # in this round, stream the QA envelope's answer verbatim and exit
             # the agent loop. The QA run card already renders the rich grounded
@@ -3628,51 +3562,6 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             # Round-scoped: _futures only holds the LAST batch, so check the
             # names collected across every batch this round.
             _called_ask_project = "ask_project" in _round_tool_names
-            if _called_ask_project:
-                try:
-                    _qa_runs = await db.get_runs_by_conversation(conv_id, limit=10)
-                    for _qr in _qa_runs:
-                        if _qr.get("role") != "qa":
-                            continue
-                        # Only short-circuit when the QA succeeded AND wasn't a
-                        # change request AND belongs to this stream — without
-                        # the stream-start filter, a failed ask_project this
-                        # turn would replay the previous turn's stale answer.
-                        if _qa_run_qualifies(_qr, _stream_started_at):
-                            _qa_env = _qr.get("result_envelope") or {}
-                            _qa_answer = _qa_env["answer"]
-                            print(f"[CHAT]   QA short-circuit: streaming "
-                                  f"{len(_qa_answer)} chars from {_qr.get('id')}")
-                            for _i in range(0, len(_qa_answer), 8):
-                                yield f"data: {json.dumps({'type': 'token', 'content': _qa_answer[_i:_i+8]})}\n\n"
-                                await asyncio.sleep(0)
-                            if _assistant_msg_id is not None:
-                                try:
-                                    await db.save_chat_delivery(
-                                        _assistant_msg_id,
-                                        content=_qa_answer,
-                                        metadata={
-                                            "stream_started_at": _stream_started_at,
-                                            "in_progress": False,
-                                            "qa_short_circuit": True,
-                                            "qa_run_id": _qr.get("id"),
-                                            "has_full_product_build": False,
-                                        },
-                                    )
-                                except Exception as _pe:
-                                    print(f"[CHAT]   QA persist failed (non-fatal): {_pe}")
-                            await events.emit(conv_id, "complete", {"status": "Complete"})
-                            _done_payload = {
-                                "type": "done", "model": req.model,
-                                "message_id": _assistant_msg_id,
-                            }
-                            yield f"data: {json.dumps(_done_payload)}\n\n"
-                            return
-                        # Latest qa run didn't qualify — fall through to LLM
-                        break
-                except Exception as _qe:
-                    print(f"[CHAT]   QA short-circuit lookup failed (non-fatal): {_qe}")
-
             # ── Continuation nudge ──
             # When the model wrote visible prose before calling tool(s), that
             # prose is already shown to the user as part of THIS reply. Some
@@ -3699,7 +3588,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             # never handed a false success. Q&A turns run ask_project (a tool), so
             # _tools_ran_this_turn>0 keeps them exempt.
             _phantom_hit = (
-                _is_v2_persona and bool(_active_project)
+                _is_v2_persona and not _persistent_coder and bool(_active_project)
                 and _tools_ran_this_turn == 0
                 and bool(_PHANTOM_CLAIM_RE.search(content))
             )

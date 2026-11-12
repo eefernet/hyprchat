@@ -14,7 +14,49 @@ export function normalizeCodeLanguage(info='') {
 export function parseCodeFence(block) {
   const match=String(block).match(/^[ \t]{0,3}```([^\r\n`]*)\r?\n([\s\S]*?)\r?\n?[ \t]{0,3}```[ \t]*$/);
   if(!match)return null;
-  return {lang:normalizeCodeLanguage(match[1]),code:match[2]};
+  const info=match[1].trim(), first=info.split(/\s+/)[0];
+  const colon=first.indexOf(':');
+  const label=colon>0?first.slice(0,colon):first;
+  const rest=info.slice(first.length).trim();
+  const named=rest.match(/(?:^|\s)(?:title|filename)=(?:"([^"]*)"|'([^']*)'|([^\s]+))/);
+  const filename=(colon>0?first.slice(colon+1):named?(named[1]??named[2]??named[3]):/^[^=\s]+\.[^\s]+$/.test(rest)?rest:'');
+  // `label` keeps the author's tag (html, svg, …) where `lang` is the Prism alias (markup).
+  return {lang:normalizeCodeLanguage(label),label:label.toLowerCase(),code:match[2],...(filename?{meta:{filename}}:{})};
+}
+
+// Tokenize the whole block, then split text leaves while retaining their nested
+// token classes. Newlines inside comments/strings never lose their styling.
+export function codeLines(code, lang, prism) {
+  const source=String(code),language=normalizeCodeLanguage(lang);
+  let tokens=[source];
+  if(prism?.languages&&Object.prototype.hasOwnProperty.call(prism.languages,language)){
+    try{
+      const env={code:source,grammar:prism.languages[language],language};
+      prism.hooks?.run('before-tokenize',env);
+      env.tokens=prism.tokenize(env.code,env.grammar);
+      prism.hooks?.run('after-tokenize',env);
+      tokens=env.tokens;
+    }catch{}
+  }
+  const lines=[[]];
+  const visit=(value,classes=[])=>{
+    if(Array.isArray(value)){value.forEach(part=>visit(part,classes));return;}
+    if(typeof value==='string'){
+      value.split('\n').forEach((text,i)=>{
+        if(i)lines.push([]);
+        if(text)lines.at(-1).push({text,classes});
+      });return;
+    }
+    if(value&&typeof value==='object')visit(value.content,[...classes,'token',value.type,...(Array.isArray(value.alias)?value.alias:value.alias?[value.alias]:[])]);
+  };
+  visit(tokens);
+  return lines;
+}
+
+export function codeDiffKind(line) {
+  if(line.startsWith('@@'))return 'hunk';
+  if(/^(\+\+\+|---|diff |index )/.test(line))return 'meta';
+  return line.startsWith('+')?'add':line.startsWith('-')?'delete':'';
 }
 
 export function highlightCode(code,lang,prism) {

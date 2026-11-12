@@ -13,7 +13,7 @@ from coder_sandbox import Sandbox, clean_environment, public_connection
 
 
 def test_private_network_and_non_http_ports_are_rejected():
-    for host, port in [('127.0.0.1', 80), ('192.168.1.201', 443), ('169.254.169.254', 80), ('::1', 443), ('example.com', 22)]:
+    for host, port in [('127.0.0.1', 80), ('10.0.0.10', 443), ('169.254.169.254', 80), ('::1', 443), ('example.com', 22)]:
         with pytest.raises(ValueError):
             public_connection(host, port)
 
@@ -22,6 +22,45 @@ def test_environment_does_not_inherit_unknown_credentials():
     env = clean_environment({'PATH': '/usr/bin', 'AWS_SECRET_ACCESS_KEY': 'hidden',
                              'GITHUB_TOKEN': 'hidden', 'HYPRCHAT_PASS': 'hidden', 'SSH_AUTH_SOCK': '/socket'})
     assert env == {'PATH': '/usr/bin'}
+
+
+def test_pytest_identity_hook_only_enters_instrumented_test_rows():
+    assert clean_environment({'PYTEST_PLUGINS':'daedalus_test_ids'})=={}
+    assert 'PYTEST_PLUGINS' not in clean_environment({'DAEDALUS_TEST_IDS':'1','PYTEST_PLUGINS':'other_plugin'})
+    allowed={'DAEDALUS_TEST_IDS':'1','PYTEST_PLUGINS':'daedalus_test_ids'}
+    assert clean_environment(allowed)==allowed
+
+
+@pytest.mark.skipif(not shutil.which('bwrap'), reason='Linux Codebox isolation integration')
+def test_modern_loopback_forwarding_grants_only_the_selected_endpoint(tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b'allowed')
+    servers=[ThreadingHTTPServer(('127.0.0.1',0),Handler) for _ in range(2)]
+    threads=[threading.Thread(target=s.serve_forever,daemon=True) for s in servers]
+    for thread in threads: thread.start()
+    allowed,denied=[f'http://127.0.0.1:{s.server_port}' for s in servers]
+    code='''import json,os,urllib.request
+result={'url':os.environ['DAEDALUS_APP_URL']}
+result['allowed']=urllib.request.urlopen(result['url'],timeout=3).read().decode()
+try:urllib.request.urlopen(DENIED,timeout=1);result['denied_reachable']=True
+except OSError:result['denied_reachable']=False
+print(json.dumps(result))
+'''.replace('DENIED',repr(denied))
+    try:
+        with Sandbox(['/usr/bin/python3','-c',code],cwd=tmp_path,writable=[tmp_path],network_urls=[allowed],
+                     environment={'DAEDALUS_APP_URL':allowed,'DAEDALUS_LOOPBACK_ENDPOINTS':'1'}) as box:
+            result=subprocess.run(box.args,env=box.env,capture_output=True,text=True,timeout=20)
+        assert result.returncode==0,result.stderr
+        assert json.loads(result.stdout)=={'url':allowed,'allowed':'allowed','denied_reachable':False}
+        legacy=Sandbox([],cwd=tmp_path,network_urls=[allowed])
+        assert '.invalid:' in legacy.translate_url(allowed)
+    finally:
+        for server in servers:server.shutdown();server.server_close()
+        for thread in threads:thread.join()
 
 
 @pytest.mark.skipif(not shutil.which('bwrap'), reason='Linux Codebox isolation integration')
@@ -39,7 +78,7 @@ try:
  result['host_write']=True
 except OSError: result['host_write']=False
 try:
- socket.create_connection(('192.168.1.201',8586),timeout=1).close()
+ socket.create_connection((os.environ.get('HEPHAESTUS_PROBE_HOST','127.0.0.1'),8586),timeout=1).close()
  result['worker_reachable']=True
 except OSError: result['worker_reachable']=False
 print(json.dumps(result))
@@ -55,7 +94,7 @@ print(json.dumps(result))
 @pytest.mark.skipif(not shutil.which('bwrap'), reason='Linux Codebox isolation integration')
 def test_cancellation_stops_background_descendants(tmp_path):
     import time
-    from coder_patch_runtime import stop_process
+    from coder_execution_utils import stop_process
     heartbeat = tmp_path / 'heartbeat'
     code = "import pathlib,time\np=pathlib.Path(" + repr(str(heartbeat)) + ")\nwhile True:\n p.write_text(str(time.time_ns()))\n time.sleep(.03)\n"
     launcher = 'import subprocess,time\nsubprocess.Popen(["/usr/bin/python3","-c",' + repr(code) + '], start_new_session=True)\ntime.sleep(60)'
@@ -107,6 +146,61 @@ def test_inference_bridge_rejects_other_models_and_bills_supervisor(tmp_path):
         server.shutdown(); server.server_close(); thread.join()
 
 
+def test_live_m1a_follow_up_a_warm_load_through_the_bridge_makes_the_supervisor_evict_the_other_model(tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading, time, urllib.request
+    import coder_inference
+    from coder_sandbox_agent import model_bridge
+    from coder_worker_runtime import WorkerStore
+    from context_policy import DEFAULTS, resolve
+    # Live 2026-10-28 (cw3-13fb755c): the child saw only itself in /api/ps through the bridge, unloaded itself six times
+    # beside the resident planner (20 GB) and reported a false "does not fit". The SUPERVISOR must evict upstream.
+    monkeypatch.setattr(coder_inference, 'SETTLE_SECONDS', 0); monkeypatch.setattr(coder_inference, 'CONFIRM_SECONDS', 0)
+    num_ctx = resolve('builder', DEFAULTS).num_ctx
+    vram, sizes, loaded, calls = 38, {'local:coder': 21, 'planner': 19}, {}, []
+    def place(name, ctx):
+        """Ollama's placement over a fixed VRAM budget: a model that does not fit beside the others spills to the CPU."""
+        free = vram - sum(m['size_vram'] for n, m in loaded.items() if n != name)
+        loaded[name] = {'name': name, 'model': name, 'context_length': ctx, 'size': sizes[name], 'size_vram': min(sizes[name], max(0, free))}
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def reply(self, value):
+            data = json.dumps(value).encode()
+            self.send_response(200); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data)
+        def do_GET(self):
+            self.reply({'models': list(loaded.values())})
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if self.path == '/api/generate':
+                if str(body.get('keep_alive')) in {'0', '0s'}:
+                    calls.append(('unload', body['model'])); loaded.pop(body['model'], None)
+                else:
+                    calls.append(('load', body['model'], body['options']['num_ctx']))
+                    if loaded.get(body['model'], {}).get('context_length') != body['options']['num_ctx']:
+                        place(body['model'], body['options']['num_ctx'])   # already loaded at that context: a no-op
+            self.reply({})
+    place('planner', num_ctx); place('local:coder', num_ctx)   # the coder loaded second: spilled beside the planner
+    assert loaded['local:coder']['size_vram'] < loaded['local:coder']['size']
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Upstream); server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever); thread.start()
+    store = WorkerStore(tmp_path / 'supervisor')
+    store.create('op', 'job', 'code', {'model': 'local:coder', 'ollama_url': f'http://127.0.0.1:{server.server_port}',
+        'settings': DEFAULTS, 'calls_remaining': 1, 'seconds_remaining': 30})
+    store.update('op', status='running', started=time.time())
+    try:
+        with model_bridge(store, 'op') as bridge:
+            warm = json.dumps({'model': 'local:coder', 'prompt': '', 'stream': False, 'keep_alive': '10m', 'options': {'num_ctx': num_ctx}}).encode()
+            with urllib.request.urlopen(urllib.request.Request(bridge + '/api/generate', data=warm, headers={'Content-Type': 'application/json'}), timeout=8) as response:
+                assert response.status == 200
+            assert ('unload', 'planner') in calls, calls
+            assert 'planner' not in loaded
+            assert loaded['local:coder']['size_vram'] == loaded['local:coder']['size'] == 21
+            assert store.get('op')['calls'] == 0   # a warm request is still not a model call
+            assert any(event['type'] == 'warmup' for event in store.events('op'))
+    finally:
+        server.shutdown(); server.server_close(); thread.join()
+
+
 def test_closing_inference_bridge_disconnects_an_inflight_upstream(tmp_path):
     from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
     import threading,time,urllib.request
@@ -141,3 +235,18 @@ def test_closing_inference_bridge_disconnects_an_inflight_upstream(tmp_path):
     finally:
         upstream.shutdown();upstream.server_close();thread.join()
         if client:client.join(7)
+
+
+@pytest.mark.skipif(__import__('sys').platform!='linux',reason='Linux namespace fixture')
+def test_short_temporary_alias_uses_the_owned_disk_cache(tmp_path):
+    import os,subprocess,sys,uuid
+    from coder_sandbox import Sandbox
+    runtime=tmp_path/('long-release-name-'*5)/'operation-cache'
+    marker='owned-'+uuid.uuid4().hex
+    script="import os,pathlib;assert os.environ['TMPDIR']=='/tmp/daedalus';pathlib.Path(os.environ['TMPDIR'],%r).write_text('disk-backed')" % marker
+    with Sandbox([sys.executable,'-c',script],cwd=tmp_path,writable=[tmp_path],runtime=runtime,
+                 environment={'PATH':os.environ['PATH']},short_tmp=True) as box:
+        result=subprocess.run(box.args,env=box.env,text=True,capture_output=True,timeout=15)
+    assert result.returncode==0,result.stderr
+    assert (runtime/'tmp'/marker).read_text()=='disk-backed'
+    assert not __import__('pathlib').Path('/tmp/daedalus',marker).exists()

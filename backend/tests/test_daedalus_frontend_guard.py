@@ -57,7 +57,7 @@ def test_form_row_fails_only_on_a_rejected_write():
     assert form_row(service, 'http://127.0.0.1:1', settings, prober=probe([], forms=0)) is None
     broken = form_row(service, 'http://127.0.0.1:1', settings, prober=probe([], fault='Executable does not exist'))
     assert not broken['passed'] and broken['environment_fault']
-    from coder_policy7_evidence import blocking
+    from coder_check_evidence import blocking
     from coder_project_runtime import failure_class
     assert blocking(rejected) and failure_class(rejected) == 'application_defect' and failure_class(broken) == 'environment'
 

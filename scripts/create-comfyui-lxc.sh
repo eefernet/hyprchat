@@ -10,8 +10,8 @@
 #   - kokoro-fastapi (OpenAI-compatible TTS) → :8880
 #
 # Usage:
-#   bash create-comfyui-lxc.sh [CTID] [IP]
-#   bash create-comfyui-lxc.sh 115 192.168.1.115
+#   bash create-comfyui-lxc.sh <CTID> <IP> [GATEWAY]
+#   bash create-comfyui-lxc.sh 115 10.0.0.115     # gateway defaults to <first three octets>.1
 #
 # After it finishes, enter the container (`pct enter <CTID>`) and run the
 # printed PHASE 2 steps (NVIDIA userspace libs + service installs) — those
@@ -20,9 +20,13 @@
 # ============================================================
 set -e
 
-CTID=${1:-115}
-IP=${2:-"192.168.1.115"}
-GW="192.168.1.1"
+CTID=${1:-}
+IP=${2:-}
+if [ -z "$CTID" ] || [ -z "$IP" ]; then
+    echo "Usage: bash create-comfyui-lxc.sh <CTID> <IP> [GATEWAY]" >&2
+    exit 2
+fi
+GW=${3:-"${IP%.*}.1"}
 HOSTNAME="comfyui"
 MEMORY=16384
 SWAP=2048

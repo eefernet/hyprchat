@@ -29,6 +29,8 @@ class CreateWorkflow(BaseModel):
     visual_model: str | None = None
     execution_commands: dict | None = None
     protected_files: list[str] | None = None
+    engine: str = ''
+    ui_checks: list[dict] | None = None
 
 
 @router.post("/api/coder/workflows", status_code=202)
@@ -38,7 +40,8 @@ async def create_workflow(request: CreateWorkflow):
         return await coder_jobs.create(body.get("conversation_id", ""), body.get("task", ""),
             body.get("mode", "build_from_prompt"), body.get("project_id", ""),
             body.get("model", ""), body.get("idempotency_key", ""), visual_review=request.visual_review, visual_model=request.visual_model,
-            execution_commands=request.execution_commands, protected_files=request.protected_files)
+            execution_commands=request.execution_commands, protected_files=request.protected_files, engine=request.engine,
+            ui_checks=request.ui_checks)
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -48,7 +51,7 @@ async def create_workflow(request: CreateWorkflow):
 @router.post("/api/coder/workflows/{workflow_id}/resume")
 async def resume_workflow(workflow_id: str, body: dict = Body(default={})):
     try:
-        return await coder_jobs.resume(workflow_id,visual_review=body.get("visual_review"),visual_model=body.get("visual_model"),candidate_revision=body.get('candidate_revision'),clarification=body.get('clarification'))
+        return await coder_jobs.resume(workflow_id,visual_review=body.get("visual_review"),visual_model=body.get("visual_model"),candidate_revision=body.get('candidate_revision'),clarification=body.get('clarification'),budget_mode=body.get('budget_mode'))
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -56,9 +59,12 @@ async def resume_workflow(workflow_id: str, body: dict = Body(default={})):
 
 
 @router.get("/api/coder/workflows/{workflow_id}/events")
-async def workflow_events(workflow_id: str, request: Request, after: int = 0):
+async def workflow_events(workflow_id: str, request: Request, after: int = 0, view: str = "", before: int = 0, limit: int = 50):
     if not await store.get(workflow_id):
         raise HTTPException(404, "Workflow not found")
+    if view == 'activity':
+        return await store.activity(workflow_id, max(0,before), min(100,max(1,limit)))
+    if view: raise HTTPException(422, 'Unknown events view')
     try:
         cursor = max(after, int(request.headers.get("last-event-id") or 0))
     except ValueError:
@@ -89,6 +95,8 @@ async def inspect_workflow(workflow_id: str, body: dict = Body(...)):
     job = await store.get(workflow_id)
     if not job:
         raise HTTPException(404, "Workflow not found")
+    if job.get('engine') != 'openhands159':
+        raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     if not job.get("worker_operation"):
         raise HTTPException(409, "Workspace is not initialized")
     try:
@@ -139,10 +147,12 @@ async def stream_worker_file(url, media_type, filename=""):
 async def evidence(workflow_id: str, identity: str):
     job=await store.get(workflow_id)
     if not job: raise HTTPException(404,"Workflow not found")
+    if job.get('engine') != 'openhands159':
+        raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     import re
     if not re.fullmatch(r"[a-f0-9]{64}",identity): raise HTTPException(404,"Evidence not found")
     # The worker checks that this opaque reference belongs to the owned job.
-    return await stream_worker_file(config.OPENHANDS_URL.rstrip("/")+f"/jobs/{workflow_id}/evidence/{identity}",
+    return await stream_worker_file(coder_jobs.worker_base(job)+f"/jobs/{workflow_id}/evidence/{identity}",
         "application/octet-stream")
 
 
@@ -150,7 +160,13 @@ async def evidence(workflow_id: str, identity: str):
 async def checkpoint(workflow_id: str):
     job=await store.get(workflow_id)
     if not job: raise HTTPException(404,"Workflow not found")
+    if job.get('engine') != 'openhands159':
+        raise HTTPException(409, coder_jobs.RETIRED_ENGINE + ' Recorded results and saved artifacts remain available.')
     if not job.get("revision_id") or job["state"] not in {"blocked","waiting_for_input","cancelled","ready_for_review"}:
         raise HTTPException(409,"Stop the job before exporting an unverified checkpoint")
+    from coder_naming import base_for, download_name
+    project = await db.get_coding_project(job["project_id"]) if job.get("project_id") else None
+    # download_name admits only [a-z0-9.-], so the hand-built header below cannot be broken by a title.
+    name = download_name((project or {}).get("download_slug") or base_for(job), "unverified")
     return await stream_worker_file(coder_jobs.worker_url(job)+"/checkpoint?revision="+job["revision_id"],
-        "application/gzip",f"unverified-{job['id']}-{job['revision_id']}.tar.gz")
+        "application/gzip", name)

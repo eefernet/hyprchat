@@ -230,7 +230,7 @@ def kanban(root):
             note('DELETE /api/tasks/:id removes', status in (200, 204) and not any(r.get('id') == identity for r in rows), {'status': status})
         def restart():
             nonlocal server
-            from coder_patch_runtime import stop_process
+            from coder_execution_utils import stop_process
             stop_process(server)
             server = subprocess.Popen('npm start',shell=True,cwd=base_dir,stdout=log,stderr=subprocess.STDOUT,
                 env={**os.environ,'PORT':str(port),'HOST':'127.0.0.1'},start_new_session=True)

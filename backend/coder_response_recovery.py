@@ -75,3 +75,11 @@ class Recovery:
     def accepted(self, answer):
         self.state['answer'] = answer
         self.observed()
+
+
+JSON_VALUE = {'$ref': '#/$defs/json_value'}
+DEFINITIONS = {'json_value': {'anyOf': [
+    {'type': 'null'}, {'type': 'boolean'}, {'type': 'number'}, {'type': 'string'},
+    {'type': 'array', 'items': JSON_VALUE},
+    {'type': 'object', 'additionalProperties': JSON_VALUE},
+]}}

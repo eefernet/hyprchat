@@ -159,7 +159,8 @@ async def download_artifact_ep(artifact_id: str):
     filepath, safe_name = artifact_path_for_row(artifact)
     if not filepath:
         raise HTTPException(404, "Artifact file is missing")
-    download_name = os.path.basename(artifact.get("filename") or "") or safe_name
+    from coder_naming import display_name_for
+    download_name = display_name_for(artifact) or os.path.basename(artifact.get("filename") or "") or safe_name
     return FileResponse(filepath, filename=download_name)
 
 
@@ -214,7 +215,14 @@ async def delete_all_artifacts_ep():
     deleted_artifacts = 0
     deleted_files = 0
     removed_attachments = 0
+    # A coding project's working or accepted version is its only restorable copy: never bulk-deleted.
+    from db.coder_promotion import pinned_artifact_ids
+    pinned = await pinned_artifact_ids()
+    kept = 0
     for artifact in targets:
+        if artifact.get("id") in pinned:
+            kept += 1
+            continue
         result = await delete_artifact_row_and_file(artifact)
         if result["deleted"]:
             deleted_artifacts += 1
@@ -236,6 +244,7 @@ async def delete_all_artifacts_ep():
         "deleted": deleted_artifacts,
         "deleted_files": deleted_files,
         "removed_attachments": removed_attachments,
+        "kept_project_versions": kept,
     }
 
 
@@ -244,6 +253,9 @@ async def delete_artifact_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
+    from db.coder_promotion import pinned_artifact_ids
+    if artifact_id in await pinned_artifact_ids():
+        raise HTTPException(409, "This archive is a coding project's current or accepted version; it cannot be deleted")
     result = await delete_artifact_row_and_file(artifact)
     if not result["deleted"]:
         raise HTTPException(404, "Artifact not found")
@@ -537,12 +549,18 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
     artifact = await db.get_artifact(artifact_id)
     if not artifact:
         raise HTTPException(404, "Artifact not found")
+    from hephaestus_scope import scope, conversation_metadata
+    with scope(**await conversation_metadata(artifact.get("conversation_id"))):
+        return await _fork_artifact_scoped(artifact_id,artifact)
+
+
+async def _fork_artifact_scoped(artifact_id,artifact):
     filepath, safe_name = artifact_path_for_row(artifact)
     if not filepath:
         raise HTTPException(404, "Artifact file is missing")
     size = os.path.getsize(filepath)
     if size > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Codebox copy limit")
+        raise HTTPException(413, f"Artifact exceeds {config.MAX_UPLOAD_SIZE_MB}MB Hephaestus copy limit")
 
     def _read_b64():
         with open(filepath, "rb") as f:
@@ -556,7 +574,7 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
         r = await route_context().http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 60}, timeout=70)
         data = r.json()
         if r.status_code >= 400 or data.get("exit_code", 0) != 0:
-            raise HTTPException(502, data.get("stderr") or "Codebox copy failed")
+            raise HTTPException(502, data.get("stderr") or "Hephaestus copy failed")
         result = {
             "artifact_id": artifact_id,
             "path": remote_path,
@@ -568,14 +586,14 @@ async def fork_artifact_to_codebox_ep(artifact_id: str):
         await db.add_artifact_event(
             artifact_id,
             "forked_to_codebox",
-            f"Copied to Codebox at {remote_path}",
+            f"Copied to Hephaestus at {remote_path}",
             {"path": remote_path, "project_path": result["project_path"], "size_bytes": size},
         )
         return result
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Codebox copy failed: {e}")
+        raise HTTPException(502, f"Hephaestus copy failed: {e}")
 
 
 @router.post("/api/artifacts/{artifact_id}/revise")

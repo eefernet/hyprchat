@@ -1,0 +1,11 @@
+# Isolated modern Daedalus worker. Legacy jobs retain worker-requirements.txt.
+openhands-sdk==1.59.0
+openhands-tools==1.59.0
+fastapi==0.142.2
+uvicorn==0.54.0
+python-multipart==0.0.32
+psutil==7.2.2
+playwright==1.62.0
+requests>=2.32.0
+httpx>=0.28.1
+aiosqlite>=0.21.0

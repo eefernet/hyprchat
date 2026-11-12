@@ -1,7 +1,8 @@
-"""Durable Codebox operations, isolated from HTTP connections and restarts."""
+"""Durable Hephaestus operations, isolated from HTTP connections and restarts."""
 from __future__ import annotations
 
 import argparse
+import asyncio
 from contextlib import contextmanager
 import hashlib
 import json
@@ -17,19 +18,27 @@ import tarfile
 import threading
 import time
 import tempfile
+import uuid
 from fastapi import Request
 
 from coder_repository import Repository, safe_relative, validate_links
 from context_policy import DEFAULTS, resolve, estimate_tokens, operation_settings
-from coder_checks import discover, browser_check, validate_plan
-from coder_verification import (digest, source_context, test_count, validate_requirements,
-    validate_probes, validate_probe_correction, validate_acceptance, PLAN_INSTRUCTION, PROBE_INSTRUCTION, ACCEPT_INSTRUCTION)
+from coder_verification import digest, source_context
 
 
 class WorkerStore:
-    def __init__(self, root):
+    def __init__(self, root, *, controller_owned=True):
         self.root = Path(root).resolve()
+        from hephaestus_inventory import managed_root,read,control
+        # SDK child bookkeeping is operation-private and cannot access the
+        # controller's registry or admission locks through its read-only mount.
+        managed=self.managed_root=managed_root(self.root) if controller_owned else None
+        if managed and any(self.root.is_relative_to(managed/p) for p in read(control(managed)/'retired-stores.json',{'paths':[]})['paths']):
+            raise ValueError('This test environment has been retired. Create a new environment to run more tests.')
         self.root.mkdir(parents=True, exist_ok=True)
+        from hephaestus_inventory import register_store
+        if managed:
+            register_store(self.root)
         self.path = self.root / "operations.sqlite3"
         with self.connect() as db:
             db.executescript("""
@@ -67,7 +76,7 @@ class WorkerStore:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT INTO events VALUES(?,COALESCE((SELECT MAX(seq)+1 FROM events WHERE operation_id=?),1),?)",
-                       (operation_id, operation_id, json.dumps({"type": kind, "data": data})))
+                       (operation_id, operation_id, json.dumps({"type": kind, "data": data, "at": time.time()})))
 
     def events(self, operation_id, after=0, limit=100):
         with self.connect() as db:
@@ -89,10 +98,24 @@ class WorkerStore:
                        [json.dumps(value) if key in ("payload", "result") else value for key, value in values.items()] + [operation_id])
 
     def create(self, operation_id, job_id, kind, payload):
+        from hephaestus_inventory import managed_root, read, control, lock
+        root = self.managed_root
+        if root:
+            with lock(root, 'admission', exclusive=False, blocking=False):
+                retired_stores=read(control(root)/'retired-stores.json',{'paths':[]})['paths']
+                if any(self.root.is_relative_to(root/p) for p in retired_stores):
+                    raise ValueError('This test environment has been retired and cannot accept new work.')
+                retired=read(control(root) / 'retired-jobs.json', {'jobs': [],'projects': []})
+                if job_id in retired['jobs'] or payload.get('project_id') in retired.get('projects',[]):
+                    raise ValueError('This VM workspace was deliberately removed. Restore the saved project archive to continue.')
+                return self._create(operation_id, job_id, kind, payload)
+        return self._create(operation_id, job_id, kind, payload)
+
+    def _create(self, operation_id, job_id, kind, payload):
         for value in (operation_id, job_id):
             if not re.fullmatch(r"[A-Za-z0-9_-]+", value):
                 raise ValueError("Invalid operation identity")
-        if kind not in ("inspect", "plan", "verify", "code", "check", "visual", "accept", "package", "qa"):
+        if kind not in ("inspect", "code", "check", "package", "qa"):
             raise ValueError("Unknown operation kind")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -127,8 +150,15 @@ class WorkerStore:
 
 def operation_repo(store, operation):
     root = store.root / "jobs" / operation["job_id"] / "workspace"
-    return Repository(root, store.root / "jobs" / operation["job_id"] / "repository",
+    repository = Repository(root, store.root / "jobs" / operation["job_id"] / "repository",
                       operation["payload"]["settings"].get("daedalus_exclude_dirs", DEFAULTS["daedalus_exclude_dirs"]))
+    if operation['payload'].get('deliverable_contract') is not None:
+        protected = list(operation['payload'].get('protected_files', []))
+        protected += [row['path'] for row in operation['payload']['deliverable_contract']['criteria']
+                      if Path(row['path']).suffix.lower() not in {'.jar', '.war', '.zip'}]
+        from coder_environment_publish import atomic_json
+        atomic_json(repository.state / 'protected-source.json', protected)
+    return repository
 
 
 def _alive(operation):
@@ -207,6 +237,11 @@ def reconcile(store, operation_id):
         # Allow the startup handshake to store its PID before calling it lost.
         if time.time() - (operation.get("started") or time.time()) > 10 and not _alive(operation):
             result = {"error":"Worker interrupted; inspect checkpoint before continuation", "unverified_changes":operation["kind"] == "code"}
+            if operation['payload'].get('engine') == 'openhands159':
+                from coder_engine_resources import failure
+                result.update(failure(operation['payload'].get('_resource_cgroup')) or {})
+                result['failure'] = {'category': result.get('failure_category', 'worker_interrupted'),
+                                     'stage': operation['kind'], 'next_action': 'Inspect the retained checkpoint and resume with the existing allowance.'}
             with store.connect() as db:
                 db.execute("UPDATE operations SET status='interrupted',ended=?,result=? WHERE id=? AND status IN ('running','starting','cancelling')",
                            (time.time(),json.dumps(result),operation_id))
@@ -219,8 +254,22 @@ def _boundary(store, operation_id, *, model_call=False):
     if operation["cancel_requested"]:
         raise InterruptedError("Cancellation requested")
     payload = operation["payload"]
-    if time.time() - operation["started"] >= payload["seconds_remaining"]:
+    if payload.get('_preparation_failure'):
+        raise ValueError('Dependency environment preparation failed; project files are saved.')
+    now = time.time()
+    preparing = max(0, now - payload.get('_preparation_active_started', now))
+    if payload.get('_preparation_deadline') and now >= payload['_preparation_deadline']:
+        raise TimeoutError('Environment preparation allowance exhausted')
+    if now - payload.get('_active_started', operation["started"]) - preparing >= payload["seconds_remaining"]:
         raise TimeoutError("Execution allowance exhausted; continue from the checkpoint")
+    if payload.get('engine') == 'openhands159' and now - payload.get('_usage_checkpoint', {}).get('at', 0) >= 1:
+        checkpoint = {'at': now, 'active_seconds': max(0, now - payload.get('_active_started', operation['started']) - preparing)}
+        with store.connect() as connection:
+            connection.execute("UPDATE operations SET payload=json_set(payload,'$._usage_checkpoint',json(?)) WHERE id=?",
+                               (json.dumps(checkpoint), operation_id))
+    if payload.get('engine') == 'openhands159' and now - getattr(store, '_storage_checked_at', 0) >= 30:
+        store._storage_checked_at = now
+        enforce_storage(store, payload)
     if model_call:
         with store.connect() as db:
             cursor = db.execute("UPDATE operations SET calls=calls+1 WHERE id=? AND calls<? AND cancel_requested=0",
@@ -313,22 +362,42 @@ def _json(text):
     raise ValueError("Expected a JSON object in the model response")
 
 
+def validate_qa(answer, repository=None):
+    text = answer.get('answer')
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError('Return a nonempty answer grounded in the inspected source')
+    if repository is None:
+        return
+    references = re.findall(r"([\w./-]+):(?:L)?([1-9]\d*)", text)
+    if not references:
+        raise ValueError('Cite inspected source as relative/path:line; do not invent a source answer')
+    for path, line in references:
+        try:
+            content = repository.read(path, start=int(line), limit=1).get('content')
+        except (OSError, ValueError) as exc:
+            raise ValueError('Invalid source citation: ' + path + ':' + line) from exc
+        if not content:
+            raise ValueError('Source citation does not identify a current source line: ' + path + ':' + line)
+
+
 def _read_only(store, operation_id, repository, instruction, extra, validate=None, schema=None):
     """The model can navigate evidence, but receives no write/shell tools."""
     from coder_inference import local_chat, summarize_history
     operation = store.get(operation_id)
-    role = {"plan": "architect", "verify":"reviewer", "accept": "acceptance", "qa": "qa"}[operation["kind"]]
+    role = "qa"
     task = operation["payload"]["task"]
     observations, checkpoint, corrections = [], "", 0
     inspections, repeats, invalid_repeats = [], {}, {}
     recovery = None
     if operation['payload'].get('policy_version', 1) >= 5:
         if schema is None:
-            from coder_check_schema import DEFINITIONS, JSON_VALUE
+            from coder_response_recovery import DEFINITIONS, JSON_VALUE
             schema = {'type':'object', 'additionalProperties':JSON_VALUE, '$defs':DEFINITIONS}
         from coder_response_recovery import Recovery, ResponseFormatError
         recovery = Recovery(store, operation_id, instruction, extra, schema)
         if 'answer' in recovery.state:
+            if validate:
+                validate(recovery.state['answer'])
             return recovery.state['answer']
         observations = recovery.state['observations']
         inspections = recovery.state['inspections']
@@ -369,8 +438,6 @@ def _read_only(store, operation_id, repository, instruction, extra, validate=Non
         context["observations"] = observations
         context["checkpoint"] = checkpoint
         prompt = instruction + "\nReturn one JSON object. To inspect more return {\"inspect\":{\"operation\":\"files|symbols|dependencies|search|read|bytes|log|evidence\",\"query\":\"...\",\"path\":\"...\",\"cursor\":\"...\",\"start\":1}}. Inspection is read-only. Files/symbols accept literal substrings or * and ? wildcards; files match the full relative path or basename. Search finds literal source text.\n" + json.dumps(context)
-        if operation["kind"]=="verify":
-            prompt+='\nTo check JavaScript fixture construction or language semantics, return {"inspect":{"operation":"evaluate","expression":"a JavaScript expression, or an IIFE returning data"}}. This evaluates in an empty VM context without modules, require, process, or project files. Use it when an expected value or fixture might be wrong.'
         if estimate_tokens(prompt) > policy.input_budget:
             raise ValueError("Inspection evidence exceeds context. Increase the window or narrow the milestone in Settings.")
         if recovery: recovery.before_call()
@@ -407,12 +474,6 @@ def _read_only(store, operation_id, repository, instruction, extra, validate=Non
             continue
         inspection = answer.get("inspect")
         if not inspection:
-            if operation["kind"] == "accept" and 2 <= payload.get("policy_version",1) < 6:
-                if payload.get('policy_version',1)>=3:
-                    from coder_contracts import attach_acceptance_evidence
-                    answer=attach_acceptance_evidence(answer,extra.get('checks',[]),payload['revision_id'])
-                validate = lambda value: validate_acceptance(value,payload["requirements"],extra.get("checks",[]),
-                    payload["revision_id"],repository,inspections,payload.get("visual_review"))
             if validate:
                 try:
                     validate(answer)
@@ -436,10 +497,7 @@ def _read_only(store, operation_id, repository, instruction, extra, validate=Non
             if not isinstance(inspection,dict):
                 raise ValueError("Inspection must be an object")
             kind = inspection.get("operation")
-            if kind == "evaluate" and operation["kind"]=="verify":
-                result=javascript_experiment(inspection["expression"],min(payload["settings"]["daedalus_command_seconds"],
-                    payload["seconds_remaining"]-(time.time()-operation["started"])),policy.input_budget)
-            elif kind == "evidence":
+            if kind == "evidence":
                 result = evidence_page(extra,inspection.get("path",""),int(inspection.get("cursor") or 0),int(inspection.get("limit") or 100))
             elif kind == "log":
                 result = read_check_log(store, operation, inspection["path"], int(inspection.get("offset") or 0), policy.input_budget)
@@ -485,25 +543,6 @@ def _read_only(store, operation_id, repository, instruction, extra, validate=Non
         if recovery: recovery.observed()
 
 
-def javascript_experiment(expression,timeout,budget):
-    """Check language semantics without exposing the project to the expression."""
-    if not isinstance(expression,str) or not expression.strip(): raise ValueError("Expression is required")
-    if estimate_tokens(expression)>budget: raise ValueError("Experiment exceeds configured input budget")
-    if timeout<=0: raise TimeoutError("Execution allowance exhausted")
-    program='''const vm=require('node:vm');const fs=require('node:fs');
-const input=JSON.parse(fs.readFileSync(0,'utf8'));
-const context=vm.createContext(Object.create(null),{codeGeneration:{strings:false,wasm:false}});
-const result=vm.runInContext('JSON.stringify({value:('+input.expression+')})',context,{timeout:input.milliseconds});
-process.stdout.write(result);
-'''
-    with tempfile.TemporaryDirectory(prefix="daedalus-semantics-") as directory:
-        result=subprocess.run(['node','--max-old-space-size=128','-e',program],
-            input=json.dumps({"expression":expression,"milliseconds":max(1,int(timeout*1000))}),
-            cwd=directory,env={"PATH":os.environ.get("PATH","")},capture_output=True,text=True,timeout=timeout)
-    if result.returncode:
-        return {"error":result.stderr[-budget:],"exit_code":result.returncode}
-    if estimate_tokens(result.stdout)>budget:return {"error":"Experiment result is too large; return fewer values"}
-    return {"experiment":json.loads(result.stdout),"note":"Language experiment only; this does not verify the project"}
 
 
 
@@ -562,140 +601,6 @@ def read_check_log(store, operation, name, offset=0, length=65536):
             "next_offset":offset+len(data) if offset+len(data)<size else None}
 
 
-def _run_check(store, operation_id, repository, payload):
-    if payload.get('policy_version', 1) >= 6:
-        from coder_native_checks import run_checks
-        return run_checks(store, operation_id, repository, payload)
-    revision = payload["revision_id"]
-    check_dir = store.root / "checks" / store.get(operation_id)["job_id"] / revision
-    check_dir.mkdir(parents=True, exist_ok=True)
-    archive = check_dir / "source.tar.gz"
-    repository.archive(revision, archive)
-    root = check_dir / "workspace"
-    exclusions=payload["settings"]["daedalus_exclude_dirs"] if payload.get("policy_version",1)>=2 else None
-    if root.exists() and changed_check_sources(archive, root, exclusions):
-        shutil.rmtree(root)
-        for cached in check_dir.glob("*.json"):
-            cached.unlink()
-    if not root.exists():
-        staging = check_dir / "copying"
-        shutil.rmtree(staging,ignore_errors=True)
-        staging.mkdir()
-        with tarfile.open(archive) as bundle:
-            bundle.extractall(staging, filter="data")
-        staging.rename(root)
-    results = []
-    def persist(check_key):
-        target = check_dir / (check_key + ".json")
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps(results[-1]))
-        temporary.replace(target)
-        store.update(operation_id,result={"revision_id":revision,"checks":results,"passed":False})
-        store.event(operation_id,"check",check=results[-1])
-    for index, check in enumerate(payload.get("checks", [])):
-        _boundary(store, operation_id)
-        cwd = root if check.get("cwd", ".") == "." else safe_relative(root, check["cwd"])
-        check_key = hashlib.sha256(json.dumps(check,sort_keys=True).encode()).hexdigest()
-        if payload.get('policy_version',1)>=5:
-            check_key = digest({'check':check,'settings':payload['settings'],
-                'environment':dict(os.environ),'baseline':payload.get('baseline_revision')})
-        cached = check_dir / (check_key + ".json")
-        if cached.exists():
-            previous = json.loads(cached.read_text())
-            if previous.get("passed"):
-                results.append({**previous,"reused":True})
-                continue
-        log_path = check_dir / f"check-{check_key}-{operation_id}.log"
-        started = time.time()
-        remaining = payload["seconds_remaining"] - (time.time() - store.get(operation_id)["started"])
-        timeout = min(remaining, payload["settings"]["daedalus_command_seconds"])
-        if payload.get('policy_version',1)>=5 and check.get('execution_alias'):
-            previous = next((r for r in results if r['id']==check['execution_alias']
-                and r.get('is_test') and all(r.get(k)==check.get(k) for k in ('command','cwd','test_runner'))), None)
-            if previous:
-                results.append({**previous, **check, 'reused':True, 'reused_from':previous['id'],
-                    'execution_origin':'project_tests', 'seconds':0})
-                persist(check_key)
-                continue
-        if payload.get('policy_version',1)>=5 and check.get('runner')=='file':
-            from coder_file_probe import execute_file
-            try:
-                evidence = execute_file(repository, root, check, payload.get('baseline_revision'))
-            except (ValueError, OSError, RuntimeError, subprocess.CalledProcessError) as error:
-                evidence = {'passed':False,'error':str(error),'failure_kind':'invalid_file_binding'}
-            results.append({**check,**evidence,'revision_id':revision,'seconds':time.time()-started})
-            persist(check_key)
-            continue
-        if payload.get('policy_version',1)>=4 and (check.get('runner')=='api' or check.get('bindings')):
-            from coder_api_probe import source_bindings
-            try:
-                check={**check,'source_bindings':source_bindings(cwd,check)}
-            except (ValueError,FileNotFoundError) as error:
-                results.append({**check,'passed':False,'revision_id':revision,'error':str(error),
-                    'failure_kind':'missing_source_binding','seconds':time.time()-started})
-                persist(check_key)
-                continue
-        if check.get("kind") == "browser":
-            browser_dir = check_dir / f"browser-{check_key}-{operation_id}"
-            browser_dir.mkdir(exist_ok=True)
-            try:
-                if payload.get("policy_version",1)>=2:
-                    from coder_browser import browser_check as verified_browser
-                    from coder_evidence import attach
-                    browser = verified_browser(cwd,check,browser_dir,timeout,
-                        policy_version=payload.get('policy_version',1),
-                        step_timeout=payload["settings"]["daedalus_browser_step_seconds"],viewports=payload["settings"]["daedalus_browser_viewports"],
-                        startup_timeout=payload['settings'].get('daedalus_browser_startup_seconds',DEFAULTS['daedalus_browser_startup_seconds']),
-                        emit=lambda item:store.event(operation_id,"browser_action",action=item,revision_id=revision))
-                    attach(store,store.get(operation_id)["job_id"],browser,revision)
-                else:
-                    browser = browser_check(cwd, check, browser_dir, timeout,
-                        step_timeout=payload["settings"].get("daedalus_browser_step_seconds",DEFAULTS["daedalus_browser_step_seconds"]))
-            except Exception as error:
-                browser = {"passed":False,"error":str(error),"server_log":str(browser_dir/"browser-server.log"),
-                           "environment_fault":any(marker in str(error).lower() for marker in ("executable doesn't exist","host system is missing dependencies","error while loading shared libraries"))}
-            results.append({**check,**browser,"revision_id":revision,"seconds":time.time()-started})
-            persist(check_key)
-            if browser.get("environment_fault"):
-                break
-            continue
-        from coder_sandbox import Sandbox
-        from coder_patch_runtime import stop_process
-        environment = {k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LC_ALL', 'TZ'}}
-        environment['PATH'] = os.pathsep.join([str(cwd / '.venv/bin'), str(root / '.venv/bin'), environment.get('PATH', '')])
-        with Sandbox(['bash', '-c', check['command']], cwd=cwd, writable=[root], environment=environment) as box, log_path.open('wb') as output:
-            process = subprocess.Popen(box.args, cwd=cwd, stdout=output, stderr=subprocess.STDOUT, start_new_session=True, env=box.env)
-            try:
-                exit_code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                stop_process(process)
-                exit_code = -1
-            finally:
-                stop_process(process)
-        # Logs are evidence references, not a hidden permanent truncation.
-        policy = resolve("reviewer", payload["settings"])
-        with log_path.open("rb") as source:
-            source.seek(max(0, log_path.stat().st_size - policy.input_budget))
-            tail = source.read().decode("utf-8", "replace")
-        preview_chars = policy.input_budget // max(1,len(payload.get("checks", [])))
-        preview = tail[-preview_chars:] if preview_chars else ""
-        count = test_count(check.get("test_runner") or check["command"],tail)
-        false_assertion = False
-        if check.get("is_test") or "node" in check["command"]:
-            with log_path.open(errors="replace") as full_log:
-                false_assertion=any("Assertion failed" in line for line in full_log)
-        results.append({**check, "exit_code": exit_code, "passed": exit_code == 0 and (payload.get("policy_version",1)<2 or (count!=0 and not false_assertion)),
-                        "test_count":count, "assertion_failure":false_assertion,"seconds": time.time() - started,
-                        "environment_fault": exit_code == 127 or bool(check.get("setup") and any(marker in tail.lower() for marker in ("temporary failure in name resolution", "eai_again", "enotfound", "connection refused", "network is unreachable"))), "log": str(log_path), "log_tail": preview, "log_bytes": log_path.stat().st_size, "revision_id": revision})
-        persist(check_key)
-        if results[-1]["environment_fault"]:
-            break
-    changed = changed_check_sources(archive, root, exclusions)
-    if changed:
-        results.append({"id":"verification-source-integrity", "passed":False, "revision_id":revision,
-                        "summary":"Verification modified or removed source from the tested revision", "paths":changed})
-        persist("source-integrity")
-    return {"revision_id": revision, "checks": results, "environment_fault": any(r.get("environment_fault") for r in results), "passed": bool(results) and all(item["passed"] for item in results)}
 
 
 def storage_usage(root):
@@ -712,9 +617,13 @@ def storage_usage(root):
 
 
 def enforce_storage(store, payload):
+    store._storage_checked_at = time.time()
     limit = payload["settings"]["daedalus_storage_mb"] * 1024 * 1024
+    if payload.get('engine') == 'openhands159':
+        from coder_engine_cache import collect
+        collect(store, limit_bytes=limit, reserve_bytes=payload['settings'].get('daedalus_min_free_mb', 0)*1024*1024)
     if storage_usage(store.root) > limit:
-        raise ValueError("Worker storage allowance exceeded. Increase storage in Settings or remove archived jobs.")
+        raise ValueError("Worker storage allowance exceeded by retained data or active caches. Increase storage in Settings or remove archived jobs.")
     if shutil.disk_usage(store.root).free < payload["settings"].get("daedalus_min_free_mb",0)*1024*1024:
         raise ValueError("Worker free disk space is below the configured reserve; free space before continuing")
 
@@ -739,15 +648,79 @@ def stop_descendants():
 def execute(store, operation_id):
     operation = store.get(operation_id)
     payload, kind = operation["payload"], operation["kind"]
+    if payload.get('engine') != 'openhands159' or kind not in {'inspect','code','check','package','qa'}:
+        store.update(operation_id,status='blocked',ended=time.time(),result={
+            'error':'This engine or operation has been retired; start a new OpenHands 1.59 job.',
+            'failure_category':'engine_retired'})
+        return
+    if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+        metadata=payload.get('_execution_scope',{})
+        if not metadata.get('owner'):
+            store.update(operation_id,status='blocked',result={'error':'Authenticated execution scope is missing'},ended=time.time())
+            return
+        os.environ['HEPHAESTUS_EXECUTION_IDENTITY']=json.dumps({**metadata,'operation':operation_id,
+            'job':operation['job_id'],'revision':payload.get('revision_id','')})
     store.update(operation_id, status="running")
     result, status = {}, "succeeded"
     alarm = threading.current_thread() is threading.main_thread()
+    modern = True
+    if modern:
+        payload = {**payload, '_usage_checkpoint': {'at': time.time(), 'active_seconds': 0}}
+        store.update(operation_id, payload=payload)
+        from coder_engine_resources import enter_operation
+        try:
+            group = enter_operation(operation_id)
+            if group:
+                payload = {**payload, '_resource_cgroup': group}
+                store.update(operation_id, payload=payload)
+                store.event(operation_id, 'resource_limits', cgroup=group, memory_bytes=3*1024**3, tasks=256)
+        except Exception as error:
+            store.update(operation_id, status='blocked', result={'error': str(error),
+                'failure_category': 'resource_preparation', 'stage': 'preparation'}, ended=time.time())
+            return
+    if modern and kind == 'code':
+        # Loading the model is bounded independently and never consumes coding time.
+        preparation_start = time.time()
+        store.update(operation_id, payload={**store.get(operation_id)['payload'],
+            '_preparation_active_started': preparation_start,
+            '_preparation_deadline': preparation_start + payload['settings'].get('daedalus_preparation_seconds', 600)})
+        preparation_alarm = None
+        try:
+            if alarm:
+                def preparation_expired(signum, frame):
+                    raise TimeoutError('Model preparation allowance exhausted')
+                preparation_alarm = signal.signal(signal.SIGALRM, preparation_expired)
+                signal.setitimer(signal.ITIMER_REAL, payload['settings'].get('daedalus_preparation_seconds', 600))
+            from coder_engine_ops import prepare
+            prepare(store, operation_id)
+        except Exception as error:
+            payload = {**store.get(operation_id)['payload'], '_preparation_seconds': time.time() - preparation_start}
+            payload.pop('_preparation_active_started', None); payload.pop('_preparation_deadline', None)
+            status = 'cancelled' if store.get(operation_id)['cancel_requested'] else 'blocked'
+            store.update(operation_id, status=status, payload=payload,
+                result={'error': str(error), 'failure_category': 'environment', 'stage': 'preparation'}, ended=time.time())
+            store.event(operation_id, 'finished', status=status, stage='preparation', error=str(error))
+            return
+        finally:
+            if preparation_alarm is not None:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, preparation_alarm)
+        payload = {**store.get(operation_id)['payload'], '_active_started': time.time(),
+                   '_preparation_seconds': time.time() - preparation_start}
+        payload.pop('_preparation_active_started', None); payload.pop('_preparation_deadline', None)
+        store.update(operation_id, payload=payload)
     if alarm:
         def expired(signum, frame):
             raise TimeoutError("Execution allowance exhausted; continue from checkpoint")
         previous_alarm = signal.signal(signal.SIGALRM, expired)
-        signal.setitimer(signal.ITIMER_REAL, max(0.001, payload["seconds_remaining"] - (time.time() - operation["started"])))
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, payload["seconds_remaining"] + (payload['settings'].get('daedalus_preparation_seconds', 600) if modern else 0) - (time.time() - payload.get('_active_started', operation["started"]))))
+    from contextlib import ExitStack
+    cache_leases = ExitStack()
     try:
+        if modern:
+            from coder_engine_cache import lease, scope
+            cache_leases.enter_context(lease(store.root / 'project-environments' / scope(payload.get('project_id') or operation['job_id'])))
+            cache_leases.enter_context(lease(store.root / 'operation-caches' / operation_id))
         enforce_storage(store, payload)
         _boundary(store, operation_id)
         workspace = store.root / "jobs" / operation["job_id"] / "workspace"
@@ -773,12 +746,20 @@ def execute(store, operation_id):
                 staging.mkdir()
                 with tarfile.open(baseline_bundle) as bundle:
                     bundle.extractall(staging,filter="data")
+                # A review candidate's archive carries its "not accepted" report; it is never project source.
+                for report in staging.glob("DAEDALUS_REVIEW_*.json"):
+                    report.unlink()
                 baseline_bundle.unlink()
                 staging.rename(workspace)
             elif source_id:
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", source_id):
                     raise ValueError("Invalid registered project identity")
                 projects_root = Path(payload["projects_root"]).resolve()
+                if os.environ.get("HEPHAESTUS_EXECUTOR")=="docker":
+                    from hephaestus_scope import scope, workspace_root
+                    with scope(**payload["_execution_scope"]):
+                        with scope(project=source_id):
+                            projects_root=workspace_root()/"root/projects"
                 source = safe_relative(projects_root, source_id)
                 source_links = validate_links(source, payload["settings"]["daedalus_exclude_dirs"])
                 remaining = payload["settings"]["daedalus_storage_mb"] * 1024 * 1024 - storage_usage(store.root)
@@ -803,7 +784,7 @@ def execute(store, operation_id):
             else:
                 workspace.mkdir(parents=True)
         repository = operation_repo(store, operation)
-        if kind in {"plan", "verify", "code", "accept", "qa"}:
+        if kind in {"code", "qa"}:
             from coder_inference import require_local_model
             require_local_model(payload["ollama_url"],payload["model"])
         if kind == "inspect":
@@ -834,79 +815,19 @@ def execute(store, operation_id):
             if payload.get('policy_version', 1) >= 6:
                 from coder_profiles import discover as profiles
                 result['verification'] = profiles(repository, payload.get('execution_commands'), payload.get('proposed_commands'))
-            else:
-                result["verification"] = discover(repository)
-        elif kind in {'plan', 'verify', 'accept', 'code', 'check'} and payload.get('policy_version', 1) >= 7:
-            from coder_policy7_ops import execute_operation
-            result = execute_operation(store, operation_id, repository)
-        elif kind in {'plan', 'verify', 'accept'} and payload.get('policy_version', 1) >= 6:
-            from coder_review import plan, author, judge
-            observed = repository.snapshot('Independent review source check', parent=payload['revision_id'])
-            if observed['revision'] != payload['revision_id']:
-                raise ValueError('Source changed after checkpoint; rerun checks before reviewing')
-            result = {'plan': plan, 'verify': author, 'accept': judge}[kind](store, operation_id, repository, _read_only)
-        elif kind in {"plan","verify"} and payload.get("policy_version",1)>=3:
-            from coder_contracts import run_contract
-            result = run_contract(store,operation_id,repository,_read_only)
-        elif kind == "plan" and payload.get("policy_version",1)>=2:
-            result = _read_only(store,operation_id,repository,PLAN_INSTRUCTION,payload.get("evidence",{}),
-                                validate=lambda answer: validate_requirements(answer,payload["original_task"]))
-        elif kind == "verify":
-            previous=payload.get("diagnose_probes")
-            instruction=PROBE_INSTRUCTION
-            if previous:
-                instruction+='\nDiagnose the supplied failing verification probes before any further code repair. Inspect the real source. A test can be wrong: check fixture construction, language semantics, assumed filenames, and expected results against the original request. Return the COMPLETE checks list. Keep valid checks unchanged. Correct only demonstrated probe defects; never adapt requested behavior to the current implementation or weaken assertions to make a failure pass. Preserve all IDs and requirement mappings. Include corrections:[{check_id,reason,source_quote}] for any changed check. If the code is wrong, return the original checks unchanged and corrections:[]; the Builder will repair it.'
-            result = _read_only(store,operation_id,repository,instruction,payload.get("evidence",{}),
-                validate=(lambda answer:validate_probe_correction(answer,payload["requirements"],previous,payload["original_task"])) if previous else
-                         (lambda answer:validate_probes(answer,payload["requirements"])))
-        elif kind == "plan":
+        elif modern and kind in {'code', 'check'}:
+            from coder_engine_ops import execute as engine_execute
+            result = engine_execute(store, operation_id, repository)
+        elif kind == 'qa':
+            from coder_execution_utils import tree_hashes
+            original_hashes = tree_hashes(repository.root, repository.excludes)
             result = _read_only(store, operation_id, repository,
-                "Plan the requested work as observable milestones. Keep implementation, tests, and docs together for a small utility. "
-                "Inspect existing source and package manifests before planning changes. The controller discovers and runs real build, lint, and test commands after coding. "
-                "For new projects, OMIT the checks field: do not invent test-module filenames or inline shell/Python programs. "
-                "For existing projects, optional checks may reference commands already present in inspected package scripts. "
-                "Prefer standard-library unittest for Python utilities that need no external dependencies. "
-                "Return {\"milestones\":[{\"id\":\"m1\",\"title\":\"...\",\"task\":\"...\",\"criteria\":[\"...\"]}]}. "
-                "For UI behavior include browser_flows:[{cwd:\".\",path:\"/\",steps:[{action:click|fill|visible|text|reload,selector,value}]}] on the milestone. "
-                "The controller supplies the preview server command from the project. Include steps that exercise requested behavior, including reload for persistence. "
-                "Keep all requested behavior, integration, tests, and documentation requirements. File layouts are advisory.",
-                payload.get("evidence", {}), validate=validate_plan)
-        elif kind == "code":
-            from coder_sdk_runtime import run_coder
-            result = run_coder(store, operation_id, repository)
-            # cargo new / git init leave nested repositories that break the checkpoint snapshot.
-            for nested in sorted(repository.root.rglob('.git')):
-                if nested.parent != repository.root and 'node_modules' not in nested.parts:
-                    shutil.rmtree(nested, ignore_errors=True) if nested.is_dir() else nested.unlink(missing_ok=True)
-            enforce_storage(store, payload)
-            result["inventory"] = repository.refresh()
-            if payload.get('policy_version', 1) >= 6:
-                from coder_profiles import discover as profiles
-                result['verification'] = profiles(repository, payload.get('execution_commands'), payload.get('proposed_commands'))
-            else:
-                result["verification"] = discover(repository)
-            result["snapshot"] = repository.snapshot("Coding checkpoint", parent=payload.get("revision_id", ""))
-        elif kind == "check":
-            result = _run_check(store, operation_id, repository, payload)
-        elif kind == "visual":
-            from coder_visual import review
-            result = review(store,operation_id)
-        elif kind in ("accept", "qa"):
-            if kind == "accept":
-                observed = repository.snapshot("Acceptance source check",parent=payload["revision_id"])
-                if observed["revision"] != payload["revision_id"]:
-                    raise ValueError("Source changed after verification; inspect the checkpoint and rerun checks")
-            instruction = ("Assess the requested behavior against the exact revision and executable evidence. Inspect missing source before deciding. "
-                           "Return {\"accepted\":true|false,\"issues\":[{\"summary\":\"...\",\"file\":\"...\"}],\"summary\":\"...\"}. "
-                           "Do not claim unexecuted behavior passed." if kind == "accept" else
-                           "Answer using current source evidence and file:line citations. Return {\"answer\":\"...\"}. Never modify the project.")
-            if kind == "accept" and payload.get("policy_version",1)>=2:
-                instruction = ACCEPT_INSTRUCTION
-                if payload.get('policy_version',1)>=3:
-                    instruction+='\nThe controller supplies check_ids using the actual requirement/revision mapping. Omit check_ids from your output. You still independently decide status and explain each judgment; unexecuted or failed evidence can never establish success.'
-            result = _read_only(store, operation_id, repository, instruction,
-                {**payload.get("evidence", {}),"requirements":payload.get("requirements",[]),"visual_review":payload.get("visual_review",{})})
-            result["revision_id"] = payload.get("revision_id", "")
+                'Answer using current source evidence and file:line citations. Return {"answer":"..."}. Never modify the project.',
+                payload.get('evidence', {}),
+                validate=lambda answer: validate_qa(answer, repository))
+            if tree_hashes(repository.root, repository.excludes) != original_hashes:
+                raise ValueError('Source changed during read-only Q&A; answer was not published')
+            result['revision_id'] = payload.get('revision_id', '')
         elif kind == "package":
             observed = repository.snapshot("Delivery source check",parent=payload["revision_id"])
             if observed["revision"] != payload["revision_id"]:
@@ -915,6 +836,11 @@ def execute(store, operation_id):
             output = store.root / "artifacts" / f"{'candidate-' if payload.get('candidate') else ''}{archive_owner}-{payload['revision_id']}.tar.gz"
             output.parent.mkdir(exist_ok=True)
             result = {**repository.archive(payload["revision_id"], output), "path": str(output), "revision_id": payload["revision_id"]}
+            if modern and payload.get('verified_outputs'):
+                from coder_engine_delivery import append_products
+                from coder_repository import file_hash
+                append_products(output, payload['verified_outputs'], payload['revision_id'], store.root)
+                result.update(sha256=file_hash(output), size=output.stat().st_size)
             if payload.get('candidate'):
                 import io
                 from coder_repository import file_hash
@@ -922,7 +848,9 @@ def execute(store, operation_id):
                 name = f"DAEDALUS_REVIEW_{payload['revision_id']}.json"
                 report = json.dumps({'label':'Review candidate; not accepted', 'revision_id':payload['revision_id'],
                     'verification_summary':payload.get('verification_summary', {}),
-                    'run_instructions':payload.get('run_instructions', [])}, indent=2).encode()
+                    'run_instructions':payload.get('run_instructions', []),
+                    'build_products': [{k: row[k] for k in ('name', 'revision_id', 'sha256', 'size')}
+                                       for row in payload.get('verified_outputs', [])]}, indent=2).encode()
                 with tarfile.open(output) as source, tarfile.open(temporary, 'w:gz') as target:
                     for member in source:
                         if member.name == name:
@@ -946,20 +874,56 @@ def execute(store, operation_id):
         # and every child process (dev servers, Chromium) would be left running.
         if (store.get(operation_id) or {}).get("pid") == os.getpid():
             stop_descendants()
+        cache_leases.close()
     if kind == "code" and "snapshot" not in result:
         try:
-            result["snapshot"] = operation_repo(store, operation).snapshot("Interrupted coding checkpoint", parent=payload.get("revision_id", ""))
-        except Exception:
-            pass
+            checkpoint_repo = operation_repo(store, operation)
+            if modern and payload.get('engine_behavior_version', 0) >= 1:
+                from coder_execution_utils import sanitize_workspace
+                from coder_execution_utils import restore_protected
+                sanitize_workspace(checkpoint_repo.root, checkpoint_repo.excludes)
+                result['protected_restored'] = restore_protected(checkpoint_repo,
+                    payload.get('baseline_revision') or payload.get('revision_id', ''), payload.get('protected_files', []))
+                result['inventory'] = checkpoint_repo.refresh()
+            result["snapshot"] = checkpoint_repo.snapshot("Interrupted coding checkpoint", parent=payload.get("revision_id", ""))
+        except Exception as checkpoint_error:
+            result['checkpoint_error'] = str(checkpoint_error)
+    if modern and kind == 'code' and payload.get('engine_behavior_version', 0) >= 1:
+        try:
+            from coder_engine_runtime import repair_count
+            path = store.root / 'agent-runtime' / operation['job_id'] / 'bookkeeping' / 'engine' / 'stop.json'
+            result['hook_denials'] = repair_count(path, payload.get('repair_round', 0))
+        except (ValueError, OSError) as repair_error:
+            result['hook_denials'] = 2  # Corrupt bookkeeping must not grant more repairs.
+            result['repair_recovery_error'] = str(repair_error)
     if status in {'blocked','failed'}:
         from coder_failures import classify_failure
         result['failure']=classify_failure(result.get('error','Operation failed'),kind,
             recovery_attempted=store.has_event(operation_id, 'tool_mode_fallback'))
+        if modern:
+            with store.connect() as connection:
+                event = connection.execute(
+                    "SELECT payload FROM events WHERE operation_id=? AND json_extract(payload,'$.type') IN ('model_failure','model_response') ORDER BY seq DESC LIMIT 1",
+                    (operation_id,)).fetchone()
+            record = json.loads(event['payload']) if event else {}
+            if record.get('type') == 'model_failure':
+                detail = record['data']
+                result['failure'].update(category=detail['category'], request_id=detail['request_id'],
+                    upstream_status=detail['upstream_status'], recovery_attempted=detail['attempt'] > 1,
+                    next_action='Inspect the inference request and termination reason before resuming the retained conversation.')
+                result['failure'].update({key: detail[key] for key in ('bridge_status', 'response_requirement', 'usage') if key in detail})
+                result['transport_failure'] = detail
+    preparation_failure = store.get(operation_id)['payload'].get('_preparation_failure')
+    if preparation_failure:
+        result['failure'] = {'category': 'environment', 'stage': kind, 'preparation': preparation_failure,
+            'next_action': 'Restore dependency preparation, then start a fresh project or resume the saved checkpoint.'}
+        result['error'] = 'Dependency setup failed; your project files are saved.'
+        status = 'blocked'
     store.update(operation_id, status=status, result=result, ended=time.time())
     store.event(operation_id, "finished", status=status, result=result)
 
 
-def install_routes(app, projects_root):
+def install_routes(app, projects_root, *, engine="openhands159"):
     from fastapi import Body, HTTPException
     from fastapi.responses import FileResponse
     class LazyStore:
@@ -985,14 +949,22 @@ def install_routes(app, projects_root):
                             upload_mb: int = DEFAULTS["daedalus_upload_mb"],extracted_mb: int = DEFAULTS["daedalus_extracted_mb"],free_mb: int = DEFAULTS["daedalus_min_free_mb"]):
         if min(upload_mb,extracted_mb,free_mb)<1: raise HTTPException(422,"Invalid storage allowance")
         path=source_path(job_id,checksum); path.parent.mkdir(parents=True,exist_ok=True)
-        temporary=path.with_suffix(".part")
+        # A lost response can overlap a receipt probe and a retry. Each stream
+        # owns its temporary file; only a validated exact checksum is published.
+        temporary=path.with_name(path.name + '.' + uuid.uuid4().hex + '.part')
         try:
             size=0; hasher=hashlib.sha256()
             with temporary.open("wb") as output:
                 async for chunk in request.stream():
                     size+=len(chunk)
                     if size>upload_mb*1024*1024: raise HTTPException(413,"Source archive too large")
-                    if shutil.disk_usage(store.root).free<len(chunk)+free_mb*1024*1024: raise HTTPException(507,"Insufficient worker disk space")
+                    required = len(chunk) + free_mb * 1024 * 1024
+                    if engine == 'openhands159' and shutil.disk_usage(store.root).free < required:
+                        from coder_engine_cache import collect
+                        await asyncio.to_thread(collect, store, required_bytes=len(chunk),
+                                                reserve_bytes=free_mb * 1024 * 1024)
+                    if shutil.disk_usage(store.root).free < required:
+                        raise HTTPException(507,"Insufficient worker disk space")
                     hasher.update(chunk); output.write(chunk)
             if hasher.hexdigest()!=checksum: raise HTTPException(422,"Source checksum mismatch")
             with tarfile.open(temporary) as archive:
@@ -1026,6 +998,16 @@ def install_routes(app, projects_root):
     def start_operation(job_id: str, operation_id: str, body: dict = Body(...)):
         try:
             payload = {**body, "projects_root": str(projects_root)}
+            if os.environ.get('HEPHAESTUS_EXECUTOR')=='docker':
+                from hephaestus_scope import current, claim_job
+                metadata=current()
+                if payload.get('source_job_id') and not payload.get('source_archive_sha256'):
+                    claim_job(payload['source_job_id'],metadata['owner'])
+                if not metadata.get('owner'): raise ValueError('Authenticated execution scope is missing')
+                payload['_execution_scope']={**metadata,'project':payload.get('project_id') or job_id,
+                                             'conversation':payload.get('conversation_id','')}
+            if engine and payload.get('engine') != engine:
+                raise ValueError('This worker accepts only ' + engine + ' jobs')
             for key in ("seconds_remaining", "calls_remaining", "settings"):
                 if key not in payload:
                     raise ValueError(f"Missing {key}")
@@ -1085,6 +1067,8 @@ def install_routes(app, projects_root):
         operation = operation_status(job_id, operation_id)
         repository = operation_repo(store, operation)
         try:
+            if body.get("refresh") and body.get("operation") in {"files", "symbols", "search", "dependencies"}:
+                repository.refresh()
             if body.get("operation") == "screenshot":
                 import base64
                 path = Path(body["path"]).resolve()

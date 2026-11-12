@@ -1,5 +1,6 @@
 fastapi>=0.119,<1
 uvicorn[standard]>=0.38,<1
+websockets>=15,<17
 httpx>=0.28.1,<1
 aiosqlite==0.20.0
 python-multipart>=0.0.22,<1

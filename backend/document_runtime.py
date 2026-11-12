@@ -1,4 +1,4 @@
-"""Local Office operations. Deployed with document_formats.py to Codebox.
+"""Local Office operations. Deployed with document_formats.py to Hephaestus.
 
 Edits patch selected XML parts; every other ZIP member is copied byte-for-byte.
 Python Office libraries are used to compose new files, never to round-trip an

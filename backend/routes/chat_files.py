@@ -1,7 +1,7 @@
 """Chat data-file staging routes.
 
 Uploaded data files (CSV/Excel/JSON) from the chat composer are pushed into
-the Codebox sandbox at /root/chat_files/{conversation_id}/{upload_id}/{filename} so the
+the Hephaestus sandbox at /root/chat_files/{conversation_id}/{upload_id}/{filename} so the
 always-available execute_code tool can read the FULL file from disk. The
 composer then references the sandbox path in the prompt instead of inlining
 (and truncating) the file's text — which forced the model to re-type the data
@@ -61,6 +61,12 @@ async def upload_bytes_to_codebox(http, remote_path: str, data: bytes) -> None:
 
 @router.post("/api/chat-files/stage")
 async def stage_chat_file(file: UploadFile = File(...), conversation_id: str = Form(...)):
+    from hephaestus_scope import scope, conversation_metadata
+    with scope(**await conversation_metadata(conversation_id)):
+        return await _stage_chat_file_scoped(file,conversation_id)
+
+
+async def _stage_chat_file_scoped(file,conversation_id):
     conv_id = (conversation_id or "").strip()
     if not _CONV_ID_RE.match(conv_id):
         raise HTTPException(400, "Invalid conversation_id")

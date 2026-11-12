@@ -18,6 +18,41 @@ from .optional_deps import HAS_AIOSQLITE, HAS_CHROMADB, HAS_FASTAPI  # noqa: F40
 BASE_URL = os.getenv("HYPRCHAT_URL", "http://127.0.0.1:8000")
 
 
+def pytest_configure(config):
+    """Live browser dependencies belong on candidate storage, not LXC tmpfs."""
+    root = os.getenv('DAEDALUS_TEST_ROOT')
+    if os.getenv('DAEDALUS_LIVE_ENV') == '1' and root and not config.option.basetemp:
+        from pathlib import Path
+        import uuid
+        root = Path(root).resolve()
+        if not (root / 'codex-candidate').is_file():
+            raise pytest.UsageError('Live dependency tests require a marked isolated candidate release')
+        directory = root / 'test-runs' / uuid.uuid4().hex
+        directory.mkdir(parents=True, exist_ok=True)
+        import json
+        from evals.engine_campaign import collect_evaluator_caches
+        receipts = collect_evaluator_caches(root)
+        (root / 'test-runs' / (directory.name + '-preparation.json')).write_text(json.dumps(receipts, indent=2) + '\n')
+        config.option.basetemp = str(directory)
+        config._daedalus_fixture_root = directory
+
+
+def pytest_sessionfinish(session, exitstatus):
+    directory = getattr(session.config, '_daedalus_fixture_root', None)
+    if directory is None or not directory.exists():
+        return
+    import json
+    from coder_worker_runtime import WorkerStore
+    from coder_engine_cache import collect
+    reclaimed = []
+    for database in directory.rglob('operations.sqlite3'):
+        store = WorkerStore(database.parent)
+        removed = collect(store, limit_bytes=0)
+        if removed:
+            reclaimed.append({'store': str(database.parent.relative_to(directory)), 'removed': removed})
+    (directory / 'cache-reclamation.json').write_text(json.dumps(reclaimed, indent=2) + '\n')
+
+
 @pytest.fixture(scope="session")
 def base_url():
     return BASE_URL

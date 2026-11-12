@@ -10,7 +10,7 @@ import database as db
 
 TERMINAL = {"completed", "cancelled"}
 PARKED = {"blocked", "waiting_for_input", "ready_for_review"}
-ACTIVE = {"queued", "inspecting", "baselining", "planning", "verifying", "coding", "checking", "reviewing", "auditing", "visual_review", "accepting", "packaging", "candidate_packaging", "cancelling"}
+ACTIVE = {"answering", "queued", "inspecting", "baselining", "planning", "verifying", "coding", "checking", "reviewing", "auditing", "visual_review", "accepting", "packaging", "candidate_packaging", "cancelling"}
 
 
 def now():
@@ -54,6 +54,8 @@ async def migrate(connection=None):
             WHERE COALESCE(accepted_job_id,'')='' AND EXISTS
             (SELECT 1 FROM coder_workflows WHERE id=openhands_project_id AND workflow_version=3 AND state='completed'
              AND json_extract(job_json,'$.acceptance.accepted')=1)""")
+        from db.coder_promotion import migrate as migrate_versions
+        await migrate_versions(connection)
         await connection.commit()
     finally:
         if owned:
@@ -81,12 +83,42 @@ async def get(workflow_id):
         await connection.close()
 
 
+def request_identity(conversation_id, key):
+    return "cw3-" + hashlib.sha256(f"{db.current_user_id()}:{conversation_id}:{key}".encode()).hexdigest()[:24]
+
+
+async def record_chat_dispatch_attempt(conversation_id, message_id, response, *, allow_correction):
+    """Reserve one correction on the original user turn, including reconnects."""
+    connection = await db.get_db()
+    try:
+        await connection.execute('BEGIN IMMEDIATE')
+        rows = await connection.execute_fetchall(
+            "SELECT m.metadata FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+            "WHERE m.id=? AND c.id=? AND c.user_id=? AND m.role='user'",
+            (message_id, conversation_id, db.current_user_id()))
+        if not rows:
+            raise LookupError('Original user message not found')
+        metadata = json.loads(rows[0]['metadata'] or '{}')
+        evidence = metadata.setdefault('daedalus_dispatch', {})
+        retry = bool(allow_correction and not evidence.get('correction_used'))
+        evidence.setdefault('first_unverified_response', response)
+        evidence['last_unverified_response'] = response
+        evidence['correction_used'] = bool(evidence.get('correction_used') or retry)
+        await connection.execute('UPDATE messages SET metadata=? WHERE id=?', (json.dumps(metadata), message_id))
+        await connection.commit()
+        return retry
+    finally:
+        await connection.close()
+
+
 async def create(conversation_id, task, mode, project_id, model, key, *,
                  source_job_id="", source_revision_id="", source_project_id="", policy_version=1,
-                 visual_policy=None, request_options=None, parent_artifact_id="", inherited=None):
+                 visual_policy=None, request_options=None, parent_artifact_id="", inherited=None, source_pointer="", engine="openhands159"):
     owner = db.current_user_id()
-    identity = "cw3-" + hashlib.sha256(f"{owner}:{conversation_id}:{key}".encode()).hexdigest()[:24]
+    identity = request_identity(conversation_id, key)
     body = dict(task=task, mode=mode, project_id=project_id, model=model)
+    if engine != 'legacy':
+        body['engine'] = engine
     if request_options:
         body["options"] = request_options
     fingerprint = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
@@ -99,9 +131,30 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
         rows = await connection.execute_fetchall("SELECT * FROM coder_workflows WHERE id=?", (identity,))
         if rows:
             result = _decode(rows[0])
-            if result.get("request_fingerprint") != fingerprint:
+            same = result.get('request_fingerprint') == fingerprint
+            if (not same and engine == 'openhands159' and result.get('engine_behavior_version', 0) == 0
+                    and (request_options or {}).get('engine_behavior_version') == 1):
+                # A retried creation after upgrading must return its original
+                # job, without enabling new behavior or weakening other fields.
+                options = {k:v for k,v in request_options.items() if k != 'engine_behavior_version'}
+                variants = [options, {**options, 'engine_behavior_version':0}]
+                same = any(result.get('request_fingerprint') == hashlib.sha256(
+                    json.dumps({**body, 'options': old}, sort_keys=True).encode()).hexdigest() for old in variants)
+            if not same and engine == 'openhands159' and result.get('original_user_request') == (request_options or {}).get('original_user_request'):
+                # A deployment must not reparse or enable new behavior for an
+                # already-created request. All non-derived request fields still
+                # participate in the original fingerprint.
+                old = dict(request_options or {})
+                for field in ('ui_contract', 'ui_contract_version', 'plan_finalization_version', 'ui_preflight_version', 'engine_behavior_version'):
+                    if field in result: old[field] = result[field]
+                    else: old.pop(field, None)
+                same = result.get('request_fingerprint') == hashlib.sha256(
+                    json.dumps({**body, 'options': old}, sort_keys=True).encode()).hexdigest()
+            if not same:
                 raise ValueError("Idempotency key was already used for another request")
             return result
+        # What later fences compare against: working as this job found it, and the promotion log's last id.
+        start = {"working_job_at_start": "", "working_revision_at_start": ""}
         if policy_version >= 2:
             if mode == "build_from_prompt":
                 if project_id:
@@ -114,27 +167,55 @@ async def create(conversation_id, task, mode, project_id, model, key, *,
                 projects = await connection.execute_fetchall("SELECT * FROM coding_projects WHERE id=? AND user_id=?", (project_id, owner))
                 if not projects:
                     raise LookupError("Project not found")
-                head = projects[0]["accepted_revision_id"] or ""
+                project = dict(projects[0])
+                # A pointer whose job went with a deleted conversation (an older database) failed the fence below on
+                # every retry. Re-pointed as deletion does now; a request that read the old pointer is told to retry.
+                from db.coder_promotion import repoint
+                if await repoint(connection, owner, project_id):
+                    project = dict((await connection.execute_fetchall("SELECT * FROM coding_projects WHERE id=?", (project_id,)))[0])
+                # Fence on the pointer this request read: a follow-up from the working version must not start
+                # from a revision another job has since replaced (accepted-pointer jobs keep the old rule).
+                from db.coder_promotion import pointer_column
+                head = project[pointer_column(source_pointer or "accepted") + "_revision_id"] or ""
                 if head and head != source_revision_id:
                     raise ValueError("Project changed while the request was starting; retry using its current revision")
+                start.update(working_job_at_start=project["working_job_id"] or "", working_revision_at_start=project["working_revision_id"] or "")
+            baseline = await connection.execute_fetchall(
+                "SELECT COALESCE(MAX(id),0) AS id FROM coding_project_promotions WHERE project_id=?", (project_id,))
+            start["promotion_baseline_id"] = baseline[0]["id"]
             if mode != "ask_uploaded_project":
                 await _assert_project_idle(connection, project_id)
             await connection.execute("UPDATE conversations SET active_coding_project_id=? WHERE id=? AND user_id=?", (project_id, conversation_id, owner))
-        job = {"model": model, "request_fingerprint": fingerprint, "milestones": [],
+        job = {"model": model, "engine": engine, "engine_version": '1.59.0' if engine == 'openhands159' else '1.11.4',
+               "request_fingerprint": fingerprint, "milestones": [],
                "source_job_id":source_job_id, "source_revision_id":source_revision_id, "source_project_id":source_project_id,
+               "source_pointer": source_pointer or ("working" if mode == "build_from_prompt" else "accepted"),
                "milestone_index": 0, "calls_used": 0, "seconds_used": 0,
                "allowance": 1, "revision_id": "", "baseline_revision": "", "worker_operation": "",
                "operation_sequence": 0, "blocker": "", "checks": [], "artifact": None}
         if policy_version >= 2:
             job.update(policy_version=policy_version, visual_policy=visual_policy or {"enabled":False,"model":""},
-                       parent_artifact_id=parent_artifact_id, requirements=[], visual_review={"status":"pending"})
+                       parent_artifact_id=parent_artifact_id, requirements=[], visual_review={"status":"pending"}, **start)
         if policy_version >= 6:
             job.update(candidate_artifact=None, delivery_status='building', verification_summary=None,
                 repair_round=0, check_corrections=0, recovery_used=False,
                 execution_commands=(request_options or {}).get('execution_commands', {}),
+                ui_checks=(request_options or {}).get('ui_checks', []),
                 protected_files=(request_options or {}).get('protected_files', []))
         if policy_version >= 7:
             job['inherited'] = inherited or []
+        if engine == 'openhands159' and (request_options or {}).get('ui_contract_version'):
+            for field in ('ui_contract_version', 'ui_contract', 'ui_contract_context'):
+                job[field] = request_options[field]
+        if engine == 'openhands159':
+            from coder_progress import empty
+            job['progress'] = empty()
+            for field in ('deliverable_contract_version', 'deliverable_contract', 'original_user_request', 'plan_finalization_version', 'ui_preflight_version'):
+                if field in (request_options or {}): job[field] = request_options[field]
+            job['engine_behavior_version'] = (request_options or {}).get('engine_behavior_version', 0)
+        for field in ('chat_request_key', 'origin_message_id'):
+            if field in (request_options or {}):
+                job[field] = request_options[field]
         await connection.execute(
             "INSERT INTO coder_workflows(id,conversation_id,project_id,mode,state,user_task,workflow_version,job_json,created_at,updated_at) "
             "VALUES(?,?,?,?,?,?,3,?,?,?)", (identity, conversation_id, project_id, mode, "queued", task, json.dumps(job), now(), now()))
@@ -172,7 +253,7 @@ async def _event(connection, workflow_id, kind, data):
         (workflow_id, workflow_id, json.dumps({"type": kind, "data": data}), now()))
 
 
-async def save(workflow_id, *, state=None, event="updated", **changes):
+async def save(workflow_id, *, state=None, event="updated", worker_events=None, **changes):
     connection = await db.get_db()
     try:
         await connection.execute("BEGIN IMMEDIATE")
@@ -188,7 +269,7 @@ async def save(workflow_id, *, state=None, event="updated", **changes):
             raise InterruptedError("Cancellation requested")
         payload = json.loads(row["job_json"])
         if event == 'resume' and payload.get('policy_version', 1) >= 6:
-            from coder_policy7_evidence import DURABLE_LIMITS
+            from coder_check_evidence import DURABLE_LIMITS
             if payload.get('policy_version', 1) >= 7 and payload.get('stop_limit') in DURABLE_LIMITS:
                 raise ValueError(payload.get('blocker') or 'Retained repair limits prevent continuation')
             if row['state'] not in ({'blocked', 'waiting_for_input', 'ready_for_review', 'cancelled'} if payload.get('policy_version', 1) >= 7 else {'blocked', 'waiting_for_input', 'ready_for_review'}):
@@ -199,11 +280,29 @@ async def save(workflow_id, *, state=None, event="updated", **changes):
                     raise ValueError('Candidate revision changed before continuation')
         if event == "resume" and payload.get("policy_version", 1) >= 2:
             await _assert_project_idle(connection, row["project_id"], workflow_id)
-            heads = await connection.execute_fetchall("SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?", (row["project_id"], db.current_user_id()))
-            if not heads or (heads[0][0] or "") != payload.get("source_revision_id", ""):
-                raise ValueError("The project has a newer accepted revision; start a new edit instead of resuming stale work")
+            from db.coder_promotion import assert_fresh
+            await assert_fresh(connection, row["project_id"], workflow_id, payload,
+                               "The project has a newer version; start a new edit instead of resuming stale work")
         if state and state != row['state'] or changes.get('activity') and changes['activity'] != payload.get('activity'):
             changes['meaningful_update_at'] = now()
+        if worker_events is not None:
+            # The durable cursor, projection and normalized events commit together.
+            if changes.get('worker_operation', payload.get('worker_operation')) != payload.get('worker_operation'):
+                raise ValueError('Progress operation changed')
+            batch = [e for e in worker_events if e['seq'] > payload.get('worker_event_cursor', 0)]
+            if batch:
+                changes['worker_event_cursor'] = batch[-1]['seq']
+                if payload.get('progress', {}).get('version') == 1:
+                    from coder_progress import project
+                    projected, records = project(payload['progress'], batch, payload['worker_operation'], payload.get('workspace', ''), row['state'])
+                    changes['progress'] = projected
+                    for record in records:
+                        seen = await connection.execute_fetchall("SELECT 1 FROM coder_workflow_events WHERE workflow_id=? AND json_extract(payload,'$.type')='activity' AND json_extract(payload,'$.data.id')=? LIMIT 1", (workflow_id, record['id']))
+                        if not seen: await _event(connection, workflow_id, 'activity', record)
+            else:
+                changes.pop('worker_event_cursor', None)
+        if state in TERMINAL | PARKED and payload.get('progress'):
+            changes['progress'] = {**changes.get('progress', payload['progress']), 'current': None}
         payload.update(changes)
         new_state = state or row["state"]
         artifact_status = "delivered" if new_state == "completed" and payload.get("artifact") else "not_ready"
@@ -334,15 +433,14 @@ async def finish_artifact(workflow_id, revision_id, **artifact_fields):
         if job["state"] != "packaging" or job["revision_id"] != revision_id or acceptance.get("revision_id") != revision_id or acceptance.get("accepted") is not True:
             raise ValueError("Delivery requires Acceptance for the current revision")
         if job.get('policy_version', 1) >= 7:
+            # Automatic completion needs current confirmed examples that all passed (evidence version 4).
             summary = job.get('verification_summary') or {}
-            if summary.get('evidence_version') != 3 or summary.get('revision_id') != revision_id or not summary.get('accepted'):
-                raise ValueError('Policy 7 delivery requires current trusted verification evidence')
-            if any(c.get('status') != 'passed' for c in summary.get('criteria', [])):
-                raise ValueError('Unverified behavior cannot advance the accepted project head')
+            if summary.get('evidence_version') != 4 or summary.get('revision_id') != revision_id or not summary.get('accepted'):
+                raise ValueError('Policy 7 delivery requires current confirmed acceptance examples that passed')
         if job.get("policy_version",1) >= 2:
-            heads = await connection.execute_fetchall("SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?", (job["project_id"], db.current_user_id()))
-            if not heads or (heads[0][0] or "") != job.get("source_revision_id", ""):
-                raise ValueError("Project head changed; this revision cannot replace newer accepted work")
+            from db.coder_promotion import assert_fresh
+            await assert_fresh(connection, job["project_id"], workflow_id, job,
+                               "Project head changed; this revision cannot replace newer work")
         artifact = await db.add_artifact(_connection=connection, conversation_id=job["conversation_id"], workflow_id=workflow_id, **artifact_fields)
         if not artifact:
             raise ValueError("Artifact registration failed")
@@ -352,13 +450,22 @@ async def finish_artifact(workflow_id, revision_id, **artifact_fields):
             payload['delivery_status'] = 'accepted'
         project_id = job["project_id"] or workflow_id
         prior = await connection.execute_fetchall("SELECT * FROM coding_projects WHERE id=? AND user_id=?", (project_id,db.current_user_id()))
-        if prior:
-            await connection.execute("UPDATE coding_projects SET openhands_project_id=?,accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=?,updated_at=? WHERE id=? AND user_id=?",
+        from db.coder_promotion import JOB_OR_UPLOAD, advance_working, record_promotion, user_promoted_since
+        # An automatic promotion never replaces a version the owner accepted after this job started.
+        keep_user_choice = bool(prior) and await user_promoted_since(connection, project_id, job)
+        if keep_user_choice:
+            payload['accepted_pointer'] = 'kept_user_promotion'
+        elif prior:
+            await connection.execute(f"UPDATE coding_projects SET openhands_project_id={JOB_OR_UPLOAD},accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=?,updated_at=? WHERE id=? AND user_id=?",
                                      (workflow_id,workflow_id,revision_id,artifact["id"],now(),project_id,db.current_user_id()))
         else:
             await connection.execute("INSERT INTO coding_projects(id,user_id,name,description,language,file_manifest,last_plan,conversation_id,openhands_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                                     (project_id,db.current_user_id(),"Daedalus project",job["user_task"],"","[]","",job["conversation_id"],workflow_id,now(),now()))
+                                     (project_id,db.current_user_id(),(job.get("user_task") or "").strip().splitlines()[0][:100] if (job.get("user_task") or "").strip() else "Daedalus project",job["user_task"],"","[]","",job["conversation_id"],workflow_id,now(),now()))
             await connection.execute("UPDATE coding_projects SET accepted_job_id=?,accepted_revision_id=?,accepted_artifact_id=? WHERE id=?", (workflow_id,revision_id,artifact["id"],project_id))
+        await advance_working(connection, project_id, workflow_id, revision_id, artifact["id"])
+        if not keep_user_choice:
+            await record_promotion(connection, project_id, workflow_id, revision_id, artifact["id"],
+                                   "examples" if job.get('policy_version', 1) >= 7 else "controller")
         await connection.execute("UPDATE conversations SET active_coding_project_id=? WHERE id=? AND user_id=?", (project_id,job["conversation_id"],db.current_user_id()))
         await connection.execute("UPDATE coder_workflows SET state='completed',project_id=?,job_json=?,artifact_status='delivered',updated_at=? WHERE id=?",
                                  (project_id,json.dumps(payload),now(),workflow_id))
@@ -389,15 +496,15 @@ async def finish_candidate(workflow_id, revision_id, **artifact_fields):
         summary = job.get('verification_summary') or {}
         if summary.get('revision_id') != revision_id or summary.get('accepted'):
             raise ValueError('Candidate needs an unaccepted verification summary for this revision')
-        heads = await connection.execute_fetchall('SELECT accepted_revision_id FROM coding_projects WHERE id=? AND user_id=?',
-                                                  (job['project_id'], db.current_user_id()))
-        if not heads or (heads[0][0] or '') != job.get('source_revision_id', ''):
-            raise ValueError('Project head changed; this candidate is stale')
+        from db.coder_promotion import assert_fresh, advance_working
+        await assert_fresh(connection, job['project_id'], workflow_id, job, 'Project head changed; this candidate is stale')
         artifact = await db.add_artifact(_connection=connection, conversation_id=job['conversation_id'], workflow_id=workflow_id, **artifact_fields)
         if not artifact:
             raise ValueError('Candidate registration failed')
         payload = json.loads(rows[0]['job_json'])
         payload.update(candidate_artifact=artifact, delivery_status='review_candidate')
+        # The working version is what a follow-up edit starts from; the accepted version is untouched.
+        await advance_working(connection, job['project_id'], workflow_id, revision_id, artifact['id'])
         await connection.execute("UPDATE coder_workflows SET state='ready_for_review',job_json=?,artifact_status='not_ready',updated_at=? WHERE id=?",
                                  (json.dumps(payload), now(), workflow_id))
         await _event(connection, workflow_id, 'candidate_delivered', {'state':'ready_for_review', 'candidate_artifact':artifact,
@@ -422,8 +529,8 @@ async def account_operation(workflow_id, operation_id, kind, operation):
             raise LookupError('Workflow not found')
         payload = json.loads(rows[0]['job_json'])
         if payload.get('worker_operation') == operation_id and not payload.get('operation_accounted'):
-            begun = operation.get('started') or operation.get('ended') or 0
-            elapsed = max(0, (operation.get('ended') or begun) - begun)
+            from context_policy import operation_active_seconds
+            elapsed = operation_active_seconds(operation)
             usage = [r for r in payload.get('stage_usage', []) if r['operation_id'] != operation_id]
             usage.append({'operation_id': operation_id, 'stage': kind, 'seconds': elapsed,
                           'calls': operation.get('calls', 0), 'status': operation['status']})
@@ -432,8 +539,26 @@ async def account_operation(workflow_id, operation_id, kind, operation):
                 last_operation_status=operation['status'], operation_calls=0, operation_seconds=0, stage_usage=usage)
             await connection.execute('UPDATE coder_workflows SET job_json=?,updated_at=? WHERE id=?',
                                      (json.dumps(payload), now(), workflow_id))
-            await _event(connection, workflow_id, 'operation_accounted', {'operation_id': operation_id, 'calls': operation.get('calls', 0)})
+            # SSE consumers need the same totals committed above. Otherwise the
+            # next operation clears its live counters while the card still has
+            # the old lifetime totals, appearing to reset usage between stages.
+            await _event(connection, workflow_id, 'operation_accounted', {
+                'operation_id': operation_id, 'calls': operation.get('calls', 0),
+                **{key: payload[key] for key in ('calls_used', 'seconds_used', 'operation_calls',
+                    'operation_seconds', 'operation_accounted', 'last_operation_status', 'stage_usage')}})
         await connection.commit()
     finally:
         await connection.close()
     return await get(workflow_id)
+
+
+async def activity(workflow_id, before=0, limit=50):
+    if not await get(workflow_id): raise LookupError('Workflow not found')
+    connection = await db.get_db()
+    try:
+        rows = await connection.execute_fetchall("""SELECT * FROM coder_workflow_events
+            WHERE workflow_id=? AND json_extract(payload,'$.type')='activity'
+            AND (?=0 OR seq<?) ORDER BY seq DESC LIMIT ?""", (workflow_id, before, before, min(100,max(1,limit))+1))
+        items = [{"seq": r['seq'], **json.loads(r['payload'])['data']} for r in rows[:limit]]
+        return {'items': items, 'next_cursor': items[-1]['seq'] if len(rows)>limit else None}
+    finally: await connection.close()

@@ -16,7 +16,7 @@ def browser_options():
 
 
 def invoke(module, function, args, kwargs, *, writable=(), readonly=(), timeout=180, boundary=None):
-    from coder_patch_runtime import stop_process
+    from coder_execution_utils import stop_process
     import time
     with tempfile.TemporaryDirectory(prefix='daedalus-probe-') as directory:
         folder = Path(directory)
@@ -62,7 +62,7 @@ def invoke(module, function, args, kwargs, *, writable=(), readonly=(), timeout=
 if __name__ == '__main__':
     request = json.loads(Path(sys.argv[1]).read_text())
     allowed = {('coder_page_guard', 'load_errors'), ('coder_frontend_guard', 'submit_forms'), ('coder_browser', 'browser_check'),
-               ('coder_policy7_visual', 'capture_browser'), ('coder_workflow_guard', 'run_workflows')}
+               ('coder_visual', 'capture_browser'), ('coder_workflow_guard', 'run_workflows')}
     try:
         if (request['module'], request['function']) not in allowed:
             raise ValueError('Unsupported isolated probe')

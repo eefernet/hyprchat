@@ -13,6 +13,8 @@ import ResponsiveDrawer from './components/ResponsiveDrawer.jsx';
 import {REVIEW_LEVELS,reviewLevel,effortChoices,nativeChoice,effortRequest} from "./effort.js";
 import DocumentActivity from "./components/DocumentActivity.jsx";
 import DocumentPreviewPanel from "./components/DocumentPreviewPanel.jsx";
+import SidePane from "./components/SidePane.jsx";
+import {useWorkbench,closeWorkbench,configureWorkbench,workbenchState} from "./workbench.js";
 import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles.js";
 // HyprChat frontend entry.
 //
@@ -28,9 +30,12 @@ import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles
 import './vendor.js';
 import {mergeResearchReport,researchRevision,researchTerminal,researchHeadings,linkResearchCitations,researchExportMarkdown} from './researchState.js';
 import { parseCodeFence } from './syntaxHighlight.js';
+import CodeCard,{CodeCardSession,CodeMessageBoundary} from './components/CodeCard.jsx';
+import {ActivityLabel,PlayfulStatusContext} from './components/hyprChatWidgets.jsx';
 
 import React from 'react';
 import DaedalusSettings from './components/DaedalusSettings.jsx';
+import {serviceLabel} from './serviceLabels.js';
 import DaedalusRequestOptions from './components/DaedalusRequestOptions.jsx';
 import ComposerToolsMenu from './components/ComposerToolsMenu.jsx';
 import DocumentSettings from './components/DocumentSettings.jsx';
@@ -72,6 +77,7 @@ import {
   researchModelOptions,
 } from './modelHelpers.js';
 import { createSettingsSync, createPrefsSync } from './settingsSync.js';
+import {createImageSettingsSync} from './imageSettingsSync.js';
 import { NAV_ITEMS, NAV_ITEM_MAP, DEFAULT_NAV_LAYOUT, resolveNavLayout } from './navItems.js';
 import NavLayoutEditor from './components/NavLayoutEditor.jsx';
 import ModelPicker from './ModelPicker.jsx';
@@ -188,6 +194,8 @@ function HyprChat(){
   const [tm,setTm]=useState(()=>{try{const saved=localStorage.getItem("hc-theme");return Object.hasOwn(THEMES,saved)?saved:"hyprflat";}catch{return "hyprflat";}});
   const [fi,setFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-font")||"0");return Number.isInteger(saved)&&FONTS[saved]?saved:0;}catch{return 0;}});
   // Interface font: -1 matches the code font (default); otherwise an index into UI_FONTS (sans faces).
+  const [funVerbs,setFunVerbs]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-fun-verbs::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
+  const [previewAutoOpen,setPreviewAutoOpen]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-preview-auto-open::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
   const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
   const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
@@ -226,22 +234,10 @@ function HyprChat(){
   const [planningModel,setPlanningModel]=useState(()=>{try{return localStorage.getItem("hc-planning-model")||"";}catch{return "";}});
   const [coderModel,setCoderModel]=useState(()=>{try{return localStorage.getItem("hc-coder-model")||"";}catch{return "";}});
   // Coder Bot v2 — per-agent model overrides. Empty = inherit from umbrella (Planning/Coder) or chat model.
-  const [architectModel,setArchitectModel]=useState(()=>{try{return localStorage.getItem("hc-architect-model")||"";}catch{return "";}});
-  const [reviewerModel, setReviewerModel] =useState(()=>{try{return localStorage.getItem("hc-reviewer-model") ||"";}catch{return "";}});
-  const [acceptanceModel,setAcceptanceModel]=useState(()=>{try{return localStorage.getItem("hc-acceptance-model")||"";}catch{return "";}});
-  const [builderModel,  setBuilderModel]  =useState(()=>{try{return localStorage.getItem("hc-builder-model")  ||"";}catch{return "";}});
-  const [fixerModel,    setFixerModel]    =useState(()=>{try{return localStorage.getItem("hc-fixer-model")    ||"";}catch{return "";}});
   const [qaModel,       setQaModel]       =useState(()=>{try{return localStorage.getItem("hc-qa-model")       ||"";}catch{return "";}});
-  const [coderBotModelsOpen,setCoderBotModelsOpen]=useState(()=>{try{return localStorage.getItem("hc-coderbot-models-open")==="1";}catch{return false;}});
   const [coderNumCtx,setCoderNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-coder-num-ctx")||"0");}catch{return 0;}});
   const [coderChatCtx,setCoderChatCtx]=useState(0);
   const [researchNumCtx,setResearchNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-research-num-ctx")||"40960");}catch{return 40960;}});
-  const [openhandsEnabled,setOpenhandsEnabled]=useState(()=>{try{return localStorage.getItem("hc-openhands-enabled")!=="false";}catch{return true;}});
-  const [openhandsMaxRounds,setOpenhandsMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-openhands-max-rounds")||"20");}catch{return 20;}});
-  const [openhandsReasoningEffort,setOpenhandsReasoningEffort]=useState(()=>{try{return localStorage.getItem("hc-openhands-reasoning-effort")||"medium";}catch{return "medium";}});
-  const [aiderEnabled,setAiderEnabled]=useState(()=>{try{return localStorage.getItem("hc-aider-enabled")!=="false";}catch{return true;}});
-  const [aiderModel,setAiderModel]=useState(()=>{try{return localStorage.getItem("hc-aider-model")||"";}catch{return "";}});
-  const [aiderAutoTest,setAiderAutoTest]=useState(()=>{try{return localStorage.getItem("hc-aider-auto-test")!=="false";}catch{return true;}});
   const [openhandsDisableThinking,setOpenhandsDisableThinking]=useState(()=>{try{return localStorage.getItem("hc-openhands-disable-thinking")!=="false";}catch{return true;}});
   const [quickSearchMode,setQuickSearchMode]=useState(()=>{try{return localStorage.getItem("hc-quick-search-mode")||"balanced";}catch{return "balanced";}});
   const [ctxTokens,setCtxTokens]=useState(0);
@@ -301,15 +297,17 @@ function HyprChat(){
   // Init from localStorage like sibling settings so the mount-time persist
   // effect doesn't clobber the stored value with "" before server hydration.
   const lsGet=(k,fb)=>{try{return localStorage.getItem(k)??fb;}catch{return fb;}};
-  const [imgChatCkpt,setImgChatCkpt]=useState(()=>lsGet("hc-img-chat-ckpt",""));
-  const [imgChatRes,setImgChatRes]=useState(()=>lsGet("hc-img-chat-res","1024x1024")||"1024x1024");
-  const [imgChatVae,setImgChatVae]=useState(()=>lsGet("hc-img-chat-vae",""));
-  const [imgChatWorkflow,setImgChatWorkflow]=useState(()=>lsGet("hc-img-chat-workflow",""));
+  const [imgChatCkpt,setImgChatCkpt]=useState("");
+  const [imgChatRes,setImgChatRes]=useState("1024x1024");
+  const [imgChatVae,setImgChatVae]=useState("");
+  const [imgChatWorkflow,setImgChatWorkflow]=useState("");
   const [imgChatWorkflows,setImgChatWorkflows]=useState([]); // saved workflow names for the chat-default selector
   const [imgChatPrefix,setImgChatPrefix]=useState("");
   const [imgChatNeg,setImgChatNeg]=useState("");
-  const [imgChatComposeModel,setImgChatComposeModel]=useState(()=>lsGet("hc-img-chat-compose",""));
-  const [imgChatAutoEnhance,setImgChatAutoEnhance]=useState(()=>lsGet("hc-img-chat-auto-enhance","")==="true");
+  const [imgChatComposeModel,setImgChatComposeModel]=useState("");
+  const [imgChatAutoEnhance,setImgChatAutoEnhance]=useState(false);
+  const [imgChatListsEpoch,setImgChatListsEpoch]=useState(0);
+  const imgChatCkptRef=useRef(imgChatCkpt);imgChatCkptRef.current=imgChatCkpt;
   const [imgChatLists,setImgChatLists]=useState(null); // {checkpoints,vaes,settings} lazy-fetched for the dropdowns
   const [mdlPrefix,setMdlPrefix]=useState(""); // per-model prompt prefix being edited for imgChatCkpt
   const [mdlNeg,setMdlNeg]=useState("");
@@ -367,7 +365,6 @@ function HyprChat(){
   const [activeTagFilter,setActiveTagFilter]=useState(null);
   const [showTagEditor,setShowTagEditor]=useState(null); // conv id
   const [newTagInput,setNewTagInput]=useState("");
-  const [previewWidth,setPreviewWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-preview-w")||"420");}catch{return 420;}});
   const [pasteMode,setPasteMode]=useState(false);
   const [pasteCode,setPasteCode]=useState("");
   const [pasteToolName,setPasteToolName]=useState("");
@@ -399,7 +396,6 @@ function HyprChat(){
   const t=UI_THEMES[tm], codeFont=FONTS[fi].v, uiFont=uiFi>=0?UI_FONTS[uiFi]:null, font=uiFont?uiFont.v:codeFont;
   useEffect(()=>{
     for(const [key,value] of Object.entries(presentationTokens(t,font,codeFont,uiFontSize/14)))document.documentElement.style.setProperty(key,String(value));
-    try{localStorage.removeItem('hc-ui-font');}catch{}
   },[t,font,codeFont,uiFontSize]);
   const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
   const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
@@ -407,6 +403,9 @@ function HyprChat(){
   const seenSettingEffectRef=useRef({});
   const skipSettingPatchRef=useRef({});
   const modelParamsSeenRef=useRef(false);
+  const [imageSettingsReady,setImageSettingsReady]=useState(false);
+  const [imageSettingsError,setImageSettingsError]=useState("");
+  const imageSettingsSyncRef=useRef(null);
   const flashSettingsPulse=(text="Saved",type="success")=>{
     setSettingsPulse({text,type});
     if(settingsPulseTimer.current)clearTimeout(settingsPulseTimer.current);
@@ -419,6 +418,26 @@ function HyprChat(){
     skipSettingPatchRef,
     flashSettingsPulse,
   });
+
+  if(!imageSettingsSyncRef.current)imageSettingsSyncRef.current=createImageSettingsSync({
+    request:apiJson,getContext:hcCaptureUserContext,onReady:setImageSettingsReady,
+    onValues:(values,attempted)=>{
+      const setters={image_chat_checkpoint:setImgChatCkpt,image_chat_resolution:setImgChatRes,
+        image_chat_vae:setImgChatVae,image_chat_workflow:setImgChatWorkflow,
+        image_chat_prompt_prefix:setImgChatPrefix,image_chat_negative:setImgChatNeg,
+        image_chat_compose_model:setImgChatComposeModel,image_chat_auto_enhance:setImgChatAutoEnhance};
+      for(const [key,value] of Object.entries(values))setters[key]?.(previous=>attempted&&previous!==attempted[key]?previous:value);
+    },
+    onPreset:(checkpoint,settings,patch)=>{
+      setImgChatLists(p=>p?{...p,settings:{...p.settings,[checkpoint]:settings}}:p);
+      if(imgChatCkptRef.current!==checkpoint)return;
+      if("prompt_prefix" in patch)setMdlPrefix(value=>value===patch.prompt_prefix?(settings.prompt_prefix||""):value);
+      if("negative_prefix" in patch)setMdlNeg(value=>value===patch.negative_prefix?(settings.negative_prefix||""):value);
+    },
+    onError:message=>{setImageSettingsError(message||"Image settings could not be saved.");flashSettingsPulse("Failed","error");},
+    onSaved:()=>{setImageSettingsError("");flashSettingsPulse("Saved");},
+  });
+  const saveImageSetting=(key,value)=>imageSettingsSyncRef.current.save(key,value);
 
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
@@ -456,47 +475,27 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
+  useEffect(()=>{persistPref("fun-verbs",funVerbs);},[funVerbs]);
+  useEffect(()=>{persistPref("preview-auto-open",previewAutoOpen);configureWorkbench({autoOpen:previewAutoOpen});},[previewAutoOpen]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
   // Coder Bot v2 per-agent overrides — sync each to localStorage + guarded PATCH /api/settings.
-  useEffect(()=>{persistServerSetting("hc-architect-model","architect_model",architectModel);},[architectModel]);
-  useEffect(()=>{persistServerSetting("hc-reviewer-model","reviewer_model",reviewerModel);},[reviewerModel]);
-  useEffect(()=>{persistServerSetting("hc-acceptance-model","acceptance_model",acceptanceModel);},[acceptanceModel]);
-  useEffect(()=>{persistServerSetting("hc-builder-model","builder_model",builderModel);},[builderModel]);
-  useEffect(()=>{persistServerSetting("hc-fixer-model","fixer_model",fixerModel);},[fixerModel]);
   useEffect(()=>{persistServerSetting("hc-qa-model","qa_model",qaModel);},[qaModel]);
-  useEffect(()=>{try{localStorage.setItem("hc-coderbot-models-open",coderBotModelsOpen?"1":"0");}catch{}},[coderBotModelsOpen]);
   useEffect(()=>{persistServerSetting("hc-coder-num-ctx","openhands_num_ctx",coderNumCtx,String(coderNumCtx));},[coderNumCtx]);
   useEffect(()=>{persistServerSetting("hc-research-num-ctx","research_num_ctx",researchNumCtx,String(researchNumCtx));},[researchNumCtx]);
-  useEffect(()=>{persistServerSetting("hc-openhands-enabled","openhands_enabled",openhandsEnabled,String(openhandsEnabled));},[openhandsEnabled]);
-  useEffect(()=>{persistServerSetting("hc-openhands-max-rounds","openhands_max_rounds",openhandsMaxRounds,String(openhandsMaxRounds));},[openhandsMaxRounds]);
-  useEffect(()=>{persistServerSetting("hc-openhands-reasoning-effort","openhands_reasoning_effort",openhandsReasoningEffort);},[openhandsReasoningEffort]);
   useEffect(()=>{persistServerSetting("hc-openhands-disable-thinking","openhands_disable_thinking",openhandsDisableThinking,String(openhandsDisableThinking));},[openhandsDisableThinking]);
-  useEffect(()=>{persistServerSetting("hc-aider-enabled","aider_enabled",aiderEnabled,String(aiderEnabled));},[aiderEnabled]);
-  useEffect(()=>{persistServerSetting("hc-aider-model","aider_model",aiderModel);},[aiderModel]);
-  useEffect(()=>{persistServerSetting("hc-aider-auto-test","aider_auto_test",aiderAutoTest,String(aiderAutoTest));},[aiderAutoTest]);
   useEffect(()=>{persistServerSetting("hc-quick-search-mode","quick_search_mode",quickSearchMode);},[quickSearchMode]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-ckpt","image_chat_checkpoint",imgChatCkpt);},[imgChatCkpt]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-res","image_chat_resolution",imgChatRes);},[imgChatRes]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-vae","image_chat_vae",imgChatVae);},[imgChatVae]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-workflow","image_chat_workflow",imgChatWorkflow);},[imgChatWorkflow]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-compose","image_chat_compose_model",imgChatComposeModel);},[imgChatComposeModel]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-auto-enhance","image_chat_auto_enhance",imgChatAutoEnhance,String(imgChatAutoEnhance));},[imgChatAutoEnhance]);
   // Per-model prompt fields track the selected default image model
   useEffect(()=>{
     const s=(imgChatCkpt&&imgChatLists?.settings?.[imgChatCkpt])||{};
     setMdlPrefix(s.prompt_prefix||"");
     setMdlNeg(s.negative_prefix||"");
-  },[imgChatCkpt,imgChatLists]);
-  const saveModelPrefix=()=>{
-    if(!imgChatCkpt)return;
-    fetch(`${API}/api/images/model-settings/${encodeURIComponent(imgChatCkpt)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt_prefix:mdlPrefix,negative_prefix:mdlNeg})})
-      .then(r=>r.ok?r.json():Promise.reject(new Error("save failed")))
-      .then(d=>{setImgChatLists(p=>p?{...p,settings:{...p.settings,[imgChatCkpt]:d.settings}}:p);flashSettingsPulse("Saved");})
-      .catch(()=>flashSettingsPulse("Failed","error"));
+  },[imgChatCkpt,imgChatListsEpoch]);
+  const saveModelPrefix=(key,value)=>{
+    if(imgChatCkpt)imageSettingsSyncRef.current.savePreset(imgChatCkpt,{[key]:value});
   };
   useEffect(()=>{const echoed=persistPref("model-params",modelParams);if(!echoed){if(modelParamsSeenRef.current)flashSettingsPulse("Saved","success");else modelParamsSeenRef.current=true;}},[modelParams]);
   useEffect(()=>{persistPref("prompts",prompts);},[prompts]);
@@ -516,6 +515,7 @@ function HyprChat(){
     setPreparingSend("");
   };
   const isMobile=useIsMobile();
+  const workbench=useWorkbench();
   const keyboardOpen=useMobileViewport(isMobile);
   const [sidebar,setSidebar]=useState(()=>!isMobileNow());
   const [notifUnseen,setNotifUnseen]=useState(0);
@@ -576,18 +576,25 @@ function HyprChat(){
   useEffect(()=>{setResearchListOpen(false);setResearchDetailsOpen(false);},[panel]);
   const [settingsTab,setSettingsTab]=useState("connections");
   useEffect(()=>{if(settingsTab==="danger"){fetch(`${API}/api/backup/status`).then(r=>r.ok?r.json():null).then(d=>{if(d)setBackupStatus(d);}).catch(()=>{});}},[settingsTab]);
-  // Lazy-load the checkpoint/VAE dropdown data and refresh saved workflow names
-  // when the Model & Generation tab is opened with ComfyUI configured. (Must stay below the
-  // panel/settingsTab declarations — hooks read them at render time.)
-  useEffect(()=>{
-    if(panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl)return;
-    if(!imgChatLists)fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatLists(d);}).catch(()=>{});
-    fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatWorkflows(d.workflows||[]);}).catch(()=>{});
-  },[panel,settingsTab,comfyuiUrl]);
   const [users,setUsers]=useState([]);
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
   const [authReady,setAuthReady]=useState(false);
+  useEffect(()=>{
+    if(!authReady)return;
+    imageSettingsSyncRef.current.load();
+    return ()=>imageSettingsSyncRef.current.reset();
+  },[authReady,currentUserId]);
+  useEffect(()=>{
+    if(!authReady||panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl)return;
+    let cancelled=false;
+    apiJson('/api/images/checkpoints').then(d=>{
+      if(cancelled)return;
+      imageSettingsSyncRef.current.setPresets(d.settings||{});setImgChatLists(d);setImgChatListsEpoch(v=>v+1);
+    }).catch(error=>{if(!cancelled&&error.name!=="AbortError")setImageSettingsError(error.message);});
+    apiJson('/api/images/workflows').then(d=>{if(!cancelled)setImgChatWorkflows(d.workflows||[]);}).catch(()=>{});
+    return ()=>{cancelled=true;};
+  },[authReady,currentUserId,panel,settingsTab,comfyuiUrl]);
   // Daily welcome tagline — lives below the currentUser/currentUserId
   // declarations because its deps close over them (TDZ during render otherwise).
   useEffect(()=>{
@@ -1455,6 +1462,10 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
+    imageSettingsSyncRef.current.reset();setImageSettingsError("");setImgChatLists(null);setImgChatWorkflows([]);
+    setImgChatCkpt("");setImgChatRes("1024x1024");setImgChatVae("");setImgChatWorkflow("");
+    setImgChatPrefix("");setImgChatNeg("");setImgChatComposeModel("");setImgChatAutoEnhance(false);
+    setMdlPrefix("");setMdlNeg("");
     cancelVoice();
     prefsSyncRef.current?.cancel();
     for(const timer of kbSaveTimersRef.current.values())clearTimeout(timer);
@@ -1474,7 +1485,7 @@ function HyprChat(){
     // Server-backed prefs are per-profile: clear them and re-gate persistence
     // until the next boot hydration fetches the new profile's values.
     prefsReadyRef.current=false;prefsSkipRef.current={};
-    setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});setGlobalEffort(0);setThinkMode("auto");setNativeEffort({});setPendingNativeEffort({});setEffortCaps({});setPendingEffort(null);
+    setFunVerbs(true);setPrompts([]);setModelParams({});setCustomQuotes(DEFAULT_LOADING_QUOTES);setConvTags({});setEffortPerChat({});setGlobalEffort(0);setThinkMode("auto");setNativeEffort({});setPendingNativeEffort({});setEffortCaps({});setPendingEffort(null);
   };
 
   // Boot hydration for server-backed prefs. Server value wins; otherwise the
@@ -1496,6 +1507,8 @@ function HyprChat(){
         {key:"effort-level",legacy:"hc-effort-level",set:setGlobalEffort,fallback:0},
         {key:"think-mode",legacy:"hc-think-mode",set:setThinkMode,fallback:"auto"},
         {key:"native-effort",legacy:"hc-native-effort",set:setNativeEffort,fallback:{},convMap:true},
+        {key:"fun-verbs",legacy:"hc-fun-verbs",set:setFunVerbs,fallback:true},
+        {key:"preview-auto-open",legacy:"hc-preview-auto-open",set:setPreviewAutoOpen,fallback:true},
         {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
       let server={};
@@ -1514,6 +1527,8 @@ function HyprChat(){
         if(d.convMap&&val&&typeof val==="object"&&!Array.isArray(val)){
           val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
         }
+        if(d.key==='fun-verbs')val=typeof val==='boolean'?val:true;
+        if(d.key==='preview-auto-open')val=typeof val==='boolean'?val:true;
         if(d.key==='effort-level')val=reviewLevel(val);
         if(d.key==='think-mode'&&!['auto','on','off'].includes(val))val='auto';
         if(d.key==='native-effort'&&(!val||typeof val!=='object'||Array.isArray(val)))val={};
@@ -1683,17 +1698,17 @@ function HyprChat(){
   // Load
   useEffect(()=>{
     if(!authReady){if(userGateOpen)dismissHyprLoader();return;}
+    const loadOrigin=hcCaptureUserContext();
     const dismissLoader=dismissHyprLoader;
     setTimeout(dismissLoader,5000); // fallback
     fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
-    fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(cs.length){
+    fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(loadOrigin.epoch!==hcCaptureUserContext().epoch)return;if(cs.length){
       // Seed last-model from most recent conversation if not set
       try{if(!localStorage.getItem("hc-last-model")&&cs[0]?.model)localStorage.setItem("hc-last-model",cs[0].model);}catch{}
       const isCouncil=v=>v==="1"||v===1||v===true;
-      setConvs(cs.map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null})));
-      setActId(null);
-      setPanel("chat");
-      setLoadingConv(false);
+      // Login already resets selection. Late history must preserve navigation,
+      // drafts and any conversation opened or created while the request ran.
+      setConvs(current=>{const known=new Set(current.map(c=>c.id));return [...current,...cs.filter(c=>!known.has(c.id)).map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null}))];});
     }}).catch(()=>{});
     apiJson("/api/knowledge-bases").then(d=>setKbs(Array.isArray(d)?d:[])).catch(()=>{});
     apiJson("/api/tools").then(d=>setTools(Array.isArray(d)?d:[])).catch(()=>{});
@@ -1727,32 +1742,13 @@ function HyprChat(){
       if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
       if(d.current_coder_model!=null)hydrateServerSetting("coder_model",setCoderModel,d.current_coder_model,coderModel);
-      if(d.current_architect_model!=null)hydrateServerSetting("architect_model",setArchitectModel,d.current_architect_model,architectModel);
-      if(d.current_reviewer_model!=null)hydrateServerSetting("reviewer_model",setReviewerModel,d.current_reviewer_model,reviewerModel);
-      if(d.current_acceptance_model!=null)hydrateServerSetting("acceptance_model",setAcceptanceModel,d.current_acceptance_model,acceptanceModel);
-      if(d.current_builder_model!=null)hydrateServerSetting("builder_model",setBuilderModel,d.current_builder_model,builderModel);
-      if(d.current_fixer_model!=null)hydrateServerSetting("fixer_model",setFixerModel,d.current_fixer_model,fixerModel);
       if(d.current_qa_model!=null)hydrateServerSetting("qa_model",setQaModel,d.current_qa_model,qaModel);
       if(d.current_workspace_model!=null)hydrateServerSetting("workspace_model",setWsModel,d.current_workspace_model,wsModel);
       if(d.resolved_contexts?.chat?.num_ctx)setCoderChatCtx(d.resolved_contexts.chat.num_ctx);
       if(d.openhands_num_ctx!=null)hydrateServerSetting("openhands_num_ctx",setCoderNumCtx,d.openhands_num_ctx,coderNumCtx);
       if(d.research_num_ctx!=null)hydrateServerSetting("research_num_ctx",setResearchNumCtx,d.research_num_ctx,researchNumCtx);
-      if(d.openhands_enabled!=null)hydrateServerSetting("openhands_enabled",setOpenhandsEnabled,d.openhands_enabled,openhandsEnabled);
-      if(d.openhands_max_rounds!=null)hydrateServerSetting("openhands_max_rounds",setOpenhandsMaxRounds,d.openhands_max_rounds,openhandsMaxRounds);
-      if(d.openhands_reasoning_effort)hydrateServerSetting("openhands_reasoning_effort",setOpenhandsReasoningEffort,d.openhands_reasoning_effort,openhandsReasoningEffort);
       if(d.openhands_disable_thinking!=null)hydrateServerSetting("openhands_disable_thinking",setOpenhandsDisableThinking,d.openhands_disable_thinking,openhandsDisableThinking);
-      if(d.aider_enabled!=null)hydrateServerSetting("aider_enabled",setAiderEnabled,d.aider_enabled,aiderEnabled);
-      if(d.aider_model!=null)hydrateServerSetting("aider_model",setAiderModel,d.aider_model,aiderModel);
-      if(d.aider_auto_test!=null)hydrateServerSetting("aider_auto_test",setAiderAutoTest,d.aider_auto_test,aiderAutoTest);
       if(d.quick_search_mode)hydrateServerSetting("quick_search_mode",setQuickSearchMode,d.quick_search_mode,quickSearchMode);
-      if(d.image_chat_checkpoint!=null)hydrateServerSetting("image_chat_checkpoint",setImgChatCkpt,d.image_chat_checkpoint,imgChatCkpt);
-      if(d.image_chat_resolution)hydrateServerSetting("image_chat_resolution",setImgChatRes,d.image_chat_resolution,imgChatRes);
-      if(d.image_chat_vae!=null)hydrateServerSetting("image_chat_vae",setImgChatVae,d.image_chat_vae,imgChatVae);
-      if(d.image_chat_workflow!=null)hydrateServerSetting("image_chat_workflow",setImgChatWorkflow,d.image_chat_workflow,imgChatWorkflow);
-      if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
-      if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
-      if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
-      if(d.image_chat_auto_enhance!=null)hydrateServerSetting("image_chat_auto_enhance",setImgChatAutoEnhance,d.image_chat_auto_enhance,imgChatAutoEnhance);
       if(d.model_hardware_profile)setHyprfitProfile(d.model_hardware_profile);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
@@ -1810,7 +1806,9 @@ function HyprChat(){
     connect();
     return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
   },[actId]);
-  useEffect(()=>{if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
+  // Jobs are per conversation: drop the previous chat's rows at once instead of
+  // showing them until the fetch for the new chat answers (a ghost chat has none).
+  useEffect(()=>{setCoderWorkflows(p=>p.filter(w=>w.conversation_id===actId));if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
   // Mobile: close the nav drawer after picking a conversation or switching panels.
   useEffect(()=>{if(isMobile)setSidebar(false);},[isMobile,actId,panel]);
   useEffect(()=>{
@@ -2406,7 +2404,9 @@ function HyprChat(){
           const rr = await fetch(`${API}/api/runs?conversation_id=${id}`);
           if(rr.ok){
             const runs = await rr.json();
-            const anyRunning = (runs||[]).some(r=>r.status==="running"||r.status==="queued");
+            // A persistent Daedalus job owns its own Stop on the job card; its operation rows
+            // must not put the composer into streaming mode on reload.
+            const anyRunning = (runs||[]).some(r=>(r.status==="running"||r.status==="queued")&&!String(r.workflow_id||"").startsWith("cw3-"));
             if(anyRunning && reqId===loadReqRef.current){
               // No local fetch to abort — set streaming=true so the input bar
               // shows the stop button. Clicking stop will clear this UI state;
@@ -2748,7 +2748,7 @@ function HyprChat(){
       if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();startBlankChat();}
       if((e.ctrlKey||e.metaKey)&&e.key==="/"){e.preventDefault();setSidebar(p=>!p);}
       if(e.key==="?"&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||"")&&!e.target?.isContentEditable){e.preventDefault();setShowShortcuts(v=>!v);}
-      if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile){setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
+      if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile||workbenchState().open){closePreview();closeWorkbench();}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
     };
     document.addEventListener("keydown",handler);
     return ()=>document.removeEventListener("keydown",handler);
@@ -2844,11 +2844,6 @@ function HyprChat(){
     }));
     if(deletedSet.has(planningModel))setPlanningModel("");
     if(deletedSet.has(coderModel))setCoderModel("");
-    if(deletedSet.has(architectModel))setArchitectModel("");
-    if(deletedSet.has(reviewerModel))setReviewerModel("");
-    if(deletedSet.has(acceptanceModel))setAcceptanceModel("");
-    if(deletedSet.has(builderModel))setBuilderModel("");
-    if(deletedSet.has(fixerModel))setFixerModel("");
     if(deletedSet.has(qaModel))setQaModel("");
     if(deletedSet.has(wsModel))setWsModel(fallback);
     if(deletedSet.has(modelParamsOpen))setModelParamsOpen(null);
@@ -3329,7 +3324,7 @@ function HyprChat(){
       const useDocumentAssets=documentsEnabled&&(attachments.some(a=>a.type==="office")||(cv?.tool_ids||[]).includes("documents"))&&!ghostMode&&!isGhostConv(cv);
       // Route council chats to council sender
       if(cv?.is_council){prep.preparing=false;setPreparingSend("");await sendCouncil();return;}
-      // Stage data-file attachments (CSV/Excel/JSON) into the Codebox sandbox so
+      // Stage data-file attachments (CSV/Excel/JSON) into the Hephaestus workspace so
       // the model analyzes the FULL file via execute_code instead of a truncated
       // inline paste. Keep the whole draft if any attachment cannot be staged.
       if(hasDataFiles)setPreparingSend("Uploading attachments…");
@@ -3632,7 +3627,7 @@ function HyprChat(){
       }
       if(isData(file)){
         if(file.size>50*1024*1024){notify({type:"warning",text:"File skipped",detail:`${file.name} is larger than 50MB.`});continue;}
-        // Keep the raw File — staged into the Codebox sandbox at send time so
+        // Keep the raw File — staged into the Hephaestus workspace at send time so
         // execute_code can read the FULL file (no 20K-char inline truncation).
         newAttachments.push({name:file.name,file,type:"data",size:file.size});
         continue;
@@ -3671,6 +3666,7 @@ function HyprChat(){
   };
 
   const openPreview=async(filename,url)=>{
+    closeWorkbench();
     const artifactId=documentArtifactId(url);
     if(artifactId){setPreviewFile({filename,url,type:(filename||"document").split(".").pop().toLowerCase(),artifactId});setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);return;}
     const isExternal=url.startsWith("http://") || url.startsWith("https://");
@@ -3718,32 +3714,19 @@ function HyprChat(){
     }
   };
   const closePreview=()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);};
-  useEffect(()=>{closePreview();},[actId,currentUserId]);
+  // A new chat is promoted from its ghost id to the saved conversation id during its first reply;
+  // that is the same conversation, so a preview that auto-opened while streaming must survive it.
+  const previousActId=useRef(actId);
+  useEffect(()=>{
+    const promoted=String(previousActId.current||'').startsWith('ghost-')&&actId&&!String(actId).startsWith('ghost-');
+    previousActId.current=actId;
+    closePreview();
+    if(!promoted)closeWorkbench();
+  },[actId,currentUserId]);
   const openArtifact=(artifactId)=>{
     if(artifactId)setArtifactFocusId(artifactId);
     setWsPanel(false);
     setPanel("artifacts");
-  };
-
-  const startPreviewDrag=(e)=>{
-    e.preventDefault();
-    const startX=e.clientX,startW=previewWidth;
-    // Track the live width locally — `previewWidth` in onUp is the stale
-    // value from the render the drag started in, so persisting it snapped
-    // the panel back to the pre-drag width on reload.
-    let lastW=startW;
-    const onMove=(ev)=>{
-      const nw=Math.max(260,Math.min(900,startW+(startX-ev.clientX)));
-      lastW=nw;
-      setPreviewWidth(nw);
-    };
-    const onUp=()=>{
-      localStorage.setItem("hc-preview-w",String(lastW));
-      window.removeEventListener("mousemove",onMove);
-      window.removeEventListener("mouseup",onUp);
-    };
-    window.addEventListener("mousemove",onMove);
-    window.addEventListener("mouseup",onUp);
   };
 
   const exportChat=()=>{
@@ -4188,11 +4171,6 @@ function HyprChat(){
       if(planningModel===m){setPlanningModel("");}
       if(coderModel===m){setCoderModel("");}
       // Coder Bot v2 per-agent overrides — clear if pinned to the deleted model
-      if(architectModel===m){setArchitectModel("");}
-      if(reviewerModel===m){setReviewerModel("");}
-      if(acceptanceModel===m){setAcceptanceModel("");}
-      if(builderModel===m){setBuilderModel("");}
-      if(fixerModel===m){setFixerModel("");}
       if(qaModel===m){setQaModel("");}
       // Clear workspace model if it was the deleted model
       if(wsModel===m){setWsModel(fallback);}
@@ -4601,7 +4579,7 @@ function HyprChat(){
           .trim();
         const open=/^<details[^>]*\bopen\b/i.test(p);
         if(printMode)return <div key={i} className="print-details"><div className="print-details-summary">{summary}</div>{md(body,opts)}</div>;
-        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,opts)}</Collapsible>;
+        return <Collapsible key={i} theme={t} font={font} summary={summary} defaultOpen={open} variant={opts.changelog?"changelog":""}>{md(body,{...opts,codePath:`${opts.codePath||""}/details${i}`})}</Collapsible>;
       }
       if(/^[ \t]{0,3}```/.test(p)){
         const parsed=parseCodeFence(p);
@@ -4618,27 +4596,7 @@ function HyprChat(){
         if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode} streaming={streaming}/>;
         const isDiff=lang==="diff";
         if(printMode)return <pre key={i} className="print-code-block"><code>{code}</code></pre>;
-        return <div key={i} style={{margin:"10px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:"1px solid var(--hc-line)",background:t.bgDeep}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:"1px solid var(--hc-line)"}}>
-            <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0}}><IC.Terminal/>{lang||"code"}</span>
-            <button onClick={()=>cp(code,bid)} style={{background:"none",border:"none",color:copied===bid?t.ok:t.dim,cursor:"pointer",padding:3,display:"flex",alignItems:"center",gap:4,fontSize:"var(--hc-text-control)",fontFamily:font}}>
-              {copied===bid?<><IC.Check/> copied</>:<><IC.Copy/> copy</>}
-            </button>
-          </div>
-          {isDiff
-            ?<pre style={{margin:0,padding:"8px 0",fontSize:"var(--hc-text-secondary)",lineHeight:1.6,overflowX:"auto",fontFamily:codeFont,color:t.dim}}>{code.split("\n").map((ln,li)=>{
-                const c0=ln.charAt(0);
-                const isAdd=c0==="+"&&!ln.startsWith("+++");
-                const isDel=c0==="-"&&!ln.startsWith("---");
-                const isHunk=ln.startsWith("@@");
-                const isMeta=ln.startsWith("+++")||ln.startsWith("---")||ln.startsWith("diff ")||ln.startsWith("index ");
-                const bg=isAdd?`${t.ok}12`:isDel?`${t.err}12`:isHunk?`${t.acc}10`:"transparent";
-                const col=isAdd?t.ok:isDel?t.err:isHunk?t.acc:isMeta?t.mut:t.dim;
-                const fs=isMeta?"italic":"normal";
-                return <div key={li} style={{padding:"0 12px",background:bg,color:col,fontStyle:fs,whiteSpace:"pre"}}>{ln||" "}</div>;
-              })}</pre>
-            :<CodeBlock code={code} lang={lang} t={t} font={codeFont}/>}
-        </div>;
+        return <CodeCard key={i} code={code} lang={lang} fenceLabel={parsed?.label} filename={parsed?.meta?.filename} blockKey={`${opts.codePath||""}/${bid}`} streaming={streaming}/>;
       }
       // Protect $$/$ sequences inside single-line backtick inline code from the display-math split below
       const _DD="",_SD="";
@@ -4653,11 +4611,18 @@ function HyprChat(){
         return <React.Fragment key={`s${si}`}>{_lines.map((ln,j)=>{
         if(_consumed.has(j))return null;
         if(ln.match(/^---+$|^\*\*\*+$|^___+$/))return <hr key={j} style={{border:"none",borderTop:`1px solid ${rt.brd}44`,margin:"10px 0"}}/>;
-        if(ln.match(/^##### /))return <div key={j} style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
-        if(ln.match(/^#### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
-        if(ln.match(/^### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
-        if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
-        if(ln.match(/^# /))return <div key={j} style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
+        if(printMode){
+          if(ln.match(/^##### /))return <div key={j} style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:rt.acc,margin:"8px 0 3px"}}>{ip(ln.slice(6))}</div>;
+          if(ln.match(/^#### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"10px 0 4px"}}>{ip(ln.slice(5))}</div>;
+          if(ln.match(/^### /))return <div key={j} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"12px 0 5px"}}>{ip(ln.slice(4))}</div>;
+          if(ln.match(/^## /))return <div key={j} data-research-heading={ln.slice(3)} style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:rt.acc,margin:"14px 0 6px"}}>{ip(ln.slice(3))}</div>;
+          if(ln.match(/^# /))return <div key={j} style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:rt.acc,margin:"16px 0 7px"}}>{ip(ln.slice(2))}</div>;
+        }
+        if(ln.match(/^##### /))return <h5 key={j} className="hc-prose-heading">{ip(ln.slice(6))}</h5>;
+        if(ln.match(/^#### /))return <h4 key={j} className="hc-prose-heading">{ip(ln.slice(5))}</h4>;
+        if(ln.match(/^### /))return <h3 key={j} className="hc-prose-heading">{ip(ln.slice(4))}</h3>;
+        if(ln.match(/^## /))return <h2 key={j} data-research-heading={ln.slice(3)} className="hc-prose-heading">{ip(ln.slice(3))}</h2>;
+        if(ln.match(/^# /))return <h1 key={j} className="hc-prose-heading">{ip(ln.slice(2))}</h1>;
         /* GitHub-style callout: > [!NOTE|TIP|IMPORTANT|WARNING|CAUTION] */
         const mCallout=ln.match(/^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i);
         if(mCallout){
@@ -4735,23 +4700,24 @@ function HyprChat(){
           let header=null,aligns=[],body=[];
           if(tRows.length>=2&&isDivRow(tRows[1])){
             header=parseRow(tRows[0]);
-            aligns=parseRow(tRows[1]).map(c=>{const lf=c.startsWith(":"),rg=c.endsWith(":");return lf&&rg?"center":rg?"right":"left";});
+            aligns=parseRow(tRows[1]).map(c=>{const lf=c.startsWith(":"),rg=c.endsWith(":");return lf&&rg?"center":rg?"right":lf?"left":null;});
             body=tRows.slice(2).map(parseRow);
           }else{
             body=tRows.filter(r=>!isDivRow(r)).map(parseRow);
           }
+          const tableAlign=Array.from({length:Math.max(header?.length||0,...body.map(r=>r.length))},(_,ci)=>aligns[ci]||(body.some(r=>r[ci]?.trim())&&body.every(r=>!r[ci]?.trim()||/^[-+]?[$€£]?\d[\d,.]*(?:%|\s*[$€£])?$/.test(r[ci].trim()))?"right":"left"));
           if(printMode)return <table key={j} className="print-md-table">
             {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left"}}>{ip(h)}</th>)}</tr></thead>}
             <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left"}}>{ip(c)}</td>)}</tr>)}</tbody>
           </table>;
-          return <div key={j} style={{margin:"10px 0",overflowX:"auto",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:`${t.bgDeep}F5`}}>
-            <table style={{borderCollapse:"collapse",width:"100%",fontSize:"var(--hc-text-secondary)",fontFamily:font}}>
-              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:aligns[hi]||"left",padding:"7px 12px",borderBottom:"1px solid var(--hc-line-strong)",background:`${t.surface}F5`,color:t.acc,fontWeight:700,fontSize:"var(--hc-text-secondary)",letterSpacing:0,textTransform:"none",whiteSpace:"nowrap"}}>{ip(h)}</th>)}</tr></thead>}
-              <tbody>{body.map((row,ri)=><tr key={ri} style={{borderBottom:ri<body.length-1?"1px solid var(--hc-line-subtle)":"none"}}>{row.map((c,ci)=><td key={ci} style={{textAlign:aligns[ci]||"left",padding:"6px 12px",color:t.dim,verticalAlign:"top",lineHeight:1.5,wordBreak:"break-word"}}>{ip(c)}</td>)}</tr>)}</tbody>
+          return <div key={j} className="hc-table-wrap">
+            <table className="hc-table">
+              {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:tableAlign[hi]}}>{ip(h)}</th>)}</tr></thead>}
+              <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:tableAlign[ci],fontVariantNumeric:tableAlign[ci]==="right"?"tabular-nums":undefined}}>{ip(c)}</td>)}</tr>)}</tbody>
             </table>
           </div>;
         }
-        return <div key={j} style={{minHeight:ln===""?8:"auto"}}>{ip(ln)}</div>;
+        return printMode?<div key={j} style={{minHeight:ln===""?8:"auto"}}>{ip(ln)}</div>:<div key={j} className={ln===""?"hc-prose-gap":"hc-prose-line"}>{ip(ln)}</div>;
       })}</React.Fragment>;
       })}</div>;
     });
@@ -4768,7 +4734,7 @@ function HyprChat(){
   };
 
   // Level 0 chrome (rail, header) is tonal; level 2 float (composer, scroll buttons) gets real elevation.
-  const chromeS={background:"var(--hc-sunken)",border:"none",boxShadow:"none"};
+  const chromeS={border:"none"};
   const floatS={background:"color-mix(in srgb, var(--hc-elev-2) 90%, transparent)",backdropFilter:"blur(var(--hc-blur-float)) saturate(1.25)",WebkitBackdropFilter:"blur(var(--hc-blur-float)) saturate(1.25)",border:"1px solid var(--hc-line)",boxShadow:"var(--hc-shadow-2)"};
   const glass=floatS;
   const _navShort={...Object.fromEntries(NAV_ITEMS.map(i=>[i.label,i.short])),Settings:"Settings",More:"More",Search:"Search"};
@@ -4781,7 +4747,7 @@ function HyprChat(){
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
-  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${n}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
+  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${serviceLabel(n)}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -4792,14 +4758,14 @@ function HyprChat(){
   const inputS={width:"100%",background:"var(--hc-sunken)",border:"1px solid var(--hc-line)",color:t.text,padding:"9px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",boxSizing:"border-box"};
   const labelS={fontSize:"var(--hc-text-secondary)",color:t.mut,display:"block",marginBottom:5};
   const cardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:18,marginBottom:14,boxShadow:"var(--hc-shadow-1)"};
-  const settingsCardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:14};
+  const settingsCardS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:14,boxShadow:"var(--hc-shadow-1)"};
   const settingsKickerS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};
   const btnS=(c,bg)=>({background:bg||`${c}18`,border:`1px solid ${c}33`,color:c,padding:"6px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:500,minHeight:"var(--hc-control-height)",display:"flex",alignItems:"center",gap:8});
   // ── Settings design system: one titled-card language for every settings tab ──
   const secS={background:"var(--hc-elev-1)",border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"16px 18px",marginBottom:12,display:"flex",flexDirection:"column",gap:12};
   const subSecS={background:"var(--hc-sunken)",border:"none",borderRadius:"var(--hc-radius)",padding:12,display:"flex",flexDirection:"column",gap:10};
   const secHeadRowS={display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:10};
-  const secTitleS={fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text};
+  const secTitleS={fontSize:"var(--hc-text-section)",fontWeight:600,color:t.text,letterSpacing:"-.02em"};
   const secHintS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};
   const secFieldLabelS={fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:500,display:"flex",flexDirection:"column",gap:5,minWidth:0};
   const secGridS={display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,190px),1fr))",gap:10,alignItems:"end"};
@@ -4809,7 +4775,7 @@ function HyprChat(){
   // types. Defining components here would mint a new type each App render and
   // remount the subtree, dropping input focus mid-keystroke.
   const settingSection=(title,extras,children,hint,color)=>(
-    <section style={color?{...secS,background:`${color}08`,border:`1px solid ${color}1F`}:secS}>
+    <section className="hc-settings-section" style={color?{...secS,background:`${color}08`,border:`1px solid ${color}1F`}:secS}>
       <div style={secHeadRowS}>
         <div style={color?{...secTitleS,color}:secTitleS}>{title}</div>
         {extras||null}
@@ -4850,7 +4816,7 @@ function HyprChat(){
   const msgActionS=(c=t.mut)=>({background:"transparent",border:"none",color:c,cursor:"pointer",padding:"0 8px",height:28,minHeight:28,borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5});
   // Shared panel header recipe (Research pattern). Plain function — call as {panelHeader(...)}.
   const panelHeader=(icon,title,extras,{color=t.acc,left,subtitle}={})=>(
-    <div style={{padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
+    <div className="hc-panel-heading" style={{padding:"18px 24px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
         <span style={{display:"flex",color}}>{icon}</span>
         <div style={{minWidth:0}}>
@@ -4948,7 +4914,7 @@ function HyprChat(){
     ["appearance",<IC.Palette/>,"Appearance","Theme, font, and density"],
     ["rag",<IC.Database/>,"RAG Pipeline","Indexing and retrieval"],
     ["quotes",<IC.Chat/>,"Loading Quotes","Custom waiting text"],
-    ["cleanup",<IC.HardDrive/>,"Sandbox & Cleanup","Storage maintenance"],
+    ["cleanup",<IC.HardDrive/>,"Storage & Cleanup","Local files and execution VM"],
     ["danger",<IC.Alert/>,"Danger Zone","Destructive actions"],
     ["changelog",<IC.File/>,"Changelog","Release notes and updates"],
   ];
@@ -4977,7 +4943,6 @@ function HyprChat(){
   // RENDER
   // ============================================================
   const settingsFocus=useFocusScope(panel==='settings',()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||'chat');});
-  const previewFocus=useFocusScope(!!previewFile&&isMobile,()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);});
   const kbFocus=useFocusScope(!!kbPreview,()=>setKbPreview(null));
   const confirmFocus=useFocusScope(!!confirmDialog,()=>{const dialog=confirmDialog;setConfirmDialog(null);setConfirmPhrase('');dialog?.resolve?.(dialog.prompt?null:false);});
   // Exit animations: surfaces stay mounted briefly while closing (usePresence); focus scopes keep the real open flag.
@@ -4987,9 +4952,9 @@ function HyprChat(){
   // Only newly appended rows animate; loads/switches fade the list container instead (useNewKeys).
   const newMessageKeys=useNewKeys((act?.messages||[]).map((m,idx)=>`${actId}:${m._activityKey||m.id||idx}`),actId);
   const _uiScale=uiFontSize/14;
-  return <div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
+  return <PlayfulStatusContext.Provider value={funVerbs}><div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
     {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>({...c,messages:(c.messages||[]).map(m=>m.id===id?{...m,...saved}:m)})))}/>}
-    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
+    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${isLightTheme?THEMES[tm].text:THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
     <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
 
@@ -5024,7 +4989,7 @@ function HyprChat(){
     </div>}
 
     {/* NAV RAIL */}
-    <div inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...chromeS,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
+    <div className="hc-nav-rail" inert={isMobile&&!sidebar?"":undefined} style={{width:68,minWidth:68,display:"flex",flexDirection:"column",alignItems:"center",...chromeS,zIndex:11,padding:"12px 0",gap:4,...(isMobile?{position:"absolute",left:0,top:0,bottom:0,zIndex:60,transform:sidebar?"translateX(0)":"translateX(-100%)",transition:"transform .25s ease",paddingTop:"calc(12px + var(--hc-content-safe-top))",paddingBottom:"calc(12px + var(--hc-content-safe-bottom))"}:{})}}>
       <div style={{flex:1,minHeight:0,width:"100%",display:"flex",flexDirection:"column",alignItems:"center",gap:4,overflowY:"auto",overflowX:"hidden",scrollbarWidth:"none",paddingBottom:4}}>
         <button className={`nav-panel-button${sidebarSearchActive?" is-active":""}`} onClick={()=>{if(showMessageSearch&&sidebar)closeSidebarSearch();else openSidebarSearch("titles");}} title={`Search conversations (${MOD_KEY} K)`} style={navBtnS(!!sidebarSearchActive)}>
           <span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}><IC.Search/></span>
@@ -5059,9 +5024,9 @@ function HyprChat(){
     </div>
 
     {/* CONVERSATION LIST */}
-    <div data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{...(isMobile
+    <div className="hc-conversation-sidebar" data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{...(isMobile
       ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,paddingTop:"var(--hc-content-safe-top)",paddingBottom:"var(--hc-content-safe-bottom)",transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
-      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:"1px solid var(--hc-line-subtle)",overflow:"hidden",background:"var(--hc-sunken)"}}>
+      :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:"1px solid var(--hc-line-subtle)",overflow:"hidden"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
         <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:"var(--hc-radius-sm)"}}>ALPHA</span></div>
         <button onClick={()=>{openSettings();setSettingsTab("users");}} style={{width:"100%",display:"flex",alignItems:"center",gap:7,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",color:t.dim,borderRadius:"var(--hc-radius)",padding:"6px 8px",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8,textAlign:"left"}}>
@@ -5162,7 +5127,7 @@ function HyprChat(){
         })}
       </div>}
       <div style={{padding:"7px 11px",borderTop:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-        {svc("ollama")}Ollama {svc("codebox")}CB {svc("searxng")}SX {svc("n8n")}n8n{health.comfyui!==undefined&&<> {svc("comfyui")}SD</>}{health.stt!==undefined&&<> {svc("stt")}STT</>}{health.tts!==undefined&&<> {svc("tts")}TTS</>}
+        {svc("ollama")}Ollama {svc("codebox")}Hephaestus {svc("searxng")}SX {svc("n8n")}n8n{health.comfyui!==undefined&&<> {svc("comfyui")}SD</>}{health.stt!==undefined&&<> {svc("stt")}STT</>}{health.tts!==undefined&&<> {svc("tts")}TTS</>}
       </div>
     </div>
 
@@ -5171,7 +5136,7 @@ function HyprChat(){
 
     {/* MAIN */}
     <div ref={contentRef} className="hc-content" data-panel={panel} style={{flex:1,display:"flex",flexDirection:"column",zIndex:5,minWidth:0,position:"relative"}}>
-      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",background:"var(--hc-elev-0)",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
+      <div className="hc-app-header" style={{padding:isMobile?"8px 10px":"10px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,flexWrap:"wrap",flexShrink:0,position:"relative",zIndex:100,...(isMobile?{flexWrap:"wrap",rowGap:6,paddingTop:"calc(8px + var(--hc-content-safe-top))"}:{})}}>
         <div style={{display:"flex",alignItems:"center",gap:6,...(isMobile?{flexWrap:"wrap",minWidth:0,maxWidth:"100%"}:{})}}>
           {isMobile&&<button onClick={()=>setSidebar(p=>!p)} title={sidebar?"Hide menu":"Show menu"} aria-label={sidebar?"Hide menu":"Show menu"} className="hc-icon-btn is-lg" style={{color:t.dim}}><IC.Sidebar/></button>}
           {panel==="chat"&&!act&&<>
@@ -5405,7 +5370,7 @@ function HyprChat(){
       {wsPanel&&activeWs?null
       :panel==='workspaces'?<WorkspaceHome {...{t,btnS,inputS,workspaces,notify}} onNewChat={startWorkspaceChat} onOpen={openWorkspace} onCreated={ws=>{setWorkspaces(p=>[ws,...p]);openWorkspace(ws.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify} confirmAction={confirmAction}/>
-      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
+      :panel==="images"?<ImageStudioPanel key={currentUserId} t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {panelHeader(<IC.Database/>,"Knowledge Bases",<button onClick={createKb} style={btnS(t.acc)}><IC.Plus/> New KB</button>)}
@@ -7385,7 +7350,7 @@ function HyprChat(){
               </div>}
               <div ref={chatEnd}/>
             </div>;
-          })():<div key={actId||"empty"} className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
+          })():<CodeCardSession key={`${currentUserId}:${actId||"empty"}`}><div className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
             {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
               const totalMessages=messageRows.length;
               const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
@@ -7437,18 +7402,20 @@ function HyprChat(){
               if(!messageWorkflows.length&&isLastAssistant&&!hasDocumentActivity)messageWorkflows.push(...coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3));
               const isDaedalusFullBuild=!isU&&_isDaedalusFullBuildOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
               const isDaedalusOutput=!isU&&_isDaedalusOutput({meta,savedEvents,liveEvents:liveEventsForMsg,runIds:daedalusRunIds,workflows:messageWorkflows});
+              // A persistent job's card shows progress, not the reply: keep the assistant's words above it.
+              const hidesReply=isDaedalusOutput&&!hasDocumentActivity&&!messageWorkflows.some(w=>w.workflow_version===3);
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               const quickSearchPayload=renderOpts?.quickSearch;
               const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
-              return <React.Fragment key={`${actId}:${msg._activityKey||msg.id||i}`}>
+              return <CodeMessageBoundary key={`${actId}:${msg._activityKey||msg.id||i}`} identity={msg._activityKey||msg.id||i} live={!!msg.isS}>
               <div id={`saved-message-${msg.id}`} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
                 {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
-                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
+                :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
                   {isU?<IC.User/>:personaAvatar?<img src={avatarSrc(personaAvatar)} style={{width:"100%",height:"100%",objectFit:"cover"}} alt=""/>:<IC.Bot/>}
                 </div>}
                 <div style={{flex:1,minWidth:0,maxWidth:isU?"min(760px,92%)":"100%"}}>
-                  {(!grouped||refinedN>0)&&<div style={{fontSize:"var(--hc-text-secondary)",marginBottom:5,fontWeight:600,letterSpacing:.4,display:"flex",alignItems:"center",gap:6}}>
+                  {(!grouped||refinedN>0)&&<div className="hc-msg-meta" style={{display:"flex",alignItems:"center",gap:6}}>
                     {isU?<span style={{color:t.mut}}>you</span>:personaName
                       ?<span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"1px 7px",background:`${t.pink}15`,border:`1px solid ${t.pink}28`,borderRadius:"var(--hc-radius-card)",color:t.pink}}>
                         {personaAvatar&&<img src={avatarSrc(personaAvatar)} style={{width:14,height:14,borderRadius:"var(--hc-radius-sm)",objectFit:"cover"}} alt=""/>}
@@ -7458,9 +7425,9 @@ function HyprChat(){
                     {msg.created_at&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:2,fontWeight:500}}>{new Date(_parseUtcishMs(msg.created_at)).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
                     {refinedN>0&&(()=>{const lvl=EFFORT_LEVELS[refinedN]||EFFORT_LEVELS[EFFORT_LEVELS.length-1];return <span title={`Refined ${refinedN}× via ${lvl.name}`} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius)",background:`${t.pink}15`,border:`1px solid ${t.pink}30`,color:t.pink,display:"inline-flex",alignItems:"center",gap:3,fontWeight:600}}>✨ Refined {refinedN}×</span>;})()}
                   </div>}
-                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t}/>}
+                  {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t} messageKey={`${actId}:${msg._activityKey||msg.id||i}`}/>}
                   {!isU&&activityLive&&<WaitingQuote active={streaming&&tokC===0&&!renderedContent} quotes={customQuotes} t={t}/>}
-                  <div style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":isDaedalusOutput?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
+                  <div className={`hc-prose${isU?" is-user":""}`} style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":hidesReply?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -7471,7 +7438,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :isDaedalusOutput&&!hasDocumentActivity?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
+                    :hidesReply?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -7600,17 +7567,17 @@ function HyprChat(){
                     {!isU&&!!msg.metadata?.stats?.gen_tokens&&<span title="Generation stats" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.75,marginLeft:4,alignSelf:"center",whiteSpace:"nowrap"}}>{msg.metadata.stats.gen_tokens} tok{msg.metadata.stats.speed?` · ${msg.metadata.stats.speed} tok/s`:""}{msg.metadata.stats.routed_model?` · via ${msg.metadata.stats.routed_model}`:""}</span>}
                   </div>}
                 </div>
-              </div></React.Fragment>;
+              </div></CodeMessageBoundary>;
             })}</>;})()}
             {evts.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}><ToolStatus evts={evts} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/></div>}
             {standaloneCoderJobs.length>0&&!(act.messages||[]).some(m=>m.role==="assistant")&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"8px 16px"}}>{standaloneCoderJobs.slice(0,3).map(workflow=><WorkflowCard key={workflow.id} workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/>)}</div>}
             <div ref={chatEnd}/>
-          </div>}
+          </div></CodeCardSession>}
         </div>
         </div>
         <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
-          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
-          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} onChange={setCodingOptions} t={t} font={font}/></div>}
+          {[backgroundJob(coderWorkflows.filter(w=>w.conversation_id===actId))].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
+          {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} jobs={standaloneCoderJobs} onChange={setCodingOptions} t={t} font={font}/></div>}
         {/* INPUT */}
         <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
           <div className="hc-composer-extras">
@@ -7620,7 +7587,7 @@ function HyprChat(){
             const active=streaming||councilRunning||searchLoading;
             return <div className="hc-run-pill hc-live-head is-active hc-pop" data-placement="top" {...runPill.props} style={{maxWidth:chatWidth,margin:"0 auto 7px",display:"flex",alignItems:"center",gap:8,padding:"6px 12px",background:`${currentRun.color}0d`,boxShadow:`0 0 0 1px ${currentRun.color}2f`,color:currentRun.color,fontSize:"var(--hc-text-secondary)",minHeight:31,boxSizing:"border-box"}}>
               <span className={`hc-activity-dot${active?" is-running":""}`} aria-hidden="true" style={{width:7,height:7,color:currentRun.color}}/>
-              <span key={phaseLabel} className="hc-activity-label" style={{fontSize:"var(--hc-text-secondary)"}}>{phaseLabel}</span>
+              <ActivityLabel label={phaseLabel} phase={currentRun.phase} active={active} seed={`${actId}:${currentRun.id||currentRun.label}`}/>
               <span style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
               {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
               {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
@@ -7675,7 +7642,7 @@ function HyprChat(){
               </span>)}
           </div>}
           </div>
-          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",...floatS,borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
+          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
             {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:"inherit",pointerEvents:"none",overflow:"hidden",zIndex:0}}>
               {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
             </div>}
@@ -7785,8 +7752,8 @@ function HyprChat(){
             </button>}
             {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
             :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,borderRadius:"50%",cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>
         </div>
@@ -7889,7 +7856,7 @@ function HyprChat(){
               <span style={{fontSize:"var(--hc-text-control)"}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label={ollama:"Ollama",codebox:"Codebox",n8n:"N8N",searxng:"SearXNG",comfyui:"ComfyUI",stt:"Voice STT",tts:"Voice TTS"}[n];return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label=serviceLabel(n);return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{s.response_ms}ms</span>}
@@ -7941,13 +7908,13 @@ function HyprChat(){
         {settingSection("Endpoints",null,
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,300px),1fr))",gap:12}}>
             {[
-              ["Ollama",ollamaUrl,setOllamaUrl,"http://192.168.1.110:11434","Model inference and model manager"],
-              ["Codebox",codeboxUrl,setCodeboxUrl,"http://192.168.1.201:8585","Tool execution and project upload bridge"],
-              ["N8N",n8nUrl,setN8nUrl,"http://192.168.1.47:5678","External workflow automation"],
-              ["SearXNG",searxngUrl,setSearxngUrl,"http://192.168.1.56:8888","Search and research backend"],
-              ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://192.168.1.115:8188","Stable Diffusion image generation (optional)"],
-              ["Voice STT",sttUrl,setSttUrl,"http://192.168.1.115:8001","Speech-to-text — Speaches/Whisper (optional)"],
-              ["Voice TTS",ttsUrl,setTtsUrl,"http://192.168.1.115:8880","Text-to-speech — Kokoro (optional)"],
+              ["Ollama",ollamaUrl,setOllamaUrl,"http://127.0.0.1:11434","Model inference and model manager"],
+              [serviceLabel("codebox"),codeboxUrl,setCodeboxUrl,"http://127.0.0.1:8585","Tool execution and project upload bridge"],
+              ["N8N",n8nUrl,setN8nUrl,"http://127.0.0.1:5678","External workflow automation"],
+              ["SearXNG",searxngUrl,setSearxngUrl,"http://127.0.0.1:8888","Search and research backend"],
+              ["ComfyUI",comfyuiUrl,setComfyuiUrl,"http://127.0.0.1:8188","Stable Diffusion image generation (optional)"],
+              ["Voice STT",sttUrl,setSttUrl,"http://127.0.0.1:8001","Speech-to-text — Speaches/Whisper (optional)"],
+              ["Voice TTS",ttsUrl,setTtsUrl,"http://127.0.0.1:8880","Text-to-speech — Kokoro (optional)"],
             ].map(([label,value,setter,placeholder,hint])=><label key={label} style={{display:"grid",gridTemplateColumns:"120px minmax(0,1fr)",gap:12,alignItems:"center"}}>
               <div style={{display:"flex",alignItems:"baseline",justifyContent:"space-between",gap:8,marginBottom:5}}>
                 <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700}}>{label}</span>
@@ -8116,8 +8083,10 @@ function HyprChat(){
               const cks=imgChatLists?.checkpoints||[];
               const vaeList=imgChatLists?.vaes||[];
               const hasPreset=!!(imgChatLists?.settings?.[imgChatCkpt]?.user_override);
-              const selectedModelLabel=imgChatCkpt?imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,""):"global fallback";
-              return <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
+              const selectedModelLabel=imgChatCkpt?imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,""):"profile fallback";
+              return <><div style={secHintS}>Image defaults for {currentUser?.name||"this profile"}. Changes apply only to this profile.</div>
+                {imageSettingsError&&<div role="alert" style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:8}}>{imageSettingsError}{!imageSettingsReady&&<button onClick={()=>{setImageSettingsError("");imageSettingsSyncRef.current.load();}}>Retry</button>}</div>}
+                <fieldset disabled={!imageSettingsReady} style={{border:0,padding:0,margin:0,minWidth:0,display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
                   <section style={subSecS}>
                     <div style={secHeadRowS}>
                       <div style={secTitleS}>Generation Target</div>
@@ -8125,14 +8094,14 @@ function HyprChat(){
                     </div>
                     <div style={secGridS}>
                       <label style={secFieldLabelS}>Image model
-                        <select value={imgChatCkpt} onChange={e=>setImgChatCkpt(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatCkpt} onChange={e=>saveImageSetting("image_chat_checkpoint",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">(none — built-in SDXL template)</option>
                       {cks.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
                       {imgChatCkpt&&imgChatLists&&!cks.includes(imgChatCkpt)&&<option value={imgChatCkpt}>{imgChatCkpt} (missing!)</option>}
                     </select>
                       </label>
                       <label style={secFieldLabelS}>Resolution
-                        <select value={imgChatRes} onChange={e=>setImgChatRes(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatRes} onChange={e=>saveImageSetting("image_chat_resolution",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="1024x1024">Square — 1024 × 1024</option>
                       <option value="1216x832">Landscape — 1216 × 832</option>
                       <option value="832x1216">Portrait — 832 × 1216</option>
@@ -8143,13 +8112,13 @@ function HyprChat(){
                     </select>
                       </label>
                       <label style={secFieldLabelS}>VAE
-                        <select value={imgChatVae} onChange={e=>setImgChatVae(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatVae} onChange={e=>saveImageSetting("image_chat_vae",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Baked (checkpoint)</option>
                       {vaeList.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
                     </select>
                       </label>
                       <label style={secFieldLabelS}>Workflow
-                        <select value={imgChatWorkflow} onChange={e=>setImgChatWorkflow(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatWorkflow} onChange={e=>saveImageSetting("image_chat_workflow",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Default (built-in SDXL)</option>
                       {imgChatWorkflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
                       {imgChatWorkflow&&!imgChatWorkflows.some(w=>w.name===imgChatWorkflow)&&<option value={imgChatWorkflow}>{imgChatWorkflow} (missing!)</option>}
@@ -8167,20 +8136,20 @@ function HyprChat(){
                     {imgChatCkpt?<>
                   <div>
                     <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt saved with this model</div>
-                    <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
+                    <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={()=>saveModelPrefix("prompt_prefix",mdlPrefix)} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
                   </div>
                   <div>
                     <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt for this model</div>
-                    <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
+                    <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={()=>saveModelPrefix("negative_prefix",mdlNeg)} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
                   </div>
                 </>:<>
                   <div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
-                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt (profile fallback)</div>
+                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>saveImageSetting("image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
                   </div>
                   <div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
-                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt (profile fallback)</div>
+                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>saveImageSetting("image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
                   </div>
                 </>}
                     <div style={secHintS}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless overridden here.</div>
@@ -8191,116 +8160,67 @@ function HyprChat(){
                       <div style={secTitleS}>Prompt Model</div>
                       <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>persona photos + enhance</div>
                     </div>
-                  {modelField({icon:"📷",value:imgChatComposeModel,set:setImgChatComposeModel,inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
-                  {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>setImgChatAutoEnhance(v=>!v),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
+                  {modelField({icon:"📷",value:imgChatComposeModel,set:value=>saveImageSetting("image_chat_compose_model",value),inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
+                  {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>saveImageSetting("image_chat_auto_enhance",!imgChatAutoEnhance),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
                   <div style={secHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating. Auto-enhance applies to regular chats only — persona photos already compose their own prompts.</div>
                   </section>
-              </div>;
+              </fieldset></>;
             })()}
         </>,<>Defaults for the in-chat <code>generate_image</code> tool. Image Studio ★ presets still apply automatically; this section controls the chat-facing model, workflow, prompt defaults, and optional prompt-writer model.</>)}
       </div>
 
       {/* TILE: Daedalus — all coder-agent-related settings live here.
-          Includes the umbrella Planning/Coder model pickers, the new collapsible
-          per-agent model overrides card, and OpenHands runtime knobs. */}
+          Includes chat and coding model choices plus current OpenHands runtime limits. */}
       <div className="hc-tab-pane" style={{display:settingsTab==="daedalus"?"block":"none"}}>
         {settingSection("Models",null,<>
-        {modelField({label:"Code Planning Model",icon:"🧠",value:planningModel,set:setPlanningModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated planning model",hint:"Used by Architect + Reviewer + Acceptance agents. Empty = uses the active chat model."})}
-        {modelField({label:"Code Generator Model",icon:"🧬",value:coderModel,set:setCoderModel,inheritTitle:"Same as chat model",inheritDesc:"Click to select a dedicated coder model",hint:"Used by Builder + Fixer agents. Empty = uses the active chat model."})}
-
-        {/* Per-agent model overrides — collapsible advanced card.
-            Each picker defaults to "Inherits from <umbrella>" until clicked.
-            The reset button clears the override (returns to inheritance). */}
-        <div>
-          <div onClick={()=>setCoderBotModelsOpen(p=>!p)} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",userSelect:"none"}}>
-            <span style={{fontSize:"var(--hc-text-control)"}}>🎛</span>
-            <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,letterSpacing:.3}}>Per-Agent Model Overrides</span>
-            <span style={{flex:1}}/>
-            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{coderBotModelsOpen ? "▴ collapse" : "▾ expand"}</span>
-          </div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Optional. Pin a specific model per agent; empty rows inherit from the umbrella above. Persistent jobs use Architect, Builder, Reviewer for verification, Acceptance, and ProjectQA. Fixer model overrides apply to legacy workflows.</div>
-
-          {coderBotModelsOpen && <div style={{marginTop:14,paddingLeft:10,borderLeft:`2px solid ${t.acc}33`,display:"flex",flexDirection:"column",gap:14}}>
-            {modelField({label:"📐 Architect Model",icon:"📐",value:architectModel,set:setArchitectModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Architect agent only"})}
-            {modelField({label:"🔍 Reviewer Model",icon:"🔍",value:reviewerModel,set:setReviewerModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Reviewer agent only"})}
-            {modelField({label:"✅ Acceptance Model",icon:"✅",value:acceptanceModel,set:setAcceptanceModel,inheritTitle:"Inherits from Planning Model",inheritDesc:"Click to override for the Acceptance agent only"})}
-            {modelField({label:"🏗 Builder Model",icon:"🏗",value:builderModel,set:setBuilderModel,inheritTitle:"Inherits from Coder Model",inheritDesc:"Click to override the Builder (OpenHands) agent only"})}
-            {modelField({label:"🛠 Fixer Model",icon:"🛠",value:fixerModel,set:setFixerModel,inheritTitle:"Inherits from Coder Model",inheritDesc:"Click to override the Fixer agent only"})}
-            {modelField({label:"❓ ProjectQA Model",icon:"❓",value:qaModel,set:setQaModel,inheritTitle:"Inherits from chat model",inheritDesc:"Click to override the ProjectQA agent only"})}
-          </div>}
-        </div>
-        </>,"Coder-agent routing and model inheritance.")}
-        {settingSection("Legacy Repair Engines",null,<>
-        {toggleField("OpenHands Enabled",openhandsEnabled,()=>setOpenhandsEnabled(!openhandsEnabled),openhandsEnabled?"On":"Off")}
-        <div style={{display:"flex",flexDirection:"column",gap:10}}>
-          {toggleField("Aider Enabled",aiderEnabled,()=>setAiderEnabled(!aiderEnabled),aiderEnabled?"Uploaded-project fixes use Aider":"Fallback Fixer")}
-          {modelField({label:"Aider/Fix Model",icon:"🛠",value:aiderModel,set:setAiderModel,activateValue:fixerModel||coderModel||models[0]||"",inheritTitle:"Inherits from Fixer/Coder Model",inheritDesc:"Click to pin the Aider edit model"})}
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.mut,cursor:"pointer"}}>
-            <input type="checkbox" checked={aiderAutoTest} onChange={e=>setAiderAutoTest(e.target.checked)} style={{accentColor:t.acc}}/>
-            Auto-run safe test command after Aider edits
-          </label>
-        </div>
-        </>,"These engine switches apply to legacy workflows. Persistent jobs use OpenHands for coding and repairs.")}
-
+          {modelField({label:"Daedalus chat model",icon:"🧠",value:planningModel,set:setPlanningModel,inheritTitle:"Same as chat model",inheritDesc:"Choose the model that handles your conversation",hint:"Handles your conversation and starts jobs. Planning and implementation use the Coding model below."})}
+          {modelField({label:"Coding model",icon:"🧬",value:coderModel,set:setCoderModel,inheritTitle:"Same as chat model",inheritDesc:"Choose a local coding model",hint:"OpenHands uses this model for planning, implementation, repairs and compaction. Empty = uses the conversation's model."})}
+          <details><summary style={{cursor:"pointer",color:t.text}}>Optional model overrides</summary>
+            <div style={{paddingTop:14}}>{modelField({label:"Project Q&A model",icon:"❓",value:qaModel,set:setQaModel,inheritTitle:"Inherits from Coding model",inheritDesc:"Choose a local model for read-only project questions"})}</div>
+          </details>
+        </>,"Models for the current Daedalus workflow.")}
         <DaedalusSettings t={t} font={font} onSaved={data=>{setCoderNumCtx(data.openhands_num_ctx);setCoderChatCtx(data.resolved_contexts?.chat?.num_ctx||0);}}/>
 
-        {settingSection("Builder Behavior",null,<>
-        <div>
-          <label style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,display:"block",marginBottom:6}}>Reasoning Effort: <span style={{color:t.acc}}>{openhandsReasoningEffort}</span></label>
-          <select value={openhandsReasoningEffort} onChange={e=>setOpenhandsReasoningEffort(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
-            <option value="low">Low — fastest, minimal think tokens</option>
-            <option value="medium">Medium — balanced (recommended for local Ollama)</option>
-            <option value="high">High — most thorough, slow on local models</option>
-          </select>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Controls how much the Builder LLM thinks before each tool call. Drop to <b>low</b> if generate_code is taking minutes per file.</div>
-        </div>
-
+        {settingSection("Coding model thinking",null,<>
         <div>
           <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600,cursor:"pointer"}}>
             <input type="checkbox" checked={openhandsDisableThinking} onChange={e=>setOpenhandsDisableThinking(e.target.checked)} style={{accentColor:t.acc}}/>
             Disable model thinking during builds
           </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Sends <b>think: false</b> to thinking-capable coder models (qwen3.5-class). Without it they reason with an unbounded budget before every tool call, making builds slow and tool calls flaky. Non-thinking models are unaffected.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>When a role’s thinking control is set to Inherit, request thinking off. Explicit role settings above take precedence; supported modes depend on the model.</div>
         </div>
-        {sliderField({label:"Legacy Max Agent Rounds",value:openhandsMaxRounds,set:setOpenhandsMaxRounds,min:5,max:40,step:1,hint:"Legacy workflows only. Persistent jobs use Turns per coding attempt above."})}
-        </>,"How the Builder model reasons before each tool call. These save as you change them.")}
+        </>,"Default for inherited thinking settings. Saves as you change it.")}
       </div>
 
       {/* TILE: Appearance */}
       <div className="hc-tab-pane" style={{display:settingsTab==="appearance"?"block":"none"}}>
         {settingSection("Theme & Background",null,(()=>{
             const previewKey=pendingTheme||tm;
-            const pTh=THEMES[previewKey]||t;
+            const pTh=UI_THEMES[previewKey]||t;
             return <div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:8,alignItems:"end",marginBottom:8}}>
                 <div>
                   <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
-                  <select value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
+                  <select aria-label="Theme" value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                     {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
                   </select>
                 </div>
                 <div>
                   <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Background</div>
-                  <select value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
+                  <select aria-label="Background" value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
                     {BACKGROUND_EFFECTS.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
                 </div>
               </div>
-              <div style={{padding:"10px 14px",background:pTh.bgDeep,border:`1px solid ${pTh.brd}44`,borderRadius:"var(--hc-radius-card)",marginBottom:8}}>
-                <div style={{display:"flex",gap:4,marginBottom:8,flexWrap:"wrap"}}>
-                  {[["bg",pTh.bg],["surface",pTh.surface],["text",pTh.text],["accent",pTh.acc],["warm",pTh.warm],["ok",pTh.ok],["err",pTh.err],["pink",pTh.pink]].map(([label,c])=><div key={label} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
-                    <div style={{width:18,height:18,borderRadius:"var(--hc-radius-sm)",background:c,border:`1px solid ${pTh.brd}66`}}/>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:pTh.mut}}>{label}</span>
-                  </div>)}
-                </div>
-                <div style={{borderRadius:"var(--hc-radius)",overflow:"hidden",background:pTh.bg,padding:8}}>
-                  <div style={{display:"flex",gap:6,marginBottom:4}}>
-                    <div style={{flex:1,padding:"6px 10px",borderRadius:"var(--hc-radius)",background:`${pTh.surface}CC`,fontSize:"var(--hc-text-secondary)",color:pTh.text}}>Hello!</div>
-                  </div>
-                  <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
-                    <div style={{flex:1,maxWidth:"70%",padding:"6px 10px",borderRadius:"var(--hc-radius)",background:`${pTh.acc}22`,border:`1px solid ${pTh.acc}33`,fontSize:"var(--hc-text-secondary)",color:pTh.acc}}>Response preview</div>
-                  </div>
-                </div>
+              <div className="hc-theme-grid" role="group" aria-label="Theme palettes">
+                {Object.entries(UI_THEMES).map(([key,palette])=><button key={key} type="button" className="hc-theme-choice" aria-pressed={previewKey===key} onClick={()=>setPendingTheme(key)} style={{background:palette.bg,color:palette.text,border:`1px solid ${previewKey===key?palette.acc:palette.brd}`,borderRadius:"var(--hc-radius)",padding:12,font: "inherit",fontSize:"var(--hc-text-secondary)"}}>
+                  <span>{palette.name}</span><span className="hc-theme-swatches" aria-hidden="true">{[palette.acc,palette.acc2,palette.warm,palette.pink].map((color,i)=><i key={i} style={{background:color}}/>)}</span>
+                </button>)}
+              </div>
+              <div className="hc-theme-preview" style={presentationTokens(pTh,font,codeFont,uiFontSize/14)} aria-label="Theme preview">
+                <div className="preview-user">Make something useful.</div>
+                <div className="preview-answer"><strong>A little clarity goes a long way.</strong><br/><span style={{color:"var(--hc-muted)"}}>Readable answers, thoughtful details, your colors.</span></div>
+                <pre><span style={{color:"var(--code-keyword)"}}>const</span>{' idea = '}<span style={{color:"var(--code-string)"}}>"Hello, HyprChat"</span>{';\n'}<span style={{color:"var(--code-function)"}}>console.log</span>{'(idea);'}</pre>
               </div>
               <div style={{display:"flex",gap:6}}>
                 {pendingTheme&&pendingTheme!==tm&&<><button onClick={()=>{setTm(pendingTheme);setPendingTheme(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:"var(--hc-radius)",background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Apply</button>
@@ -8308,6 +8228,8 @@ function HyprChat(){
               </div>
             </div>;
           })())}
+        {settingSection("Activity",null,toggleField("Playful status words",funVerbs,()=>setFunVerbs(v=>!v),funVerbs?"On":"Off"),"A little personality while working. Specific actions and errors keep their precise labels.")}
+        {settingSection("Previews",null,toggleField("Open previews automatically",previewAutoOpen,()=>setPreviewAutoOpen(v=>!v),previewAutoOpen?"On":"Off"),"Full HTML pages in replies and Daedalus web apps open in the side pane as they arrive. The Preview button on a code block always works.")}
         {settingSection("Typography",null,(()=>{
             const previewIdx=pendingFont!==null?pendingFont:fi;
             const pF=FONTS[previewIdx]||FONTS[0];
@@ -8539,10 +8461,9 @@ function HyprChat(){
         </>,"Shown on the startup loading screen. Edit, remove, or add quotes below.")}
       </div>
 
-      {/* TILE: Sandbox & Cleanup */}
+      {/* TILE: Storage & Cleanup */}
       <div className="hc-tab-pane" style={{...settingsCardS,display:settingsTab==="cleanup"?"block":"none"}}>
-        <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.acc,letterSpacing:.5,marginBottom:10,display:"flex",alignItems:"center",gap:8}}>🗃️ Sandbox & Cleanup</div>
-        <SandboxSection t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
+        <SandboxSection active={settingsTab==="cleanup"} t={t} btnS={btnS} labelS={labelS} notify={notify} addActivity={addActivity} updateActivity={updateActivity}/>
       </div>
 
 	      {/* TILE: Danger Zone */}
@@ -8634,7 +8555,7 @@ function HyprChat(){
         return <div key={svc} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"14px 16px",marginBottom:14}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize"}}>{svc}</span>
+              <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text}}>{serviceLabel(svc)}</span>
               {isRL&&<span style={{padding:"3px 10px",borderRadius:"var(--hc-radius)",background:`${STATUS_DEGRADED}18`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:STATUS_DEGRADED}}>Still Operational, limited engine usage</span>}
             </div>
             <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:isRL?STATUS_DEGRADED:statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
@@ -8675,75 +8596,10 @@ function HyprChat(){
     </div>
   </div>,document.body)}
       </div>{/* end inner panel column */}
-      {/* Preview panel — outside panel ternary so it renders alongside any panel */}
-      {previewFile&&<div ref={previewFocus} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label="Preview panel" style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":"1px solid var(--hc-line)",background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
-            {/* Drag handle */}
-            {!isMobile&&<div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
-            {/* Header */}
-            <div style={{padding:"9px 12px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}F5`}}>
-              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
-              <span style={{fontSize:"var(--hc-text-secondary)",color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
-              {previewFile.isExternal
-                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
-                :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}
-              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1,display:"flex"}}><IC.X/></button>
-            </div>
-            {/* Content */}
-            <div style={{flex:1,overflowY:"auto",padding:14}}>
-              {previewFile.artifactId?<DocumentPreviewPanel key={previewFile.artifactId} artifactId={previewFile.artifactId} events={evts} t={t} font={font} onRevision={a=>setPreviewFile(p=>p?{...p,artifactId:a.artifact_id,filename:a.filename,url:a.url,type:a.filename.split(".").pop().toLowerCase()}:p)}/>
-              :previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:"var(--hc-radius-card)",color:t.err}}>
-                <div style={{fontWeight:700,fontSize:"var(--hc-text-secondary)"}}>⚠ {previewError}</div>
-                {previewFile.isExternal
-                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
-                  :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
-              </div>
-              :!previewFile.isExternal&&previewFile.type==="pdf"
-                ?<iframe src={userScopedUrl(previewFile.url)} title={previewFile.filename} style={{width:"100%",height:"100%",minHeight:500,border:0,background:"white"}}/>
-              :previewFile.isExternal&&previewFile.type==="pdf"
-                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",minHeight:500}} title={previewFile.filename}/>
-              :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
-                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",display:"block"}} alt={previewFile.filename}/>
-              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)&&!previewFile.isExternal
-                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",display:"block"}} alt={previewFile.filename}/>
-                :previewFile.type==="archive"&&previewArchive
-                ?<div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)"}}>
-                    <span style={{fontSize:"var(--hc-text-display)"}}>📦</span>
-                    <div style={{flex:1}}>
-                      <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
-                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
-                    </div>
-                    <a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)",fontWeight:600}}>⬇ Download</a>
-                  </div>
-                  <div style={{borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",overflow:"hidden"}}>
-                    {previewArchive.entries.filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/").map((entry,i)=>{
-                      const depth=Math.max(0,(entry.name.match(/\//g)||[]).length-(entry.is_dir?1:0));
-                      const basename=entry.is_dir?entry.name.replace(/\/$/,"").split("/").pop()+"/":entry.name.split("/").pop();
-                      const sizeStr=entry.is_dir?"":entry.size>=1048576?(entry.size/1048576).toFixed(1)+"MB":entry.size>=1024?(entry.size/1024).toFixed(1)+"KB":entry.size+"B";
-                      const extC=(basename.match(/\.(\w+)$/)||[])[1]||"";
-                      const iconColor=entry.is_dir?t.warm:["py","js","ts","rs","go","java","c","cpp","sh"].includes(extC)?t.acc:["md","txt","log","csv"].includes(extC)?t.dim:["json","yaml","toml","xml","html","css"].includes(extC)?t.f1:t.mut;
-                      return <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",paddingLeft:10+depth*16,background:i%2===0?"transparent":`${t.surface}33`,borderBottom:i<previewArchive.entries.length-1?"1px solid var(--hc-line-subtle)":"none",fontSize:"var(--hc-text-secondary)",color:entry.is_dir?t.warm:t.dim}}>
-                        <span style={{fontSize:"var(--hc-text-secondary)",flexShrink:0,color:iconColor}}>{entry.is_dir?"📁":"📄"}</span>
-                        <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:entry.is_dir?600:400}}>{basename}</span>
-                        {sizeStr&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,fontFamily:codeFont}}>{sizeStr}</span>}
-                      </div>;
-                    })}
-                  </div>
-                </div>
-                :previewFile.type==="html"&&previewContent
-                ?<iframe sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",background:"#fff",minHeight:400}} title={previewFile.filename}/>
-                :["md","markdown","mdx"].includes(previewFile.type)&&previewContent
-                ?<div style={{lineHeight:1.7,fontSize:"var(--hc-text-secondary)",color:t.dim}}><MDWrap>{md(previewContent)}</MDWrap></div>
-                :previewContent
-                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:codeFont,lineHeight:1.6}}>{previewContent}</pre>
-                :!["png","jpg","jpeg","gif","webp","svg","archive"].includes(previewFile.type)
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
-                :previewFile.type==="archive"&&!previewArchive&&!previewError
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>
-                :null
-              }
-            </div>
-          </div>}
+      {/* Side pane — outside the panel ternary so it renders alongside any panel: file previews, live HTML previews and the Daedalus workbench */}
+      {(previewFile||workbench.open)&&<SidePane previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onClosePreview={closePreview}
+        onRevision={a=>setPreviewFile(p=>p?{...p,artifactId:a.artifact_id,filename:a.filename,url:a.url,type:a.filename.split(".").pop().toLowerCase()}:p)}
+        t={t} font={font} md={md} codeFont={codeFont} evts={evts} isMobile={isMobile} onOpenArtifact={openArtifact}/>}
       </div>{/* end panels + preview wrapper */}
     </div>
 
@@ -8805,17 +8661,7 @@ function HyprChat(){
       @import url('https://fonts.googleapis.com/css2?family=${FONTS[fi].i}${uiFont?.i?`&family=${uiFont.i}`:""}&display=swap');
       @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
       @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.2)}}
-      .composer-trace{position:absolute;display:block;background:linear-gradient(90deg,transparent,var(--trace-color),transparent);filter:drop-shadow(0 0 4px var(--trace-color));opacity:.52;pointer-events:none}
-      .composer-trace-top{top:0;left:0;width:42%;height:2px;animation:traceX 1.25s linear infinite}
-      .composer-trace-bottom{right:0;bottom:0;width:42%;height:2px;animation:traceXReverse 1.25s linear infinite}
-      .composer-trace-right{top:0;right:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceY 1.25s linear infinite}
-      .composer-trace-left{left:0;bottom:0;width:2px;height:50%;background:linear-gradient(180deg,transparent,var(--trace-color),transparent);animation:traceYReverse 1.25s linear infinite}
-      .empty-composer-box{animation:emptyComposerAura .75s ease-out .08s both}
-      @keyframes emptyComposerAura{0%{box-shadow:0 0 0 rgba(0,0,0,0)}42%{box-shadow:0 0 0 1px var(--empty-composer-glow),0 0 34px var(--empty-composer-glow)}100%{box-shadow:0 0 0 rgba(0,0,0,0)}}
-      @keyframes traceX{0%{transform:translateX(-115%)}100%{transform:translateX(260%)}}
-      @keyframes traceXReverse{0%{transform:translateX(115%)}100%{transform:translateX(-260%)}}
-      @keyframes traceY{0%{transform:translateY(-115%)}100%{transform:translateY(260%)}}
-      @keyframes traceYReverse{0%{transform:translateY(115%)}100%{transform:translateY(-260%)}}
+
       @keyframes fadeIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
       @keyframes glow{0%,100%{box-shadow:0 0 8px ${t.acc}88}50%{box-shadow:0 0 16px ${t.acc}CC}}
       @keyframes pGlow{0%,100%{box-shadow:0 0 4px ${t.err}44}50%{box-shadow:0 0 14px ${t.err}88}}
@@ -8826,7 +8672,7 @@ function HyprChat(){
       @keyframes writing{0%{transform:rotate(-8deg) translateY(0)}25%{transform:rotate(4deg) translateY(-1px)}50%{transform:rotate(-6deg) translateY(0)}75%{transform:rotate(5deg) translateY(-1px)}100%{transform:rotate(-8deg) translateY(0)}}
 	      @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
     `}</style>
-  </div></div>;
+  </div></div></PlayfulStatusContext.Provider>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<><PanelBoundary><HyprChat/></PanelBoundary><NewVersionBar/></>);

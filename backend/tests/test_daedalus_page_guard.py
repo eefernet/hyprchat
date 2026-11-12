@@ -43,7 +43,7 @@ def test_a_json_service_has_no_page_to_guard(serve):
 
 
 def test_the_row_is_a_blocking_application_defect_the_repair_round_can_read(serve):
-    from coder_policy7_evidence import blocking
+    from coder_check_evidence import blocking
     from coder_project_runtime import failure_class
     row = page_row({'id': 'app', 'cwd': '.'}, serve('site', BROKEN), {}, loader=lambda *a, **k: (["Cannot read properties of null (reading 'addEventListener')"], ''))
     assert row['id'] == 'page:app' and blocking(row) and failure_class(row) == 'application_defect'

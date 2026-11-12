@@ -46,3 +46,12 @@ button.hc-activity-header:hover{background:var(--activity-tint-strong);filter:no
 @keyframes hc-preview-in{from{opacity:0}to{opacity:1}}
 @keyframes hc-preview-out{from{opacity:1}to{opacity:0}}
 @media(prefers-reduced-motion:reduce){.hc-chat-activity,.hc-chat-activity *{animation:none!important;transition:none!important;}.hc-activity-preview-old{display:none;}}
+
+/* A stable word slot keeps the card steady while its status gains personality. */
+.hc-activity-label.is-playful { display:inline-grid; width:18ch; max-width:100%; flex-shrink:1; }
+.hc-activity-word { display:inline-block; white-space:nowrap; animation:hc-verb-fade 180ms var(--hc-ease-out); }
+.hc-activity-label.is-playful .hc-activity-word { overflow:hidden; text-overflow:ellipsis; }
+@keyframes hc-verb-fade { from { opacity:.35; } to { opacity:1; } }
+.hc-chat-activity { box-shadow:inset 0 1px 0 var(--hc-edge-light); }
+.hc-chat-activity[data-active="true"] { border-color:var(--activity-ring); }
+@media (prefers-reduced-motion:reduce) { .hc-activity-word { animation:none; } }

@@ -46,6 +46,24 @@ Use this path when you already have a ComfyUI instance.
    curl -s http://<hyprchat-host>:8000/api/images/checkpoints | python3 -m json.tool
    ```
 
+## Profile defaults
+
+Settings → Model & Generation → Chat Image Generation applies to the current
+profile. Checkpoint, resolution, VAE, saved-workflow selection, prompt defaults,
+prompt-writing model, and automatic enhancement are independent for each account.
+Image Studio's saved checkpoint presets are also per profile and shared with that
+profile's chat image generation. Persona-specific image profiles retain precedence.
+
+Existing shared image defaults and `comfy_model_settings.json` seed each profile's
+SQLite `user_prefs` record once. Later edits and preset resets do not change those
+legacy seed files or other accounts. Browser-only values from previously failed
+saves are not migrated. New accounts start from the same legacy defaults.
+
+`GET/PATCH /api/images/settings` reads or updates the authenticated profile's chat
+image defaults. Existing `/api/images/model-settings/{checkpoint}` save/reset
+routes also use the current profile. Shared ComfyUI connections, workflow uploads
+and deletion, and service maintenance remain Main-profile operations.
+
 ## Default Workflow Requirements
 
 HyprChat submits ComfyUI API-format workflows. UI-format workflow JSON is not
@@ -69,7 +87,7 @@ This repo includes a homelab helper for creating a companion ComfyUI and voice
 container:
 
 ```bash
-bash scripts/create-comfyui-lxc.sh 115 192.168.1.115
+bash scripts/create-comfyui-lxc.sh <ctid> <ip>   # gateway defaults to <first three octets>.1
 ```
 
 Run it on the Proxmox host. It prints the second-phase commands to run inside

@@ -14,7 +14,8 @@ MARK="${SEARXNG_VPN_MARK:-0x1}"
 BLOCK_PRIORITY="${SEARXNG_VPN_BLOCK_PRIORITY:-101}"
 CHAIN6="SEARXNG_VPN6_OUT"
 DNS_CHAIN="SEARXNG_VPN_DNS"
-LAN_CIDR="${SEARXNG_LAN_CIDR:-192.168.1.0/24}"
+LAN_CIDR="${SEARXNG_LAN_CIDR:-}"
+[ -n "$LAN_CIDR" ] || { echo "SEARXNG_LAN_CIDR is required (e.g. 10.0.0.0/24)" >&2; exit 2; }
 LAN_DEV="${SEARXNG_LAN_DEV:-eth0}"
 LAN6_CIDR="${SEARXNG_LAN6_CIDR:-fd73:a49c:ce1b:4f7a::/64}"
 VPN_DEV="${SEARXNG_VPN_DEV:-${dev:-tun0}}"
@@ -145,7 +146,7 @@ case "$ACTION" in
         ip route replace unreachable default table "$TABLE" metric 4278198272
         apply_ipv6
         # HyprChat: restore a working public resolver so box DNS survives tunnel-down
-        printf 'nameserver 1.1.1.1\nnameserver 192.168.1.1\n' > /etc/resolv.conf
+        printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
         ;;
     status)
         echo "uid=$UID_NUM table=$TABLE mark=$MARK vpn_dev=$VPN_DEV vpn_gw=${VPN_GW:-none} dns=${DNS_SERVER:-none}"

@@ -59,7 +59,7 @@ def test_safe_url_filtering_blocks_private_reserved_and_local_hosts():
         "http://127.0.0.1/admin",
         "http://10.0.0.8",
         "http://172.16.0.10",
-        "http://192.168.1.1",
+        "http://10.0.0.1",
         "http://169.254.1.1",
         "http://[::1]/",
         "http://example.local/page",

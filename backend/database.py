@@ -892,6 +892,8 @@ async def init_db():
         # v1: allow_autonomous_email became a master AND-gate over the
         # per-account allow_autonomous_send — turn it on for users who already
         # had an autonomous account so nothing silently stops sending.
+        # v2: db.coder_promotion.migrate (project version pointers), which runs
+        # after the coder tables exist; later steps go after it.
         try:
             rows = await db.execute_fetchall("PRAGMA user_version")
             _uver = rows[0][0] if rows else 0
@@ -1387,6 +1389,25 @@ async def update_conversation(id: str, **kwargs):
         await db.close()
 
 
+async def release_working_pointers(db, user_id: str, conversation_id: str | None = None):
+    """Re-point project versions naming Daedalus jobs of a conversation about to be deleted (None: all of the
+    user's). The jobs cascade with it, coding_projects does not: a pointer to a missing job made every later edit
+    fail its creation fence, and an accepted pointer to one locked an uploaded project for good. Working moves to
+    the newest delivery of another conversation (coder_promotion.repoint), so a restart has nothing to refill."""
+    from db.coder_promotion import repoint
+    if conversation_id:
+        jobs = "SELECT id FROM coder_workflows WHERE conversation_id=?"
+        rows = await db.execute_fetchall(f"SELECT id FROM coding_projects WHERE user_id=? AND (working_job_id IN ({jobs}) "
+                                         f"OR accepted_job_id IN ({jobs}))", (user_id, conversation_id, conversation_id))
+        for row in rows:
+            await repoint(db, user_id, row["id"], leaving=conversation_id)
+        return
+    jobs = "SELECT id FROM coder_workflows WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)"
+    for pointer in ("working", "accepted"):   # every job of the user goes: nothing survives to re-point to
+        await db.execute(f"UPDATE coding_projects SET {pointer}_job_id='',{pointer}_revision_id='',{pointer}_artifact_id='' "
+                         f"WHERE user_id=? AND {pointer}_job_id IN ({jobs})", (user_id, user_id))
+
+
 async def delete_conversation(id: str):
     user_id = _scope_user()
     db = await get_db()
@@ -1407,6 +1428,7 @@ async def delete_conversation(id: str):
         # firing into a dead id (ensure_assistant re-seeds + repoints later).
         await db.execute("UPDATE assistant_profiles SET conversation_id='' WHERE conversation_id=? AND user_id=?", (id, user_id))
         await db.execute("UPDATE scheduled_tasks SET conversation_id='' WHERE conversation_id=? AND user_id=?", (id, user_id))
+        await release_working_pointers(db, user_id, id)
         await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
         await db.commit()
     finally:
@@ -5126,7 +5148,7 @@ async def list_coding_projects():
     connection = await get_db()
     try:
         rows = await connection.execute_fetchall(
-            "SELECT id,name,description,language,accepted_job_id,accepted_revision_id,accepted_artifact_id,updated_at FROM coding_projects WHERE user_id=? ORDER BY updated_at DESC", (_scope_user(),))
+            "SELECT id,name,description,language,accepted_job_id,accepted_revision_id,accepted_artifact_id,working_job_id,working_revision_id,working_artifact_id,updated_at FROM coding_projects WHERE user_id=? ORDER BY updated_at DESC", (_scope_user(),))
         return [dict(row) for row in rows]
     finally:
         await connection.close()

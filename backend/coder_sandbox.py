@@ -21,11 +21,21 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 
 class IsolationUnavailable(RuntimeError):
     failure_category = 'environment'
+
+
+class StopUnconfirmed(IsolationUnavailable):
+    """The broker could not confirm a container stopped. Its writer may still be alive."""
+
+
+class NotDispatched(IsolationUnavailable):
+    """The broker confirmed this execution never started: nothing ran and nothing was charged."""
+    failure_category = 'not_dispatched'
 
 
 def relay(left, right):
@@ -64,6 +74,14 @@ def public_connection(host, port):
     raise error or OSError('No usable dependency address')
 
 
+def network_failure(error, host, port):
+    category = ('network_policy' if isinstance(error, (ValueError, KeyError, TypeError)) else
+                'dns' if isinstance(error, socket.gaierror) else
+                'timeout' if isinstance(error, TimeoutError) else 'connection')
+    return {'source': 'sandbox_gateway', 'category': category, 'retryable': category != 'network_policy',
+            'host': str(host)[:253], 'port': port, 'detail': str(error)[:500]}
+
+
 class UnixServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
 
@@ -82,13 +100,18 @@ def start_server(server):
 def clean_environment(environment):
     """An allowlist, not a growing list of names of known secret providers."""
     names = {'PATH', 'LANG', 'LC_ALL', 'TZ', 'TERM', 'NO_COLOR', 'CI', 'PORT', 'HOST',
-             'HOME', 'TMPDIR', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE',
+             'HOME', 'TMPDIR', 'PIP_FIND_LINKS', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE',
              'VIRTUAL_ENV', 'JAVA_HOME', 'DOTNET_ROOT', 'RUSTUP_HOME', 'CARGO_HOME',
              'GOCACHE', 'GOPATH', 'GOMODCACHE', 'DOTNET_CLI_HOME', 'DOTNET_NOLOGO',
-             'DOTNET_CLI_TELEMETRY_OPTOUT', 'PLAYWRIGHT_BROWSERS_PATH', 'NODE_V8_COVERAGE',
+             'DOTNET_CLI_TELEMETRY_OPTOUT', 'PLAYWRIGHT_BROWSERS_PATH', 'PLAYWRIGHT_SKIP_BROWSER_GC', 'NODE_V8_COVERAGE',
              'NODE_OPTIONS', 'APP_DB_PATH', 'DATABASE_URL', 'DB_PATH', 'OLLAMA_API_BASE',
-             'AIDER_ANALYTICS_DISABLE', 'LITELLM_LOCAL_MODEL_COST_MAP', 'ALLOW_SHORT_CONTEXT_WINDOWS'}
-    return {k: str(v) for k, v in environment.items() if k in names or k.startswith('DAEDALUS_')}
+             'PIP_CACHE_DIR', 'npm_config_cache', 'npm_config_store_dir', 'YARN_CACHE_FOLDER', 'PNPM_HOME', 'COMPOSER_CACHE_DIR', 'BUNDLE_USER_CACHE', 'BUNDLE_PATH', 'MAVEN_OPTS', 'GRADLE_USER_HOME', 'NUGET_PACKAGES', 'AIDER_ANALYTICS_DISABLE', 'LITELLM_LOCAL_MODEL_COST_MAP', 'ALLOW_SHORT_CONTEXT_WINDOWS'}
+    clean = {k: str(v) for k, v in environment.items() if k in names or k.startswith('DAEDALUS_')}
+    # Only controller-instrumented project test rows request our named-test
+    # hook. Keep arbitrary host or project pytest plugins out of the sandbox.
+    if clean.get('DAEDALUS_TEST_IDS') == '1' and environment.get('PYTEST_PLUGINS') == 'daedalus_test_ids':
+        clean['PYTEST_PLUGINS'] = 'daedalus_test_ids'
+    return clean
 
 
 def toolchain_mounts(command):
@@ -97,6 +120,7 @@ def toolchain_mounts(command):
              '/bin', '/sbin', '/lib', '/lib64', '/etc/alternatives', '/etc/ssl/certs',
              '/etc/ca-certificates', '/etc/ld.so.cache', '/etc/nsswitch.conf', '/etc/resolv.conf',
              '/etc/hosts', '/etc/passwd', '/etc/group', '/etc/localtime',
+             '/etc/dbus-1', '/etc/fonts', '/etc/X11',
              '/etc/maven/m2.conf', '/etc/maven/logging',
              '/root/.cargo/bin', '/root/.rustup/toolchains', '/root/.rustup/settings.toml',
              '/root/.dotnet', '/root/.cache/ms-playwright']
@@ -127,23 +151,48 @@ class Sandbox(AbstractContextManager):
     of them. Runtime/cache directories are distinct from those trusted stores.
     """
     def __init__(self, command, *, cwd, writable=(), readonly=(), environment=None,
-                 network_urls=(), listen_port=None, runtime=None):
+                 network_urls=(), listen_port=None, guest_port=None, runtime=None, short_tmp=False,
+                 aliases=(), timeout=None, memory_mib=None, managed_application=False, process_trace=None, runtime_profile=None, resource_group=None, public_network=True, controller_browser=True):
         self.command = list(command)
         self.cwd = Path(cwd).absolute()
+        from coder_mount_policy import private_paths
         self.writable = [Path(p).absolute() for p in writable]
+        if environment and environment.get('DAEDALUS_RUNTIME_POLICY') == '1':
+            self.writable += private_paths(environment)
         self.readonly = [Path(p).absolute() for p in readonly]
+        shared = Path(os.environ.get('HEPHAESTUS_ROOT', '/srv/hephaestus')) / 'caches/shared'
+        if os.environ.get('HEPHAESTUS_SHARED_CACHE') == '1' and shared.is_dir():
+            self.readonly.append(shared)
         self.environment = clean_environment(environment if environment is not None else {k: v for k, v in os.environ.items() if k in {'PATH', 'LANG', 'LC_ALL', 'TZ'}})
         self.urls = list(dict.fromkeys(network_urls))
         self.listen_port = listen_port
+        self.guest_port = guest_port if guest_port is not None else listen_port
         self.runtime = Path(runtime).absolute() if runtime else None
+        # Chromium creates Unix sockets below TMPDIR (108-byte path ceiling).
+        self.short_tmp = short_tmp or os.environ.get('HEPHAESTUS_EXECUTOR')=='docker'
+        self.aliases = list(aliases)
+        self.timeout = timeout
+        self.memory_mib = memory_mib
+        self.managed_application = managed_application
+        self.process_trace = process_trace
+        self.runtime_profile = runtime_profile
+        self.resource_group = resource_group
+        self.public_network = public_network
+        self.controller_browser = controller_browser
+        self.network_failures = []
         self.servers = []
         self.temporary = None
+        self.cache_lease = None
+        self.shared_leases = []
+        self.execution_identity = None
+        self.stop_status = None
 
     def translate_url(self, value):
         for i, original in enumerate(self.urls):
             target = urlsplit(original)
             if value.startswith(original.rstrip('/')):
-                alias = urlunsplit((target.scheme, f'upstream-{i}.invalid:{target.port}', target.path, '', ''))
+                host = '127.0.0.1' if self.environment.get('DAEDALUS_LOOPBACK_ENDPOINTS') == '1' else f'upstream-{i}.invalid'
+                alias = urlunsplit((target.scheme, f'{host}:{target.port}', target.path, '', ''))
                 return alias.rstrip('/') + value[len(original.rstrip('/')):]
         return value
 
@@ -151,15 +200,46 @@ class Sandbox(AbstractContextManager):
         try:
             return self._enter()
         except BaseException:
-            self.__exit__()
+            self.__exit__(*sys.exc_info())
             raise
 
     def _enter(self):
-        if sys.platform != 'linux' or not shutil.which('bwrap'):
+        docker = os.environ.get('HEPHAESTUS_EXECUTOR') == 'docker'
+        if sys.platform != 'linux' or (not docker and not shutil.which('bwrap')):
             raise IsolationUnavailable('Project execution requires Linux bubblewrap with user and network namespaces')
+        cache = self.environment.get('DAEDALUS_ENVIRONMENT_ROOT')
+        if cache:
+            from coder_engine_cache import lease
+            self.cache_lease = lease(cache)
+            self.cache_lease.__enter__()
+        from hephaestus_inventory import managed_root, lock
+        managed=managed_root(self.cwd)
+        if managed and os.environ.get('HEPHAESTUS_SHARED_CACHE')=='1':
+            held=lock(managed,'shared-cache-readers',exclusive=False)
+            held.__enter__();self.shared_leases.append(held)
+            if cache:
+                # A long-lived coding container can prepare a new browser after
+                # launch. Only public validated binaries are shared here; its
+                # stable project browser directory contains controller links.
+                browsers = managed / 'caches/shared/browsers'
+                browsers.mkdir(parents=True, exist_ok=True)
+                self.readonly = [*self.readonly, browsers]
+        shared_root=Path(os.environ.get('HEPHAESTUS_ROOT','/srv/hephaestus'))/'caches/shared'
+        shared_values=[self.environment.get('PLAYWRIGHT_BROWSERS_PATH',''),*self.environment.get('PIP_FIND_LINKS','').split()]
+        for value in shared_values:
+            path=Path(value)
+            if value and path.is_absolute() and path.is_relative_to(shared_root) and path.exists():
+                from coder_engine_cache import lease
+                relative=path.relative_to(shared_root)
+                if len(relative.parts)>=2:
+                    held=lease(shared_root.joinpath(*relative.parts[:2]))
+                    held.__enter__();self.shared_leases.append(held)
         self.temporary = tempfile.TemporaryDirectory(prefix='daedalus-sandbox-')
         private = Path(self.temporary.name)
         ipc = private / 'ipc'; ipc.mkdir(mode=0o700)
+        # Created by the namespace child before starting the trusted GUI server.
+        # A broker client PID alone does not establish that Docker has launched.
+        self.service_start_path = ipc / 'service.sock'
         runtime = self.runtime or private / 'runtime'
         runtime.mkdir(parents=True, exist_ok=True)
         home, tmp = runtime / 'home', runtime / 'tmp'
@@ -173,22 +253,29 @@ class Sandbox(AbstractContextManager):
 
         class Gateway(socketserver.StreamRequestHandler):
             def handle(handler):
+                host, port = '', 0
                 try:
                     request = json.loads(handler.rfile.readline(16384))
                     host, port = request['host'], int(request['port'])
                     if (host, port) in endpoints:
                         remote = socket.create_connection(endpoints[(host, port)], timeout=30)
-                    else:
+                    elif self.public_network:
                         remote = public_connection(host, port)
+                    else: raise ValueError('Public network access is disabled for this operation')
                     handler.wfile.write(b'OK\n'); handler.wfile.flush()
                     with remote:
                         relay(handler.connection, remote)
-                except (OSError, ValueError, KeyError, TypeError):
-                    try: handler.wfile.write(b'DENIED\n')
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    # This record is produced by the trusted gateway, never by
+                    # interpreting an untrusted package/application stdout line.
+                    diagnostic = network_failure(error, host, port)
+                    self.network_failures.append(diagnostic)
+                    self.network_failures[:] = self.network_failures[-32:]
+                    try: handler.wfile.write(b'DENIED\n' if not diagnostic['retryable'] else b'UNAVAILABLE\n')
                     except OSError: pass
 
         self.servers.append(start_server(UnixServer(str(ipc / 'gateway.sock'), Gateway)))
-        if self.listen_port:
+        if self.listen_port is not None:
             class Forward(socketserver.BaseRequestHandler):
                 def handle(handler):
                     try:
@@ -197,20 +284,95 @@ class Sandbox(AbstractContextManager):
                             relay(handler.request, remote)
                     except OSError:
                         pass
-            self.servers.append(start_server(TCPServer(('127.0.0.1', self.listen_port), Forward)))
+            listener = TCPServer(('127.0.0.1', self.listen_port), Forward)
+            self.listen_port = listener.server_address[1]
+            self.servers.append(start_server(listener))
         environment = {k: self.translate_url(v) for k, v in self.environment.items()}
-        environment.update(HOME=str(home), TMPDIR=str(tmp), PYTHONNOUSERSITE='1',
-            PYTHONDONTWRITEBYTECODE='1', CARGO_HOME=str(home / '.cargo'), GOPATH=str(home / 'go'),
-            GOMODCACHE=str(home / 'go/pkg/mod'), DOTNET_CLI_HOME=str(home / '.dotnet'),
+        environment.update(HOME=str(home), TMPDIR='/tmp/daedalus' if self.short_tmp else str(tmp), PYTHONNOUSERSITE='1',
+            PYTHONDONTWRITEBYTECODE='1', CARGO_HOME=environment.get('CARGO_HOME', str(home / '.cargo')), GOPATH=environment.get('GOPATH', str(home / 'go')),
+            GOMODCACHE=environment.get('GOMODCACHE', str(home / 'go/pkg/mod')), DOTNET_CLI_HOME=environment.get('DOTNET_CLI_HOME', str(home / '.dotnet')),
             DOTNET_NOLOGO='1', DOTNET_CLI_TELEMETRY_OPTOUT='1',
-            RUSTUP_HOME='/root/.rustup', DOTNET_ROOT='/root/.dotnet',
-            PLAYWRIGHT_BROWSERS_PATH='/root/.cache/ms-playwright',
+            RUSTUP_HOME='/root/.rustup', DOTNET_ROOT='/usr/share/dotnet' if docker else '/root/.dotnet',
+            PLAYWRIGHT_BROWSERS_PATH=environment.get('PLAYWRIGHT_BROWSERS_PATH', os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/root/.cache/ms-playwright')),
+            DAEDALUS_CONTROLLER_BROWSERS_PATH=os.environ.get('DAEDALUS_CONTROLLER_BROWSERS_PATH', os.environ.get('PLAYWRIGHT_BROWSERS_PATH','/root/.cache/ms-playwright')),
             PIP_REQUIRE_VIRTUALENV='true')
+        if not self.controller_browser:
+            environment.pop('DAEDALUS_CONTROLLER_BROWSERS_PATH', None)
+            browser_path = self.environment.get('PLAYWRIGHT_BROWSERS_PATH', '')
+            if browser_path and not Path(browser_path).is_relative_to('/srv/hephaestus/control/browsers'):
+                environment['PLAYWRIGHT_BROWSERS_PATH'] = browser_path
+            else:
+                environment.pop('PLAYWRIGHT_BROWSERS_PATH', None)
+        if docker:
+            # Readiness keys in the child must use the controller's pinned image
+            # identity, not a second set of executable --version strings.
+            profile_name = self.runtime_profile or os.environ.get('HEPHAESTUS_RUNTIME_PROFILE', 'core')
+            runtime_config = json.loads(Path('/etc/hephaestus/runtime.json').read_text())
+            environment['DAEDALUS_RUNTIME_IMAGE'] = runtime_config['profiles'][profile_name]['image']
         spec = private / 'launch.json'
         spec.write_text(json.dumps({'command': self.command, 'cwd': str(self.cwd), 'environment': environment,
-                                    'ipc': str(ipc), 'listen_port': self.listen_port}))
+                                    'ipc': str(ipc), 'listen_port': self.guest_port or self.listen_port,
+                                    'trace_socket': str(ipc/'trace.sock') if docker and self.process_trace else None,
+                                    'loopback_endpoints': list(endpoints) if self.environment.get('DAEDALUS_LOOPBACK_ENDPOINTS') == '1' else []}))
         module = Path(__file__).resolve()
+        if docker:
+            # Preserve the capability gateway and child protocol; replace only
+            # the process/filesystem boundary. Toolchains come from the pinned image.
+            writable = [*self.writable, runtime, ipc]
+            # Default cwd mounts may be covered by a source write grant. Explicit
+            # read grants are retained so contradictory child mounts fail closed.
+            reads = [module, spec, *self.readonly]
+            if not any(self.cwd == w or self.cwd.is_relative_to(w) for w in writable): reads.append(self.cwd)
+            mounts = [{'source': str(p), 'target': str(p), 'writable': False} for p in reads if p.exists()]
+            mounts += [{'source': str(p), 'target': str(p), 'writable': True} for p in writable]
+            for key in ('PLAYWRIGHT_BROWSERS_PATH', 'DAEDALUS_CONTROLLER_BROWSERS_PATH'):
+                browsers=Path(environment.get(key, '/nonexistent-project-browser'))
+                if (browsers.is_relative_to('/srv/hephaestus/control/browsers') or browsers.is_relative_to('/srv/hephaestus/caches/shared/browsers')) and browsers.is_dir():
+                    mounts.append({'source':str(browsers),'target':str(browsers),'writable':False})
+            # SDK interpreters live in locked controller release virtualenvs.
+            # Only those dependency prefixes are shared, never host /usr or /root.
+            for p in toolchain_mounts(self.command):
+                if (p/'pyvenv.cfg').is_file():
+                    mounts.append({'source': str(p), 'target': str(p), 'writable': False})
+            if self.short_tmp:
+                mounts.append({'source': str(tmp), 'target': '/tmp/daedalus', 'writable': True})
+            mounts += [{'source': str(source), 'target': str(target), 'writable': True}
+                       for source, target in self.aliases]
+            # Explicit children override parent mounts, as with bubblewrap.
+            unique = {item['target']: item for item in mounts}
+            if environment.get('DAEDALUS_RUNTIME_POLICY') == '1':
+                from coder_mount_policy import mounts as policy_mounts
+                canonical = policy_mounts([m['target'] for m in unique.values() if not m['writable']],
+                                          [m['target'] for m in unique.values() if m['writable']])
+                # Aliases retain their host source; policy validation operates on container destinations.
+                unique = {m['target']: {**m, 'source': unique[m['target']]['source']} for m in canonical}
+            scope = self.environment.get('DAEDALUS_RUNTIME_SCOPE') or __import__('hashlib').sha256(str(self.cwd).encode()).hexdigest()
+            from hephaestus_scope import current
+            identity = current() or json.loads(os.environ.get('HEPHAESTUS_EXECUTION_IDENTITY','{}'))
+            request = {'id': uuid.uuid4().hex, 'scope': scope,
+                       'identity':identity,
+                       'profile': self.runtime_profile or os.environ.get('HEPHAESTUS_RUNTIME_PROFILE', 'core'),
+                       'cwd': str(self.cwd), 'mounts': sorted(unique.values(), key=lambda x: len(Path(x['target']).parts)),
+                       'command': ['/usr/bin/python3', str(module), '--child', str(spec)],
+                       'memory_mib': self.memory_mib or (1024 if self.listen_port else 3072),
+                       'timeout': self.timeout if self.timeout is not None else float(os.environ.get('HEPHAESTUS_COMMAND_CEILING', '900')),
+                       'managed_application': self.managed_application}
+            if self.resource_group: request['resource_group'] = self.resource_group
+            if self.process_trace:
+                request.update(trace_path=str(self.process_trace),trace_socket=str(ipc/'trace.sock'))
+            launch = private/'broker.json'; launch.write_text(json.dumps(request))
+            self.execution_identity = (request['id'],scope)
+            self.args = [sys.executable, str(module.with_name('hephaestus_client.py')), str(launch)]
+            self.env = {k: v for k, v in os.environ.items() if k in {'PATH','LANG','HEPHAESTUS_BROKER_SOCKET'}}
+            return self
         mounts = [*toolchain_mounts(self.command), module, spec, *self.readonly, self.cwd]
+        if environment.get('DAEDALUS_RUNTIME_POLICY') == '1':
+            from coder_mount_policy import mounts as policy_mounts
+            mounts = [*toolchain_mounts(self.command), module, spec, *self.readonly]
+            if not any(self.cwd == w or self.cwd.is_relative_to(w) for w in self.writable): mounts.append(self.cwd)
+            policy_mounts(mounts, self.writable)
+        if not self.controller_browser:
+            mounts = [p for p in mounts if p != Path('/root/.cache/ms-playwright') and not p.is_relative_to('/srv/hephaestus/control/browsers')]
         args = ['bwrap', '--unshare-user', '--unshare-pid', '--unshare-net', '--unshare-ipc',
                 '--unshare-uts', '--new-session', '--die-with-parent', '--cap-drop', 'ALL',
                 '--tmpfs', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
@@ -225,20 +387,61 @@ class Sandbox(AbstractContextManager):
             if not path.exists():
                 raise ValueError('Sandbox writable path does not exist: ' + str(path))
             args.extend(['--bind', str(path), str(path)])
+        if self.short_tmp:
+            # Chromium/DBus use Unix sockets beneath TMPDIR (108-byte limit).
+            # Keep their path short inside this private namespace while the
+            # backing files remain in the controller's disk-backed leased cache.
+            args.extend(['--bind', str(tmp), '/tmp/daedalus'])
         self.args = [*args, '--chdir', str(self.cwd), '--', '/usr/bin/python3', str(module), '--child', str(spec)]
         self.env = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
         return self
 
+    def stop(self):
+        """Ask the broker to stop this execution. Returns its status ('not_dispatched' when it never started).
+
+        The answer comes from the broker's own ledger over its socket, so the workload cannot forge it.
+        """
+        if not self.execution_identity:
+            return self.stop_status
+        identity,scope=self.execution_identity
+        try:
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(60)
+                connection.connect(os.environ.get('HEPHAESTUS_BROKER_SOCKET','/run/hephaestus/broker.sock'))
+                connection.sendall(json.dumps({'action':'cancel','id':identity,'scope':scope}).encode()+b'\n')
+                with connection.makefile('rb') as reader: result=json.loads(reader.readline(65536))
+                if not result.get('result',{}).get('stopped'): raise RuntimeError('Container stop is unconfirmed')
+                self.stop_status=result['result'].get('status')
+        except (OSError,ValueError,RuntimeError) as error:
+            raise StopUnconfirmed('Hephaestus could not confirm the writer stopped: '+str(error)) from error
+        finally:
+            self.execution_identity=None
+        return self.stop_status
+
     def __exit__(self, *exception):
+        stop_error = None
+        try: self.stop()
+        except StopUnconfirmed as error: stop_error=error
         for server, thread in reversed(self.servers):
             server.shutdown(); server.server_close(); thread.join(timeout=2)
         if self.temporary:
             self.temporary.cleanup()
+        if self.cache_lease:
+            self.cache_lease.__exit__(*exception)
+            self.cache_lease = None
+        for held in reversed(self.shared_leases):held.__exit__(*exception)
+        self.shared_leases=[]
+        if stop_error: raise stop_error
 
 
 def child_main(spec):
     """Namespace-local dependency proxy and optional reverse service endpoint."""
     config = json.loads(Path(spec).read_text())
+    if config.get('trace_socket'):
+        # No project process exists until the independent host tracer is attached.
+        with socket.socket(socket.AF_UNIX) as barrier:
+            barrier.settimeout(20); barrier.connect(config['trace_socket'])
+            if barrier.recv(16)!=b'TRACED': raise RuntimeError('Independent process tracing is unavailable')
     ipc = Path(config['ipc'])
 
     def connect(host, port):
@@ -294,6 +497,26 @@ def child_main(spec):
 
     proxy = ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
     start_server(proxy)
+    # These listeners exist only inside the child's network namespace. Each
+    # tunnels one supervisor-granted endpoint through the existing capability
+    # gateway; no other host loopback service becomes reachable. Keeping the
+    # browser origin on loopback preserves Fetch Metadata and secure-context
+    # behavior that an http://*.invalid proxy alias loses.
+    forwarded_ports = set()
+    for host, port in config.get('loopback_endpoints', []):
+        if port in forwarded_ports:
+            continue
+        def forwarder(target_host, target_port):
+            class Endpoint(socketserver.BaseRequestHandler):
+                def handle(self):
+                    try:
+                        with connect(target_host, target_port) as remote:
+                            relay(self.request, remote)
+                    except OSError:
+                        pass
+            return Endpoint
+        start_server(TCPServer(('127.0.0.1', port), forwarder(host, port)))
+        forwarded_ports.add(port)
     if config.get('listen_port'):
         class Reverse(socketserver.BaseRequestHandler):
             def handle(self):
@@ -304,12 +527,25 @@ def child_main(spec):
                     pass
         start_server(UnixServer(str(ipc / 'service.sock'), Reverse))
     environment = config['environment']
+    # Browser crashes must not put memory dumps in project source or downloads.
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+    if environment.get('DAEDALUS_DOCUMENT_LIMITS')=='1':
+        resource.setrlimit(resource.RLIMIT_FSIZE,(64*1024**2,64*1024**2))
+        resource.setrlimit(resource.RLIMIT_NOFILE,(256,256))
     url = f'http://127.0.0.1:{proxy.server_port}'
     environment.update({k: url for k in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']})
     environment.update(NO_PROXY='127.0.0.1,localhost', no_proxy='127.0.0.1,localhost', DAEDALUS_HTTP_PROXY=url,
                        DAEDALUS_SANDBOXED='1')
     java_proxy = f'-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort={proxy.server_port} -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort={proxy.server_port}'
-    environment.update(MAVEN_OPTS=java_proxy, GRADLE_OPTS=java_proxy)
+    environment.update(MAVEN_OPTS=(environment.get('MAVEN_OPTS', '') + ' ' + java_proxy).strip(),
+                       GRADLE_OPTS=(environment.get('GRADLE_OPTS', '') + ' ' + java_proxy).strip())
+    try:
+        for name in json.loads(environment.get('DAEDALUS_PROBE_WRITES', '[]')):
+            with tempfile.TemporaryFile(dir=name): pass
+    except OSError as error:
+        print('DAEDALUS_PREPARATION_FAILURE:' + json.dumps({'category': 'mount', 'path': name, 'errno': error.errno, 'detail': str(error)}), file=sys.stderr)
+        return 125
     result = subprocess.run(config['command'], cwd=config['cwd'], env=environment)
     return result.returncode
 
