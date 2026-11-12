@@ -42,6 +42,8 @@ Passing check rows, advisory rows, failures, skipped checks and unverified crite
 
 The trusted broker runs project commands in scoped containers without a Docker socket, privileged mode or host networking. Dependencies use private writable preparation generations, leases and quota-aware publication. Python environments are created at their final path; compatible public downloads and browser binaries can be reused read-only. Matching Playwright binaries are validated against the declared package version. Downloads must use portable setup commands, not Hephaestus executable paths.
 
+Job progress shown in the chat card and the workbench pane is a bounded projection (`backend/coder_progress.py`): the plan, the current step with its verb, file path or secret-stripped first command line, recent tool calls and their results, file changes and UI preflight. Model thoughts, file contents and raw observations are never projected; `check_started` events make running checks visible before their rows arrive.
+
 Temporary authenticated web/desktop previews expire after 15 minutes. Keep running pins the selected revision, runtime and application data; Stop retains that data. Pinning does not accept a revision or deploy future edits. See [Hephaestus](hephaestus.md) for storage, provisioning and maintenance.
 
 ## Development, releases and validation

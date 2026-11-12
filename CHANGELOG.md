@@ -24,6 +24,11 @@
 - **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
 - **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.
 - **Visual fixes** — composer focus feedback, Send/Stop shape changes, interface-font persistence, and consistent update notices.
+- **Compact Daedalus cards** — the inline job card now shows one live line ("Writing public/app.js", "Running npm test", "Thinking"), a stage bar with per-stage times, the three newest actions and folded plan, checks and files. Finished jobs get a one-sentence verdict plus the failing check instead of a wall of lists.
+- **Daedalus strip stays in its chat** — the job strip above the composer no longer carries the previous chat's job into a new chat; job rows are scoped to the open conversation and cleared the moment you switch.
+- **HTML replies go to the preview, not the sandbox** — ordinary chat now tells the model to put a web page in one ```html fence (rendered live in the side pane) instead of writing it to disk through `execute_code` or a `write_file` that plain chat does not have. A turn whose tool rounds have filled the context window stops with a readable "Context window full" message, a cut-off tool call is explained with the token count, and the reason is kept on the message after a reload.
+- **Workbench pane** — a resizable side pane beside the chat with Activity, Plan, Checks, Files and Preview tabs replaces the job details drawer. It opens on its own when a running job turns out to be a web app (turn that off under Settings → Previews).
+- **Live HTML preview** — HTML code blocks get a Preview button that runs the page in a sandboxed frame beside the chat, updating as the reply streams. Full pages open automatically; switch between fill, tablet and phone widths, allow or block CDN libraries, and download the file.
 
 
 </details>

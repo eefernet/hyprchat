@@ -1,7 +1,7 @@
 """
 Static guard tests for frontend settings persistence.
 
-The frontend has no unit-test pipeline, so these tests protect the small
+These static guards complement frontend behavior tests and protect the small
 hydration contract that keeps stale localStorage from overwriting server
 settings on page load.
 """
@@ -52,7 +52,6 @@ def test_server_persisted_settings_use_guarded_persistence():
         ("hc-openhands-enabled", "openhands_enabled"),
         ("hc-openhands-max-rounds", "openhands_max_rounds"),
         ("hc-openhands-reasoning-effort", "openhands_reasoning_effort"),
-        ("hc-img-chat-auto-enhance", "image_chat_auto_enhance"),
     ]
 
     for storage_key, setting_key in expected_pairs:
@@ -84,7 +83,6 @@ def test_settings_fetch_hydrates_server_values_without_echo_patch():
         "openhands_enabled",
         "openhands_max_rounds",
         "openhands_reasoning_effort",
-        "image_chat_auto_enhance",
     ]
 
     for key in hydrated_keys:
@@ -105,3 +103,14 @@ def test_playful_status_preference_is_user_scoped_and_hydrated():
     assert 'setFunVerbs(true);setPrompts([])' in html
     assert "if(d.key==='fun-verbs')val=typeof val==='boolean'?val:true;" in html
     assert "localStorage.removeItem('hc-ui-font')" not in html
+
+
+def test_image_preferences_use_profile_sync_without_shared_browser_seeds():
+    html = _html()
+    assert 'createImageSettingsSync({' in html
+    assert 'imageSettingsSyncRef.current.load()' in html
+    assert 'saveImageSetting("image_chat_auto_enhance",!imgChatAutoEnhance)' in html
+    assert 'imageSettingsSyncRef.current.reset();setImageSettingsError("");setImgChatLists(null)' in html
+    assert 'persistServerSetting("hc-img-chat-' not in html
+    assert 'lsGet("hc-img-chat-' not in html
+    assert 'hydrateServerSetting("image_chat_' not in html

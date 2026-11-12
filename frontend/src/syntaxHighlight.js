@@ -20,7 +20,8 @@ export function parseCodeFence(block) {
   const rest=info.slice(first.length).trim();
   const named=rest.match(/(?:^|\s)(?:title|filename)=(?:"([^"]*)"|'([^']*)'|([^\s]+))/);
   const filename=(colon>0?first.slice(colon+1):named?(named[1]??named[2]??named[3]):/^[^=\s]+\.[^\s]+$/.test(rest)?rest:'');
-  return {lang:normalizeCodeLanguage(label),code:match[2],...(filename?{meta:{filename}}:{})};
+  // `label` keeps the author's tag (html, svg, …) where `lang` is the Prism alias (markup).
+  return {lang:normalizeCodeLanguage(label),label:label.toLowerCase(),code:match[2],...(filename?{meta:{filename}}:{})};
 }
 
 // Tokenize the whole block, then split text leaves while retaining their nested

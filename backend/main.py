@@ -50,6 +50,7 @@ import comfyui
 import voice
 import model_management
 import model_providers
+import image_settings
 import image_prompt_enhancer
 from research import (
     REPORT_TEMPLATES,
@@ -2584,7 +2585,8 @@ async def generate_image_job(body: dict = Body(...)):
     # Omitted sampling fields fall back to the checkpoint's saved preset. The
     # Image Studio UI always sends explicit values, so this only changes
     # sparse API calls (which previously sampled with the wrong objective).
-    merged = comfyui.merge_generation_preset(body, checkpoint)
+    image_preferences = await image_settings.get_snapshot()
+    merged = comfyui.merge_generation_preset(body, checkpoint, overrides=image_preferences["presets"])
     try:
         workflow, seed = comfyui.build_workflow(
             template or comfyui.load_template(),
@@ -2878,6 +2880,7 @@ async def list_image_checkpoints():
         _image_checkpoints_cache["loras"] = await comfyui.list_loras()
         _image_checkpoints_cache["ts"] = time.time()
     cks = _image_checkpoints_cache["checkpoints"]
+    image_preferences = await image_settings.get_snapshot()
     return {
         "checkpoints": cks,
         "default": cks[0] if cks else "",
@@ -2889,49 +2892,27 @@ async def list_image_checkpoints():
         "schedulers": list(comfyui.SCHEDULER_CHOICES),
         # Resolved per-model generation settings (built-in family defaults
         # merged with user-saved overrides) so the UI can auto-configure.
-        "settings": {c: comfyui.settings_for_checkpoint(c) for c in cks},
+        "settings": {c: comfyui.settings_for_checkpoint(c, overrides=image_preferences["presets"]) for c in cks},
     }
 
 @app.put("/api/images/model-settings/{checkpoint}")
 async def save_model_settings_ep(checkpoint: str, body: dict = Body(...)):
     if not config.COMFYUI_URL:
         raise HTTPException(503, "ComfyUI is not configured")
-    clean = {}
-    ms = (body.get("model_sampling") or "").strip()
-    if ms in ("", "vpred", "flow"):
-        clean["model_sampling"] = ms
-    if (body.get("sampler") or "") in comfyui.ALLOWED_SAMPLERS:
-        clean["sampler"] = body["sampler"]
-    if (body.get("scheduler") or "") in comfyui.ALLOWED_SCHEDULERS:
-        clean["scheduler"] = body["scheduler"]
     try:
-        if body.get("cfg") is not None:
-            clean["cfg"] = max(1.0, min(20.0, float(body["cfg"])))
-        if body.get("steps") is not None:
-            clean["steps"] = config.coerce_int(body["steps"], 25, minimum=1, maximum=60)
-    except (TypeError, ValueError):
-        pass
-    # Per-model chat prompt prefixes. Key-present-with-"" is an intentional
-    # clear (overrides any builtin family prefix like pony score tags).
-    for _pk in ("prompt_prefix", "negative_prefix"):
-        if _pk in body:
-            clean[_pk] = str(body[_pk] or "").strip()[:500]
-    settings = comfyui.load_model_settings()
-    # Merge, don't replace: Image Studio's Save defaults sends only sampling
-    # keys and the Settings prompt fields send only prefix keys — each must
-    # not wipe the other's saved values.
-    settings[checkpoint] = {**(settings.get(checkpoint) or {}), **clean}
-    comfyui.save_model_settings(settings)
-    return {"status": "saved", "checkpoint": checkpoint, "settings": comfyui.settings_for_checkpoint(checkpoint)}
+        snapshot = await image_settings.save_preset(checkpoint, body)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return {"status": "saved", "checkpoint": checkpoint,
+            "settings": comfyui.settings_for_checkpoint(checkpoint, overrides=snapshot["presets"])}
 
 @app.delete("/api/images/model-settings/{checkpoint}")
 async def clear_model_settings_ep(checkpoint: str):
-    settings = comfyui.load_model_settings()
-    if checkpoint not in settings:
-        raise HTTPException(404, "No saved defaults for this model")
-    settings.pop(checkpoint)
-    comfyui.save_model_settings(settings)
-    return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint)}
+    try:
+        snapshot = await image_settings.delete_preset(checkpoint)
+    except KeyError as error:
+        raise HTTPException(404, "No saved defaults for this model") from error
+    return {"status": "cleared", "settings": comfyui.settings_for_checkpoint(checkpoint, overrides=snapshot["presets"])}
 
 @app.post("/api/images/enhance-prompt")
 async def enhance_image_prompt(body: dict = Body(...)):
@@ -2941,7 +2922,8 @@ async def enhance_image_prompt(body: dict = Body(...)):
     if not idea:
         raise HTTPException(400, "prompt is required")
     result = await image_prompt_enhancer.enhance_prompt(
-        http, idea, model=(body.get("model") or "").strip(), timeout=45)
+        http, idea, model=(body.get("model") or "").strip(), timeout=45,
+        image_preferences=await image_settings.get_snapshot())
     if result is None:
         raise HTTPException(502, "Prompt enhancer returned no usable prompt — "
                                  "check that Ollama is reachable and try again")

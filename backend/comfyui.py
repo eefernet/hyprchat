@@ -147,10 +147,10 @@ def builtin_defaults_for(checkpoint: str) -> dict:
     return {"model_sampling": "", "sampler": "euler", "scheduler": "normal", "cfg": 7, "steps": 25, **_no_prefix}
 
 
-def settings_for_checkpoint(checkpoint: str) -> dict:
+def settings_for_checkpoint(checkpoint: str, *, overrides: dict | None = None) -> dict:
     """Built-in defaults merged with the user's saved override (user wins)."""
     resolved = dict(builtin_defaults_for(checkpoint))
-    override = load_model_settings().get(checkpoint)
+    override = (load_model_settings() if overrides is None else overrides).get(checkpoint)
     if isinstance(override, dict):
         for k in _SETTING_KEYS:
             if k in override and override[k] is not None:
@@ -161,13 +161,14 @@ def settings_for_checkpoint(checkpoint: str) -> dict:
     return resolved
 
 
-def merge_generation_preset(body: dict, checkpoint: str) -> dict:
+def merge_generation_preset(body: dict, checkpoint: str, *, overrides: dict | None = None) -> dict:
     """Fill omitted sampling fields from the checkpoint's resolved preset
     (request values win). The Image Studio UI always sends explicit values;
     this protects sparse API callers from silently sampling a flow/vpred
     checkpoint with the wrong objective."""
     body = body or {}
-    preset = settings_for_checkpoint(checkpoint) if checkpoint else {}
+    preset = (settings_for_checkpoint(checkpoint) if overrides is None else
+              settings_for_checkpoint(checkpoint, overrides=overrides)) if checkpoint else {}
     return {
         "steps": body.get("steps") or preset.get("steps") or 25,
         "cfg": body.get("cfg") or preset.get("cfg") or 7.0,

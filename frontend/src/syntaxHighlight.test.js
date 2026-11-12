@@ -7,10 +7,10 @@ import { THEMES } from './theme.js';
 test('language aliases and metadata do not enter the code body',()=>{
   for(const [label,lang] of [['Swift','swift'],['JS','javascript'],['py','python'],['c++','cpp'],['C#','csharp'],['shell','bash']]){
     const code='  x < y && y > 0\n  return "hello"';
-    assert.deepEqual(parseCodeFence('```'+label+' filename=example\n'+code+'\n```'),{lang,code,meta:{filename:'example'}});
+    assert.deepEqual(parseCodeFence('```'+label+' filename=example\n'+code+'\n```'),{lang,label:label.toLowerCase(),code,meta:{filename:'example'}});
   }
-  assert.deepEqual(parseCodeFence('```\nhello\n```'),{lang:'',code:'hello'});
-  assert.deepEqual(parseCodeFence('```Swift\r\nlet x = 1\r\n```'),{lang:'swift',code:'let x = 1'});
+  assert.deepEqual(parseCodeFence('```\nhello\n```'),{lang:'',label:'',code:'hello'});
+  assert.deepEqual(parseCodeFence('```Swift\r\nlet x = 1\r\n```'),{lang:'swift',label:'swift',code:'let x = 1'});
   assert.equal(normalizeCodeLanguage('<script>'),'');
   assert.equal(normalizeCodeLanguage('constructor'),'constructor');
   assert.equal(normalizeCodeLanguage('__proto__'),'__proto__');
@@ -51,10 +51,10 @@ test('light and dark token palettes remain legible against every bundled theme',
 });
 
 test('filename fence forms preserve code and keep unknown metadata harmless',()=>{
-  for(const [info,lang,filename] of [['js:app.js','javascript','app.js'],['js title="my app.js"','javascript','my app.js'],['python app.py','python','app.py'],['c++ filename="demo.cpp"','cpp','demo.cpp']]){
-    assert.deepEqual(parseCodeFence('```'+info+'\n  const x = "<script>";\n```'),{lang,code:'  const x = "<script>";',meta:{filename}});
+  for(const [info,lang,label,filename] of [['js:app.js','javascript','js','app.js'],['js title="my app.js"','javascript','js','my app.js'],['python app.py','python','python','app.py'],['c++ filename="demo.cpp"','cpp','c++','demo.cpp']]){
+    assert.deepEqual(parseCodeFence('```'+info+'\n  const x = "<script>";\n```'),{lang,label,code:'  const x = "<script>";',meta:{filename}});
   }
-  assert.deepEqual(parseCodeFence('```unknown some-flag\nvalue\n```'),{lang:'unknown',code:'value'});
+  assert.deepEqual(parseCodeFence('```unknown some-flag\nvalue\n```'),{lang:'unknown',label:'unknown',code:'value'});
   assert.equal(parseCodeFence('incomplete'),null);
 });
 

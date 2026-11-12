@@ -1,5 +1,6 @@
 import React,{useState} from 'react';
 import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary,outcomeExplanation} from '../daedalusProgress.js';
+import {elapsedLabel} from '../daedalusJobs.js';
 import './daedalusPlan.css';
 
 // What the job is doing and why, read straight from the job snapshot. Icons always
@@ -8,12 +9,15 @@ const STAGE_ICON={done:'✓',current:'●',stopped:'■',pending:'○',failed:'�
 const OUTCOME={passed:['✓','Verified'],failed:['✗','Failed review'],unverified:['?','Not verified'],evidence:['◐','Evidence found'],pending:['○','Pending']};
 const STEP_ICON={done:'✓',current:'●',partial:'◐',pending:'○',not_updated:'—'};
 
-export function StageRail({job}){
+// `timings` (optional, one {seconds} per stage) adds the elapsed time under each segment.
+export function StageRail({job,timings}){
   const loops=loopLabel(job);
   return <div className="dp-rail-wrap">
-    <ol className="dp-rail" aria-label="Job stages">{stageRail(job).map(stage=>
-      <li key={stage.label} className={`dp-stage dp-${stage.state}`} aria-current={stage.state==='current'?'step':undefined}>
-        <span aria-hidden="true">{STAGE_ICON[stage.state]}</span> {stage.label}<span className="dp-sr"> ({stage.state})</span></li>)}</ol>
+    <ol className="dp-rail" aria-label="Job stages">{stageRail(job).map((stage,index)=>{
+      const seconds=timings?.[index]?.seconds||0;
+      return <li key={stage.label} className={`dp-stage dp-${stage.state}`} aria-current={stage.state==='current'?'step':undefined}>
+        <span className="dp-stage-label"><span><span aria-hidden="true">{STAGE_ICON[stage.state]}</span> {stage.label}</span>{seconds>0&&<span className="dp-stage-time">{elapsedLabel(seconds)}</span>}</span>
+        <span className="dp-sr"> ({stage.state})</span></li>;})}</ol>
     {loops&&<p className="dp-loops">{loops}</p>}
   </div>;
 }
@@ -30,7 +34,7 @@ export function PlanSection({job,defaultOpen=true}){
   if(!outcomes.length&&!steps.length)return <p className="dp-muted">{["queued","inspecting","planning"].includes(job.state)||job.state==="coding"&&job.progress?.version===1&&!job.progress?.files?.length?"Preparing the plan":"No structured plan was recorded."}</p>;
   const verified=outcomes.filter(row=>row.status==='passed').length;
   return <details className="dp-section" open={expanded} onToggle={e=>setExpanded(e.currentTarget.open)}>
-    <summary>{job.progress?.version===1?"Implementation plan":"Plan"}{job.progress?.version!==1&&<> — {outcomes.length} requested outcome{outcomes.length===1?'':'s'}{verified?` · ${verified} verified`:''}</>}</summary>
+    <summary>{job.progress?.version===1?<>Implementation plan{steps.length>0&&<> — {steps.filter(step=>step.state==='done').length} of {steps.length} steps done</>}</>:<>Plan — {outcomes.length} requested outcome{outcomes.length===1?'':'s'}{verified?` · ${verified} verified`:''}</>}</summary>
     {job.progress?.version===1&&<p className="dp-muted">Agent-reported progress. Checks below show what Daedalus verified.</p>}
     <ul className="dp-outcomes">{outcomes.map(row=>{const [icon,label]=OUTCOME[row.status]||OUTCOME.pending;return <li key={row.id} className={`dp-outcome dp-o-${row.status}`}>
       <span className="dp-icon" aria-hidden="true">{icon}</span>

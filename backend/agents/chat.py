@@ -11,6 +11,7 @@ import traceback
 from datetime import datetime
 
 import config
+import image_settings
 import context_policy
 import database as db
 import model_providers
@@ -41,6 +42,47 @@ _LEAK_TRANSITION_MARKERS = ("<|channel|>", "<channel|>", "<|message|>")
 # Line-anchored fence counter: CoT prose often *mentions* ``` mid-line
 # ("followed by a ```chart block"), which must not count as a real fence.
 _FENCE_LINE_RE = re.compile(r"(?m)^[ \t]*```")
+
+
+CONTEXT_FULL_SHARE = 0.92
+
+
+def context_exhausted(prev_prompt_tokens, prev_gen_tokens, appended_tokens, num_ctx, share=CONTEXT_FULL_SHARE):
+    """True when the previous round's observed usage plus what was appended since leaves no room for a reply.
+
+    Observed counts come from Ollama (prompt_eval_count/eval_count); without them nothing is known, so never block.
+    """
+    try:
+        num_ctx = int(num_ctx or 0)
+        used = int(prev_prompt_tokens or 0) + int(prev_gen_tokens or 0) + int(appended_tokens or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(num_ctx > 0 and prev_prompt_tokens and used >= num_ctx * share)
+
+
+def context_full_message(used, num_ctx):
+    return (f"Context window full: about {int(used):,} of {int(num_ctx):,} tokens are used by this turn's tool calls, "
+            "so the model cannot answer in the remaining space. Start a new chat, shorten the task, "
+            "or raise the chat context size in Settings.")
+
+
+_TRUNCATED_TOOL_CALL_MARKERS = ("invalid tool call arguments", "unexpected end of json input", "unexpected eof in tool call")
+
+
+def truncated_tool_call_error(error, used, num_ctx):
+    """Readable message for llama-server's cut-off tool-call JSON (generation stopped at the window), else None."""
+    low = str(error or "").lower()
+    if not any(marker in low for marker in _TRUNCATED_TOOL_CALL_MARKERS):
+        return None
+    try:
+        used, num_ctx = int(used or 0), int(num_ctx or 0)
+    except (TypeError, ValueError):
+        used, num_ctx = 0, 0
+    where = f" (context window full: {used:,} of {num_ctx:,} tokens)" if num_ctx and used >= num_ctx * CONTEXT_FULL_SHARE else \
+        (f" ({used:,} of {num_ctx:,} tokens used)" if num_ctx and used else "")
+    return ("The model's tool call was cut off before its arguments were complete" + where +
+            ". Start a new chat, ask for a smaller result, or raise the chat context size in Settings. "
+            f"Original: {str(error)[:160]}")
 
 
 def _merge_stream_tool_calls(collected: list, incoming) -> list:
@@ -1122,6 +1164,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     """
     conv_id = req.conversation_id
     ephemeral = bool(getattr(req, "ephemeral", False))
+    image_preferences = await image_settings.get_snapshot() if config.COMFYUI_URL else image_settings.legacy_snapshot()
 
     last_user_msg = ""
     _user_message_id = None
@@ -1541,6 +1584,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "Start every ```chart / ```pygraph / ```mermaid fence on its own new line, and put a newline after the closing fence. "
             "Colors auto-pick from the active theme palette. Use charts for quantitative comparisons or trends "
             "instead of dumping raw numbers or ASCII art.\n"
+            "- **Web pages / HTML demos**: put the complete HTML document (inline `<style>` and `<script>`) "
+            "in ONE ```html code fence in your reply. The chat renders it live in a sandboxed preview pane beside "
+            "the conversation, so the user sees the page as you write it. Do not write HTML to disk with "
+            "`execute_code`, do not base64 it, and do not look for `write_file` — it is not available in ordinary chat.\n"
             "- **Callouts**: start a blockquote with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, "
             "`> [!WARNING]`, or `> [!CAUTION]` to render a coloured admonition box. Subsequent `> ` lines are body. "
             "Use these for important caveats, tips, or warnings — don't over-use.\n"
@@ -1568,7 +1615,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 + (
                     "An automatic enhancer expands your prompt with photographic detail before "
                     "rendering — keep the prompt short and focused on what to depict.\n"
-                    if config.IMAGE_CHAT_AUTO_ENHANCE else ""
+                    if image_preferences["settings"]["image_chat_auto_enhance"] else ""
                 ) +
                 "If you are roleplaying a persona with a described appearance, you can send photos of "
                 "yourself: call `generate_image` describing yourself (matching your persona's "
@@ -1884,7 +1931,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "and data transformation. When a visual aid would genuinely help, compute the "
             "numbers with execute_code, then emit an inline ```chart or ```pygraph fence using "
             "the computed values. Use ```mermaid fences for diagrams and `$...$` / `$$...$$` "
-            "for math. Do not save image files for charts or diagrams.\n"
+            "for math. Do not save image files for charts or diagrams. For an HTML page or interactive "
+            "demo, emit a ```html fence in the reply instead of saving a file.\n"
         )
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += _viz_hint
@@ -2087,8 +2135,40 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     # disconnect/error snapshots never lose the text the user already has.
     _turn_text = _continue_prior
 
+    async def _persist_stream_failure(err_msg, content_now):
+        # Persist whatever streamed before the failure and clear the
+        # in_progress flag — otherwise the stub reloads empty/stale and the
+        # user loses the partial answer they were watching.
+        if _assistant_msg_id is None or _review_round:
+            return
+        try:
+            _partial = '' if _persistent_coder else ((_turn_text + content_now) if _turn_text else content_now)
+            _partial = _partial if _partial.strip() else ""
+            _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
+                else f"_[no response — {err_msg[:160]}]_"
+            await db.save_chat_delivery(_assistant_msg_id, content=_final,
+                                        metadata={"in_progress": False, "stream_error": True, "stream_error_text": err_msg[:300]})
+        except Exception as _pe:
+            print(f"[CHAT]   partial-persist failed (non-fatal): {_pe}")
+
     _gen_speed = 0.0  # tokens/sec of the most recent generation round
+    _last_round_usage = (0, 0)  # (prompt_tokens, gen_tokens) Ollama reported for the previous round
+    _round_start_len = len(messages)
     for round_num in range(MAX_ROUNDS):
+        if round_num > 0:
+            _last_round_usage = (prompt_tokens, gen_tokens)
+            # Tool results appended since the previous request are not in its counts;
+            # the assistant turn itself is (it was that round's generation).
+            _appended = context_policy.estimate_tokens({"messages": [m for m in messages[_round_start_len:] if m.get("role") != "assistant"]})
+            _used = _last_round_usage[0] + _last_round_usage[1] + _appended
+            if context_exhausted(_last_round_usage[0], _last_round_usage[1], _appended, model_options.get("num_ctx")):
+                _full_msg = context_full_message(_used, model_options.get("num_ctx"))
+                print(f"[CHAT]   Context exhausted before round {round_num}: {_full_msg}")
+                await _persist_stream_failure(_full_msg, "")
+                await events.emit(conv_id, "error", {"status": _full_msg[:200]})
+                yield f"data: {json.dumps({'type': 'error', 'error': _full_msg})}\n\n"
+                return
+        _round_start_len = len(messages)
         content = ""
         thinking = ""
         tool_calls = []
@@ -2406,7 +2486,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 await events.emit(conv_id, "tool_end", {"tool": "processing", "status": _corrupt_msg, "icon": "alert"})
                                 yield f"data: {json.dumps({'type': 'error', 'error': _corrupt_msg})}\n\n"
                                 return
-                            await events.emit(conv_id, "error", {"status": f"Ollama: {_ollama_err[:120]}"})
+                            _used_now = (prompt_tokens or _last_round_usage[0]) + _live_gen_tokens
+                            _ollama_err = truncated_tool_call_error(_ollama_err, _used_now, model_options.get("num_ctx")) or _ollama_err
+                            await _persist_stream_failure(_ollama_err, content)
+                            await events.emit(conv_id, "error", {"status": f"Ollama: {_ollama_err[:200]}"})
                             yield f"data: {json.dumps({'type': 'error', 'error': _ollama_err})}\n\n"
                             return
 
@@ -2676,19 +2759,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             elif not _is_cloud_provider and ("input stream" in err_lower or "failed to load" in err_lower or "ggml" in err_lower):
                 err_msg = (f"Model '{req.model}' failed mid-stream — it may be corrupt or hit a context-buffer issue. "
                            f"Try `ollama stop {req.model}` and retry, or reduce num_ctx. Original: {err_msg[:200]}")
-            # Persist whatever streamed before the failure and clear the
-            # in_progress flag — otherwise the stub reloads empty/stale and the
-            # user loses the partial answer they were watching.
-            if _assistant_msg_id is not None and not _review_round:
-                try:
-                    _partial = '' if _persistent_coder else ((_turn_text + content) if _turn_text else content)
-                    _partial = _partial if _partial.strip() else ""
-                    _final = (_partial + f"\n\n_[interrupted: {err_msg[:160]}]_") if _partial \
-                        else f"_[no response — {err_msg[:160]}]_"
-                    await db.save_chat_delivery(_assistant_msg_id, content=_final,
-                                            metadata={"in_progress": False, "stream_error": True})
-                except Exception as _pe:
-                    print(f"[CHAT]   partial-persist failed (non-fatal): {_pe}")
+            await _persist_stream_failure(err_msg, content)
             await events.emit(conv_id, "error", {"status": f"{_provider_label}: {err_msg[:200]}"})
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
@@ -2869,7 +2940,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     _compose_model = (model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
                                       or config.DEFAULT_MODEL)
                 else:
-                    _compose_model = (model_providers.reject_cloud(config.IMAGE_CHAT_COMPOSE_MODEL or "")
+                    _compose_model = (model_providers.reject_cloud(image_preferences["settings"]["image_chat_compose_model"] or "")
                                       or model_providers.reject_cloud(req.model or "")
                                       or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
                                       or config.DEFAULT_MODEL)
@@ -3252,6 +3323,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 kb_ids=_kb,
                                 artifact_message_id=_assistant_msg_id,
                                 persona_context=_persona_context,
+                                image_preferences=image_preferences,
                                 workspace_id=effective_workspace["id"] if effective_workspace else None,
                             )
                             _tc[0] = len(r) if r else 0

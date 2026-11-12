@@ -12,7 +12,7 @@
   "DELETE /api/councils/members/{member_id}": "profile",
   "DELETE /api/councils/{council_id}": "profile",
   "DELETE /api/email/accounts/{account_id}": "profile",
-  "DELETE /api/images/model-settings/{checkpoint}": "admin",
+  "DELETE /api/images/model-settings/{checkpoint}": "profile",
   "DELETE /api/images/workflows/{name}": "admin",
   "DELETE /api/knowledge-bases/files/{file_id}": "profile",
   "DELETE /api/knowledge-bases/{kb_id}": "profile",
@@ -325,7 +325,7 @@
   "POST /api/workspaces/{ws_id}/research-reports": "profile",
   "POST /api/workspaces/{ws_id}/sources/{kind}/{identity}/link": "profile",
   "POST /api/workspaces/{ws_id}/upload": "profile",
-  "PUT /api/images/model-settings/{checkpoint}": "admin",
+  "PUT /api/images/model-settings/{checkpoint}": "profile",
   "PUT /api/knowledge-bases/{kb_id}": "profile",
   "PUT /api/model-configs/{mc_id}": "profile",
   "PUT /api/notifications/channels/ntfy": "profile",
@@ -336,5 +336,7 @@
   "DELETE /api/coder/workflows/{workflow_id}/previews/{identity}": "profile",
   "GET /api/coder/workflows/{workflow_id}/previews": "profile",
   "POST /api/coder/workflows/{workflow_id}/previews/{identity}/control": "profile",
-  "GET /api/coder/workflows/{workflow_id}/previews/{identity}/logs": "profile"
+  "GET /api/coder/workflows/{workflow_id}/previews/{identity}/logs": "profile",
+  "GET /api/images/settings": "profile",
+  "PATCH /api/images/settings": "profile"
 }

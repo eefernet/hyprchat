@@ -748,6 +748,7 @@ def run_revision(store, op_id, repository, profile, *, project_id, audit_source=
         process_trace = folder / f'process-{index}.trace' if traced else None
         known = artifacts(root, [p['cwd'] for p in profile['profiles']]) if traced else {}
         process_evidence = None
+        store.event(op_id, 'check_started', id=c.get('id'), phase=c.get('phase'), cwd=str(c.get('cwd', '.')), command=command, index=index)
         try:
             code = execute(store, op_id, command, cwd, check_env, log,
                            writable=[audit, local_evidence] if c.get('origin') == 'independent' else None,

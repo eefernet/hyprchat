@@ -13,6 +13,8 @@ import ResponsiveDrawer from './components/ResponsiveDrawer.jsx';
 import {REVIEW_LEVELS,reviewLevel,effortChoices,nativeChoice,effortRequest} from "./effort.js";
 import DocumentActivity from "./components/DocumentActivity.jsx";
 import DocumentPreviewPanel from "./components/DocumentPreviewPanel.jsx";
+import SidePane from "./components/SidePane.jsx";
+import {useWorkbench,closeWorkbench,configureWorkbench,workbenchState} from "./workbench.js";
 import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles.js";
 // HyprChat frontend entry.
 //
@@ -75,6 +77,7 @@ import {
   researchModelOptions,
 } from './modelHelpers.js';
 import { createSettingsSync, createPrefsSync } from './settingsSync.js';
+import {createImageSettingsSync} from './imageSettingsSync.js';
 import { NAV_ITEMS, NAV_ITEM_MAP, DEFAULT_NAV_LAYOUT, resolveNavLayout } from './navItems.js';
 import NavLayoutEditor from './components/NavLayoutEditor.jsx';
 import ModelPicker from './ModelPicker.jsx';
@@ -192,6 +195,7 @@ function HyprChat(){
   const [fi,setFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-font")||"0");return Number.isInteger(saved)&&FONTS[saved]?saved:0;}catch{return 0;}});
   // Interface font: -1 matches the code font (default); otherwise an index into UI_FONTS (sans faces).
   const [funVerbs,setFunVerbs]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-fun-verbs::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
+  const [previewAutoOpen,setPreviewAutoOpen]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-preview-auto-open::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
   const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
   const [tokenLimit,setTokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
@@ -293,15 +297,17 @@ function HyprChat(){
   // Init from localStorage like sibling settings so the mount-time persist
   // effect doesn't clobber the stored value with "" before server hydration.
   const lsGet=(k,fb)=>{try{return localStorage.getItem(k)??fb;}catch{return fb;}};
-  const [imgChatCkpt,setImgChatCkpt]=useState(()=>lsGet("hc-img-chat-ckpt",""));
-  const [imgChatRes,setImgChatRes]=useState(()=>lsGet("hc-img-chat-res","1024x1024")||"1024x1024");
-  const [imgChatVae,setImgChatVae]=useState(()=>lsGet("hc-img-chat-vae",""));
-  const [imgChatWorkflow,setImgChatWorkflow]=useState(()=>lsGet("hc-img-chat-workflow",""));
+  const [imgChatCkpt,setImgChatCkpt]=useState("");
+  const [imgChatRes,setImgChatRes]=useState("1024x1024");
+  const [imgChatVae,setImgChatVae]=useState("");
+  const [imgChatWorkflow,setImgChatWorkflow]=useState("");
   const [imgChatWorkflows,setImgChatWorkflows]=useState([]); // saved workflow names for the chat-default selector
   const [imgChatPrefix,setImgChatPrefix]=useState("");
   const [imgChatNeg,setImgChatNeg]=useState("");
-  const [imgChatComposeModel,setImgChatComposeModel]=useState(()=>lsGet("hc-img-chat-compose",""));
-  const [imgChatAutoEnhance,setImgChatAutoEnhance]=useState(()=>lsGet("hc-img-chat-auto-enhance","")==="true");
+  const [imgChatComposeModel,setImgChatComposeModel]=useState("");
+  const [imgChatAutoEnhance,setImgChatAutoEnhance]=useState(false);
+  const [imgChatListsEpoch,setImgChatListsEpoch]=useState(0);
+  const imgChatCkptRef=useRef(imgChatCkpt);imgChatCkptRef.current=imgChatCkpt;
   const [imgChatLists,setImgChatLists]=useState(null); // {checkpoints,vaes,settings} lazy-fetched for the dropdowns
   const [mdlPrefix,setMdlPrefix]=useState(""); // per-model prompt prefix being edited for imgChatCkpt
   const [mdlNeg,setMdlNeg]=useState("");
@@ -359,7 +365,6 @@ function HyprChat(){
   const [activeTagFilter,setActiveTagFilter]=useState(null);
   const [showTagEditor,setShowTagEditor]=useState(null); // conv id
   const [newTagInput,setNewTagInput]=useState("");
-  const [previewWidth,setPreviewWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-preview-w")||"420");}catch{return 420;}});
   const [pasteMode,setPasteMode]=useState(false);
   const [pasteCode,setPasteCode]=useState("");
   const [pasteToolName,setPasteToolName]=useState("");
@@ -398,6 +403,9 @@ function HyprChat(){
   const seenSettingEffectRef=useRef({});
   const skipSettingPatchRef=useRef({});
   const modelParamsSeenRef=useRef(false);
+  const [imageSettingsReady,setImageSettingsReady]=useState(false);
+  const [imageSettingsError,setImageSettingsError]=useState("");
+  const imageSettingsSyncRef=useRef(null);
   const flashSettingsPulse=(text="Saved",type="success")=>{
     setSettingsPulse({text,type});
     if(settingsPulseTimer.current)clearTimeout(settingsPulseTimer.current);
@@ -410,6 +418,26 @@ function HyprChat(){
     skipSettingPatchRef,
     flashSettingsPulse,
   });
+
+  if(!imageSettingsSyncRef.current)imageSettingsSyncRef.current=createImageSettingsSync({
+    request:apiJson,getContext:hcCaptureUserContext,onReady:setImageSettingsReady,
+    onValues:(values,attempted)=>{
+      const setters={image_chat_checkpoint:setImgChatCkpt,image_chat_resolution:setImgChatRes,
+        image_chat_vae:setImgChatVae,image_chat_workflow:setImgChatWorkflow,
+        image_chat_prompt_prefix:setImgChatPrefix,image_chat_negative:setImgChatNeg,
+        image_chat_compose_model:setImgChatComposeModel,image_chat_auto_enhance:setImgChatAutoEnhance};
+      for(const [key,value] of Object.entries(values))setters[key]?.(previous=>attempted&&previous!==attempted[key]?previous:value);
+    },
+    onPreset:(checkpoint,settings,patch)=>{
+      setImgChatLists(p=>p?{...p,settings:{...p.settings,[checkpoint]:settings}}:p);
+      if(imgChatCkptRef.current!==checkpoint)return;
+      if("prompt_prefix" in patch)setMdlPrefix(value=>value===patch.prompt_prefix?(settings.prompt_prefix||""):value);
+      if("negative_prefix" in patch)setMdlNeg(value=>value===patch.negative_prefix?(settings.negative_prefix||""):value);
+    },
+    onError:message=>{setImageSettingsError(message||"Image settings could not be saved.");flashSettingsPulse("Failed","error");},
+    onSaved:()=>{setImageSettingsError("");flashSettingsPulse("Saved");},
+  });
+  const saveImageSetting=(key,value)=>imageSettingsSyncRef.current.save(key,value);
 
   // Mermaid init — re-runs when theme/font changes; bumps epoch to force diagram re-render
   const [mermaidEpoch,setMermaidEpoch]=useState(0);
@@ -448,6 +476,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
   useEffect(()=>{persistPref("fun-verbs",funVerbs);},[funVerbs]);
+  useEffect(()=>{persistPref("preview-auto-open",previewAutoOpen);configureWorkbench({autoOpen:previewAutoOpen});},[previewAutoOpen]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
@@ -459,24 +488,14 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-research-num-ctx","research_num_ctx",researchNumCtx,String(researchNumCtx));},[researchNumCtx]);
   useEffect(()=>{persistServerSetting("hc-openhands-disable-thinking","openhands_disable_thinking",openhandsDisableThinking,String(openhandsDisableThinking));},[openhandsDisableThinking]);
   useEffect(()=>{persistServerSetting("hc-quick-search-mode","quick_search_mode",quickSearchMode);},[quickSearchMode]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-ckpt","image_chat_checkpoint",imgChatCkpt);},[imgChatCkpt]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-res","image_chat_resolution",imgChatRes);},[imgChatRes]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-vae","image_chat_vae",imgChatVae);},[imgChatVae]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-workflow","image_chat_workflow",imgChatWorkflow);},[imgChatWorkflow]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-compose","image_chat_compose_model",imgChatComposeModel);},[imgChatComposeModel]);
-  useEffect(()=>{persistServerSetting("hc-img-chat-auto-enhance","image_chat_auto_enhance",imgChatAutoEnhance,String(imgChatAutoEnhance));},[imgChatAutoEnhance]);
   // Per-model prompt fields track the selected default image model
   useEffect(()=>{
     const s=(imgChatCkpt&&imgChatLists?.settings?.[imgChatCkpt])||{};
     setMdlPrefix(s.prompt_prefix||"");
     setMdlNeg(s.negative_prefix||"");
-  },[imgChatCkpt,imgChatLists]);
-  const saveModelPrefix=()=>{
-    if(!imgChatCkpt)return;
-    fetch(`${API}/api/images/model-settings/${encodeURIComponent(imgChatCkpt)}`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt_prefix:mdlPrefix,negative_prefix:mdlNeg})})
-      .then(r=>r.ok?r.json():Promise.reject(new Error("save failed")))
-      .then(d=>{setImgChatLists(p=>p?{...p,settings:{...p.settings,[imgChatCkpt]:d.settings}}:p);flashSettingsPulse("Saved");})
-      .catch(()=>flashSettingsPulse("Failed","error"));
+  },[imgChatCkpt,imgChatListsEpoch]);
+  const saveModelPrefix=(key,value)=>{
+    if(imgChatCkpt)imageSettingsSyncRef.current.savePreset(imgChatCkpt,{[key]:value});
   };
   useEffect(()=>{const echoed=persistPref("model-params",modelParams);if(!echoed){if(modelParamsSeenRef.current)flashSettingsPulse("Saved","success");else modelParamsSeenRef.current=true;}},[modelParams]);
   useEffect(()=>{persistPref("prompts",prompts);},[prompts]);
@@ -496,6 +515,7 @@ function HyprChat(){
     setPreparingSend("");
   };
   const isMobile=useIsMobile();
+  const workbench=useWorkbench();
   const keyboardOpen=useMobileViewport(isMobile);
   const [sidebar,setSidebar]=useState(()=>!isMobileNow());
   const [notifUnseen,setNotifUnseen]=useState(0);
@@ -556,18 +576,25 @@ function HyprChat(){
   useEffect(()=>{setResearchListOpen(false);setResearchDetailsOpen(false);},[panel]);
   const [settingsTab,setSettingsTab]=useState("connections");
   useEffect(()=>{if(settingsTab==="danger"){fetch(`${API}/api/backup/status`).then(r=>r.ok?r.json():null).then(d=>{if(d)setBackupStatus(d);}).catch(()=>{});}},[settingsTab]);
-  // Lazy-load the checkpoint/VAE dropdown data and refresh saved workflow names
-  // when the Model & Generation tab is opened with ComfyUI configured. (Must stay below the
-  // panel/settingsTab declarations — hooks read them at render time.)
-  useEffect(()=>{
-    if(panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl)return;
-    if(!imgChatLists)fetch(`${API}/api/images/checkpoints`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatLists(d);}).catch(()=>{});
-    fetch(`${API}/api/images/workflows`).then(r=>r.ok?r.json():null).then(d=>{if(d)setImgChatWorkflows(d.workflows||[]);}).catch(()=>{});
-  },[panel,settingsTab,comfyuiUrl]);
   const [users,setUsers]=useState([]);
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
   const [authReady,setAuthReady]=useState(false);
+  useEffect(()=>{
+    if(!authReady)return;
+    imageSettingsSyncRef.current.load();
+    return ()=>imageSettingsSyncRef.current.reset();
+  },[authReady,currentUserId]);
+  useEffect(()=>{
+    if(!authReady||panel!=="settings"||settingsTab!=="generation"||!comfyuiUrl)return;
+    let cancelled=false;
+    apiJson('/api/images/checkpoints').then(d=>{
+      if(cancelled)return;
+      imageSettingsSyncRef.current.setPresets(d.settings||{});setImgChatLists(d);setImgChatListsEpoch(v=>v+1);
+    }).catch(error=>{if(!cancelled&&error.name!=="AbortError")setImageSettingsError(error.message);});
+    apiJson('/api/images/workflows').then(d=>{if(!cancelled)setImgChatWorkflows(d.workflows||[]);}).catch(()=>{});
+    return ()=>{cancelled=true;};
+  },[authReady,currentUserId,panel,settingsTab,comfyuiUrl]);
   // Daily welcome tagline — lives below the currentUser/currentUserId
   // declarations because its deps close over them (TDZ during render otherwise).
   useEffect(()=>{
@@ -1435,6 +1462,10 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
+    imageSettingsSyncRef.current.reset();setImageSettingsError("");setImgChatLists(null);setImgChatWorkflows([]);
+    setImgChatCkpt("");setImgChatRes("1024x1024");setImgChatVae("");setImgChatWorkflow("");
+    setImgChatPrefix("");setImgChatNeg("");setImgChatComposeModel("");setImgChatAutoEnhance(false);
+    setMdlPrefix("");setMdlNeg("");
     cancelVoice();
     prefsSyncRef.current?.cancel();
     for(const timer of kbSaveTimersRef.current.values())clearTimeout(timer);
@@ -1477,6 +1508,7 @@ function HyprChat(){
         {key:"think-mode",legacy:"hc-think-mode",set:setThinkMode,fallback:"auto"},
         {key:"native-effort",legacy:"hc-native-effort",set:setNativeEffort,fallback:{},convMap:true},
         {key:"fun-verbs",legacy:"hc-fun-verbs",set:setFunVerbs,fallback:true},
+        {key:"preview-auto-open",legacy:"hc-preview-auto-open",set:setPreviewAutoOpen,fallback:true},
         {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
       let server={};
@@ -1496,6 +1528,7 @@ function HyprChat(){
           val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
         }
         if(d.key==='fun-verbs')val=typeof val==='boolean'?val:true;
+        if(d.key==='preview-auto-open')val=typeof val==='boolean'?val:true;
         if(d.key==='effort-level')val=reviewLevel(val);
         if(d.key==='think-mode'&&!['auto','on','off'].includes(val))val='auto';
         if(d.key==='native-effort'&&(!val||typeof val!=='object'||Array.isArray(val)))val={};
@@ -1716,14 +1749,6 @@ function HyprChat(){
       if(d.research_num_ctx!=null)hydrateServerSetting("research_num_ctx",setResearchNumCtx,d.research_num_ctx,researchNumCtx);
       if(d.openhands_disable_thinking!=null)hydrateServerSetting("openhands_disable_thinking",setOpenhandsDisableThinking,d.openhands_disable_thinking,openhandsDisableThinking);
       if(d.quick_search_mode)hydrateServerSetting("quick_search_mode",setQuickSearchMode,d.quick_search_mode,quickSearchMode);
-      if(d.image_chat_checkpoint!=null)hydrateServerSetting("image_chat_checkpoint",setImgChatCkpt,d.image_chat_checkpoint,imgChatCkpt);
-      if(d.image_chat_resolution)hydrateServerSetting("image_chat_resolution",setImgChatRes,d.image_chat_resolution,imgChatRes);
-      if(d.image_chat_vae!=null)hydrateServerSetting("image_chat_vae",setImgChatVae,d.image_chat_vae,imgChatVae);
-      if(d.image_chat_workflow!=null)hydrateServerSetting("image_chat_workflow",setImgChatWorkflow,d.image_chat_workflow,imgChatWorkflow);
-      if(d.image_chat_prompt_prefix!=null)setImgChatPrefix(d.image_chat_prompt_prefix);
-      if(d.image_chat_negative!=null)setImgChatNeg(d.image_chat_negative);
-      if(d.image_chat_compose_model!=null)hydrateServerSetting("image_chat_compose_model",setImgChatComposeModel,d.image_chat_compose_model,imgChatComposeModel);
-      if(d.image_chat_auto_enhance!=null)hydrateServerSetting("image_chat_auto_enhance",setImgChatAutoEnhance,d.image_chat_auto_enhance,imgChatAutoEnhance);
       if(d.model_hardware_profile)setHyprfitProfile(d.model_hardware_profile);
       settingsLoadedRef.current=true;
     }).catch(()=>{settingsLoadedRef.current=true;});
@@ -1781,7 +1806,9 @@ function HyprChat(){
     connect();
     return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
   },[actId]);
-  useEffect(()=>{if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
+  // Jobs are per conversation: drop the previous chat's rows at once instead of
+  // showing them until the fetch for the new chat answers (a ghost chat has none).
+  useEffect(()=>{setCoderWorkflows(p=>p.filter(w=>w.conversation_id===actId));if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
   // Mobile: close the nav drawer after picking a conversation or switching panels.
   useEffect(()=>{if(isMobile)setSidebar(false);},[isMobile,actId,panel]);
   useEffect(()=>{
@@ -2721,7 +2748,7 @@ function HyprChat(){
       if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();startBlankChat();}
       if((e.ctrlKey||e.metaKey)&&e.key==="/"){e.preventDefault();setSidebar(p=>!p);}
       if(e.key==="?"&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||"")&&!e.target?.isContentEditable){e.preventDefault();setShowShortcuts(v=>!v);}
-      if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile){setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
+      if(e.key==="Escape"){if(showPromptPicker)setShowPromptPicker(false);else if(previewFile||workbenchState().open){closePreview();closeWorkbench();}else if(showSysPromptPicker)setShowSysPromptPicker(false);else if(ftsQuery||sq){setSq("");setFtsQuery("");setFtsResults([]);}else if(showMessageSearch)closeSidebarSearch();}
     };
     document.addEventListener("keydown",handler);
     return ()=>document.removeEventListener("keydown",handler);
@@ -3639,6 +3666,7 @@ function HyprChat(){
   };
 
   const openPreview=async(filename,url)=>{
+    closeWorkbench();
     const artifactId=documentArtifactId(url);
     if(artifactId){setPreviewFile({filename,url,type:(filename||"document").split(".").pop().toLowerCase(),artifactId});setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);return;}
     const isExternal=url.startsWith("http://") || url.startsWith("https://");
@@ -3686,32 +3714,19 @@ function HyprChat(){
     }
   };
   const closePreview=()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);};
-  useEffect(()=>{closePreview();},[actId,currentUserId]);
+  // A new chat is promoted from its ghost id to the saved conversation id during its first reply;
+  // that is the same conversation, so a preview that auto-opened while streaming must survive it.
+  const previousActId=useRef(actId);
+  useEffect(()=>{
+    const promoted=String(previousActId.current||'').startsWith('ghost-')&&actId&&!String(actId).startsWith('ghost-');
+    previousActId.current=actId;
+    closePreview();
+    if(!promoted)closeWorkbench();
+  },[actId,currentUserId]);
   const openArtifact=(artifactId)=>{
     if(artifactId)setArtifactFocusId(artifactId);
     setWsPanel(false);
     setPanel("artifacts");
-  };
-
-  const startPreviewDrag=(e)=>{
-    e.preventDefault();
-    const startX=e.clientX,startW=previewWidth;
-    // Track the live width locally — `previewWidth` in onUp is the stale
-    // value from the render the drag started in, so persisting it snapped
-    // the panel back to the pre-drag width on reload.
-    let lastW=startW;
-    const onMove=(ev)=>{
-      const nw=Math.max(260,Math.min(900,startW+(startX-ev.clientX)));
-      lastW=nw;
-      setPreviewWidth(nw);
-    };
-    const onUp=()=>{
-      localStorage.setItem("hc-preview-w",String(lastW));
-      window.removeEventListener("mousemove",onMove);
-      window.removeEventListener("mouseup",onUp);
-    };
-    window.addEventListener("mousemove",onMove);
-    window.addEventListener("mouseup",onUp);
   };
 
   const exportChat=()=>{
@@ -4581,7 +4596,7 @@ function HyprChat(){
         if((lang==="json"||!lang)&&looksLikeChartConfig(code))return <ChartBlock key={i} code={code} theme={rt} font={font} epoch={mermaidEpoch} kind="chart" printMode={printMode} streaming={streaming}/>;
         const isDiff=lang==="diff";
         if(printMode)return <pre key={i} className="print-code-block"><code>{code}</code></pre>;
-        return <CodeCard key={i} code={code} lang={lang} filename={parsed?.meta?.filename} blockKey={`${opts.codePath||""}/${bid}`} streaming={streaming}/>;
+        return <CodeCard key={i} code={code} lang={lang} fenceLabel={parsed?.label} filename={parsed?.meta?.filename} blockKey={`${opts.codePath||""}/${bid}`} streaming={streaming}/>;
       }
       // Protect $$/$ sequences inside single-line backtick inline code from the display-math split below
       const _DD="",_SD="";
@@ -4928,7 +4943,6 @@ function HyprChat(){
   // RENDER
   // ============================================================
   const settingsFocus=useFocusScope(panel==='settings',()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||'chat');});
-  const previewFocus=useFocusScope(!!previewFile&&isMobile,()=>{setPreviewFile(null);setPreviewContent(null);setPreviewError(null);setPreviewArchive(null);});
   const kbFocus=useFocusScope(!!kbPreview,()=>setKbPreview(null));
   const confirmFocus=useFocusScope(!!confirmDialog,()=>{const dialog=confirmDialog;setConfirmDialog(null);setConfirmPhrase('');dialog?.resolve?.(dialog.prompt?null:false);});
   // Exit animations: surfaces stay mounted briefly while closing (usePresence); focus scopes keep the real open flag.
@@ -5356,7 +5370,7 @@ function HyprChat(){
       {wsPanel&&activeWs?null
       :panel==='workspaces'?<WorkspaceHome {...{t,btnS,inputS,workspaces,notify}} onNewChat={startWorkspaceChat} onOpen={openWorkspace} onCreated={ws=>{setWorkspaces(p=>[ws,...p]);openWorkspace(ws.id);}}/>
       :panel==="artifacts"?<ArtifactStudioPanel t={t} font={font} workspaces={workspaces} kbs={kbs} onPreview={openPreview} onOpenConv={id=>loadConversation(id)} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Artifact added to composer",duration:1800});}}} focusId={artifactFocusId} onFocusConsumed={()=>setArtifactFocusId(null)} notify={notify} confirmAction={confirmAction}/>
-      :panel==="images"?<ImageStudioPanel t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
+      :panel==="images"?<ImageStudioPanel key={currentUserId} t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     {panelHeader(<IC.Database/>,"Knowledge Bases",<button onClick={createKb} style={btnS(t.acc)}><IC.Plus/> New KB</button>)}
@@ -7562,7 +7576,7 @@ function HyprChat(){
         </div>
         </div>
         <div className="hc-chat-composer" style={{flexShrink:0,position:"relative",transform:isMobile?"none":emptyComposerLift,transition:isMobile?"none":"transform .7s cubic-bezier(.2,.8,.2,1)",zIndex:120,pointerEvents:"auto"}}>
-          {[backgroundJob(coderWorkflows)].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
+          {[backgroundJob(coderWorkflows.filter(w=>w.conversation_id===actId))].filter(Boolean).map(workflow=><div key={workflow.id} style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusStatusStrip workflow={workflow} t={t} font={font} onOpenArtifact={openArtifact}/></div>)}
           {showCodingOptions&&<div style={{maxWidth:chatWidth,margin:'0 auto'}}><DaedalusRequestOptions key={`${actId}:${act?.model_config_id||pendingPersona?.model_config_id||''}`} conversationId={actId} currentProjectId={act?.active_coding_project_id} refreshKey={coderProjInfo?.name} jobs={standaloneCoderJobs} onChange={setCodingOptions} t={t} font={font}/></div>}
         {/* INPUT */}
         <div className="hc-composer-input-section" style={{padding:isMobile?"6px 12px calc(10px + var(--hc-content-safe-bottom))":"6px 18px 16px",flexShrink:0}}>
@@ -8069,8 +8083,10 @@ function HyprChat(){
               const cks=imgChatLists?.checkpoints||[];
               const vaeList=imgChatLists?.vaes||[];
               const hasPreset=!!(imgChatLists?.settings?.[imgChatCkpt]?.user_override);
-              const selectedModelLabel=imgChatCkpt?imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,""):"global fallback";
-              return <div style={{display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
+              const selectedModelLabel=imgChatCkpt?imgChatCkpt.replace(/\.(safetensors|ckpt)$/i,""):"profile fallback";
+              return <><div style={secHintS}>Image defaults for {currentUser?.name||"this profile"}. Changes apply only to this profile.</div>
+                {imageSettingsError&&<div role="alert" style={{color:t.err,fontSize:"var(--hc-text-secondary)",marginBottom:8}}>{imageSettingsError}{!imageSettingsReady&&<button onClick={()=>{setImageSettingsError("");imageSettingsSyncRef.current.load();}}>Retry</button>}</div>}
+                <fieldset disabled={!imageSettingsReady} style={{border:0,padding:0,margin:0,minWidth:0,display:"grid",gridTemplateColumns:"minmax(0,1fr)",gap:10}}>
                   <section style={subSecS}>
                     <div style={secHeadRowS}>
                       <div style={secTitleS}>Generation Target</div>
@@ -8078,14 +8094,14 @@ function HyprChat(){
                     </div>
                     <div style={secGridS}>
                       <label style={secFieldLabelS}>Image model
-                        <select value={imgChatCkpt} onChange={e=>setImgChatCkpt(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatCkpt} onChange={e=>saveImageSetting("image_chat_checkpoint",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">(none — built-in SDXL template)</option>
                       {cks.map(c=><option key={c} value={c}>{c.replace(/\.(safetensors|ckpt)$/i,"")}</option>)}
                       {imgChatCkpt&&imgChatLists&&!cks.includes(imgChatCkpt)&&<option value={imgChatCkpt}>{imgChatCkpt} (missing!)</option>}
                     </select>
                       </label>
                       <label style={secFieldLabelS}>Resolution
-                        <select value={imgChatRes} onChange={e=>setImgChatRes(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatRes} onChange={e=>saveImageSetting("image_chat_resolution",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="1024x1024">Square — 1024 × 1024</option>
                       <option value="1216x832">Landscape — 1216 × 832</option>
                       <option value="832x1216">Portrait — 832 × 1216</option>
@@ -8096,13 +8112,13 @@ function HyprChat(){
                     </select>
                       </label>
                       <label style={secFieldLabelS}>VAE
-                        <select value={imgChatVae} onChange={e=>setImgChatVae(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatVae} onChange={e=>saveImageSetting("image_chat_vae",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Baked (checkpoint)</option>
                       {vaeList.map(v=><option key={v} value={v}>{v.replace(/\.(safetensors|pt|ckpt)$/i,"")}</option>)}
                     </select>
                       </label>
                       <label style={secFieldLabelS}>Workflow
-                        <select value={imgChatWorkflow} onChange={e=>setImgChatWorkflow(e.target.value)} style={{...sel,width:"100%"}}>
+                        <select value={imgChatWorkflow} onChange={e=>saveImageSetting("image_chat_workflow",e.target.value)} style={{...sel,width:"100%"}}>
                       <option value="">Default (built-in SDXL)</option>
                       {imgChatWorkflows.map(w=><option key={w.name} value={w.name}>{w.name}{w.has_lora?" ⚡":""}</option>)}
                       {imgChatWorkflow&&!imgChatWorkflows.some(w=>w.name===imgChatWorkflow)&&<option value={imgChatWorkflow}>{imgChatWorkflow} (missing!)</option>}
@@ -8120,20 +8136,20 @@ function HyprChat(){
                     {imgChatCkpt?<>
                   <div>
                     <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt saved with this model</div>
-                    <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
+                    <input value={mdlPrefix} onChange={e=>setMdlPrefix(e.target.value)} onBlur={()=>saveModelPrefix("prompt_prefix",mdlPrefix)} placeholder="e.g. score_9, score_8_up, realistic, 35mm photo — or anime style tags for anime models" style={inp}/>
                   </div>
                   <div>
                     <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt for this model</div>
-                    <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={saveModelPrefix} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
+                    <input value={mdlNeg} onChange={e=>setMdlNeg(e.target.value)} onBlur={()=>saveModelPrefix("negative_prefix",mdlNeg)} placeholder="e.g. score_4, score_3, score_2, score_1, lowres, watermark" style={inp}/>
                   </div>
                 </>:<>
                   <div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt (global fallback)</div>
-                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-prefix","image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default prompt (profile fallback)</div>
+                    <input value={imgChatPrefix} onChange={e=>setImgChatPrefix(e.target.value)} onBlur={()=>saveImageSetting("image_chat_prompt_prefix",imgChatPrefix)} placeholder="empty = standard quality tags (masterpiece, best quality, …)" style={inp}/>
                   </div>
                   <div>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt (global fallback)</div>
-                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>persistServerSetting("hc-img-chat-neg","image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
+                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:5}}>Default negative prompt (profile fallback)</div>
+                    <input value={imgChatNeg} onChange={e=>setImgChatNeg(e.target.value)} onBlur={()=>saveImageSetting("image_chat_negative",imgChatNeg)} placeholder="empty = standard negatives (lowres, bad anatomy, watermark, …)" style={inp}/>
                   </div>
                 </>}
                     <div style={secHintS}>Text fields save when you click away. Pony-family models get score-tag prompts automatically unless overridden here.</div>
@@ -8144,11 +8160,11 @@ function HyprChat(){
                       <div style={secTitleS}>Prompt Model</div>
                       <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>persona photos + enhance</div>
                     </div>
-                  {modelField({icon:"📷",value:imgChatComposeModel,set:setImgChatComposeModel,inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
-                  {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>setImgChatAutoEnhance(v=>!v),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
+                  {modelField({icon:"📷",value:imgChatComposeModel,set:value=>saveImageSetting("image_chat_compose_model",value),inheritTitle:"Same as the conversation's chat model",inheritDesc:"Click to pick a dedicated model"})}
+                  {toggleField("Auto-enhance chat prompts",imgChatAutoEnhance,()=>saveImageSetting("image_chat_auto_enhance",!imgChatAutoEnhance),imgChatAutoEnhance?"the prompt model expands every chat image prompt (adds up to ~20s per image)":"off — raw prompt + default quality tags")}
                   <div style={secHintS}>Empty uses the chat's own model, which is usually best for matching conversation tone and content rating. Auto-enhance applies to regular chats only — persona photos already compose their own prompts.</div>
                   </section>
-              </div>;
+              </fieldset></>;
             })()}
         </>,<>Defaults for the in-chat <code>generate_image</code> tool. Image Studio ★ presets still apply automatically; this section controls the chat-facing model, workflow, prompt defaults, and optional prompt-writer model.</>)}
       </div>
@@ -8213,6 +8229,7 @@ function HyprChat(){
             </div>;
           })())}
         {settingSection("Activity",null,toggleField("Playful status words",funVerbs,()=>setFunVerbs(v=>!v),funVerbs?"On":"Off"),"A little personality while working. Specific actions and errors keep their precise labels.")}
+        {settingSection("Previews",null,toggleField("Open previews automatically",previewAutoOpen,()=>setPreviewAutoOpen(v=>!v),previewAutoOpen?"On":"Off"),"Full HTML pages in replies and Daedalus web apps open in the side pane as they arrive. The Preview button on a code block always works.")}
         {settingSection("Typography",null,(()=>{
             const previewIdx=pendingFont!==null?pendingFont:fi;
             const pF=FONTS[previewIdx]||FONTS[0];
@@ -8579,75 +8596,10 @@ function HyprChat(){
     </div>
   </div>,document.body)}
       </div>{/* end inner panel column */}
-      {/* Preview panel — outside panel ternary so it renders alongside any panel */}
-      {previewFile&&<div ref={previewFocus} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label="Preview panel" style={{width:isMobile?"auto":previewWidth,flexShrink:0,borderLeft:isMobile?"none":"1px solid var(--hc-line)",background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
-            {/* Drag handle */}
-            {!isMobile&&<div onMouseDown={startPreviewDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
-            {/* Header */}
-            <div style={{padding:"9px 12px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}F5`}}>
-              <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
-              <span style={{fontSize:"var(--hc-text-secondary)",color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
-              {previewFile.isExternal
-                ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
-                :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}
-              <button onClick={closePreview} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1,display:"flex"}}><IC.X/></button>
-            </div>
-            {/* Content */}
-            <div style={{flex:1,overflowY:"auto",padding:14}}>
-              {previewFile.artifactId?<DocumentPreviewPanel key={previewFile.artifactId} artifactId={previewFile.artifactId} events={evts} t={t} font={font} onRevision={a=>setPreviewFile(p=>p?{...p,artifactId:a.artifact_id,filename:a.filename,url:a.url,type:a.filename.split(".").pop().toLowerCase()}:p)}/>
-              :previewError?<div style={{display:"flex",flexDirection:"column",gap:10,padding:16,background:`${t.err}10`,border:`1px solid ${t.err}33`,borderRadius:"var(--hc-radius-card)",color:t.err}}>
-                <div style={{fontWeight:700,fontSize:"var(--hc-text-secondary)"}}>⚠ {previewError}</div>
-                {previewFile.isExternal
-                  ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",gap:4}}>↗ Open in new tab</a>
-                  :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)",display:"inline-flex",alignItems:"center",gap:4}}>⬇ Download anyway</a>}
-              </div>
-              :!previewFile.isExternal&&previewFile.type==="pdf"
-                ?<iframe src={userScopedUrl(previewFile.url)} title={previewFile.filename} style={{width:"100%",height:"100%",minHeight:500,border:0,background:"white"}}/>
-              :previewFile.isExternal&&previewFile.type==="pdf"
-                ?<iframe src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",minHeight:500}} title={previewFile.filename}/>
-              :previewFile.isExternal&&["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)
-                ?<img src={`${API}/api/proxy-preview?url=${encodeURIComponent(previewFile.url)}`} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",display:"block"}} alt={previewFile.filename}/>
-              :["png","jpg","jpeg","gif","webp","svg"].includes(previewFile.type)&&!previewFile.isExternal
-                ?<img src={`${API}${previewFile.url}`} style={{maxWidth:"100%",borderRadius:"var(--hc-radius)",display:"block"}} alt={previewFile.filename}/>
-                :previewFile.type==="archive"&&previewArchive
-                ?<div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,padding:"8px 12px",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)"}}>
-                    <span style={{fontSize:"var(--hc-text-display)"}}>📦</span>
-                    <div style={{flex:1}}>
-                      <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text}}>{previewArchive.filename}</div>
-                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{previewArchive.file_count} files, {previewArchive.entries.length} entries</div>
-                    </div>
-                    <a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"4px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)",fontWeight:600}}>⬇ Download</a>
-                  </div>
-                  <div style={{borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",overflow:"hidden"}}>
-                    {previewArchive.entries.filter(e=>e.name!=="./"&&e.name!=="."&&e.name!=="/").map((entry,i)=>{
-                      const depth=Math.max(0,(entry.name.match(/\//g)||[]).length-(entry.is_dir?1:0));
-                      const basename=entry.is_dir?entry.name.replace(/\/$/,"").split("/").pop()+"/":entry.name.split("/").pop();
-                      const sizeStr=entry.is_dir?"":entry.size>=1048576?(entry.size/1048576).toFixed(1)+"MB":entry.size>=1024?(entry.size/1024).toFixed(1)+"KB":entry.size+"B";
-                      const extC=(basename.match(/\.(\w+)$/)||[])[1]||"";
-                      const iconColor=entry.is_dir?t.warm:["py","js","ts","rs","go","java","c","cpp","sh"].includes(extC)?t.acc:["md","txt","log","csv"].includes(extC)?t.dim:["json","yaml","toml","xml","html","css"].includes(extC)?t.f1:t.mut;
-                      return <div key={i} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",paddingLeft:10+depth*16,background:i%2===0?"transparent":`${t.surface}33`,borderBottom:i<previewArchive.entries.length-1?"1px solid var(--hc-line-subtle)":"none",fontSize:"var(--hc-text-secondary)",color:entry.is_dir?t.warm:t.dim}}>
-                        <span style={{fontSize:"var(--hc-text-secondary)",flexShrink:0,color:iconColor}}>{entry.is_dir?"📁":"📄"}</span>
-                        <span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:entry.is_dir?600:400}}>{basename}</span>
-                        {sizeStr&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,fontFamily:codeFont}}>{sizeStr}</span>}
-                      </div>;
-                    })}
-                  </div>
-                </div>
-                :previewFile.type==="html"&&previewContent
-                ?<iframe sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",background:"#fff",minHeight:400}} title={previewFile.filename}/>
-                :["md","markdown","mdx"].includes(previewFile.type)&&previewContent
-                ?<div style={{lineHeight:1.7,fontSize:"var(--hc-text-secondary)",color:t.dim}}><MDWrap>{md(previewContent)}</MDWrap></div>
-                :previewContent
-                ?<pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:codeFont,lineHeight:1.6}}>{previewContent}</pre>
-                :!["png","jpg","jpeg","gif","webp","svg","archive"].includes(previewFile.type)
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>
-                :previewFile.type==="archive"&&!previewArchive&&!previewError
-                ?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>
-                :null
-              }
-            </div>
-          </div>}
+      {/* Side pane — outside the panel ternary so it renders alongside any panel: file previews, live HTML previews and the Daedalus workbench */}
+      {(previewFile||workbench.open)&&<SidePane previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onClosePreview={closePreview}
+        onRevision={a=>setPreviewFile(p=>p?{...p,artifactId:a.artifact_id,filename:a.filename,url:a.url,type:a.filename.split(".").pop().toLowerCase()}:p)}
+        t={t} font={font} md={md} codeFont={codeFont} evts={evts} isMobile={isMobile} onOpenArtifact={openArtifact}/>}
       </div>{/* end panels + preview wrapper */}
     </div>
 

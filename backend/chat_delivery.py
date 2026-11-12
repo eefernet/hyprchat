@@ -80,9 +80,14 @@ async def deliver(stream, req):
                 candidate = ''
                 event = {'type': 'review_status', 'notice': 'Review incomplete; previous answer retained.'}
             elif kind == 'error':
+                # Keep the reason on the persisted row: the live ⚠ block is client-side only
+                # and a reload used to show just "generation failed".
+                reason = ' '.join(str(event.get('error') or '').split())[:160]
                 if not visible.strip():
-                    visible = '_[No response; generation failed.]_'
+                    visible = f'_[No response — {reason}]_' if reason else '_[No response; generation failed.]_'
                     yield sse({'type': 'token', 'content': visible})
+                elif reason and not reviewing:
+                    visible = visible.rstrip() + f'\n\n_[interrupted: {reason}]_'
                 if reviewing:
                     candidate = ''
                     yield sse({'type': 'replace', 'content': visible})

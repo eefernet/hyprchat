@@ -16,6 +16,7 @@ import config
 import context_policy
 import database as db
 import image_prompt_enhancer
+import image_settings
 import persona_images
 import cancel_registry
 from document_tools import DOCUMENT_TOOLS
@@ -731,9 +732,9 @@ def _dedupe_prompt_tags(text: str) -> str:
             tags.append(tag)
     return ", ".join(tags)
 
-def _image_chat_resolution() -> tuple[int, int]:
+def _image_chat_resolution(settings: dict | None = None) -> tuple[int, int]:
     try:
-        w, h = (int(x) for x in (config.IMAGE_CHAT_RESOLUTION or "1024x1024").split("x"))
+        w, h = (int(x) for x in ((settings or {}).get("image_chat_resolution", config.IMAGE_CHAT_RESOLUTION) or "1024x1024").split("x"))
         return w, h
     except Exception:
         return 1024, 1024
@@ -786,14 +787,15 @@ def _persona_visual_context(args: dict, persona_context: dict) -> dict:
         prior_images=persona_context.get("prior_images") if isinstance(persona_context.get("prior_images"), list) else [],
     )
 
-def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) -> dict:
+def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None, *, image_preferences: dict | None = None) -> dict:
     """Resolve chat generate_image settings without submitting to ComfyUI."""
     args = args or {}
     persona_context = persona_context or {}
     is_persona = bool(persona_context.get("persona_id"))
     gi_prompt = _clean_text(args.get("prompt"))
     gi_negative_arg = _clean_text(args.get("negative_prompt"))
-    default_w, default_h = _image_chat_resolution()
+    image_defaults = (image_preferences if image_preferences is not None else image_settings.legacy_snapshot())["settings"]
+    default_w, default_h = _image_chat_resolution(image_defaults)
 
     selection = None
     profile = None
@@ -839,22 +841,23 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
                     workflow_name = ""
 
     active_profile = profile if isinstance(profile, dict) else None
-    # Global workflow fallback: when no persona profile applied, render through
-    # the admin-selected saved workflow (Settings → Chat Image Generation).
+    # Profile workflow fallback: when no persona profile applied, render through
+    # the owner-selected saved workflow (Settings → Chat Image Generation).
     # Persona workflows already won above; this only fills the empty slot. A
     # missing file leaves template=None so generate_image falls back to the
     # built-in SDXL template.
-    if template is None and not active_profile and (config.IMAGE_CHAT_WORKFLOW or "").strip():
-        template = comfyui.load_workflow(config.IMAGE_CHAT_WORKFLOW.strip())
+    if template is None and not active_profile and (image_defaults["image_chat_workflow"] or "").strip():
+        template = comfyui.load_workflow(image_defaults["image_chat_workflow"].strip())
         if template is not None:
-            workflow_name = config.IMAGE_CHAT_WORKFLOW.strip()
+            workflow_name = image_defaults["image_chat_workflow"].strip()
     gi_ckpt = (
         _profile_text(active_profile, "checkpoint", "ckpt", "ckpt_name")
         if active_profile else ""
-    ) or (config.IMAGE_CHAT_CHECKPOINT or "").strip()
-    gi_preset = comfyui.settings_for_checkpoint(gi_ckpt) if gi_ckpt else {}
+    ) or (image_defaults["image_chat_checkpoint"] or "").strip()
+    gi_preset = (comfyui.settings_for_checkpoint(gi_ckpt) if image_preferences is None else
+                 comfyui.settings_for_checkpoint(gi_ckpt, overrides=image_preferences["presets"])) if gi_ckpt else {}
 
-    # Chat image dimensions are a global admin preference. Persona profiles and
+    # Chat image dimensions are an owner preference. Persona profiles and
     # model-supplied tool args may steer workflow/model/style, but not size.
     gi_width = default_w
     gi_height = default_h
@@ -881,13 +884,13 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
     gi_vae = (
         _profile_text(active_profile, "vae", "vae_name")
         if active_profile else ""
-    ) or (config.IMAGE_CHAT_VAE or "").strip()
+    ) or (image_defaults["image_chat_vae"] or "").strip()
 
     # Non-persona baseline: with no preset and no configured global prefix, a
     # bare prompt would hit SDXL with zero quality tags and an empty negative.
     # Persona prompts are composed upstream and profiles carry their own tags.
     base_prompt_prefix = (
-        (gi_preset.get("prompt_prefix") or config.IMAGE_CHAT_PROMPT_PREFIX or "").strip()
+        (gi_preset.get("prompt_prefix") or image_defaults["image_chat_prompt_prefix"] or "").strip()
         or ("" if is_persona else image_prompt_enhancer.DEFAULT_QUALITY_PREFIX)
     )
     profile_prompt_prefix = (
@@ -900,7 +903,7 @@ def _resolve_chat_image_recipe(args: dict, persona_context: dict | None = None) 
     )
     gi_full_prompt = _dedupe_prompt_tags(_join_prompt_parts(base_prompt_prefix, profile_prompt_prefix, gi_prompt, profile_prompt_suffix))
     gi_negative = _dedupe_prompt_tags(_join_prompt_parts(
-        (gi_preset.get("negative_prefix") or config.IMAGE_CHAT_NEGATIVE or "").strip()
+        (gi_preset.get("negative_prefix") or image_defaults["image_chat_negative"] or "").strip()
         or ("" if is_persona else image_prompt_enhancer.DEFAULT_NEGATIVE_PROMPT),
         _profile_text(active_profile, "negative_prefix", "negative_prompt") if active_profile else "",
         gi_negative_arg,
@@ -1009,6 +1012,7 @@ async def _exec_tool_scoped(
     artifact_message_id: int | None = None,
     persona_context: dict | None = None,
     workspace_id: str | None = None,
+    image_preferences: dict | None = None,
 ) -> str:
     """Execute a built-in or custom tool and return the result string."""
     custom_tool_map = custom_tool_map or {}
@@ -1685,15 +1689,17 @@ async def _exec_tool_scoped(
             # Optional LLM pass expanding terse prompts into full SDXL prompts.
             # Non-persona only: persona prompts are composed by persona_images.
             # Fail-open — a slow or dead helper model never blocks the render.
+            if image_preferences is None:
+                image_preferences = await image_settings.get_snapshot()
             gi_auto_enhanced = False
-            if config.IMAGE_CHAT_AUTO_ENHANCE and not (persona_context or {}).get("persona_id"):
+            if image_preferences["settings"]["image_chat_auto_enhance"] and not (persona_context or {}).get("persona_id"):
                 await events.emit(conv_id, "tool_progress", {
                     "tool": "generate_image", "icon": "image",
                     "status": "Enhancing prompt",
                 })
                 try:
                     _enh = await asyncio.wait_for(
-                        image_prompt_enhancer.enhance_prompt(None, gi_prompt, timeout=20),
+                        image_prompt_enhancer.enhance_prompt(None, gi_prompt, timeout=20, image_preferences=image_preferences),
                         timeout=25)
                 except Exception:
                     _enh = None
@@ -1705,7 +1711,7 @@ async def _exec_tool_scoped(
             # Settings-driven defaults plus persona-only local profile routing.
             # The profile file lives in ignored data/ and only selects known
             # saved workflows/checkpoints/LoRAs; the model never invents graphs.
-            gi_recipe = _resolve_chat_image_recipe(args, persona_context=persona_context)
+            gi_recipe = _resolve_chat_image_recipe(args, persona_context=persona_context, image_preferences=image_preferences)
             gi_recipe["auto_enhanced"] = gi_auto_enhanced
             gi_detail = _image_recipe_event_detail(gi_recipe)
             gi_detail_json = json.dumps(gi_detail, ensure_ascii=True)

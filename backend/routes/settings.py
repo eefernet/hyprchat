@@ -8,7 +8,7 @@ from typing import Literal
 
 from fastapi import Request, APIRouter, Body, HTTPException, Query
 
-import comfyui
+import image_settings
 import config
 import context_policy
 import database as db
@@ -39,6 +39,7 @@ def _sandbox_size_bytes() -> int:
 @router.get("/api/settings")
 async def get_app_settings():
     settings = load_settings()
+    image_preferences = await image_settings.get_snapshot()
     size = _sandbox_size_bytes()
     venv_exists = os.path.exists(os.path.join(config.SANDBOX_VENV_DIR, "bin", "python"))
     try:
@@ -73,14 +74,7 @@ async def get_app_settings():
         "default_num_ctx": config.DEFAULT_NUM_CTX,
         "research_num_ctx": config.RESEARCH_NUM_CTX,
         "quick_search_mode": config.QUICK_SEARCH_MODE,
-        "image_chat_checkpoint": config.IMAGE_CHAT_CHECKPOINT,
-        "image_chat_workflow": config.IMAGE_CHAT_WORKFLOW,
-        "image_chat_resolution": config.IMAGE_CHAT_RESOLUTION,
-        "image_chat_vae": config.IMAGE_CHAT_VAE,
-        "image_chat_prompt_prefix": config.IMAGE_CHAT_PROMPT_PREFIX,
-        "image_chat_negative": config.IMAGE_CHAT_NEGATIVE,
-        "image_chat_compose_model": config.IMAGE_CHAT_COMPOSE_MODEL,
-        "image_chat_auto_enhance": config.IMAGE_CHAT_AUTO_ENHANCE,
+        **image_preferences["settings"],
         "model_hardware_profile": hyprfit.clean_hardware_profile(settings.get("model_hardware_profile")),
         "sandbox_dir": config.SANDBOX_DIR,
         "sandbox_outputs_dir": config.SANDBOX_OUTPUTS_DIR,
@@ -88,6 +82,17 @@ async def get_app_settings():
         "sandbox_file_count": file_count,
         "sandbox_venv_ready": venv_exists,
     }
+
+@router.get("/api/images/settings")
+async def get_image_settings():
+    return (await image_settings.get_snapshot())["settings"]
+
+@router.patch("/api/images/settings")
+async def patch_image_settings(body: dict = Body(...)):
+    try:
+        return (await image_settings.patch_settings(body))["settings"]
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 @router.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
@@ -98,6 +103,16 @@ async def update_app_settings(body: dict = Body(...)):
         raise HTTPException(422, str(error)) from error
     if "document_tools_enabled" in body and type(body["document_tools_enabled"]) is not bool:
         raise HTTPException(422, "document_tools_enabled must be a boolean")
+    image_patch = {k: v for k, v in body.items() if k in image_settings.IMAGE_KEYS}
+    try:
+        image_preferences = (await image_settings.patch_settings(image_patch) if image_patch
+                             else await image_settings.get_snapshot())
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    body = {k: v for k, v in body.items() if k not in image_settings.IMAGE_KEYS}
+    if image_patch and not body:
+        return {**_public_settings_payload(settings), **context_policy.public_settings(),
+                **image_preferences["settings"], "pending_context_jobs": []}
     allowed = {"document_tools_enabled", "file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
@@ -106,9 +121,6 @@ async def update_app_settings(body: dict = Body(...)):
                "openhands_num_ctx",
                "openhands_disable_thinking",
                "default_num_ctx", "research_num_ctx", "quick_search_mode",
-               "image_chat_checkpoint", "image_chat_workflow", "image_chat_resolution", "image_chat_vae",
-               "image_chat_prompt_prefix", "image_chat_negative", "image_chat_compose_model",
-               "image_chat_auto_enhance",
                "ollama_scan_ssh_host", "ollama_scan_ssh_port", "ollama_scan_ssh_user",
                "ollama_scan_ssh_auth_mode", "ollama_scan_ssh_key_path", "ollama_scan_ssh_password",
                "model_hardware_profile"}
@@ -277,47 +289,6 @@ async def update_app_settings(body: dict = Body(...)):
         print(f"[Config] Quick Search mode: {config.QUICK_SEARCH_MODE}")
     if "model_hardware_profile" in body:
         settings["model_hardware_profile"] = hyprfit.clean_hardware_profile(body.get("model_hardware_profile"))
-    # Chat image generation defaults. Checkpoint/VAE values come from the live
-    # ComfyUI dropdowns in the UI; stored as-is (a stale name surfaces as a
-    # tool_error at generation time, never a crash here).
-    if "image_chat_checkpoint" in body:
-        config.IMAGE_CHAT_CHECKPOINT = str(body["image_chat_checkpoint"] or "").strip()[:200]
-        settings["image_chat_checkpoint"] = config.IMAGE_CHAT_CHECKPOINT
-        print(f"[Config] Chat image checkpoint: {config.IMAGE_CHAT_CHECKPOINT or '(built-in template)'}")
-    if "image_chat_workflow" in body:
-        _wf = str(body["image_chat_workflow"] or "").strip()[:200]
-        # Only accept a workflow that actually exists; blank an unknown/deleted
-        # name so chat image gen can't be stranded pointing at a missing graph.
-        if _wf and _wf not in comfyui.list_workflows():
-            print(f"[Config] Ignoring unknown chat image workflow: {_wf}")
-            _wf = ""
-        config.IMAGE_CHAT_WORKFLOW = _wf
-        settings["image_chat_workflow"] = _wf
-        print(f"[Config] Chat image workflow: {_wf or '(built-in template)'}")
-    if "image_chat_resolution" in body:
-        _res = str(body["image_chat_resolution"] or "").strip()
-        if not re.fullmatch(r"\d{3,4}x\d{3,4}", _res):
-            _res = "1024x1024"
-        config.IMAGE_CHAT_RESOLUTION = _res
-        settings["image_chat_resolution"] = _res
-    if "image_chat_vae" in body:
-        config.IMAGE_CHAT_VAE = str(body["image_chat_vae"] or "").strip()[:200]
-        settings["image_chat_vae"] = config.IMAGE_CHAT_VAE
-    if "image_chat_prompt_prefix" in body:
-        config.IMAGE_CHAT_PROMPT_PREFIX = str(body["image_chat_prompt_prefix"] or "").strip()[:500]
-        settings["image_chat_prompt_prefix"] = config.IMAGE_CHAT_PROMPT_PREFIX
-    if "image_chat_negative" in body:
-        config.IMAGE_CHAT_NEGATIVE = str(body["image_chat_negative"] or "").strip()[:500]
-        settings["image_chat_negative"] = config.IMAGE_CHAT_NEGATIVE
-    if "image_chat_compose_model" in body:
-        config.IMAGE_CHAT_COMPOSE_MODEL = str(body["image_chat_compose_model"] or "").strip()[:200]
-        settings["image_chat_compose_model"] = config.IMAGE_CHAT_COMPOSE_MODEL
-        print(f"[Config] Photo prompt model: {config.IMAGE_CHAT_COMPOSE_MODEL or '(conversation chat model)'}")
-    if "image_chat_auto_enhance" in body:
-        # The frontend persists string values; bool("false") is True, so parse.
-        config.IMAGE_CHAT_AUTO_ENHANCE = str(body["image_chat_auto_enhance"]).strip().lower() in ("1", "true", "yes", "on")
-        settings["image_chat_auto_enhance"] = config.IMAGE_CHAT_AUTO_ENHANCE
-        print(f"[Config] Chat image auto-enhance: {'on' if config.IMAGE_CHAT_AUTO_ENHANCE else 'off'}")
     context_policy.apply_settings(settings)
     save_settings(settings)
     import coder_jobs
@@ -325,6 +296,7 @@ async def update_app_settings(body: dict = Body(...)):
     return {
         "pending_context_jobs": pending_context_jobs,
         **_public_settings_payload(settings),
+        **image_preferences["settings"],
         **context_policy.public_settings(),
         "current_ollama_url": config.OLLAMA_URL,
         "current_codebox_url": config.CODEBOX_URL,
