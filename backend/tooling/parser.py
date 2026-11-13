@@ -430,6 +430,8 @@ TOOL_PARAMS = {
     "run_aider_fix": ["project_dir", "task", "issue_run_id"],
     "get_coder_workflow": ["workflow_id"],
     "cancel_coder_workflow": ["workflow_id"],
+    "skill_view": ["name", "file"],
+    "skill_manage": ["action", "name", "description", "body"],
 }
 
 

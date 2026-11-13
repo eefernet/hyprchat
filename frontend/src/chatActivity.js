@@ -7,7 +7,7 @@ export function activityDetail(event) {
 }
 
 const clean=value=>String(value||'').replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,'').trim();
-const names={quick_search:'Searching',research:'Searching',deep_research:'Researching',fetch_url:'Reading page',execute_code:'Running code',run_shell:'Running command',read_file:'Reading file',write_file:'Writing file',list_files:'Listing files',generate_image:'Generating image',kb:'Searching knowledge',memory:'Reading memory',download_file:'Preparing file',download_project:'Preparing project',install_package:'Installing package'};
+const names={quick_search:'Searching',research:'Searching',deep_research:'Researching',fetch_url:'Reading page',execute_code:'Running code',run_shell:'Running command',read_file:'Reading file',write_file:'Writing file',list_files:'Listing files',generate_image:'Generating image',kb:'Searching knowledge',memory:'Reading memory',download_file:'Preparing file',download_project:'Preparing project',install_package:'Installing package',skill_view:'Loading skill',skill_manage:'Saving skill'};
 const toolLabel=tool=>names[tool]||String(tool||'Tool').replaceAll('_',' ').replace(/^./,s=>s.toUpperCase());
 const identity=data=>data.tool_call_id||data.call_id||data.operation_id||data.run_id||null;
 

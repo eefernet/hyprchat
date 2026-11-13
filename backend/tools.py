@@ -20,6 +20,7 @@ import image_settings
 import persona_images
 import cancel_registry
 from document_tools import DOCUMENT_TOOLS
+from tooling.skill_tools import SKILL_TOOLS
 from artifact_files import artifact_file_metadata as _artifact_file_metadata
 from artifact_files import extract_indexable_text
 from connectors import execute_connector_tool
@@ -1021,6 +1022,9 @@ async def _exec_tool_scoped(
         if name in DOCUMENT_TOOLS:
             from documents import tool as document_tool
             return await document_tool(name, args or {}, http=http, conv_id=conv_id)
+        if name in SKILL_TOOLS:
+            from tooling import skill_tools
+            return await skill_tools.run(name, args or {}, http=http, events=events, conv_id=conv_id)
         from coder_jobs import route_tool as route_coder_job
         routed = await route_coder_job(name, args, conv_id, events)
         if routed is not None:

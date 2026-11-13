@@ -1,4 +1,28 @@
 <details open>
+<summary>Alpha v18.3 — Nov 13, 2026</summary>
+
+> HyprChat now learns from its own work.
+
+## Skills
+
+- **HyprChat saves what it works out** — after a multi-step task, a fixed error, or a correction from you, it can save a skill: a short procedure with when to use it, the steps, and the pitfalls. Later chats see a one-line list of skills and load the full procedure when a task matches.
+- **Learning in the background** — after a turn with real work, a reviewer decides whether anything is worth keeping. Most turns save nothing; it prefers improving a skill it just used over writing a new one.
+- **It fixes its own skills** — tell it a step is wrong and it patches the skill. Every change keeps the previous version, so you can compare and restore.
+- **Guardrails** — skills learned during scheduled runs, in chats that read email or connector data, or that trip a safety check wait for your approval. You can switch to "always ask me first".
+- **Skills panel** — browse, write, edit, pin, archive and delete skills; review waiting skills and changes with a before/after view; attach script files that are copied into the code sandbox when a skill is loaded; import and export standard `SKILL.md` files.
+- **Upkeep** — learned skills that go unused are flagged, then archived. Nothing is deleted automatically, and pinned skills are left alone.
+- **Where it applies** — ordinary chats, Master Developer, the Assistant and scheduled tasks. Not Daedalus coding jobs, ghost chats, or roleplay characters.
+
+## Chat
+
+- **The view follows the reply** — while you are at the bottom, new text, tool output, tables and diagrams stay in view, and the reply no longer jumps or gets cut off when it finishes. A new reply is no longer hidden behind the message box, including when your draft grows to several lines.
+- **Scroll up and it lets go** — once you scroll up to read, nothing pulls you back down. Scroll to the end, or use the jump button, to follow again.
+- **Tool output where it happened** — code output and delivered files now sit under the part of the reply that produced them, instead of in a stack at the end. Output starts collapsed to one line; a failed run starts open. Older messages keep their previous layout.
+- **Continued replies keep their output** — pressing Continue no longer drops the code output from the first half of the reply.
+
+</details>
+
+<details>
 <summary>Alpha v18.2.1 — Nov 12, 2026</summary>
 
 > Clearer coding results, safer follow-up edits, and a new home for running your projects.

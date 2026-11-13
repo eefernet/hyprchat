@@ -736,6 +736,8 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
         "mcp_servers", "openapi_connectors", "connector_tools",
     ):
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
+    for table in ("skill_revisions", "skill_files", "skill_conv_taint", "skills"):   # children first
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_prefs WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_profile WHERE id=?", (uid,))
     await conn.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
@@ -783,7 +785,7 @@ async def delete_all_users_and_data() -> dict:
             "conversation_files", "workspace_conversations", "workspace_research_reports",
             "research_sources", "research_events", "run_events", "workspace_memory_blocks",
             "artifact_tags", "artifact_workspaces", "artifact_events", "council_members",
-            "kb_chunks_fts",
+            "kb_chunks_fts", "skill_revisions", "skill_files", "skill_conv_taint", "skills",
         ):
             await db.execute(f"DELETE FROM {table}")
         for table in (
@@ -1133,6 +1135,8 @@ async def init_db():
         await migrate_calendar(db)
         from library_search import migrate as migrate_library
         await migrate_library(db)
+        from db.skill_store import migrate as migrate_skills
+        await migrate_skills(db)
     finally:
         await db.close()
 

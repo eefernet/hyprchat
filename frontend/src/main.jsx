@@ -2,6 +2,11 @@ import {WorkspaceHome,KnowledgeReadiness} from './components/workspaceComponents
 import useFocusScope from './useFocusScope.js';
 import usePresence from './usePresence.js';
 import useNewKeys from './useNewKeys.js';
+import {useChatFollow} from './useChatFollow.js';
+import {showJumpButton} from './chatScroll.js';
+import {messageParts,stampCard,resetOffsets,capSavedEvents,mergeContinued} from './messageParts.js';
+import MessageBody from './components/MessageBody.jsx';
+import {MessageCards} from './components/ToolOutputCards.jsx';
 import Switch from './components/Switch.jsx';
 import './ui.css';
 import './surfaces.css';
@@ -92,6 +97,7 @@ import ContextInspector from './components/ContextInspector.jsx';
 import LibrarySearchPanel from './panels/LibrarySearchPanel.jsx';
 import AssistantPanel from './panels/AssistantPanel.jsx';
 import NotesPanel from './panels/NotesPanel.jsx';
+import SkillsPanel from './panels/SkillsPanel.jsx';
 import CalendarPanel from './panels/CalendarPanel.jsx';
 import EmailPanel from './panels/EmailPanel.jsx';
 import BackgroundCanvas from './components/BackgroundCanvas.jsx';
@@ -654,6 +660,8 @@ function HyprChat(){
   const evtsRef=useRef([]);
   // Dedicated save buffer — accumulates events for the current stream regardless of chat switches
   const streamSaveEvtsRef=useRef([]);
+  // Length of the reply text streamed so far: tool cards are stamped with it so they render in place (messageParts.js).
+  const streamTextLenRef=useRef(0);
   // Conversation id currently being streamed (null when idle). Set at sendMessages start, cleared on completion.
   const streamingCidRef=useRef(null);
   const [kbs,setKbs]=useState([]);
@@ -687,7 +695,6 @@ function HyprChat(){
   const [toasts,setToasts]=useState([]); // [{id,type,text,detail,action}]
   const [confirmDialog,setConfirmDialog]=useState(null);
   const [confirmPhrase,setConfirmPhrase]=useState("");
-  const [collapsedOutputs,setCollapsedOutputs]=useState(()=>new Set()); // Set of "msgIdx-outputIdx" keys
   const [attachments,setAttachments]=useState([]); // [{name, content}]
   const [coderProjUploading,setCoderProjUploading]=useState(false);
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
@@ -1784,7 +1791,7 @@ function HyprChat(){
         // Only buffer events for the conversation that is actually streaming —
         // switching to another chat with an in-flight background run otherwise
         // persists THAT chat's events into this stream's message metadata.
-        if(streamingCidRef.current===actId)streamSaveEvtsRef.current.push(ev);
+        if(streamingCidRef.current===actId){stampCard(ev,streamTextLenRef.current);streamSaveEvtsRef.current.push(ev);}
         // Route search_agent results into the QUICK SEARCH carousel — same data
         // the chat model saw, instead of the old parallel /api/quick-search call.
         if(ev.type==="search_results"&&ev.data?.source==="quick_search"){
@@ -2421,21 +2428,9 @@ function HyprChat(){
     if(reqId===loadReqRef.current) setLoadingConv(false);
   }, [notify]);
 
-  useEffect(()=>{
-    const el=chatScrollRef.current;
-    if(!el)return;
-    // Only auto-scroll if user is already near the bottom (within 200px)
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<200;
-    if(nearBottom)el.scrollTop=el.scrollHeight;
-  },[act?.messages]);
-  // Auto-scroll during council streaming
-  useEffect(()=>{
-    if(!councilRunning)return;
-    const el=chatScrollRef.current;
-    if(!el)return;
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<300;
-    if(nearBottom)el.scrollTop=el.scrollHeight;
-  },[councilResponses,councilHostContent,councilVotes,councilVoting]);
+  // Keeps the newest content in view while the reader is at the bottom and lets go when they scroll up.
+  // One size observer covers streamed text, tool cards, council replies, late diagrams and the composer growing.
+  const chatFollow=useChatFollow(chatScrollRef,actId,distance=>setShowScrollBottom(showJumpButton(distance,streaming)));
   useEffect(()=>{if(panel==="chat"&&actId){try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}}if(panel==="models")refreshModels();},[actId,panel]);
   useEffect(()=>{
     if(!downloadsExpanded)return;
@@ -2655,7 +2650,7 @@ function HyprChat(){
     if(index<0)return;const needed=rows.length-index;
     if(act?.is_council){setExpandedRounds({});}
     if((visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK)<needed){setVisibleMessageCounts(p=>({...p,[actId]:needed}));return;}
-    const timer=setTimeout(()=>{const el=document.getElementById(`saved-message-${messageFocus.id}`);if(el){el.scrollIntoView({block:'center',behavior:'smooth'});el.animate([{backgroundColor:'transparent'},{backgroundColor:t.acc+'44'},{backgroundColor:'transparent'}],{duration:2200});setMessageFocus(null);}},150);return()=>clearTimeout(timer);
+    const timer=setTimeout(()=>{const el=document.getElementById(`saved-message-${messageFocus.id}`);if(el){chatFollow.release();el.scrollIntoView({block:'center',behavior:'smooth'});el.animate([{backgroundColor:'transparent'},{backgroundColor:t.acc+'44'},{backgroundColor:'transparent'}],{duration:2200});setMessageFocus(null);}},150);return()=>clearTimeout(timer);
   },[messageFocus,actId,loadingConv,act?.messages?.length,visibleMessageCounts[actId]]);
 
   useEffect(()=>{const navigate=()=>{
@@ -3099,7 +3094,9 @@ function HyprChat(){
     setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setCtxTokens(0);setGenTokens(0);
     setCurrentRunNotice(null);
     streamSaveEvtsRef.current=[];
+    streamTextLenRef.current=(overrides.prefill||"").length;
     streamingCidRef.current=cid;
+    chatFollow.follow();
     const activityKey=`${cid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     uConv(cid,c=>{const messages=[...(c.messages||[])];const last=messages.length-1;if(messages[last]?.role==="assistant")messages[last]={...messages[last],_activityKey:activityKey,_activityStatus:"running"};return{...c,messages};});
     // Cancellation can happen before init arrives; only persist a known server row.
@@ -3228,16 +3225,16 @@ function HyprChat(){
                 if(d.content&&last?.type!=="answer_token"&&last?.data?.tool!=="generating"){
                   recordActivity({type:"answer_token",data:{}});
                 }
-                full+=d.content;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
-              else if(d.type==="replace"){full=d.content||"";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],content:full,isS:true};return{...c,messages:m};});}
+                full+=d.content;streamTextLenRef.current=full.length;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
+              else if(d.type==="replace"){full=d.content||"";streamTextLenRef.current=full.length;resetOffsets(streamSaveEvtsRef.current,"replace");uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],content:full,isS:true};return{...c,messages:m};});}
               else if(d.type==="effort"){if(d.notice)notify({type:"info",text:"Effort adjusted",detail:d.notice});}
               else if(d.type==="review_status"){recordActivity({type:"tool_done",data:{tool:"refinement",status:d.notice,outcome:"retained"}});notify({type:"info",text:"Answer retained",detail:d.notice});}
-              else if(d.type==="clear"){full="";uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
+              else if(d.type==="clear"){full="";streamTextLenRef.current=0;resetOffsets(streamSaveEvtsRef.current,"clear");uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
               else if(d.type==="refinement_start"){reviewingAnswer=true;refinementsCount=d.round||refinementsCount;recordActivity({type:"tool_start",data:{tool:"refinement",status:`Reviewing answer (${d.round}/${d.total})`,round:d.round,total:d.total}});}
               else if(d.type==="done"){if(d.review_notice)recordActivity({type:"tool_done",data:{tool:"refinement",status:d.review_notice,outcome:"retained"}});if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.total_gen_tokens||d.gen_tokens||d.tokens)setSessionTokens(p=>p+(d.total_gen_tokens??d.gen_tokens??d.tokens??0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
               else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
               else if(d.type==="model_routed"){_routedModel=d.model;}
-              else if(d.type==="error"){if(reviewingAnswer){streamFailed=true;recordActivity({type:"tool_error",data:{tool:"refinement",status:d.error||"Review failed; answer retained"}});notify({type:"error",text:"Review failed; answer retained",detail:d.error});continue;}streamFailed=true;const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
+              else if(d.type==="error"){if(reviewingAnswer){streamFailed=true;recordActivity({type:"tool_error",data:{tool:"refinement",status:d.error||"Review failed; answer retained"}});notify({type:"error",text:"Review failed; answer retained",detail:d.error});continue;}streamFailed=true;const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;streamTextLenRef.current=full.length;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
             }catch{}}
         }
       }catch(e){
@@ -3260,7 +3257,7 @@ function HyprChat(){
         let _lastThinkIdx=-1;
         for(let i=_savedEvts.length-1;i>=0;i--){if(_savedEvts[i].type==="thinking"){_lastThinkIdx=i;break;}}
         if(_lastThinkIdx>=0)_savedEvts=_savedEvts.filter((e,i)=>e.type!=="thinking"||i===_lastThinkIdx);
-        if(_savedEvts.length>150)_savedEvts=_savedEvts.slice(-150);
+        _savedEvts=capSavedEvents(_savedEvts,150);
       }
       // Pluck run_ids out of the raw event stream so the Daedalus summary can
       // find every run even when older status events are trimmed.
@@ -3277,7 +3274,7 @@ function HyprChat(){
       } : {...(_doneStats?{stats:_doneStats}:{}), in_progress: false};
       // Continue mode: keep the original turn's persisted metadata (events,
       // stats) underneath the new state — the PATCH replaces it wholesale.
-      if(overrides.priorMeta){_msgMeta={...overrides.priorMeta,..._msgMeta};delete _msgMeta.truncated;}
+      if(overrides.priorMeta){const _joined=mergeContinued(overrides.priorMeta.saved_events,_msgMeta.saved_events);_msgMeta={...overrides.priorMeta,..._msgMeta,...(_joined.length?{saved_events:_joined}:{})};delete _msgMeta.truncated;}
       if(_doneTruncated)_msgMeta.truncated=true;
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
       // Auto-play the reply when the Voice "Auto-play replies" toggle is on
@@ -3410,7 +3407,7 @@ function HyprChat(){
       const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
       uConv(cid,c=>{const existing=c.messages||[];const hasRealMessages=existing.some(m=>!(m.metadata&&m.metadata.persona_first_message));return{...c,title:!hasRealMessages?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...existing,um,{role:"assistant",content:"",isS:true,created_at:_now}]};});
       setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
-      setTimeout(()=>{if(chatScrollRef.current)chatScrollRef.current.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"});},0);
+      chatFollow.follow();
       const am=[...(cv?.messages||[]),um];
       const sendOverrides={};
       if(atts.some(a=>a.type==="office"))sendOverrides.documents=true;
@@ -7129,6 +7126,7 @@ function HyprChat(){
 
       :panel==="email"?<PanelBoundary key={panel}><EmailPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
 
+      :panel==="skills"?<PanelBoundary key={panel}><SkillsPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
       :panel==="notes"?<PanelBoundary key={panel}><NotesPanel workspaces={workspaces} t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify} initialNoteId={selectedLibraryNote} onInitialNoteConsumed={()=>setSelectedLibraryNote(null)}/></PanelBoundary>
 
       :panel==="calendar"?<PanelBoundary key={panel}><CalendarPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} confirmAction={confirmAction} notify={notify}/></PanelBoundary>
@@ -7148,10 +7146,10 @@ function HyprChat(){
             <div style={{fontSize:"var(--hc-text-control)",color:t.acc,fontWeight:700,letterSpacing:1}}>{isCoderPersonaName(act?.persona_name)?"Drop files or a project archive (.zip, .tar.gz)":"Drop files to attach (PDFs supported)"}</div>
           </div>}
           {/* Scroll-to-top / Scroll-to-bottom */}
-          {showScrollTop&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"})} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
-          {showScrollBottom&&<button onClick={()=>chatScrollRef.current?.scrollTo({top:chatScrollRef.current.scrollHeight,behavior:"smooth"})} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
+          {showScrollTop&&<button onClick={()=>{chatFollow.release();chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"});}} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
+          {showScrollBottom&&<button onClick={()=>{chatFollow.follow();setShowScrollBottom(false);}} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
           {/* Messages */}
-          <div ref={chatScrollRef} onScroll={e=>{const el=e.target;setShowScrollTop(el.scrollTop>400);setShowScrollBottom(el.scrollHeight-el.scrollTop-el.clientHeight>400);}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
+          <div ref={chatFollow.attach} onScroll={e=>{const distance=chatFollow.onScroll(e);setShowScrollTop(e.currentTarget.scrollTop>400);setShowScrollBottom(showJumpButton(distance,streaming));}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
           {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
             {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
             :<><ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>
@@ -7406,6 +7404,11 @@ function HyprChat(){
               const hidesReply=isDaedalusOutput&&!hasDocumentActivity&&!messageWorkflows.some(w=>w.workflow_version===3);
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
+              // Tool cards render where they happened in the reply (messageParts.js). While streaming read the uncapped stream buffer.
+              const cardEvents=isU||isDaedalusOutput?[]:msg.isS?(activityLive&&streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:liveEventsForMsg):(savedEvents.length?savedEvents:liveEventsForMsg);
+              const body=isU?null:messageParts(msg.content||"",cardEvents);
+              const hasPlacedCards=!!body&&body.parts.some(part=>part.cards.length);
+              const trailingCards=body?[...body.trailing.filter(card=>card.type==="file_ready"),...body.trailing.filter(card=>card.type!=="file_ready")]:[];
               const quickSearchPayload=renderOpts?.quickSearch;
               const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
               return <CodeMessageBoundary key={`${actId}:${msg._activityKey||msg.id||i}`} identity={msg._activityKey||msg.id||i} live={!!msg.isS}>
@@ -7427,7 +7430,7 @@ function HyprChat(){
                   </div>}
                   {!isU&&!isDaedalusOutput&&!hasDocumentActivity&&<ChatActivity events={activityEvents} savedEvents={savedEvents} live={activityLive} status={activityStatus} content={renderedContent} autoExpand={autoExpandThink} t={t} messageKey={`${actId}:${msg._activityKey||msg.id||i}`}/>}
                   {!isU&&activityLive&&<WaitingQuote active={streaming&&tokC===0&&!renderedContent} quotes={customQuotes} t={t}/>}
-                  <div className={`hc-prose${isU?" is-user":""}`} style={{display:!isU&&!renderedContent&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":hidesReply?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
+                  <div className={`hc-prose${isU?" is-user":""}`} style={{display:!isU&&!renderedContent&&!hasPlacedCards&&!isEditing?"none":undefined,background:isU?"var(--hc-accent-tint)":"transparent",padding:isU?"10px 14px":hidesReply?"0":"2px 0",borderRadius:isU?"18px 18px 6px 18px":0,border:"none",lineHeight:1.68,fontSize:fontSize,color:t.text}}>
                     {isEditing?<div style={{display:"flex",flexDirection:"column",gap:6}}>
                       <textarea defaultValue={msg.content} ref={el=>{if(el&&!el._set){el._set=true;el.style.height=Math.min(el.scrollHeight,isU?200:420)+"px";}}} style={{width:"100%",background:t.bgDeep,border:`1px solid ${t.acc}44`,color:t.text,padding:"8px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",resize:"vertical",lineHeight:1.5,boxSizing:"border-box"}}
                         onChange={e=>setEditingMsg(p=>({...p,content:e.target.value}))}/>
@@ -7438,7 +7441,7 @@ function HyprChat(){
                         <button onClick={()=>setEditingMsg(null)} style={btnS(t.mut)}>Cancel</button>
                       </div>
                     </div>
-                    :hidesReply?null:msg.isS?mdStream(renderedContent,renderOpts):<MemoMD content={renderedContent} md={md} opts={renderOpts}/>}
+                    :hidesReply?null:isU?<MemoMD content={renderedContent} md={md} opts={renderOpts}/>:<MessageBody parts={body.parts} streaming={!!msg.isS} md={md} mdStream={mdStream} MemoMD={MemoMD} opts={renderOpts} display={text=>replacePersonaPlaceholdersForConversation(text,act)} messageText={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact}/>}
                     {isU&&msg.metadata?.images?.length>0&&!isEditing&&<div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:msg.content?10:0}}>
                       {msg.metadata.images.map((img,ii)=><div key={ii} title={img.name} style={{display:"inline-flex",flexDirection:"column",gap:4,alignItems:"flex-start",maxWidth:260}}>
                         <img src={img.dataUrl} alt={img.name} onClick={()=>openPreview&&openPreview(img.name,img.dataUrl)} style={{maxWidth:260,maxHeight:200,borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}33`,cursor:"pointer",display:"block",boxShadow:"none"}}/>
@@ -7454,7 +7457,7 @@ function HyprChat(){
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                   </div>
-                  {!isU&&!isDaedalusOutput&&<ToolStatus evts={isLastAssistant&&evts.length?evts:savedEvents} savedEvts={savedEvents} historical={!msg.isS} showActivity={false} msgContent={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>}
+                  {!isU&&!isDaedalusOutput&&<ToolStatus evts={isLastAssistant&&evts.length?evts:savedEvents} savedEvts={savedEvents} historical={!msg.isS} showActivity={false} hideCards msgContent={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>}
                   {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
                   {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
                   {(()=>{if(isU||isDaedalusOutput||hasDocumentActivity)return null;if(!isLastAssistant||!coderWorkflows.length)return null;return coderWorkflows.filter(w=>w.workflow_version!==3).slice(0,3).map(w=><WorkflowCard key={w.id} workflow={w} t={t} font={font} onOpenArtifact={openArtifact}/>);})()}
@@ -7478,17 +7481,8 @@ function HyprChat(){
                       <RunCard key={rid} runId={rid} liveEvts={isLast?evts:[]} t={t} font={font} md={md} onOpenArtifact={openArtifact}/>
                     );
                   })()}
-                  {/* Inline code execution output */}
-                  {(()=>{if(isU||isDaedalusOutput)return null;const savedEvts=savedEvents;const codeOuts=savedEvts.filter(e=>e.type==="code_output");if(!codeOuts.length)return null;return codeOuts.map((e,ci)=>{const d=e.data||{};const ckey=`${i}-${ci}`;const collapsed=collapsedOutputs.has(ckey);const toggleCollapsed=()=>setCollapsedOutputs(s=>{const n=new Set(s);if(n.has(ckey))n.delete(ckey);else n.add(ckey);return n;});return <div key={ci} style={{margin:"8px 0",borderRadius:"var(--hc-radius-card)",overflow:"hidden",border:`1px solid ${d.success?`${t.ok}33`:`${t.err}33`}`,background:t.bgDeep}}>
-                    <div onClick={toggleCollapsed} title={collapsed?"Show output":"Hide output"} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${d.success?t.ok:t.err}10`,borderBottom:collapsed?"none":`1px solid ${d.success?t.ok:t.err}22`,cursor:"pointer",userSelect:"none"}}>
-                      <span style={{display:"inline-block",transition:"transform .15s",transform:collapsed?"rotate(-90deg)":"rotate(0)",color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{"\u25BE"}</span>
-                      <span>{d.success?"\u2705":"\u274C"}</span>
-                      <span style={{fontWeight:600,color:d.success?t.ok:t.err,fontSize:"var(--hc-text-secondary)"}}>{d.language||"code"} output</span>
-                      {d.exec_time&&<span style={{color:t.mut,marginLeft:"auto",fontSize:"var(--hc-text-secondary)"}}>{parseFloat(d.exec_time).toFixed(1)}s</span>}
-                    </div>
-                    {!collapsed&&d.stdout&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,borderBottom:d.stderr?"1px solid var(--hc-line-subtle)":"none",fontFamily:codeFont}}>{d.stdout}</pre>}
-                    {!collapsed&&d.stderr&&<pre style={{margin:0,padding:"8px 12px",whiteSpace:"pre-wrap",color:t.err,fontSize:"var(--hc-text-secondary)",lineHeight:1.5,background:`${t.err}08`,fontFamily:codeFont}}>{d.stderr}</pre>}
-                  </div>;});})()}
+                  {/* Cards with no recorded place (messages saved before placement existed): after the text, files first. */}
+                  {trailingCards.length>0&&<MessageCards cards={trailingCards} slot="t" t={t} onPreview={openPreview} onOpenArtifact={openArtifact} messageText={renderedContent}/>}
                   {/* KB sources strip — numbered citation sources for this reply */}
                   {(()=>{
                     if(isU||msg.isS||isDaedalusOutput)return null;

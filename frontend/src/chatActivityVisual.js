@@ -2,7 +2,7 @@
 // (components/icons.jsx IC) and theme colour. Pure, so it is unit-tested;
 // the state machine itself lives in chatActivity.js.
 export const PHASE_ICONS = {starting:'Zap', thinking:'Brain', writing:'Pencil', reviewing:'Star', searching:'Search', tool:'Tool', complete:'Check', stopped:'Stop', failed:'Alert'};
-export const TOOL_ICONS = {fetch_url:'Globe', execute_code:'Terminal', run_shell:'Terminal', read_file:'File', write_file:'Pencil', list_files:'Layers', generate_image:'Image', kb:'Database', memory:'Brain', download_file:'Download', download_project:'Download', install_package:'Cube', deep_research:'Research'};
+export const TOOL_ICONS = {fetch_url:'Globe', execute_code:'Terminal', run_shell:'Terminal', read_file:'File', write_file:'Pencil', list_files:'Layers', generate_image:'Image', kb:'Database', memory:'Brain', download_file:'Download', download_project:'Download', install_package:'Cube', deep_research:'Research', skill_view:'Star', skill_manage:'Star'};
 
 export function activityColor(state, t) {
   if (state.phase === 'failed') return t.err;

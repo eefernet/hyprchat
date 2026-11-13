@@ -18,6 +18,7 @@ import model_providers
 import persona_images
 import reasoning
 import provider_tools
+import skills as skill_library
 import rag
 from agents import assistant as assistant_mod
 from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
@@ -556,7 +557,7 @@ async def _suggest_global_memories(
         "- Suggest only durable information useful across many future chats.\n"
         "- Good semantic memories include user preferences, personal background, important people, birthdays, interests, names, and stable constraints.\n"
         "- Good episodic memories include dated user-confirmed events, decisions, or outcomes.\n"
-        "- Good procedural memories include reusable workflows or recurring user instructions.\n"
+        "- Good procedural memories are short standing instructions from the user. Multi-step how-to procedures are kept separately as skills; do not suggest them.\n"
         "- Do not save secrets, credentials, private keys, passwords, raw tokens, or credential-bearing URLs.\n"
         "- Do not infer sensitive facts; only save what the user clearly states or confirms.\n"
         "- Do not save generic assistant claims or one-off trivia.\n"
@@ -765,6 +766,8 @@ _TOOL_ICONS = {
     "resume_project": ("activity", "📂 Resuming project"),
     "search_files": ("search", "🔍 Searching files"),
     "diff_files": ("terminal", "📊 Diffing files"),
+    "skill_view": ("star", "📘 Loading a saved skill"),
+    "skill_manage": ("star", "🧠 Saving a skill"),
 }
 
 
@@ -1149,6 +1152,12 @@ async def chat_stream_generate(req, http, events, custom_tool_map, custom_tool_i
     async with aclosing(deliver(stream, req)) as delivery:
         async for chunk in delivery:
             yield chunk
+    # The early exits of a turn (empty reply, round limit, blocked tool loop) never reach the
+    # post-turn hooks. A skill the model asked to have written must not be lost with them;
+    # review() runs once per turn, so this is a no-op after a normal finish.
+    _turn = skill_library.current_turn(getattr(req, "conversation_id", "") or "")
+    if _turn and not _turn.reviewed:
+        _spawn_bg(_turn.review(http, events, _turn.query, ""))
 
 
 async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_id_map, connector_tool_id_map=None, connector_tool_name_map=None):
@@ -1271,6 +1280,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     persona_rating_guidance = ""
     persona_rating_key = "PG-13"  # safe default: rescue treats unknown personas as SFW
     _is_v2_persona = False
+    _persona_uses_skills = True
     if req.persona_id:
         all_configs = await db.get_model_configs()
         mc = next((c for c in all_configs if c["id"] == req.persona_id), None)
@@ -1285,6 +1295,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 _is_v2_persona = True
             params = mc.get("parameters", {})
             profile_type = _model_config_profile_type(mc, params)
+            _persona_uses_skills = skill_library.persona_uses_skills(mc.get("name"), params, profile_type)
             if profile_type == "persona":
                 try:
                     current_user = await db.get_user()
@@ -1484,6 +1495,15 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         )
     except Exception:
         pass
+    # Skills: procedures saved from earlier chats. The index sits right after the
+    # date so it stays in the stable prompt prefix (it changes only when a skill
+    # does). Not for Daedalus, ghost chats or roleplay character personas.
+    _skills = await skill_library.begin_turn(
+        req, conv_id, ephemeral=ephemeral, coder=_is_v2_persona,
+        roleplay=not _persona_uses_skills,
+        num_ctx=model_options.get("num_ctx") or 0, query=last_user_msg)
+    if _skills.prompt_block:
+        effective_system = (effective_system or "") + _skills.prompt_block
     if kb_context:
         _cite_note = (
             "Excerpts are numbered [1]..[n]. When you use information from an "
@@ -1830,6 +1850,11 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         ollama_tools.append(CODEAGENT_TOOLS["search_history"])
         available_tool_names.add("search_history")
 
+    # skill_view / skill_manage: connector output is attacker-addressable, so a
+    # turn that calls one only ever produces draft skills.
+    _skills.install(ollama_tools, available_tool_names, _extra_text_tool_defs, messages,
+                    untrusted=connector_tool_name_map)
+
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
     qs = {}
@@ -1949,6 +1974,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "with one concise self-contained sentence. Never save secrets or credentials. "
             "Do not call it for one-off task details.\n"
         )
+        if "skill_manage" in available_tool_names:
+            _mem_hint += ("A multi-step procedure you worked out is a skill, not a memory: "
+                          "save it with skill_manage.\n")
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] += _mem_hint
         else:
@@ -2184,7 +2212,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             # Summarize old tool results (keep system prompt + last 6 messages intact)
             for mi in range(1, len(messages) - 6):
                 m = messages[mi]
-                if m["role"] == "tool" and len(m.get("content", "")) > 500:
+                if (m["role"] == "tool" and len(m.get("content", "")) > 500
+                        and not m["content"].startswith(skill_library.VIEW_MARK)):
                     # Truncate old tool results to first 200 chars + note
                     orig = m["content"]
                     m["content"] = orig[:200] + f"\n\n[... {len(orig)} chars truncated to save context ...]"
@@ -3247,6 +3276,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         _tool_detail = f": {tool_args.get('path', '')}"
                     elif tool_name == "generate_code":
                         _tool_detail = f" ({tool_args.get('language', '')})"
+                    elif tool_name in ("skill_view", "skill_manage"):
+                        _tool_detail = f": {str(tool_args.get('name') or tool_args.get('input') or '')[:60]}"
 
                     if (
                         tool_name == "generate_code"
@@ -3429,6 +3460,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         _result_msg["tool_call_id"] = _tool_call_id
                     messages.append(_result_msg)
                     _tools_ran_this_turn += 1
+                    await _skills.record(tool_name, tool_args, tool_result)
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):
@@ -3654,6 +3686,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     workspace_memory_info.get("workspace"),
                     last_user_msg, content, _assistant_msg_id,
                 ))
+                # Learn a reusable skill from this turn's work (no-op for most turns).
+                _spawn_bg(_skills.review(http, events, last_user_msg, content))
             await events.emit(conv_id, "complete", {"status": "Complete"})
             _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id,
                              "speed": _gen_speed, "gen_tokens": gen_tokens, "prompt_tokens": prompt_tokens}

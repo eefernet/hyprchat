@@ -72,3 +72,22 @@ def test_existing_generate_image_tool_call_syntax_still_parses():
     assert parse_text_tool_calls(py_call, {"generate_image"}) == [{
         "function": {"name": "generate_image", "arguments": {"prompt": "a castle at sunset"}}
     }]
+
+
+def test_skill_tools_parse_in_every_text_fallback_shape():
+    """A body-less call is the normal text-fallback shape; a body survives only in <parameter=...> form."""
+    names = {"skill_view", "skill_manage"}
+
+    def one(text):
+        calls = parse_text_tool_calls(text, names)
+        assert len(calls) == 1
+        return calls[0]["function"]
+
+    assert one('skill_view("resize-images")') == {"name": "skill_view", "arguments": {"name": "resize-images"}}
+    assert one('<tool_call>\n{"name": "skill_view", "arguments": {"name": "resize-images"}}\n</tool_call>')["arguments"] == {"name": "resize-images"}
+    asked = one('<tool_call>\n{"name": "skill_manage", "arguments": {"action": "create", "name": "resize-images", '
+                '"description": "Use when images need resizing"}}\n</tool_call>')
+    assert asked["arguments"] == {"action": "create", "name": "resize-images", "description": "Use when images need resizing"}
+    full = one("<function=skill_manage>\n<parameter=action>create</parameter>\n<parameter=name>resize-images</parameter>\n"
+               "<parameter=body>## Steps\n1. Run it.\n\n```bash\nconvert a b\n```\n</parameter>\n</function>")
+    assert full["arguments"]["body"] == "## Steps\n1. Run it.\n\n```bash\nconvert a b\n```"

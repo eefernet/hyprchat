@@ -39,7 +39,7 @@ function setup(overrides = {}) {
     pendingEffort: null, pendingToolIds: [], pendingPersona: null, pendingUseMemories: false,
     pendingChatModel: '', modelChoiceRef: {current: {byConv: {}}},
     storedLastModel: () => '', models: ['local-model'], API: '', quickSearch: false,
-    inpRef: {current: null}, chatScrollRef: {current: null},
+    inpRef: {current: null}, chatScrollRef: {current: null}, chatFollow: {follow: noop, release: noop},
     notify: notice => calls.notices.push(notice),
     setPreparingSend: status => { context.preparingSend = status; calls.progress.push(status); },
     setInp: value => { context.inp = value; },
