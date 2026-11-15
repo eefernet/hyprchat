@@ -174,6 +174,7 @@ async def run_headless_chat(*, conversation_id: str, prompt: str, model: str = "
         use_memories=None,
         ephemeral=False,
         continue_message_id=None,
+        turn="new",    # every scheduled run is a new message, even with the same prompt as last time
     )
 
     _all_custom = await db.get_tools()

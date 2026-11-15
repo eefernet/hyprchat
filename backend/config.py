@@ -198,6 +198,10 @@ WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen3.5:4b")
 # "on" = summarize old turns via the Workspace Model when a chat approaches its
 # context window; "off" (default) = rely on client-side trimming only.
 CONTEXT_COMPACTION = os.getenv("CONTEXT_COMPACTION", "off")
+# How full a chat's context window gets before it is compacted: 85, 90, 95, 98 or 99 (Settings).
+# chat_context.compaction_limit() applies it and always keeps room for one reply. Separate from the
+# Daedalus "Compact at (%)" setting (context_compaction_threshold).
+CHAT_COMPACTION_PERCENT = os.getenv("CHAT_COMPACTION_PERCENT", "85")
 # Chat-history recall: global kill-switch for indexing/searching past turns.
 # ANDs with the per-conversation memory toggle — turns are only ever indexed
 # from conversations where the user enabled memory.

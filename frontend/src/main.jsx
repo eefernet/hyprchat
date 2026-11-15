@@ -3,6 +3,10 @@ import useFocusScope from './useFocusScope.js';
 import usePresence from './usePresence.js';
 import useNewKeys from './useNewKeys.js';
 import {useChatFollow} from './useChatFollow.js';
+import {useBackgroundEvents} from './useBackgroundEvents.js';
+import {fromMessages,atStreamStart,applyUpdate,settle,compacted as contextCompacted,compactionIndex,compactionLimit,COMPACT_CHOICES,roomLeft} from './contextMeter.js';
+import ContextMeter from './components/ContextMeter.jsx';
+import CompactionNotice from './components/CompactionNotice.jsx';
 import {showJumpButton} from './chatScroll.js';
 import {messageParts,stampCard,resetOffsets,capSavedEvents,mergeContinued} from './messageParts.js';
 import MessageBody from './components/MessageBody.jsx';
@@ -232,6 +236,7 @@ function HyprChat(){
   const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [contextCompaction,setContextCompaction]=useState(()=>{try{return localStorage.getItem("hc-context-compaction")==="on";}catch{return false;}});
+  const [chatCompactionPercent,setChatCompactionPercent]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-compaction-percent"))||85;}catch{return 85;}});
   const [ragReranker,setRagReranker]=useState(()=>{try{return localStorage.getItem("hc-rag-reranker")==="llm";}catch{return false;}});
   const [modelRouting,setModelRouting]=useState({enabled:false,chat:"",code:"",reasoning:"",long_context:""});
   const [backupStatus,setBackupStatus]=useState(null);
@@ -246,8 +251,9 @@ function HyprChat(){
   const [researchNumCtx,setResearchNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-research-num-ctx")||"40960");}catch{return 40960;}});
   const [openhandsDisableThinking,setOpenhandsDisableThinking]=useState(()=>{try{return localStorage.getItem("hc-openhands-disable-thinking")!=="false";}catch{return true;}});
   const [quickSearchMode,setQuickSearchMode]=useState(()=>{try{return localStorage.getItem("hc-quick-search-mode")||"balanced";}catch{return "balanced";}});
-  const [ctxTokens,setCtxTokens]=useState(0);
-  const [genTokens,setGenTokens]=useState(0);
+  // Context pill: one reading per conversation ({used, working, window, measured}); see contextMeter.js.
+  const [contextReadings,setContextReadings]=useState({});
+  const updateReading=(cid,change)=>setContextReadings(p=>{const next=change(p[cid]);return next===p[cid]?p:{...p,[cid]:next};});
   const [previewFile,setPreviewFile]=useState(null);
   const [previewContent,setPreviewContent]=useState(null);
   const [previewError,setPreviewError]=useState(null);
@@ -485,6 +491,7 @@ function HyprChat(){
   useEffect(()=>{persistPref("preview-auto-open",previewAutoOpen);configureWorkbench({autoOpen:previewAutoOpen});},[previewAutoOpen]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
+  useEffect(()=>{persistServerSetting("hc-chat-compaction-percent","chat_compaction_percent",chatCompactionPercent,String(chatCompactionPercent));},[chatCompactionPercent]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
@@ -555,7 +562,6 @@ function HyprChat(){
   const [showSysPromptPicker,setShowSysPromptPicker]=useState(false);
   const [tokC,setTokC]=useState(0);
   const [tokS,setTokS]=useState(0);
-  const [sessionTokens,setSessionTokens]=useState(0);
   const [panel,setPanelState]=useState("chat");
   const [workspaceSearchReturn,setWorkspaceSearchReturn]=useState(false);
   const searchNavigation=useRef(false);
@@ -662,6 +668,9 @@ function HyprChat(){
   const streamSaveEvtsRef=useRef([]);
   // Length of the reply text streamed so far: tool cards are stamped with it so they render in place (messageParts.js).
   const streamTextLenRef=useRef(0);
+  // Set while regenerate, edit-and-resend or continue is working (they await the server before the stream
+  // starts, and a second click in that gap used to start a second reply into the same bubble).
+  const turnBusyRef=useRef(false);
   // Conversation id currently being streamed (null when idle). Set at sendMessages start, cleared on completion.
   const streamingCidRef=useRef(null);
   const [kbs,setKbs]=useState([]);
@@ -1745,6 +1754,7 @@ function HyprChat(){
       if(d.rag)setRagSettings(p=>({...p,...d.rag}));
       if(d.default_num_ctx!=null)hydrateServerSetting("default_num_ctx",setNumCtx,d.default_num_ctx,numCtx);
       if(d.context_compaction!=null)hydrateServerSetting("context_compaction",v=>setContextCompaction(v==="on"),d.context_compaction,contextCompaction?"on":"off");
+      if(d.chat_compaction_percent!=null)hydrateServerSetting("chat_compaction_percent",v=>setChatCompactionPercent(Number(v)||85),d.chat_compaction_percent,chatCompactionPercent);
       if(d.rag_reranker!=null)hydrateServerSetting("rag_reranker",v=>setRagReranker(v==="llm"),d.rag_reranker,ragReranker?"llm":"none");
       if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
@@ -1813,6 +1823,8 @@ function HyprChat(){
     connect();
     return()=>{closed=true;if(retryTimer)clearTimeout(retryTimer);sseR.current?.close();};
   },[actId]);
+  useBackgroundEvents(streaming&&streamingCidRef.current&&streamingCidRef.current!==actId?streamingCidRef.current:null,
+    ev=>{stampCard(ev,streamTextLenRef.current);streamSaveEvtsRef.current.push(ev);});
   // Jobs are per conversation: drop the previous chat's rows at once instead of
   // showing them until the fetch for the new chat answers (a ghost chat has none).
   useEffect(()=>{setCoderWorkflows(p=>p.filter(w=>w.conversation_id===actId));if(actId)refreshCoderWorkflows(actId);},[actId,refreshCoderWorkflows]);
@@ -2383,7 +2395,7 @@ function HyprChat(){
     } else {
       setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);
     }
-    setCtxTokens(0);setSessionTokens(0);setTokC(0);setTokS(0);setGenTokens(0);
+    setTokC(0);setTokS(0);
     setLoadingConv(true);
     try {
       const r = await fetch(`${API}/api/conversations/${id}`);
@@ -2396,7 +2408,9 @@ function HyprChat(){
         // If this conversation is being streamed right now, local state is authoritative for messages —
         // skip the overwrite so the stream's m[m.length-1] assistant update doesn't clobber the user message.
         const skipMessages = streamingCidRef.current === id;
-        setConvs(prev=>(prev.some(c=>c.id===id)?prev:[{...full,messages:[]},...prev]).map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),rating:m.rating||0,created_at:m.created_at}))}), workspace_context:full.workspace_context,effective_workspace:full.effective_workspace,model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
+        // The context pill shows what this chat's last reply saved; a chat that is streaming keeps its live reading.
+        if(!skipMessages)updateReading(id,()=>fromMessages(full.messages)||undefined);
+        setConvs(prev=>(prev.some(c=>c.id===id)?prev:[{...full,messages:[]},...prev]).map(c=>c.id===id ? {...c, ...(skipMessages ? {} : {messages: full.messages.map(m=>{const meta=parseMeta(m);return{id:m.id,role:m.role,content:m.content,metadata:meta,rating:m.rating||0,created_at:m.created_at,...(m.role==="user"&&meta.model_content?{_fullContent:meta.model_content}:{})};})}), summary_until_msg_id:Number(full.summary_until_msg_id)||0, workspace_context:full.workspace_context,effective_workspace:full.effective_workspace,model: full.model||c.model, system_prompt: full.system_prompt||c.system_prompt, tool_ids: full.tool_ids||c.tool_ids||[], model_config_id: full.model_config_id||null, use_memories: full.use_memories??c.use_memories??"0", is_council: isCouncil(full.is_council), council_config_id: full.council_config_id||null} : c));
         // Fetch suggestions for council chats with no messages yet
         if(isCouncil(full.is_council)&&full.council_config_id&&!(full.messages||[]).length){
           fetchCouncilSuggestions(full.council_config_id);
@@ -2606,7 +2620,7 @@ function HyprChat(){
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[newId]:pendingEffortValue}));
       setPendingUseMemories(false);
       setConvs(p=>[c,...p]);setActId(newId);setGhostMode(true);
-      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      setPanel("chat");setEvts([]);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:newId;
     }
     try{
@@ -2628,7 +2642,7 @@ function HyprChat(){
       if(opts.sendPreparation)opts.sendPreparation.conversationId=c.id;
       setPendingUseMemories(false);
       setConvs(p=>[c,...p]);setActId(c.id);setWsPanel(false);
-      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      setPanel("chat");setEvts([]);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:c.id;
     }catch(e){
       if(opts.sendPreparation||opts.workspaceId)throw e;
@@ -2640,7 +2654,7 @@ function HyprChat(){
       if(pendingEffortValue!==null)setEffortPerChat(p=>({...p,[newId]:pendingEffortValue}));
       setPendingUseMemories(false);
       setConvs(p=>[c,...p]);setActId(newId);
-      setPanel("chat");setEvts([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
+      setPanel("chat");setEvts([]);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");
       return opts.returnConv?c:newId;
     }
   };
@@ -2688,9 +2702,6 @@ function HyprChat(){
     setAttachments([]);
     setEvts([]);
     setQuickResults([]);
-    setSessionTokens(0);
-    setCtxTokens(0);
-    setGenTokens(0);
     setCouncilRunning(false);
     setCouncilResponses({});
     setCouncilHostContent("");
@@ -2708,7 +2719,7 @@ function HyprChat(){
       if(isGhostConv(act)){
         setConvs(p=>p.filter(c=>!isGhostConv(c)));
         setActId(null);
-        setEvts([]);setQuickResults([]);setSessionTokens(0);setCtxTokens(0);setGenTokens(0);
+        setEvts([]);setQuickResults([]);
       }
       notify({type:"info",text:"Ghost mode off",detail:"Saved chats will work normally again.",duration:2600});
       return;
@@ -3091,7 +3102,8 @@ function HyprChat(){
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
     overrides = overrides || {};
-    setStreaming(true);setTokC(0);setTokS(0);setEvts([]);setCtxTokens(0);setGenTokens(0);
+    setStreaming(true);setTokC(0);setTokS(0);setEvts([]);
+    updateReading(cid,r=>atStreamStart(messagesToSend,r));
     setCurrentRunNotice(null);
     streamSaveEvtsRef.current=[];
     streamTextLenRef.current=(overrides.prefill||"").length;
@@ -3118,6 +3130,7 @@ function HyprChat(){
           baseContent=baseContent?`${baseContent}\n\n${hint}`:hint;
         }
         const out={role:m.role,content:baseContent};
+        if(Number.isInteger(m.id)&&m.id>0)out.id=m.id;
         // Pass images from current send (_images) or persisted user metadata (metadata.images)
         const persistedImgs=metaImgs?metaImgs.map(im=>(im.dataUrl||"").split(",")[1]||"").filter(Boolean):null;
         const imgs=(Array.isArray(m._images)&&m._images.length)?m._images:(persistedImgs&&persistedImgs.length?persistedImgs:null);
@@ -3150,7 +3163,9 @@ function HyprChat(){
       // A per-model browser preset must not discard it before that resolver.
       const effectiveLimit = sendNumCtx || tokenLimit;
       const codingContext=(cv?.tool_ids||[]).includes('codeagent')||isCoderPersonaName(cv?.persona_name);
-      if(effectiveLimit>0&&!codingContext){
+      // With compaction on the server keeps the request inside the window (backend/chat_context.py):
+      // trimming here dropped messages before they could be summarized, and later the summary itself.
+      if(effectiveLimit>0&&!codingContext&&!contextCompaction){
         let est=estimateTokens(am);
         while(est>effectiveLimit && am.length>2){
           am.splice(0,1);
@@ -3194,6 +3209,7 @@ function HyprChat(){
       // Continue mode: resume a length-truncated assistant message on its
       // existing row; `full` starts from the partial so tokens append.
       if(overrides.continueMessageId)body.continue_message_id=overrides.continueMessageId;
+      else body.turn=overrides.retry?"retry":"new";
       let full=overrides.prefill||"",buf="",refinementsCount=0;
       // Phase 0.6: backend creates the assistant message at stream start and sends
       // its id via an `init` SSE event. We PATCH this row on stream-complete instead
@@ -3229,10 +3245,11 @@ function HyprChat(){
               else if(d.type==="replace"){full=d.content||"";streamTextLenRef.current=full.length;resetOffsets(streamSaveEvtsRef.current,"replace");uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],content:full,isS:true};return{...c,messages:m};});}
               else if(d.type==="effort"){if(d.notice)notify({type:"info",text:"Effort adjusted",detail:d.notice});}
               else if(d.type==="review_status"){recordActivity({type:"tool_done",data:{tool:"refinement",status:d.notice,outcome:"retained"}});notify({type:"info",text:"Answer retained",detail:d.notice});}
-              else if(d.type==="clear"){full="";streamTextLenRef.current=0;resetOffsets(streamSaveEvtsRef.current,"clear");uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:"",isS:true};return{...c,messages:m};});}
+              else if(d.type==="clear"){full=full.slice(0,d.keep||0);streamTextLenRef.current=full.length;resetOffsets(streamSaveEvtsRef.current,"clear",full.length);const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
               else if(d.type==="refinement_start"){reviewingAnswer=true;refinementsCount=d.round||refinementsCount;recordActivity({type:"tool_start",data:{tool:"refinement",status:`Reviewing answer (${d.round}/${d.total})`,round:d.round,total:d.total}});}
-              else if(d.type==="done"){if(d.review_notice)recordActivity({type:"tool_done",data:{tool:"refinement",status:d.review_notice,outcome:"retained"}});if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);if(d.total_gen_tokens||d.gen_tokens||d.tokens)setSessionTokens(p=>p+(d.total_gen_tokens??d.gen_tokens??d.tokens??0));if(d.prompt_tokens)setCtxTokens(d.prompt_tokens+(d.gen_tokens||0));if(d.gen_tokens){setGenTokens(d.gen_tokens);setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
-              else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);if(d.prompt_tokens)setCtxTokens(d.prompt_tokens);}
+              else if(d.type==="done"){if(d.review_notice)recordActivity({type:"tool_done",data:{tool:"refinement",status:d.review_notice,outcome:"retained"}});if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);updateReading(cid,r=>settle(r,d.context));if(d.gen_tokens){setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
+              else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);updateReading(cid,r=>applyUpdate(r,d));}
+              else if(d.type==="context_compacted"){updateReading(cid,r=>contextCompacted(r,d));if(d.cursor)uConv(cid,c=>({...c,summary_until_msg_id:d.cursor}));}
               else if(d.type==="model_routed"){_routedModel=d.model;}
               else if(d.type==="error"){if(reviewingAnswer){streamFailed=true;recordActivity({type:"tool_error",data:{tool:"refinement",status:d.error||"Review failed; answer retained"}});notify({type:"error",text:"Review failed; answer retained",detail:d.error});continue;}streamFailed=true;const _errBlock=(full?"\n\n":"")+"```\n⚠ "+d.error+"\n```";full=full+_errBlock;streamTextLenRef.current=full.length;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
             }catch{}}
@@ -3283,26 +3300,33 @@ function HyprChat(){
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
       // POST for older backends or if init/done didn't include a message_id.
+      let _saved=null;
       if(isGhostSend){
         // Ghost chats are intentionally local-only: no assistant PATCH/POST,
         // no title generation, no workspace memory suggestion source row.
       }else if(_streamMsgId){
-        persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({...(serverPersists?{}:{content:finalFull}),metadata:_msgMeta})},{label:"Message save"});
+        _saved=persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({...(serverPersists?{}:{content:finalFull}),metadata:_msgMeta})},{label:"Message save"});
       }else if(!wasStopped){
         persistFetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:finalFull,metadata:_msgMeta})},{label:"Message save"});
       }
       if(serverPersists&&!isGhostSend&&!wasStopped){
         const completedMessageId=_streamMsgId;
-        apiJson(`/api/conversations/${cid}`).then(saved=>{if(streamingCidRef.current)return;const message=(saved.messages||[]).find(m=>m.id===completedMessageId);if(message)uConv(cid,c=>({...c,messages:(c.messages||[]).map(m=>m.id===completedMessageId?{...message,_activityKey:m._activityKey,_activityStatus:message.metadata?.delivery_status||m._activityStatus}:m)}));}).catch(e=>{if(e.name!=='AbortError')notify({type:'warning',text:'Reload saved response to see final status',detail:e.message});});
+        Promise.resolve(_saved).catch(()=>{}).then(()=>apiJson(`/api/conversations/${cid}`)).then(saved=>{if(streamingCidRef.current)return;const message=(saved.messages||[]).find(m=>m.id===completedMessageId);if(message)uConv(cid,c=>({...c,messages:(c.messages||[]).map(m=>m.id===completedMessageId?{...message,_activityKey:m._activityKey,_activityStatus:message.metadata?.delivery_status||m._activityStatus}:m)}));}).catch(e=>{if(e.name!=='AbortError')notify({type:'warning',text:'Reload saved response to see final status',detail:e.message});});
       }
       // Auto-generate title after first exchange
       if(!wasStopped&&!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
-    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:`\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false,_activityStatus:"failed"};return{...c,messages:m};});}}
+    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});
+      // Keep what was already written; the error goes under it. The server saved the partial reply
+      // itself, so re-read that row (it carries the id that rate, continue and delete need).
+      uConv(cid,c=>{const m=[...(c.messages||[])];const last=m[m.length-1]||{};const kept=last.role==="assistant"?String(last.content||""):"";m[m.length-1]={...last,role:"assistant",content:`${kept}${kept?"\n\n":""}\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false,_activityStatus:"failed"};return{...c,messages:m};});
+      if(!String(cid).startsWith("ghost-"))apiJson(`/api/conversations/${cid}`).then(saved=>{if(streamingCidRef.current)return;const rows=(saved.messages||[]).filter(m=>m.role==="assistant");const row=rows[rows.length-1];if(row&&String(row.content||"").trim())uConv(cid,c=>{const m=[...(c.messages||[])];const at=m.length-1;if(m[at]?.role!=="assistant")return c;m[at]={...row,_activityKey:m[at]._activityKey,_activityStatus:row.metadata?.delivery_status||"failed"};return{...c,messages:m};});}).catch(()=>{});
+    }}
     setStreaming(false);setAttachments([]);streamingCidRef.current=null;
   };
 
   const send=async()=>{
-    if(sendPrepRef.current||streaming||councilRunning||loadingConv||(!inp.trim()&&!attachments.length))return;
+    if(sendPrepRef.current||turnBusyRef.current||councilRunning||loadingConv||(!inp.trim()&&!attachments.length))return;
+    if(streaming){if(streamingCidRef.current&&streamingCidRef.current!==actId)notify({type:"info",text:"Another chat is still replying",detail:"Wait for it to finish, or stop it in that chat, then send."});return;}
     if(attachments.some(a=>a.loading)){notify({type:"warning",text:"Attachment still processing",detail:"Wait for extraction to finish or remove the file."});return;}
     const prep={controller:new AbortController(),preparing:true,conversationId:actId,userId:currentUserId};
     sendPrepRef.current=prep;
@@ -3423,10 +3447,18 @@ function HyprChat(){
     }
   };
 
+  // Regenerating or editing an older message removes every later turn of the chat. Ask first.
+  const confirmLaterTurns=async(count,verb)=>count<=0||await confirmAction({title:`${verb} from here?`,body:`This removes the ${count} later message${count===1?"":"s"} in this chat. It cannot be undone.`,confirmLabel:verb,tone:"warning"});
   const regenerate=async(msgIndex, overrides)=>{
-    if(streaming||sendPrepRef.current?.preparing)return;
+    if(streaming||sendPrepRef.current?.preparing||turnBusyRef.current)return;
     const cid=actId;if(!cid)return;
     const cv=convs.find(c=>c.id===cid);
+    const all=cv?.messages||[];
+    // A greeting has no request to answer again: regenerating it used to delete the whole chat.
+    if(!all[msgIndex]||all[msgIndex].metadata?.persona_first_message||!all.slice(0,msgIndex).some(m=>m.role==="user"))return;
+    if(!await confirmLaterTurns(all.length-1-msgIndex,"Regenerate"))return;
+    turnBusyRef.current=true;
+    try{
     // Truncate server-side from the replaced assistant row inclusive BEFORE
     // re-streaming — otherwise the old rows stay in SQLite and reload shows
     // both the old and the new reply.
@@ -3434,15 +3466,21 @@ function HyprChat(){
     // Remove the assistant message at msgIndex and re-send everything before it
     uConv(cid,c=>{const m=[...(c.messages||[])];m[msgIndex]={role:"assistant",content:"",isS:true,created_at:new Date().toISOString()};return{...c,messages:m.slice(0,msgIndex+1)};});
     const msgsBeforeRegen=(cv?.messages||[]).slice(0,msgIndex);
-    await sendMessages(cid, msgsBeforeRegen, null, overrides);
+    await sendMessages(cid, msgsBeforeRegen, null, {...(overrides||{}),retry:true});
+    }finally{turnBusyRef.current=false;}
   };
 
   const editMessage=async(msgIndex, newContent)=>{
-    if(streaming||sendPrepRef.current?.preparing)return;
+    if(streaming||sendPrepRef.current?.preparing||turnBusyRef.current)return;
     const cid=actId;if(!cid)return;
-    setEditingMsg(null);
     const cv=convs.find(c=>c.id===cid);
     const orig=cv?.messages?.[msgIndex];
+    if(!String(newContent||"").trim()){notify({type:"warning",text:"Nothing to send",detail:"The edited message is empty."});return;}
+    // The edited message's own reply goes with it; anything after that is a later turn.
+    if(!await confirmLaterTurns((cv?.messages||[]).length-2-msgIndex,"Edit and resend"))return;
+    setEditingMsg(null);
+    turnBusyRef.current=true;
+    try{
     // Truncate server-side from the edited user row inclusive FIRST — the
     // stream's defensive persist then saves the edited text exactly once
     // instead of stacking it under the original.
@@ -3457,6 +3495,7 @@ function HyprChat(){
     const msgsUpToEdit=(cv?.messages||[]).slice(0,msgIndex);
     msgsUpToEdit.push(rebuilt);
     await sendMessages(cid, msgsUpToEdit, newContent);
+    }finally{turnBusyRef.current=false;}
   };
 
   const saveAssistantEdit=async(msgIndex,newContent)=>{
@@ -3507,12 +3546,16 @@ function HyprChat(){
       const mid=await resolveMsgDbId(cid,msgIndex,target);
       if(!mid)return;
       await fetch(`${API}/api/conversations/${cid}/messages?from_id=${mid}`,{method:"DELETE"});
+      // The server drops a summary that covered the removed messages; drop the line that marks it too.
+      uConv(cid,c=>Number(c.summary_until_msg_id)>=Number(mid)?{...c,summary_until_msg_id:0}:c);
     }catch(e){console.warn("Server truncate failed (non-fatal):",e);}
   };
 
   const continueMessage=async(msgIndex)=>{
-    if(streaming||sendPrepRef.current?.preparing)return;
+    if(streaming||sendPrepRef.current?.preparing||turnBusyRef.current)return;
     const cid=actId;if(!cid)return;
+    turnBusyRef.current=true;
+    try{
     const cv=convs.find(c=>c.id===cid);
     const msg=cv?.messages?.[msgIndex];
     if(!msg||msg.role==="user"||!msg.content)return;
@@ -3522,6 +3565,7 @@ function HyprChat(){
     uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex+1);m[msgIndex]={...m[msgIndex],isS:true};return{...c,messages:m};});
     const prior=(cv.messages||[]).slice(0,msgIndex+1);
     await sendMessages(cid,prior,null,{continueMessageId:mid,prefill:msg.content,priorMeta:msg.metadata||null});
+    }finally{turnBusyRef.current=false;}
   };
 
   const rateMessage=async(msgIndex,value)=>{
@@ -3647,9 +3691,15 @@ function HyprChat(){
     // run's ollama call keeps burning until its 600s timeout and the runs
     // row stays status='running' forever.
     try{
-      const stopEvents=evtsRef.current||evts;
-      const workflowIds=cancellableWorkflowIds(coderWorkflows,stopEvents,actId);
-      for(const workflowId of workflowIds)fetch(`${API}/api/coder/workflows/${workflowId}/cancel`,{method:"POST"}).catch(()=>{});
+      // The reply's own events (uncapped), and its conversation: Stop pressed while another chat is on
+      // screen must not act on that chat's jobs.
+      const stopCid=streamingCidRef.current||actId;
+      const stopEvents=streamSaveEvtsRef.current.length?streamSaveEvtsRef.current:(evtsRef.current||evts);
+      // Job states are re-read first: the list in memory is only refreshed on chat events, and a job
+      // that had since parked for review was being cancelled as if it were still running.
+      fetch(`${API}/api/coder/workflows?conversation_id=${stopCid}`).then(r=>r.ok?r.json():coderWorkflows).catch(()=>coderWorkflows).then(rows=>{
+        for(const workflowId of cancellableWorkflowIds(rows,stopEvents,stopCid))fetch(`${API}/api/coder/workflows/${workflowId}/cancel`,{method:"POST"}).catch(()=>{});
+      });
       const rids=_runIdsFromEvents(stopEvents);
       for(const rid of rids){
         // Fire-and-forget — we don't await, the backend route is idempotent.
@@ -5314,29 +5364,13 @@ function HyprChat(){
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
           {!isMobile&&panel==="chat"&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" className="hc-chip" style={{"--chip-c":t.mut,background:"transparent",fontFamily:font}}><IC.Download/> Import</button>}
           {panel==="chat"&&act&&(()=>{
-            // Context meter: prompt + generated tokens against the active num_ctx.
-            const promptToks=ctxTokens||0;
-            const liveGen=streaming&&tokC>0?tokC:0;
-            const totalCtxUsed=streaming?(promptToks+liveGen):(promptToks||sessionTokens||0);
-            const toks=totalCtxUsed;
+            // Context pill. The reading comes from the server (contextMeter.js); this is only the limit to
+            // show before the first reply of a chat has reported the window it ran with.
             const modelName=act?.model||models[0]||"";
             const mp=modelParams[modelName]||{};
             const codingContext=isCoderPersonaName(act?.persona_name)||(act?.tool_ids||[]).includes("codeagent");
-            const maxCtx=codingContext?(coderChatCtx||coderNumCtx||numCtx):(mp.num_ctx&&mp.num_ctx!=="default"?parseInt(mp.num_ctx)||0:numCtx||tokenLimit||0);
-            const ratio=maxCtx>0?Math.min(1,toks/maxCtx):0;
-            const cc=maxCtx>0?(ratio>0.85?t.err:ratio>0.6?t.warm:t.ok):streaming?t.acc:t.warm;
-            const fmtK=n=>n>=1000?`${(n/1000).toFixed(1)}k`:String(n);
-            return <div style={{display:"flex",flexDirection:"column",overflow:"hidden",borderRadius:"var(--hc-radius-card)",border:`1px solid ${cc}45`,background:`${cc}12`,minWidth:90,cursor:"default"}} title={`Context used: prompt + generated tokens = ${toks}${maxCtx>0?` / ${maxCtx}`:""}${liveGen>0?` | Live generation: +${liveGen} tokens`:genTokens>0?` | Generated this turn: ${genTokens} tokens`:""}`}>
-              <div style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px"}}>
-                <span style={{fontSize:"var(--hc-text-control)",display:"inline-block",animation:streaming?"bop 1.5s ease-in-out infinite":"none"}}>🧠</span>
-                <span style={{fontSize:"var(--hc-text-control)",color:cc,fontWeight:700,fontFamily:font,letterSpacing:.2}}>{fmtK(toks)}</span>
-                {maxCtx>0&&<span style={{fontSize:"var(--hc-text-micro)",color:t.mut,fontFamily:font}}>/{fmtK(maxCtx)}</span>}
-                {streaming&&tokS>0&&<span style={{fontSize:"var(--hc-text-micro)",color:`${cc}99`,marginLeft:2}}>{tokS}t/s</span>}
-              </div>
-              {maxCtx>0&&<div style={{height:3,background:`${t.surface}88`}}>
-                <div style={{height:"100%",background:cc,width:`${ratio*100}%`,transition:"width .3s ease"}}/>
-              </div>}
-            </div>;
+            const maxCtx=isCloudModelName(modelName)?0:codingContext?(coderChatCtx||coderNumCtx||numCtx):(mp.num_ctx&&mp.num_ctx!=="default"?parseInt(mp.num_ctx)||0:numCtx||tokenLimit||0);
+            return <ContextMeter reading={contextReadings[actId]} fallbackWindow={maxCtx} compactPercent={contextCompaction&&!codingContext&&!isCloudModelName(modelName)?chatCompactionPercent:0} live={streaming&&streamingCidRef.current===actId} speed={tokS} t={t} font={font}/>;
           })()}
         </div>
       </div>
@@ -7354,6 +7388,8 @@ function HyprChat(){
               const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
               const hiddenCount=Math.max(0,totalMessages-visibleCount);
               const visibleRows=hiddenCount>0?messageRows.slice(hiddenCount):messageRows;
+              // Where compaction cut this chat: everything above the line reaches the model as one summary.
+              const compactedFrom=contextCompaction?compactionIndex(act.messages,act.summary_until_msg_id):-1;
               // Find the last assistant message once so live search/tool events attach to the active answer.
               let lastAssistantMsgIdx=-1;
               messageRows.forEach(({msg,index})=>{if(msg.role==="assistant")lastAssistantMsgIdx=index;});
@@ -7412,6 +7448,7 @@ function HyprChat(){
               const quickSearchPayload=renderOpts?.quickSearch;
               const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
               return <CodeMessageBoundary key={`${actId}:${msg._activityKey||msg.id||i}`} identity={msg._activityKey||msg.id||i} live={!!msg.isS}>
+              {i===compactedFrom&&<CompactionNotice conversationId={actId} t={t} font={font}/>}
               <div id={`saved-message-${msg.id}`} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
                 {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
                 :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
@@ -7508,7 +7545,7 @@ function HyprChat(){
                     {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} className={generating?undefined:"hc-icon-btn"} data-tip={generating?undefined:playing?"Stop playback":"Read aloud"} aria-label={(playing||generating)?"Stop playback":"Read aloud"} style={generating?msgActionS(t.warm):{color:playing?t.acc:t.mut}}>
                       {generating?<><Spinner size={10} style={{color:t.warm}}/> {ttsPhase||"generating"}</>:playing?<IC.Stop/>:<IC.Volume/>}
                     </button>;})()}
-                    {!isU&&msg.content&&!streaming&&<div style={{position:"relative",display:"inline-flex"}}>
+                    {!isU&&msg.content&&!streaming&&!msg.metadata?.persona_first_message&&<div style={{position:"relative",display:"inline-flex"}}>
                       <button onClick={()=>regenerate(i)} className="hc-icon-btn" data-tip="Regenerate" aria-label="Regenerate response" style={{color:t.mut,borderRadius:"var(--hc-radius-sm) 0 0 var(--hc-radius-sm)"}}><IC.Refresh/></button>
                       <button onClick={()=>setRegenPopover(p=>p?.index===i?null:{index:i,model:"",temperature:"",personaId:""})} aria-label="Regenerate with a different model, temperature or profile" aria-expanded={regenPopover?.index===i} className="hc-icon-btn" style={{color:regenPopover?.index===i?t.acc:t.mut,width:22,minWidth:22,borderRadius:"0 var(--hc-radius-sm) var(--hc-radius-sm) 0"}}><IC.ChevDown/></button>
                       {regenPopover?.index===i&&<div className="hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 4px)",left:0,padding:10,zIndex:20,minWidth:240}}>
@@ -7585,7 +7622,7 @@ function HyprChat(){
               <span style={{color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{currentRun.label}</span>
               {currentRun.detail&&<span style={{color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,minWidth:40}}>{currentRun.detail}</span>}
               {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
-              {streaming&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Stop</button>}
+              {streaming&&streamingCidRef.current===actId&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Stop</button>}
             </div>;
           })()}
           {/* Attachment chips */}
@@ -7713,7 +7750,7 @@ function HyprChat(){
               }
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
-              disabled={streaming||councilRunning||loadingConv||!!preparingSend}
+              disabled={(streaming&&streamingCidRef.current===actId)||councilRunning||loadingConv||!!preparingSend}
               style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
@@ -7746,7 +7783,7 @@ function HyprChat(){
             </button>}
             {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
             :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            :streaming&&streamingCidRef.current===actId?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
             :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>
@@ -8037,7 +8074,13 @@ function HyprChat(){
             <input type="checkbox" checked={contextCompaction} onChange={e=>setContextCompaction(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
             {contextCompaction?"Enabled":"Disabled"}
           </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>When a chat nears its context window, older turns are summarized by the Workspace Analysis Model so long conversations keep their beginning. Original messages are never modified.</div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>When a chat fills its context window, earlier messages are summarized by the chat model and recent ones are kept word for word. Original messages are never modified.</div>
+          <div style={{marginTop:10,opacity:contextCompaction?1:.45,pointerEvents:contextCompaction?"auto":"none"}} aria-disabled={!contextCompaction}>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Compact when the chat reaches</div>
+            {chipRow(COMPACT_CHOICES.map(v=>({v,label:`${v}%`,title:`Summarize earlier messages when the chat fills ${v}% of the context window`})),chatCompactionPercent,setChatCompactionPercent,{color:t.ok})}
+            {(()=>{const {limit,capped}=compactionLimit(numCtx,chatCompactionPercent);return limit?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Fires at about {limit.toLocaleString()} of {Number(numCtx).toLocaleString()} tokens (your default context){capped?"; limited to leave room for a reply.":"."} A chat with its own context size uses the same rule.</div>:null;})()}
+            {roomLeft(numCtx).tight&&<div role="alert" style={{fontSize:"var(--hc-text-secondary)",color:t.warm,marginTop:6}}>A {Number(numCtx).toLocaleString()}-token context is too small for chat: HyprChat's own instructions and tools take about 3,500 tokens of every request, which leaves about {roomLeft(numCtx).room.toLocaleString()} for the conversation and the reply. Replies will be cut off and compaction cannot help. Use 8,192 or more.</div>}
+          </div>
         </div>
         <div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>

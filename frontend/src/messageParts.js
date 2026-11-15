@@ -20,14 +20,14 @@ export function stampCard(event, textLength) {
   return event;
 }
 
-// The visible reply was wiped ("clear": a text-fallback tool round) or swapped for another ("replace":
-// the review step). After a clear everything so far happened before the text that follows; after a
-// replace the old positions mean nothing.
-export function resetOffsets(events, mode) {
+// The visible reply lost text. "clear" takes back the current round (a text-fallback tool call, or leaked
+// reasoning): the reply is cut to `keep` characters, so a card stamped beyond that now sits at its end.
+// "replace" swaps the whole reply (the review step): the old positions mean nothing.
+export function resetOffsets(events, mode, keep = 0) {
   for (const event of events || []) {
     if (!placed(event)) continue;
     if (mode === 'replace') delete event.at;
-    else event.at = 0;
+    else event.at = Math.min(event.at, Math.max(0, keep));
   }
 }
 

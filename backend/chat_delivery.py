@@ -3,7 +3,11 @@ import asyncio
 import json
 import time
 
+import chat_context
 import database as db
+
+
+_SAVES: set = set()     # final saves still running after their request was cancelled
 
 
 def sse(payload):
@@ -21,6 +25,10 @@ async def deliver(stream, req):
     effort = None
     started = time.monotonic()
     ephemeral = bool(getattr(req, 'ephemeral', False))
+    meter = chat_context.TurnMeter()     # what the chat holds in the model's window (chat_context.py)
+    # Where the current model call's text starts. A `clear` retracts that call's text only: it used to
+    # empty the whole reply, which lost earlier rounds and, in continue mode, the original half for good.
+    round_start = candidate_start = 0
 
     async def save(status):
         if message_id is not None and not ephemeral:
@@ -30,6 +38,7 @@ async def deliver(stream, req):
                 'usage_calls': calls, 'elapsed_seconds': round(time.monotonic() - started, 3),
                 'total_prompt_tokens': sum(c.get('prompt_tokens', 0) for c in calls),
                 'total_gen_tokens': sum(c.get('gen_tokens', 0) for c in calls),
+                **({'context': reading} if (reading := meter.reading(visible)) else {}),
             })
 
     try:
@@ -48,11 +57,23 @@ async def deliver(stream, req):
                 visible = event.get('prior_content') or ''
                 revisions = event.pop('prior_reviews', [])
                 event['server_persists'] = True
+                meter.begin(visible)
+                round_start = len(visible)
                 await save('running')
             elif kind == 'effort':
                 effort = event
+            elif kind == 'context_info':
+                meter.info(event)
+                if event.get('prompt_estimate'):          # sent once before every model call
+                    round_start, candidate_start = len(visible), len(candidate)
+                continue
+            elif kind == 'ctx_update':
+                event = meter.live(event, visible)
+            elif kind == 'context_compacted':
+                meter.compacted(event)
             elif kind == 'usage_round':
                 calls.append({k: v for k, v in event.items() if k != 'type'})
+                meter.usage(event)
                 if not ephemeral:
                     await db.record_token_usage(req.conversation_id, req.model,
                         getattr(req, 'persona_id', '') or '', event['prompt_tokens'], event['gen_tokens'])
@@ -73,9 +94,11 @@ async def deliver(stream, req):
                 visible += event.get('content', '')
             elif kind == 'clear':
                 if reviewing:
-                    candidate = ''
+                    candidate = '' if event.get('all') else candidate[:candidate_start]
                     continue
-                visible = ''
+                keep = 0 if event.get('all') else min(round_start, len(visible))
+                visible = visible[:keep]
+                event = {'type': 'clear', 'keep': keep}    # the browser trims its copy to the same length
             elif kind == 'review_incomplete':
                 candidate = ''
                 event = {'type': 'review_status', 'notice': 'Review incomplete; previous answer retained.'}
@@ -106,6 +129,8 @@ async def deliver(stream, req):
                     event['review_notice'] = 'Previous completed answer retained.'
                 event['total_prompt_tokens'] = sum(c.get('prompt_tokens', 0) for c in calls)
                 event['total_gen_tokens'] = sum(c.get('gen_tokens', 0) for c in calls)
+                if (reading := meter.reading(visible)):
+                    event['context'] = reading
                 await save('completed')
                 terminal = True
             yield sse(event)
@@ -114,9 +139,11 @@ async def deliver(stream, req):
             await stream.aclose()
         finally:
             if not terminal and message_id is not None and not ephemeral:
-                # Shield the bounded local commit from an HTTP disconnect.
+                # Shield the bounded local commit from an HTTP disconnect. The web server cancels this
+                # task again at every await once the browser is gone, and awaiting the save a second time
+                # (unshielded) passed that cancellation on to the save itself: the reply stayed "running"
+                # with nothing saved. Keep a reference, let it finish on its own, and stay cancelled.
                 task = asyncio.create_task(save('interrupted'))
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    await task
+                _SAVES.add(task)
+                task.add_done_callback(_SAVES.discard)
+                await asyncio.shield(task)

@@ -76,13 +76,13 @@ test('a file delivered twice shows once, at its latest place, with a version cou
   assert.equal(result.parts[0].cards[0].versions, 2);
 });
 
-test('a wiped reply moves earlier cards above the new text; a replaced one drops their places', () => {
-  const cleared = [output('a', 40), output('b')];
-  resetOffsets(cleared, 'clear');
-  assert.deepEqual(cleared.map(event => event.at), [0, undefined]);
-  const result = messageParts('Fresh text after the tool round.', [...cleared.slice(0, 1), output('c', 0)]);
-  assert.deepEqual(texts(result), ['', 'Fresh text after the tool round.']);
-  assert.deepEqual(shown(result)[0], ['a', 'c']);
+test('taking back a round keeps earlier cards in place; a replaced reply drops their places', () => {
+  // Found 2026-11-13: "clear" emptied the whole reply, so every card jumped to the top.
+  const events = [output('a', 40), output('b', 90), output('c')];
+  resetOffsets(events, 'clear', 55);
+  assert.deepEqual(events.map(event => event.at), [40, 55, undefined]);
+  resetOffsets(events, 'clear');
+  assert.deepEqual(events.map(event => event.at), [0, 0, undefined]);
 
   const replaced = [output('a', 40)];
   resetOffsets(replaced, 'replace');

@@ -39,6 +39,7 @@ def test_server_persisted_settings_use_guarded_persistence():
     sync = _sync()
     expected_pairs = [
         ("hc-num-ctx", "default_num_ctx"),
+        ("hc-chat-compaction-percent", "chat_compaction_percent"),
         ("hc-ws-model", "workspace_model"),
         ("hc-planning-model", "planning_model"),
         ("hc-coder-model", "coder_model"),

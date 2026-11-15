@@ -1516,7 +1516,7 @@ async def patch_message_presentation(conversation_id, message_id, *, content=Non
             metadata = {**previous, **metadata}
             if previous.get('server_persists'):
                 for key in ('server_persists','in_progress','delivery_status','review_history','effort',
-                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens',
+                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens','context',
                             'run_ids','run_roles','run_types','has_full_product_build'):
                     if key in previous:
                         metadata[key] = previous[key]
@@ -1618,6 +1618,13 @@ async def delete_message(message_id: int) -> bool:
     user_id = _scope_user()
     db = await get_db()
     try:
+        # A message inside the summarized part of its chat lives on in the summary. Drop the summary
+        # with it (as delete_messages_from does); the chat is summarized again when it next fills up.
+        await db.execute(
+            """UPDATE conversations SET summary='', summary_until_msg_id=0
+               WHERE user_id=? AND summary_until_msg_id >= ?
+                 AND id = (SELECT conversation_id FROM messages WHERE id = ?)""",
+            (user_id, message_id, message_id))
         cur = await db.execute(
             "DELETE FROM messages WHERE id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
             (message_id, user_id),
@@ -4707,7 +4714,7 @@ async def fork_conversation(original_conv_id: str, fork_msg_id: int, new_conv_id
         )
         await db.execute("""
             INSERT INTO messages (conversation_id, role, content, metadata, created_at)
-            SELECT ?, role, content, metadata, created_at
+            SELECT ?, role, content, json_remove(COALESCE(NULLIF(metadata, ''), '{}'), '$.context'), created_at
             FROM messages WHERE conversation_id = ? AND id <= ?
             ORDER BY id ASC
         """, (new_conv_id, original_conv_id, fork_msg_id))

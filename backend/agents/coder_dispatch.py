@@ -1,4 +1,5 @@
 """Application-side dispatch receipts; this module does not belong on the worker."""
+import json
 import re
 
 import database as db
@@ -29,10 +30,28 @@ _JOB_ID = re.compile(r'\bcw3-[0-9a-f]{24}\b')
 _STATUS = re.compile(r'\b(?:status|progress|finished|completed|running|queued|blocked|failed)\b|\bhow.+(?:going|doing)\b', re.I)
 
 
-def claims_start(content):
+# What a reply to a QUESTION must say before it counts as claiming work: something done to the project in
+# the first person, or progress of the job itself. "In progress" and "running in the background" on their
+# own are ordinary words in an answer about spinners or background tasks.
+_JOB_CLAIM = re.compile(
+    r"\b(?:I(?:['’]ve| have)?|we(?:['’]ve| have)?|(?:the|your) (?:job|workflow|build|edit|update))"
+    r"\s+(?:is |has |have )?(?:started|launched|queued|dispatched|begun)\b"
+    r"|\b(?:I['’]m|I am)\s+(?:starting|building|implementing|updating)\b"
+    r"|\b(?:I['’]ve|I have)\s+(?:added|created|built|implemented|updated|fixed|finished|completed)\b"
+    r"|\b(?:Daedalus job|Project question)\s+\S+\s+is saved with status\b"
+    r"|\b(?:the|your|this) (?:Daedalus )?(?:job|workflow|build|edit|update|change|request)\b[^.!?\n]{0,60}"
+    r"\b(?:underway|in progress|running in (?:the )?background)\b",
+    re.I,
+)
+
+
+def claims_start(content, about_job=False):
+    """True when a reply says work was started or done. ``about_job`` narrows it to claims about the job
+    or the project (see _JOB_CLAIM): used when the user asked a question, where nothing could start."""
+    claim = _JOB_CLAIM if about_job else _CLAIM
     text = re.sub(r'```.*?```|`[^`\n]*\s[^`\n]*`|"[^"\n]*"|“[^”\n]*”|(?<!\w)\x27[^\x27\n]+\x27', '', content, flags=re.S)
     text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('>'))
-    return any(_CLAIM.search(sentence) and not re.search(
+    return any(claim.search(sentence) and not re.search(
         r"\b(?:no|not|never|hasn't|haven't|isn't|didn't|couldn't)\b", sentence, re.I)
         for sentence in re.split(r'[.!?\n]', text))
 
@@ -73,13 +92,32 @@ class DispatchGuard:
         return job
 
     @staticmethod
+    def refusal(result):
+        """Why the router started no job, in its own words, for the reply. '' when it gave no reason."""
+        text = str(result or '').strip()
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            reason = data.get('error') or (data.get('message') if data.get('request_started') is False else '')
+            reason = ' '.join(str(reason or '').split())
+            if reason and data.get('workflow_id') and data.get('state'):
+                reason += f" (job `{data['workflow_id']}` is {data['state']})"
+            return reason[:400]
+        return ' '.join(text.split())[:400] if re.match(r'(?i)error\b', text) else ''
+
+    @staticmethod
     def describe(job):
         kind = 'Project question' if job['mode'] == 'ask_uploaded_project' else 'Daedalus job'
         return (f"{kind} `{job['id']}` is saved with status **{job['state']}**. "
                 'The progress card shows its current state. Completion and review are separate from starting the job.')
 
     async def review(self, content, *, can_retry):
-        if not claims_start(content):
+        # A question cannot start a job, so its answer is checked only for claims about the job itself.
+        # The broad check used to replace ordinary answers ("show an in-progress spinner like this…")
+        # with "No Daedalus job was started for this message" (found 2026-11-13).
+        if not claims_start(content, about_job=not may_correct(self.request)):
             return content, False
         job = await self.receipt()
         if job:

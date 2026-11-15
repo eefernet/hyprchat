@@ -158,3 +158,12 @@ def test_fail_open_on_db_error(monkeypatch):
     msgs = [{"role": "user", "content": "z" * 10_000}]
     out = _run(chat_mod._maybe_compact_context(None, None, msgs, {"num_ctx": 1024}, "c1", False))
     assert out is msgs
+
+
+def test_below_the_limit_a_stored_summary_is_still_sent(monkeypatch):
+    # Scheduled runs send only the last messages and take this path: they used to see none of the summary.
+    state = _wire(monkeypatch, old_summary="EARLIER SUMMARY", until_id=40)
+    msgs = [{"role": "system", "content": "sys"}] + _dialogue(4, chars=50)
+    out = _run(chat_mod._maybe_compact_context(None, None, msgs, {"num_ctx": 100000}, "c1", False))
+    assert out[0] == msgs[0] and out[1]["content"].endswith("EARLIER SUMMARY") and out[2:] == msgs[1:]
+    assert state["llm_calls"] == 0 and state["saved"] is None

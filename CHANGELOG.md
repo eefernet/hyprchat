@@ -20,6 +20,32 @@
 - **Tool output where it happened** — code output and delivered files now sit under the part of the reply that produced them, instead of in a stack at the end. Output starts collapsed to one line; a failed run starts open. Older messages keep their previous layout.
 - **Continued replies keep their output** — pressing Continue no longer drops the code output from the first half of the reply.
 
+## Chat fixes
+
+- **Repeated messages are kept** — sending the same text twice in a row (for example "yes") used to save only the first; after a reload the second turn was gone.
+- **Stop really stops** — stopping a reply, or losing the connection, now saves what was written and marks it interrupted (it could stay "running" forever with no text), and tools the reply had started are cancelled instead of finishing in the background.
+- **Stop and the message box belong to the chat that is replying** — other chats stay typeable, and Stop no longer acts on a different chat's work.
+- **Example code is not run as a tool call** — an answer that mentions something like `read_file("data.csv")`, defines a helper with a tool's name, or shows a JSON example is no longer executed.
+- **Earlier text survives tool calls** — with models that write tool calls as text, the reply so far was wiped at every call; continuing a reply could erase its first half. Only the round being retracted is removed now.
+- **Regenerate and Edit ask first** — when they would remove later messages, a confirmation says how many. Regenerate is no longer offered on an agent's greeting, where it deleted the whole chat.
+- **Tool cards survive a chat switch** — code output, files and sources from a reply that was still running are kept when you open another chat meanwhile.
+- **PDFs are remembered** — the text of an attached PDF stays available to the model after a reload or chat switch.
+- **A dropped connection keeps the reply** — the text already written stays, with the error noted under it.
+- **No double replies** — double-clicking Regenerate, Save & Send or Continue no longer starts two replies in one bubble.
+
+## Context
+
+- **A context meter you can trust** — the pill in the chat header now shows how much of the model's window the conversation holds, measured from the model's own counts. It no longer drops to zero when you send, reload or switch chats, and it no longer falls after every reply. Each chat keeps its own reading.
+- **Working context shown separately** — thinking and tool results are used while a reply runs and are not kept afterwards. They show as a lighter end of the bar and in the tooltip, and count toward the warning colours.
+- **The real limit** — the limit shown is the window the server actually ran the model with, including an agent's own setting.
+- **Auto-compaction you can see** — when a chat reaches the compaction threshold, earlier messages are summarized by the chat model and everything recent is kept word for word. The chat shows a line where it was cut, with the summary one click away, and the meter drops to the new size.
+- **Nothing dropped silently** — compaction used to send only a short summary plus the last eight messages, which with a large window discarded most of the chat unsummarized. Every message is now either in the summary or sent in full.
+- **Long tool runs recover** — when tool results fill the window in the middle of a reply, older results are shortened and the history summarized before the chat gives up.
+- **A warning when the context is too small** — HyprChat's own instructions and tools take about 3,500 tokens of every request. When a window leaves too little for the conversation and replies, the context pill shows a warning with the numbers, and Settings explains it. The pill's tooltip now also shows that fixed cost.
+- **Compaction that keeps working** — a stored summary is always sent, even when the browser had trimmed the messages before it; compaction no longer runs when it could free almost nothing; a chat that was compacted before can be compacted again in the middle of a long tool run; and the browser no longer trims old messages itself while compaction is on.
+- **Cloud models are left alone** — Claude and GPT chats are no longer judged against the local context setting, which stopped them as "full" at a few thousand tokens and summarized them with the small local model.
+- **Choose when chats compact** — Settings → Model & Generation has a new "Compact when the chat reaches" choice: 85, 90, 95, 98 or 99% of the context window (default 85%). Settings shows the token count that works out to, and the context pill's tooltip shows it for the open chat. Room for one reply is always kept, so on small windows the highest choices fire a little earlier than their percentage. Coding jobs keep their own "Compact at" setting.
+
 </details>
 
 <details>

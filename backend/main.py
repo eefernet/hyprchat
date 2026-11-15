@@ -364,6 +364,8 @@ async def lifespan(app: FastAPI):
     if "context_compaction" in _settings:
         config.CONTEXT_COMPACTION = "on" if str(_settings["context_compaction"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded context compaction: {config.CONTEXT_COMPACTION}")
+    if "chat_compaction_percent" in _settings:
+        config.CHAT_COMPACTION_PERCENT = _settings["chat_compaction_percent"]
     if "history_recall" in _settings:
         config.HISTORY_RECALL = "on" if str(_settings["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded history recall: {config.HISTORY_RECALL}")
@@ -648,6 +650,9 @@ class ChatRequest(BaseModel):
     # message; no new stub row is created and the frontend PATCHes the
     # concatenated result back onto the same row.
     continue_message_id: Optional[int] = None
+    # "new" = a message the user just sent (always saved); "retry" = regenerate of the last one
+    # (reuses the saved message). Absent for older clients. See chat_turns.is_retry.
+    turn: Optional[str] = None
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None

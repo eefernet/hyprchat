@@ -83,9 +83,23 @@ def _fix_json_newlines(text: str) -> str:
     return ''.join(result)
 
 
-def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
+def _is_explanation(content: str) -> bool:
+    """True when a reply is mostly prose around its JSON or code: an answer that shows a call, not a call."""
+    prose = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
+    for found in _extract_json_objects(prose):
+        prose = prose.replace(found, '')
+    return len(re.sub(r'\s', '', prose)) > 80
+
+
+def parse_text_tool_calls(content: str, available_names: set, native: bool = False) -> list[dict]:
     """Parse tool calls from model text when native Ollama tool protocol fails.
-    Handles: raw JSON, <tool_call> tags, JSON in code blocks, bare JSON objects."""
+    Handles: raw JSON, <tool_call> tags, JSON in code blocks, bare JSON objects.
+
+    ``native`` = the model was given real tool definitions this round. Such a model that wants a tool
+    uses the protocol, or at worst emits explicit call markup; a JSON object or a function call inside
+    an explanatory answer is the answer. Without this, "you can call read_file("data.csv") in your own
+    code" and a ```json example of a tool call were executed as real calls (found 2026-11-13).
+    """
     calls = []
 
     # Strip markdown code fences and model-specific special tokens for parsing
@@ -181,6 +195,10 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
     if calls:
         return calls
 
+    # Past this point nothing is explicit call markup: these are guesses about sloppy output.
+    if native and _is_explanation(content):
+        return calls
+
     # 3. JSON objects with name+arguments anywhere in text
     for json_str in _extract_json_objects(stripped):
         try:
@@ -210,7 +228,7 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
 
     # 5. Python function call syntax: run_shell("cmd"), write_file("path", "content"), etc.
     #    Models sometimes write tool calls as Python code instead of using the protocol.
-    if not calls:
+    if not calls and not native:
         calls = _parse_python_tool_calls(content, available_names)
 
     # 6. Loose roleplay-model syntax: <tools> "generate_image" (prompt: ...)
@@ -222,25 +240,54 @@ def parse_text_tool_calls(content: str, available_names: set) -> list[dict]:
 
 def _parse_python_tool_calls(content: str, available_names: set) -> list[dict]:
     """Parse Python-style function calls from model output.
-    Catches patterns like: run_shell("pip install foo"), write_file("/root/app.py", '''code'''), etc."""
+    Catches patterns like: run_shell("pip install foo"), write_file("/root/app.py", '''code'''), etc.
+
+    Only text that is nothing but calls counts. A code block that also assigns, imports or defines is a
+    code example; a tool name the reply defines itself (``def read_file(path)``) is the user's helper; and
+    outside code blocks a call must stand alone on its line, so a sentence that mentions one is prose.
+    """
     calls = []
+    names = [name for name in available_names
+             if not re.search(rf'\b(?:def|function|func|fn)\s+{re.escape(name)}\s*\(', content)]
+    if not names:
+        return calls
+    pattern = re.compile(r'\b(' + '|'.join(sorted(map(re.escape, names), key=len, reverse=True)) + r')\s*\(')
 
     # Extract all code blocks, or use full content if no code blocks
     code_blocks = re.findall(r'```(?:\w*)\n(.*?)\n\s*```', content, re.DOTALL)
-    texts_to_scan = code_blocks if code_blocks else [content]
-
-    for text in texts_to_scan:
-        for name in available_names:
-            # Match tool_name( ... ) — find the opening paren after the tool name
-            pattern = rf'\b{re.escape(name)}\s*\('
-            for m in re.finditer(pattern, text):
-                start = m.end()  # position after opening (
-                args = _extract_balanced_parens(text, start)
-                if args is None:
-                    continue
-                parsed = _parse_python_args(name, args)
-                if parsed:
-                    calls.append({"function": {"name": name, "arguments": parsed}})
+    for text in code_blocks or [content]:
+        found, covered = [], 0
+        for m in pattern.finditer(text):
+            if m.start() < covered:
+                continue                                   # inside the arguments of the previous call
+            args = _extract_balanced_parens(text, m.end())
+            if args is None:
+                continue
+            parsed = _parse_python_args(m.group(1), args)
+            if not parsed:
+                continue
+            covered = m.end() + len(args) + 1
+            found.append((m.start(), covered, {"function": {"name": m.group(1), "arguments": parsed}}))
+        if not found:
+            continue
+        if code_blocks:
+            rest, last = [], 0
+            for start, end, _ in found:
+                rest.append(text[last:start])
+                last = end
+            rest.append(text[last:])
+            leftover = re.sub(r'(?m)^\s*(?:#|//).*$', '', ''.join(rest))
+            if re.sub(r'[\s;]', '', leftover):
+                continue                                   # a code example, not a list of calls
+            calls.extend(call for _, _, call in found)
+            continue
+        for start, end, call in found:
+            line_start = text.rfind('\n', 0, start) + 1
+            line_end = text.find('\n', end)
+            line_end = len(text) if line_end == -1 else line_end
+            if text[line_start:start].strip() or text[end:line_end].strip(' \t;'):
+                continue                                   # mentioned inside a sentence
+            calls.append(call)
     return calls
 
 
