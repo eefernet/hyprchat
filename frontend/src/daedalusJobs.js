@@ -1,5 +1,7 @@
 import {onlyInconclusiveChecks} from './daedalusCheckOutcomes.js';
-export const terminalJobStates=new Set(['completed','cancelled','blocked','waiting_for_input','ready_for_review']);
+// 'loading' is the card's own placeholder for a job whose row has not been fetched yet (daedalusCards.js):
+// nothing is running as far as the browser knows, so it gets no Stop button and no live line.
+export const terminalJobStates=new Set(['completed','cancelled','blocked','waiting_for_input','ready_for_review','loading']);
 // Completed work never changes again. (A cancelled policy-7 job can be continued from another tab, so it keeps its slow poll.)
 export const finishedJobStates=new Set(['completed']);
 
@@ -26,7 +28,9 @@ export function jobStatusLabel(job){
     return reviewableCandidate(job)?'Ready for review':'Build incomplete';
   }
   if(job.state==='coding')return job.repair_round>0?`Repairing · attempt ${job.repair_round} of 2`:'Building';
-  return ({queued:'Planning',inspecting:'Planning',baselining:'Checking',planning:'Planning',
+  // A project question is read, not planned and built.
+  if(job.mode==='ask_uploaded_project'&&['queued','inspecting','answering'].includes(job.state))return 'Answering';
+  return ({loading:'Loading',answering:'Answering',verifying:'Checking',queued:'Planning',inspecting:'Planning',baselining:'Checking',planning:'Planning',
     checking:'Checking',auditing:'Checking',reviewing:'Reviewing',accepting:'Reviewing',visual_review:'Reviewing',
     packaging:'Saving checkpoint',candidate_packaging:'Saving checkpoint',cancelling:'Stopping',
     cancelled:'Stopped',blocked:'Needs attention',waiting_for_input:'Needs attention'})[job.state]||'Needs attention';
@@ -50,7 +54,8 @@ export function jobActivity(job){
     if(job.narrowed_targets?.length)return compact(`Updating ${job.narrowed_targets[0]}`);
     return job.last_patch?.category==='output_limit'?'Splitting work into smaller file edits':compact(job.brief?.batches?.[job.batch||0]?.task||'Creating project files');
   }
-  return ({queued:'Waiting for the coding worker',inspecting:'Inspecting project files',baselining:'Checking the original project',
+  if(job.mode==='ask_uploaded_project'&&['queued','inspecting','answering'].includes(job.state))return 'Reading the project to answer your question';
+  return ({answering:'Reading the project to answer your question',verifying:'Checking the plan against the project',queued:'Waiting for the coding worker',inspecting:'Inspecting project files',baselining:'Checking the original project',
     planning:'Preparing an implementation plan',checking:'Running project checks',reviewing:'Preparing independent checks',
     auditing:'Testing the current revision',accepting:'Reviewing the execution evidence',visual_review:'Reviewing the interface',
     packaging:'Publishing the accepted revision',candidate_packaging:'Saving the current candidate',

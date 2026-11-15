@@ -105,3 +105,12 @@ test('continuing a reply keeps the cards from its first half', () => {
   assert.deepEqual(merged.map(event => event.data.stdout), ['before', 'after']);
   assert.deepEqual(mergeContinued([], [output('only', 3)]).length, 1);
 });
+
+test("a card's sequence number does not depend on the part it lands in", () => {
+  // The run list keeps what the reader opened by this number while text is still streaming in.
+  const early = messageParts(ROUND_1, [output('a', ROUND_1.length), output('b', ROUND_1.length)]);
+  const later = messageParts(`${ROUND_1}\n\n${ROUND_2}`, [output('a', ROUND_1.length), output('b', ROUND_1.length + 2 + ROUND_2.length)]);
+  const seqs = result => result.parts.flatMap(part => part.cards.map(card => [card.data.stdout, card.seq]));
+  assert.deepEqual(seqs(early), [['a', 0], ['b', 1]]);
+  assert.deepEqual(seqs(later), [['a', 0], ['b', 1]]);
+});

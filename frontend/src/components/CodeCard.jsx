@@ -1,4 +1,4 @@
-import React,{createContext,useContext,useEffect,useId,useMemo,useRef,useState,useSyncExternalStore} from 'react';
+import React,{createContext,useCallback,useContext,useEffect,useId,useMemo,useRef,useState,useSyncExternalStore} from 'react';
 import {codeLines,codeDiffKind} from '../syntaxHighlight.js';
 import {IC} from './icons.jsx';
 import '../codeBlocks.css';
@@ -27,6 +27,20 @@ export function CodeCardSession({children}){
 export function CodeMessageBoundary({identity,live=false,children}){
   const value=useMemo(()=>({identity,live}),[identity,live]);
   return <Message.Provider value={value}>{children}</Message.Provider>;
+}
+
+// The same per-visit memory for other things drawn inside a reply (the code-run list): what the reader
+// opened stays open when the streaming render is swapped for the final one. Outside a chat reply the
+// value lives with the component.
+export function useCardMemory(blockKey,initial){
+  const visit=useContext(Visit),message=useContext(Message),local=useRef(new Map());
+  const stateMap=visit&&message?visit:local.current;
+  const key=`${message?.identity||'standalone'}:${blockKey}`;
+  if(!stateMap.has(key))stateMap.set(key,{value:initial});
+  const saved=stateMap.get(key);
+  const [,refresh]=useState(0);
+  const set=useCallback(next=>{saved.value=typeof next==='function'?next(saved.value):next;refresh(count=>count+1);},[saved]);
+  return [saved.value,set];
 }
 
 export default function CodeCard({code,lang='',fenceLabel='',filename='',blockKey,streaming=false}){

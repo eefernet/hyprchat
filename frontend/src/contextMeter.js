@@ -3,6 +3,9 @@
 //   used     tokens the conversation holds: what is sent again on the next turn
 //   working  tokens only in use while a reply runs (thinking, tool results, search excerpts): not kept
 //   window   the context window the server ran the model with (0 = not known)
+//   parts    the same tokens by category, when the server sent a split (contextBreakdown.js draws it):
+//            while a reply runs they add up to used + working, afterwards to used
+//   peak     { total, parts } of the fullest moment of the last reply
 //
 // The server works these out (backend/chat_context.py) and saves the final reading on each reply as
 // metadata.context. This file restores it when a chat opens, keeps it sensible between events, and never
@@ -27,10 +30,18 @@ const meta = message => {
 
 const number = value => (Number.isFinite(Number(value)) && Number(value) > 0 ? Math.round(Number(value)) : 0);
 
+const isSplit = value => !!value && typeof value === 'object' && !Array.isArray(value);
+// The category split and the peak, only when the server sent them (older replies have neither).
+const split = context => ({
+  ...(isSplit(context?.parts) ? { parts: context.parts } : {}),
+  ...(isSplit(context?.peak) && isSplit(context.peak.parts) ? { peak: context.peak } : {}),
+});
+const without = (reading, ...keys) => { const copy = { ...reading }; keys.forEach(key => delete copy[key]); return copy; };
+
 function saved(message) {
   const context = meta(message).context;
   if (context && number(context.used)) {
-    return { used: number(context.used), working: 0, window: number(context.window), measured: !!context.measured, ratio: Number(context.ratio) || DEFAULT_RATIO, fixed: number(context.fixed) };
+    return { used: number(context.used), working: 0, window: number(context.window), measured: !!context.measured, ratio: Number(context.ratio) || DEFAULT_RATIO, fixed: number(context.fixed), ...split(context) };
   }
   // Replies saved before readings existed still carry each model call's real counts.
   const first = (meta(message).usage_calls || [])[0];
@@ -58,7 +69,7 @@ export function fromMessages(messages) {
 export function atStreamStart(messages, previous) {
   const list = (messages || []).filter(message => !(message?.role === 'assistant' && !String(message.content || '').trim()));
   const restored = fromMessages(list);
-  if (restored) return { ...restored, working: 0 };
+  if (restored) return { ...without(restored, 'peak'), working: 0 };      // the peak was the previous reply's
   const guess = list.reduce((sum, message) => sum + estimateTokens(message?.content), 0);
   return { used: guess, working: 0, window: previous?.window || 0, measured: false, ratio: DEFAULT_RATIO };
 }
@@ -68,19 +79,23 @@ export function applyUpdate(reading, event) {
   const current = reading || { used: 0, working: 0, window: 0, measured: false, ratio: DEFAULT_RATIO };
   if (event?.used == null) return current;
   const used = event.measured || current.compacted ? number(event.used) : Math.max(current.used, number(event.used));
-  return { ...current, used, working: number(event.working), window: number(event.window) || current.window, measured: !!event.measured, compacted: event.measured ? false : current.compacted, fixed: number(event.fixed) || current.fixed || 0 };
+  return { ...without(current, 'peak', ...(isSplit(event.parts) ? [] : ['parts'])), used, working: number(event.working), window: number(event.window) || current.window, measured: !!event.measured, compacted: event.measured ? false : current.compacted, fixed: number(event.fixed) || current.fixed || 0, ...(isSplit(event.parts) ? { parts: event.parts } : {}) };
 }
 
 // `done.context`: the reply is finished and what it used while working is gone.
 export function settle(reading, context) {
-  if (!context || !number(context.used)) return reading ? { ...reading, working: 0 } : reading;
-  return { used: number(context.used), working: 0, window: number(context.window) || reading?.window || 0, measured: !!context.measured, ratio: Number(context.ratio) || reading?.ratio || DEFAULT_RATIO, fixed: number(context.fixed) || reading?.fixed || 0 };
+  // Without a final reading (a stopped reply) the split still describes the moment it stopped: drop it.
+  if (!context || !number(context.used)) return reading ? { ...without(reading, 'parts', 'peak'), working: 0 } : reading;
+  return { used: number(context.used), working: 0, window: number(context.window) || reading?.window || 0, measured: !!context.measured, ratio: Number(context.ratio) || reading?.ratio || DEFAULT_RATIO, fixed: number(context.fixed) || reading?.fixed || 0, ...split(context) };
 }
 
 // `context_compacted`: earlier messages were summarized, so the conversation really is smaller now.
+// Only `freed_history` came out of the conversation. Room made by shortening this reply's own tool results
+// (`summarized: 0`) was working context and never part of `used`.
 export function compacted(reading, event) {
   if (!reading) return reading;
-  return { ...reading, used: Math.max(0, reading.used - number(event?.freed)), compacted: true };
+  const freed = event?.freed_history != null ? number(event.freed_history) : event?.summarized === 0 ? 0 : number(event?.freed);
+  return freed ? { ...without(reading, 'parts'), used: Math.max(0, reading.used - freed), compacted: true } : reading;
 }
 
 // When a chat is compacted. Same rule as backend/chat_context.py compaction_limit(): the chosen share of the
@@ -132,7 +147,7 @@ export function meterView(reading, fallbackWindow = 0, compactPercent = 0) {
   if (limit) parts.push(`Auto-compaction at ${limit.toLocaleString()} tokens`);
   if (reading && !reading.measured) parts.push('Estimate until the model reports its count');
   if (!reading) parts.push('No reply yet');
-  return { used, working, window, usedShare: share(used), workingShare: Math.max(0, fill - share(used)), tone: warning ? 'full' : tone, warning, tooltip: parts.join('\n') };
+  return { used, working, total: used + working, window, percent: window > 0 ? Math.round(fill * 100) : null, usedShare: share(used), workingShare: Math.max(0, fill - share(used)), tone: warning ? 'full' : tone, warning, tooltip: parts.join('\n') };
 }
 
 // Where the "earlier messages are summarized" line goes: the index of the first message after the cut,

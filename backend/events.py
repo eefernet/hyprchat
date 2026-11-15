@@ -7,6 +7,8 @@ import ast
 import re
 import time
 
+import tool_calls
+
 
 class EventBus:
     """Simple pub/sub for SSE status events per conversation."""
@@ -29,7 +31,8 @@ class EventBus:
 
     async def emit(self, conv_id: str, event_type: str, data: dict):
         """Emit a status event to all subscribers of a conversation."""
-        event = {"type": event_type, "data": data, "timestamp": time.time()}
+        # Tool events sent while a tool call is running carry that call's id (tool_calls.py).
+        event = {"type": event_type, "data": tool_calls.stamp(event_type, data), "timestamp": time.time()}
         async with self._lock:
             targets = list(self._subscribers.get(conv_id, []))
         for q in targets:
@@ -94,7 +97,7 @@ def inject_text_tool_prompt(messages: list, available_tool_names: set, extra_too
             "</tool_call>\n\n"
             "2. Test code with hardcoded values (NO input(), NO sys.argv):\n"
             "<tool_call>\n"
-            '{"name": "execute_code", "arguments": {"code": "from art import text2art\\nprint(text2art(\'Hello\', font=\'block\'))", "language": "python"}}\n'
+            '{"name": "execute_code", "arguments": {"description": "Draw Hello as block letters", "code": "from art import text2art\\nprint(text2art(\'Hello\', font=\'block\'))", "language": "python"}}\n'
             "</tool_call>\n\n"
             "3. Save the final script:\n"
             "<tool_call>\n"

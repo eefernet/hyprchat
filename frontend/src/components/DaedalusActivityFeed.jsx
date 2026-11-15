@@ -44,7 +44,7 @@ export default function DaedalusActivityFeed({job,limit=0,paged=false,onShowAll}
   });
   return <div>
     <ol className="dw-feed" aria-label="Job activity">{items}</ol>
-    {limit&&rows.length>limit&&onShowAll&&<button type="button" className="dw-more" onClick={onShowAll}>Show all activity</button>}
+    {limit>0&&rows.length>limit&&onShowAll&&<button type="button" className="dw-more" onClick={onShowAll}>Show all activity</button>}
     {paged&&more&&<button type="button" className="dw-more" disabled={busy} onClick={load}>{busy?'Loading…':older.length?'Load earlier activity':'Load full history'}</button>}
     {error&&<p role="alert" className="dw-empty">{error}</p>}
   </div>;

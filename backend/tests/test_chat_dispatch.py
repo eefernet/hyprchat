@@ -61,7 +61,7 @@ def harness(tmp_path, monkeypatch):
         await db.create_conversation('c', model='fixture', model_config_id='agent', tool_ids=['codeagent'])
         await db.upsert_coding_project('p', 'Existing project', conversation_id='c', openhands_project_id='upload')
 
-    async def run(responses, prompt=PROMPT, options=None):
+    async def run(responses, prompt=PROMPT, options=None, **request):
         payloads = []
         def handle(request):
             if request.url.path == '/api/show':
@@ -78,7 +78,7 @@ def harness(tmp_path, monkeypatch):
             return httpx.Response(200, text=''.join(json.dumps(p)+'\n' for p in packets))
         req = ChatRequest(conversation_id='c', model='fixture', persona_id='agent',
             messages=[{'role':'user','content':prompt}], tool_ids=['codeagent'], use_memories=False,
-            think_budget=0)
+            think_budget=0, **request)
         token = coder_jobs.REQUEST_OPTIONS.set({'project_id':'p', **(options or {})})
         try:
             async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
@@ -378,4 +378,90 @@ def test_current_receipt_does_not_trust_the_reported_id_or_state(harness):
             await connection.close()
         with pytest.raises(ValueError,match='mode differs'):
             await guard.receipt()
+    asyncio.run(scenario())
+
+
+# ── Chat bug-fix pass, stage 3 (2026-11-15) ──────────────────────────────────────────────────────────────
+
+ORDINARY_ANSWERS = [
+    'Show a spinner while the upload is in progress, then swap in the result.',
+    "I've added a short example below to show the idea:\n\n    button.disabled = true",
+    'A service worker keeps running in the background after the tab is closed.',
+    'While the build is in progress, the status badge stays yellow.',
+    "I've updated my explanation: the greeting comes from Main.java, line 12.",
+]
+
+
+@pytest.mark.parametrize('reply', ORDINARY_ANSWERS)
+def test_an_answer_to_a_question_is_not_replaced_for_using_progress_words(harness, reply):
+    # Found 2026-11-13: any answer containing "in progress", "running in the background" or "I've updated"
+    # was swapped for "No Daedalus job was started for this message", also when the user only asked something.
+    initialize, run, spawn = harness
+    async def scenario():
+        await initialize()
+        _, calls, conv = await run([reply], 'How should the page show that something is loading?')
+        assert len(calls) == 1 and not spawn and conv['messages'][-1]['content'] == reply
+    asyncio.run(scenario())
+
+
+def test_only_claims_about_the_job_count_in_an_answer_to_a_question():
+    for reply in ORDINARY_ANSWERS:
+        assert not claims_start(reply, about_job=True), reply
+    for reply in [CLAIM, 'The job is underway.', "I've started the build.", 'I am implementing the flag now.',
+                  'Your fix is running in the background.', 'This workflow is now in progress.']:
+        assert claims_start(reply, about_job=True), reply
+    # A request that asks for a change keeps the broad rule: any progress wording needs a saved job.
+    assert claims_start('The upload is in progress.') and claims_start("I've added the flag.")
+
+
+def test_a_refused_job_says_why_instead_of_a_generic_line(harness):
+    # The reply used to be "The workflow tool did not produce a matching saved job. Check its result before
+    # retrying", which hid the router's reason (here: another job still holds the project).
+    initialize, run, spawn = harness
+    async def scenario():
+        await initialize()
+        earlier = await coder_jobs.create('c', 'Existing request', 'edit_project', 'p', key='previous')
+        _, calls, conv = await run([{'role':'assistant','content':'','tool_calls':[action()]}])
+        reply = conv['messages'][-1]['content']
+        assert len(calls) == 1 and len(spawn) == 1                      # only the earlier job exists
+        assert 'No new Daedalus job was started for this message.' in reply
+        assert earlier['id'] in reply and 'still queued' in reply and 'did not produce' not in reply
+    asyncio.run(scenario())
+
+
+def test_refusal_reads_the_routers_own_reason():
+    refusal = DispatchGuard.refusal
+    assert refusal(json.dumps({'error': 'A project is selected for this request.'})) == 'A project is selected for this request.'
+    assert 'still coding (`cw3-1`)' in refusal(json.dumps({
+        'workflow_id': 'cw3-1', 'state': 'coding', 'request_started': False, 'message': 'An earlier background job is still active.'}))
+    assert refusal(json.dumps({'workflow_id': 'cw3-1', 'state': 'queued', 'message': 'Job started in background.'})) == ''
+    assert refusal('Error: worker unreachable') == 'Error: worker unreachable'
+    assert refusal('plain text answer') == '' and refusal(None) == ''
+    assert 'did not produce a matching saved job' in DispatchGuard.not_started()
+
+
+def test_resending_after_picking_another_project_explains_itself(harness):
+    # The saved job check raised inside the stream and the reply came back empty.
+    initialize, run, spawn = harness
+    async def scenario():
+        await initialize()
+        await run([{'role':'assistant','content':'','tool_calls':[action()]}])
+        events, calls, conv = await run([], options={'project_id': 'other'})
+        errors = [e['error'] for e in events if e['type'] == 'error']
+        assert not calls and len(spawn) == 1
+        assert errors and 'belongs to another project' in errors[0] and 'new message' in errors[0]
+        assert 'belongs to another project' in conv['messages'][-1]['content']
+        user = next(m for m in conv['messages'] if m['role'] == 'user')
+        guard = DispatchGuard('c', user['id'], PROMPT, project_id='other')
+        assert (await guard.saved())[0] is None and 'another project' in (await guard.review(CLAIM, can_retry=True))[0]
+    asyncio.run(scenario())
+
+
+def test_ghost_mode_says_that_jobs_need_a_saved_chat(harness):
+    initialize, run, spawn = harness
+    async def scenario():
+        await initialize()
+        events, calls, _ = await run([], ephemeral=True)
+        errors = [e['error'] for e in events if e['type'] == 'error']
+        assert not calls and not spawn and errors and 'Ghost mode' in errors[0]
     asyncio.run(scenario())

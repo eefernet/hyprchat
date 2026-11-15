@@ -60,7 +60,8 @@ function fileCards(events) {
   return latest;
 }
 
-// { parts: [{ text, cards }], trailing }. A card is { type, data, versions, at }.
+// { parts: [{ text, cards }], trailing }. A card is { type, data, versions, at, seq }. `seq` is the card's
+// place among the reply's cards: it does not change when a card moves to another part while text streams.
 export function messageParts(content, events) {
   const text = String(content || '');
   const source = (events || []).filter(isCard);
@@ -70,9 +71,9 @@ export function messageParts(content, events) {
     if (event.type === 'file_ready') {
       const kept = files.get(event.data?.filename);
       if (!kept || kept.event !== event) continue;
-      cards.push({ type: event.type, data: event.data || {}, versions: kept.versions, at: event.at });
+      cards.push({ type: event.type, data: event.data || {}, versions: kept.versions, at: event.at, seq: cards.length });
     } else {
-      cards.push({ type: event.type, data: event.data || {}, versions: 1, at: event.at });
+      cards.push({ type: event.type, data: event.data || {}, versions: 1, at: event.at, seq: cards.length });
     }
   }
   if (!cards.some(placed) || FOOTNOTE.test(text)) return { parts: [{ text, cards: [] }], trailing: cards };

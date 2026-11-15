@@ -192,6 +192,7 @@ CODEAGENT_TOOLS = {
             "name": "execute_code",
             "description": "Execute source code directly in the sandbox. Pass complete source code with hardcoded test values. Working directory is /root/. Do NOT use input() or sys.argv — they will fail. For scripts needing arguments, use write_file + run_shell instead.",
             "parameters": {"type": "object", "properties": {
+                "description": {"type": "string", "description": "A few words saying what this run does, shown to the user. Example: Count the lines of Python"},
                 "code": {"type": "string", "description": "Complete source code to execute (must be self-contained with hardcoded test values)"},
                 "language": {"type": "string", "description": "Language: python, javascript, bash, c, cpp, rust, go, java, ruby, php, etc."},
             }, "required": ["code", "language"]},

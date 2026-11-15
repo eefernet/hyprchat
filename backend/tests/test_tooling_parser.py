@@ -132,3 +132,13 @@ def test_a_model_with_real_tool_definitions_only_calls_through_explicit_markup()
     assert _names(tagged, native=True) == ["read_file"]
     assert _names('Saving it now:\n{"name": "write_file", "arguments": {"path": "a.txt", "content": "hi"}}', native=True) == ["write_file"]
     assert _names('{"name": "run_shell", "arguments": {"command": "ls"}}', native=True) == ["run_shell"]
+
+
+def test_text_fallback_execute_code_accepts_a_description():
+    # The run list in chat labels each run with the model's own few words (2026-11-15).
+    from tooling.parser import TOOL_PARAMS, parse_text_tool_calls
+    assert TOOL_PARAMS["execute_code"] == ["code", "language", "description"]
+    reply = ('<tool_call>{"name": "execute_code", "arguments": {"description": "Count the lines", '
+             '"code": "print(3)", "language": "python"}}</tool_call>')
+    calls = parse_text_tool_calls(reply, {"execute_code"})
+    assert calls[0]["function"]["arguments"] == {"description": "Count the lines", "code": "print(3)", "language": "python"}

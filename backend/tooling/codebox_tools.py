@@ -12,6 +12,7 @@ import sys
 import time
 
 import config
+import tool_calls
 
 
 CODEBOX_TOOL_NAMES = {
@@ -231,6 +232,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
     if name == "execute_code":
         code = args.get("code", "")
         language = args.get("language", "python")
+        description = tool_calls.description(args)
         await events.emit(conv_id, "tool_start", {
             "tool": "execute_code", "icon": "code",
             "status": f"Running {language} code...",
@@ -302,12 +304,16 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
             }),
         })
 
-        if stdout or stderr:
-            await events.emit(conv_id, "code_output", {
-                "language": language, "stdout": stdout[:3000],
-                "stderr": stderr[:1500] if not success else "",
-                "success": success, "exec_time": exec_time,
-            })
+        # Sent for every finished run, a silent one too: the run list in chat draws one line per run.
+        # The card carries the code and the model's description itself. The tool_end above also has the
+        # code, but it is among the first events dropped when a long reply's saved events are capped.
+        await events.emit(conv_id, "code_output", {
+            "language": language, "description": description,
+            "code": code[:2000], "code_truncated": len(code) > 2000,
+            "stdout": stdout[:3000],
+            "stderr": stderr[:1500] if not success else "",
+            "success": success, "exit_code": exit_code, "exec_time": exec_time,
+        })
 
         parts = [f"**{'SUCCESS' if success else 'FAILED'}** | {language} | exit {exit_code} | {exec_time:.1f}s"]
         if result.get("compile_output"):

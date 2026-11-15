@@ -19,6 +19,13 @@
 - **Scroll up and it lets go** — once you scroll up to read, nothing pulls you back down. Scroll to the end, or use the jump button, to follow again.
 - **Tool output where it happened** — code output and delivered files now sit under the part of the reply that produced them, instead of in a stack at the end. Output starts collapsed to one line; a failed run starts open. Older messages keep their previous layout.
 - **Continued replies keep their output** — pressing Continue no longer drops the code output from the first half of the reply.
+- **Longer tool runs** — a reply may now call the model 40 times while it works with tools (it was 12, and the limit was hit at a few percent of the context window). Change it in Settings → Model & Generation → "Tool rounds per reply" (12 / 20 / 40 / 60 / 100).
+- **A reply that reaches the limit still answers** — it writes its answer from what it has found, then shows "This reply stopped at the limit of N tool rounds" with a Continue button. It used to end with only "Ran out of round budget".
+- **A model that goes quiet is asked once for the answer** — small models sometimes ran their tools and then wrote nothing; the reply ended as "no text response".
+- **Code runs as one list** — runs with nothing written between them are drawn as one box: a header that adds them up ("12 code runs · 11 passed, 1 failed · 15.0s") and one line per run with what it did and how long it took. A failed run shows its error line. A long list shows the newest five and every failed run, with "Show N more". Click a line for its code and output.
+- **Runs say what they did** — each code run carries a few words from the model ("Clone the repository"); older replies use the first line of the code that says something. A run that printed nothing gets its line too.
+- **The Activity badge counts calls** — it showed "26 tools" for twelve code runs and a search, and briefly doubled the count right after a reply.
+- **"continue" no longer searches the web first** — a bare "continue" or "keep going" ran a web search about the earlier topic before carrying on.
 
 ## Chat fixes
 
@@ -32,6 +39,21 @@
 - **PDFs are remembered** — the text of an attached PDF stays available to the model after a reload or chat switch.
 - **A dropped connection keeps the reply** — the text already written stays, with the error noted under it.
 - **No double replies** — double-clicking Regenerate, Save & Send or Continue no longer starts two replies in one bubble.
+- **Daedalus answers questions without second-guessing itself** — an ordinary answer that happened to say "in progress" or "I've added an example" was replaced by "No Daedalus job was started for this message". That check now only applies to claims about the job itself.
+- **Daedalus says why a job did not start** — for example that an earlier job in the chat is still running, instead of a generic line. Resending after picking another project, and Ghost mode, now explain themselves instead of returning an empty reply.
+- **One card per Daedalus job** — a job that finished in the background no longer put a copy of its card on your newest reply, where it also hid that reply's own code output and files.
+- **"Start a new project" and "Accepted version" apply to one message** — both go back to the default after you send, so the next follow-up continues the current project from its latest build.
+- **Regenerate and Edit are not offered on the message that started a job** — they removed the job's card while the job kept running.
+- **Project archives work in a new Daedalus chat** — dropping a .zip before the first message now creates the chat and uploads the project; it used to be attached as text.
+- **Smaller Daedalus fixes** — a project question shows "Answering" instead of "Needs attention"; a question asked while a job runs keeps its reply visible; old chats no longer flash a "Planning" card with a Stop button; a deleted job says so and offers no Stop.
+- **Continue for any reply that stopped short** — a reply you stopped, one that lost its connection, or one that hit the output limit now shows a line under it with a Continue button (it used to be a hover-only button, and only for the output limit). The button no longer comes back after the reply was finished.
+- **Deleting a message you just sent really deletes it** — it used to return after a reload. Edit, Regenerate, Fork and ratings now find the right saved message even when the chat starts with a greeting, and a failed save, delete or edit tells you instead of failing silently.
+- **Files attached while a reply is being written stay attached** — they vanished when the reply finished.
+- **The message box unlocks by itself after a reload** — if a research run was still going when the page loaded, the box stayed locked until you pressed Stop or reloaded again.
+- **Enter does not send while you are composing a word** — for Japanese, Chinese and Korean input.
+- **Each reply shows the model that wrote it** — not the model the chat is set to now.
+- **Errors appear once, and always appear** — an error was sometimes shown twice; an unexpected failure used to end the reply with no message at all.
+- **Smaller chat fixes** — files that are not text are refused with a note instead of being sent as garbage; an empty edit of a reply is not saved; search cards from a replaced reply no longer stay on the new one; Continue is refused for a reply that belongs to another chat.
 
 ## Context
 
@@ -45,6 +67,10 @@
 - **Compaction that keeps working** — a stored summary is always sent, even when the browser had trimmed the messages before it; compaction no longer runs when it could free almost nothing; a chat that was compacted before can be compacted again in the middle of a long tool run; and the browser no longer trims old messages itself while compaction is on.
 - **Cloud models are left alone** — Claude and GPT chats are no longer judged against the local context setting, which stopped them as "full" at a few thousand tokens and summarized them with the small local model.
 - **Choose when chats compact** — Settings → Model & Generation has a new "Compact when the chat reaches" choice: 85, 90, 95, 98 or 99% of the context window (default 85%). Settings shows the token count that works out to, and the context pill's tooltip shows it for the open chat. Room for one reply is always kept, so on small windows the highest choices fire a little earlier than their percentage. Coding jobs keep their own "Compact at" setting.
+- **See what is using the context** — click the context pill for a breakdown: instructions, tool definitions, memory, skills, the summary of earlier messages, the messages themselves, this turn's search and knowledge excerpts, and this reply's tool calls and results, with free space and the point where auto-compaction fires. A link opens the full "Response context" for the last reply. Totals are the model's own counts; the split between rows is an estimate.
+- **Tool work counts while it happens** — while a reply runs, the pill's number is everything in the window right now, tool calls and results included. It no longer dips when a tool starts, and it rises as each result arrives. After the reply it shows what the conversation keeps, and the breakdown says how full the window got.
+- **A slimmer pill** — the number over a thin bar, green to amber to red as before, with a tick where auto-compaction fires.
+- **"Instructions and tools" no longer counts excerpts** — knowledge excerpts were counted both there and as this turn's working context.
 
 </details>
 

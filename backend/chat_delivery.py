@@ -4,6 +4,7 @@ import json
 import time
 
 import chat_context
+import chat_turns
 import database as db
 
 
@@ -29,11 +30,18 @@ async def deliver(stream, req):
     # Where the current model call's text starts. A `clear` retracts that call's text only: it used to
     # empty the whole reply, which lost earlier rounds and, in continue mode, the original half for good.
     round_start = candidate_start = 0
+    # Saved with the reply, so a chat whose model was changed later still says who wrote what, and so
+    # "cut off at the output limit" is the server's fact (the browser's copy came back after a Continue).
+    model = getattr(req, 'model', '') or ''
+    truncated = False
+    round_limit = 0      # the reply used every tool round it had (chat_rounds.py)
 
     async def save(status):
         if message_id is not None and not ephemeral:
             await db.save_chat_delivery(message_id, visible, {
                 'in_progress': status == 'running', 'delivery_status': status,
+                'model': model, 'truncated': truncated and status == 'completed',
+                'round_limit': round_limit if status == 'completed' else 0,
                 'review_history': revisions, 'effort': effort,
                 'usage_calls': calls, 'elapsed_seconds': round(time.monotonic() - started, 3),
                 'total_prompt_tokens': sum(c.get('prompt_tokens', 0) for c in calls),
@@ -102,21 +110,25 @@ async def deliver(stream, req):
             elif kind == 'review_incomplete':
                 candidate = ''
                 event = {'type': 'review_status', 'notice': 'Review incomplete; previous answer retained.'}
+            elif kind == 'model_routed':
+                model = event.get('model') or model
             elif kind == 'error':
                 # Keep the reason on the persisted row: the live ⚠ block is client-side only
                 # and a reload used to show just "generation failed".
-                reason = ' '.join(str(event.get('error') or '').split())[:160]
-                if not visible.strip():
-                    visible = f'_[No response — {reason}]_' if reason else '_[No response; generation failed.]_'
-                    yield sse({'type': 'token', 'content': visible})
-                elif reason and not reviewing:
-                    visible = visible.rstrip() + f'\n\n_[interrupted: {reason}]_'
+                if not visible.strip() or not reviewing:
+                    visible, fresh = chat_turns.failure_text(visible, event.get('error'))
+                    if fresh:
+                        yield sse({'type': 'token', 'content': visible})
+                    event['saved_note'] = True     # the saved reply carries the reason: no second block needed
                 if reviewing:
                     candidate = ''
                     yield sse({'type': 'replace', 'content': visible})
                 await save('failed')
                 terminal = True
             elif kind == 'done':
+                model = event.get('model') or model
+                truncated = event.get('done_reason') == 'length'
+                round_limit = int(event.get('round_limit') or 0)
                 if not reviewing and not visible.strip():
                     visible = '_[The model produced no text response.]_'
                     yield sse({'type': 'token', 'content': visible})
@@ -134,6 +146,20 @@ async def deliver(stream, req):
                 await save('completed')
                 terminal = True
             yield sse(event)
+    except Exception as error:
+        # Anything the chat loop did not turn into an error event itself (a malformed request, a bug). The
+        # connection used to just close: the browser took that for a finished reply and showed nothing.
+        import traceback
+        traceback.print_exc()
+        if not terminal:
+            reason = ' '.join(f'{type(error).__name__}: {error}'.split())[:160]
+            if not (reviewing and visible.strip()):      # a reviewed answer that was kept stays as it is
+                visible, fresh = chat_turns.failure_text(visible, reason)
+                if fresh:
+                    yield sse({'type': 'token', 'content': visible})
+            await save('failed')
+            terminal = True
+            yield sse({'type': 'error', 'error': reason, 'saved_note': True})
     finally:
         try:
             await stream.aclose()

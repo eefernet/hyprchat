@@ -21,7 +21,7 @@ function versionsDiffer(projects,id){
 }
 
 // A conversation or upload change resets the choices; a job change only refetches the list, so it keeps what the user picked.
-function useRequestOptions({conversationId,currentProjectId,refreshKey,jobIds,jobChanges,onChange}){
+function useRequestOptions({conversationId,currentProjectId,refreshKey,jobIds,jobChanges,sentKey,onChange}){
   const [projects,setProjects]=useState([]),[activeProjectId,setActiveProjectId]=useState(''),[target,setTarget]=useState(''),[visual,setVisual]=useState('inherit'),[source,setSource]=useState('working');
   const [enabled,setEnabled]=useState(false),[error,setError]=useState('');
   const request=useRef(0);
@@ -66,6 +66,14 @@ function useRequestOptions({conversationId,currentProjectId,refreshKey,jobIds,jo
   };
   // A refetch can make the two versions equal again: a hidden choice must not keep sending 'accepted'.
   useEffect(()=>{if(source==='accepted'&&(target==='new'||!differs(target)))update(target,visual,'working');},[projects,current]);
+  // "Start a new project" and "Accepted version" apply to the message they were sent with. Left selected,
+  // the next follow-up started the project over or went back a version (owner's choice 2026-11-14: reset).
+  const sent=useRef(sentKey);
+  useEffect(()=>{
+    if(sent.current===sentKey)return;
+    sent.current=sentKey;
+    if(target==='new'||source==='accepted')update(target==='new'?'':target,visual,'working');
+  },[sentKey]);
   return {enabled,error,projects,current,target,visual,source,update,versions:target!=='new'&&differs(target)};
 }
 
@@ -76,10 +84,10 @@ function JobWatch({workflow,onChange}){
   return null;
 }
 
-export default function DaedalusRequestOptions({conversationId,currentProjectId,refreshKey,jobs,onChange,t,font}){
+export default function DaedalusRequestOptions({conversationId,currentProjectId,refreshKey,jobs,sentKey=0,onChange,t,font}){
   const [jobChanges,setJobChanges]=useState(0),jobChanged=useCallback(()=>setJobChanges(n=>n+1),[]);
   const jobIds=(jobs||[]).filter(job=>job?.workflow_version===3).map(job=>job.id).join('|');
-  const {enabled,error,projects,current,target,visual,source,update,versions}=useRequestOptions({conversationId,currentProjectId,refreshKey,jobIds,jobChanges,onChange});
+  const {enabled,error,projects,current,target,visual,source,update,versions}=useRequestOptions({conversationId,currentProjectId,refreshKey,jobIds,jobChanges,sentKey,onChange});
   if(!enabled)return null;
   const style={background:t.bgDeep,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:6,fontFamily:font,fontSize:"var(--hc-text-secondary)"};
   return <div style={{display:'flex',gap:8,flexWrap:'wrap',margin:'6px 0',alignItems:'center'}}>

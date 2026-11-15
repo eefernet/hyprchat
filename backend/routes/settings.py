@@ -10,6 +10,7 @@ from fastapi import Request, APIRouter, Body, HTTPException, Query
 
 import image_settings
 import chat_context
+import chat_rounds
 import config
 import context_policy
 import database as db
@@ -63,6 +64,7 @@ async def get_app_settings():
         "current_workspace_model": config.WORKSPACE_MODEL,
         "context_compaction": config.CONTEXT_COMPACTION,
         "chat_compaction_percent": chat_context.compact_percent(),
+        "chat_max_rounds": chat_rounds.setting(),
         "history_recall": config.HISTORY_RECALL,
         "rag_reranker": config.RAG_RERANKER,
         "model_routing": config.MODEL_ROUTING,
@@ -118,7 +120,7 @@ async def update_app_settings(body: dict = Body(...)):
     allowed = {"document_tools_enabled", "file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
-               "workspace_model", "context_compaction", "chat_compaction_percent", "history_recall", "rag_reranker", "model_routing",
+               "workspace_model", "context_compaction", "chat_compaction_percent", "chat_max_rounds", "history_recall", "rag_reranker", "model_routing",
                "qa_model",
                "openhands_num_ctx",
                "openhands_disable_thinking",
@@ -238,6 +240,10 @@ async def update_app_settings(body: dict = Body(...)):
         config.CHAT_COMPACTION_PERCENT = chat_context.compact_percent(body["chat_compaction_percent"])
         settings["chat_compaction_percent"] = config.CHAT_COMPACTION_PERCENT
         print(f"[Config] Chats compact at {config.CHAT_COMPACTION_PERCENT}% of the context window")
+    if "chat_max_rounds" in body:
+        config.MAX_AGENT_ROUNDS = chat_rounds.setting(body["chat_max_rounds"])
+        settings["chat_max_rounds"] = config.MAX_AGENT_ROUNDS
+        print(f"[Config] Chat replies get {config.MAX_AGENT_ROUNDS} tool rounds")
     if "history_recall" in body:
         config.HISTORY_RECALL = "on" if str(body["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         settings["history_recall"] = config.HISTORY_RECALL
@@ -317,6 +323,7 @@ async def update_app_settings(body: dict = Body(...)):
         "current_workspace_model": config.WORKSPACE_MODEL,
         "context_compaction": config.CONTEXT_COMPACTION,
         "chat_compaction_percent": chat_context.compact_percent(),
+        "chat_max_rounds": chat_rounds.setting(),
 
         "current_qa_model":        config.QA_MODEL,
 

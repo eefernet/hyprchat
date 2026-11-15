@@ -43,3 +43,24 @@ def test_text_the_model_saw_but_the_bubble_does_not_show_is_kept():
     assert meta["model_content"].endswith("...") and meta["pdfs"][0]["name"] == "a.pdf"
     assert chat_turns.user_metadata(None, "hello", "hello") is None
     assert chat_turns.user_metadata({"a": 1}, "hi", "x" * (chat_turns.MODEL_TEXT_LIMIT + 1)) == {"a": 1}
+
+
+# ── Chat bug-fix pass, stage 4 (2026-11-15) ──────────────────────────────────────────────────────────────
+
+def test_only_an_assistant_reply_of_this_chat_can_be_continued():
+    # The id was trusted as sent: one from another chat had that chat's reply overwritten.
+    chat = {'messages': [{'id': 7, 'role': 'user', 'content': 'q'}, {'id': 8, 'role': 'assistant', 'content': 'half', 'metadata': {}}]}
+    row, problem = chat_turns.continue_target(chat, '8')
+    assert row['id'] == 8 and problem == ''
+    for bad in (7, 99, 'abc', None):
+        row, problem = chat_turns.continue_target(chat, bad)
+        assert row is None and problem
+    assert chat_turns.continue_target(None, 8)[0] is None
+
+
+def test_a_failed_reply_keeps_its_text_and_names_the_reason_once():
+    assert chat_turns.failure_text('', 'model  crashed\nhard') == ('_[No response — model crashed hard]_', True)
+    assert chat_turns.failure_text('', '') == ('_[No response; generation failed.]_', True)
+    assert chat_turns.failure_text('Half an answer \n', 'boom') == ('Half an answer\n\n_[interrupted: boom]_', False)
+    assert chat_turns.failure_text('Half', '') == ('Half', False)
+    assert len(chat_turns.failure_text('', 'x' * 500)[0]) < 200

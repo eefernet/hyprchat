@@ -979,7 +979,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
 
   // Chat replies draw these cards themselves, in place (MessageBody + messageParts.js), and pass
   // hideCards. The other timelines that use ToolStatus still list them together here.
-  const CodeOutputCards = ()=>hideCards||historical?null:<>{codeOutputEvts.map((e,i)=><CodeOutputPill key={i} data={e.data} t={t} defaultOpen/>)}</>;
+  const CodeOutputCards = ()=>hideCards||historical?null:<>{codeOutputEvts.filter(e=>e.data?.stdout||e.data?.stderr).map((e,i)=><CodeOutputPill key={i} data={e.data} t={t} defaultOpen/>)}</>;
   const FileReadyButtons = ()=>{
     if(hideCards)return null;
     // Deduplicate by filename — keep latest URL, count updates

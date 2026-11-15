@@ -1,4 +1,6 @@
 import React, { useState } from 'react';
+import CodeRunGroup from './CodeRunGroup.jsx';
+import { groupCards, runKey, runLabel } from '../codeRuns.js';
 import { API } from '../session.js';
 
 // The cards a tool leaves in a reply: code output and delivered files. messageParts.js decides where
@@ -26,7 +28,7 @@ export function CodeOutputPill({ data, t, defaultOpen }) {
       style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: '6px 12px', background: `${tone}10`, border: 'none', borderBottom: open && hasOutput ? `1px solid ${tone}22` : 'none', borderRadius: 0, cursor: 'pointer', userSelect: 'none', fontFamily: 'inherit', textAlign: 'left' }}>
       <span style={{ display: 'inline-block', transition: 'transform .15s', transform: open ? 'rotate(0)' : 'rotate(-90deg)', color: tone, fontSize: 'var(--hc-text-secondary)' }}>{'▾'}</span>
       <span>{d.success ? '✅' : '❌'}</span>
-      <span style={{ fontWeight: 600, color: tone, fontSize: 'var(--hc-text-secondary)' }}>{d.language || 'code'} output</span>
+      <span style={{ fontWeight: 600, color: tone, fontSize: 'var(--hc-text-secondary)' }}>{d.description || d.code ? runLabel({ data: d }) : `${d.language || 'code'} output`}</span>
       {Number.isFinite(seconds) && <span style={{ color: t.mut, marginLeft: 'auto', fontSize: 'var(--hc-text-secondary)' }}>{seconds.toFixed(1)}s</span>}
     </button>
     {open && d.stdout && <pre style={{ margin: 0, padding: '8px 12px', whiteSpace: 'pre-wrap', color: t.dim, fontSize: 'var(--hc-text-secondary)', lineHeight: 1.5, maxHeight: 320, overflowY: 'auto', borderBottom: d.stderr ? '1px solid var(--hc-line-subtle)' : 'none', fontFamily: 'var(--hc-font-code)' }}>{d.stdout}</pre>}
@@ -55,13 +57,13 @@ export function FileReadyCard({ data, versions = 1, t, onPreview, onOpenArtifact
   </div>;
 }
 
-// `cards` come from messageParts(): { type, data, versions }. `slot` keeps each pill's open state apart
-// from the pills of other parts of the same reply.
-export function MessageCards({ cards, slot = '', t, onPreview, onOpenArtifact, messageText, defaultOpen }) {
+// `cards` come from messageParts(): { type, data, versions, seq }. Code runs with nothing between them are
+// drawn as one list (CodeRunGroup); a file card stays where it was delivered.
+export function MessageCards({ cards, slot = '', t, onPreview, onOpenArtifact, messageText }) {
   if (!cards?.length) return null;
   return <div className="hc-tool-cards" style={{ margin: '6px 0 10px' }}>
-    {cards.map((card, index) => card.type === 'file_ready'
-      ? <FileReadyCard key={`${slot}f${card.data.filename}`} data={card.data} versions={card.versions} t={t} onPreview={onPreview} onOpenArtifact={onOpenArtifact} messageText={messageText}/>
-      : <CodeOutputPill key={`${slot}o${index}`} data={card.data} t={t} defaultOpen={defaultOpen}/>)}
+    {groupCards(cards).map((item, index) => item.type === 'file'
+      ? <FileReadyCard key={`${slot}f${item.card.data.filename}`} data={item.card.data} versions={item.card.versions} t={t} onPreview={onPreview} onOpenArtifact={onOpenArtifact} messageText={messageText}/>
+      : <CodeRunGroup key={`${slot}r${runKey(item.runs[0])}`} runs={item.runs}/>)}
   </div>;
 }

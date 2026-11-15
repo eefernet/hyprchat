@@ -366,6 +366,9 @@ async def lifespan(app: FastAPI):
         print(f"[Config] Loaded context compaction: {config.CONTEXT_COMPACTION}")
     if "chat_compaction_percent" in _settings:
         config.CHAT_COMPACTION_PERCENT = _settings["chat_compaction_percent"]
+    if "chat_max_rounds" in _settings:
+        import chat_rounds
+        config.MAX_AGENT_ROUNDS = chat_rounds.setting(_settings["chat_max_rounds"])
     if "history_recall" in _settings:
         config.HISTORY_RECALL = "on" if str(_settings["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded history recall: {config.HISTORY_RECALL}")

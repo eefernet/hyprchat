@@ -1,23 +1,46 @@
-import React from 'react';
-import { formatTokens, meterView } from '../contextMeter.js';
+import React, { useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { compactionLimit, formatTokens, meterView } from '../contextMeter.js';
+import useAnchoredPopover from '../useAnchoredPopover.js';
+import useFocusScope from '../useFocusScope.js';
+import usePresence from '../usePresence.js';
+import ContextBreakdown from './ContextBreakdown.jsx';
+import './contextMeter.css';
 
-// The context pill in the chat header. The number is what the conversation holds; the lighter end of the
-// bar is what the current reply is using on top of that while it runs (see contextMeter.js).
-export default function ContextMeter({ reading, fallbackWindow, compactPercent, live, speed, t, font }) {
+// The context pill in the chat header. While a reply runs the number is everything in the window right
+// now (the conversation plus this reply's tool calls, results and excerpts); when it ends, what the
+// conversation keeps. The bar's solid part is the conversation, the lighter part this reply's working
+// context, and the tick is where auto-compaction fires. Click it for the breakdown.
+export default function ContextMeter({ reading, fallbackWindow, compactPercent, live, speed, onInspect }) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef(null), id = useId();
+  const presence = usePresence(open);
+  const close = (restore = true) => { setOpen(false); if (restore) trigger.current?.focus({ preventScroll: true }); };
+  const panel = useFocusScope(open, () => close());
+  const position = useAnchoredPopover(open, trigger, panel, close, 384);
   const view = meterView(reading, fallbackWindow, compactPercent);
-  const color = view.tone === 'full' ? t.err : view.tone === 'high' ? t.warm : view.tone === 'ok' ? t.ok : live ? t.acc : t.warm;
-  return <div title={view.tooltip} aria-label={view.tooltip} role="status" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRadius: 'var(--hc-radius-card)', border: `1px solid ${color}45`, background: `${color}12`, minWidth: 90, cursor: 'default' }}>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 11px' }}>
-      <span style={{ fontSize: 'var(--hc-text-control)', display: 'inline-block', animation: live ? 'bop 1.5s ease-in-out infinite' : 'none' }}>🧠</span>
-      {view.warning && <span aria-hidden="true" style={{ fontSize: 'var(--hc-text-control)', color }}>⚠</span>}
-      <span style={{ fontSize: 'var(--hc-text-control)', color, fontWeight: 700, fontFamily: font, letterSpacing: .2 }}>{reading && !reading.measured ? '~' : ''}{formatTokens(view.used)}</span>
-      {view.window > 0 && <span style={{ fontSize: 'var(--hc-text-micro)', color: t.mut, fontFamily: font }}>/{formatTokens(view.window)}</span>}
-      {live && view.working >= 100 && <span style={{ fontSize: 'var(--hc-text-micro)', color: `${color}BB`, fontFamily: font }}>+{formatTokens(view.working)}</span>}
-      {live && speed > 0 && <span style={{ fontSize: 'var(--hc-text-micro)', color: `${color}99`, marginLeft: 2 }}>{speed}t/s</span>}
-    </div>
-    {view.window > 0 && <div style={{ display: 'flex', height: 3, background: `${t.surface}88` }}>
-      <div style={{ height: '100%', background: color, width: `${view.usedShare * 100}%`, transition: 'width .3s ease' }}/>
-      <div style={{ height: '100%', background: `${color}66`, width: `${view.workingShare * 100}%`, transition: 'width .3s ease' }}/>
-    </div>}
-  </div>;
+  const shown = live ? view.total : view.used;
+  const { limit } = compactionLimit(view.window, compactPercent);
+  const label = `Context: ${shown.toLocaleString()}${view.window ? ` of ${view.window.toLocaleString()} tokens (${view.percent}%)` : ' tokens'}${view.warning ? `. ${view.warning}` : ''}. Show what is using it`;
+  return <>
+    <button ref={trigger} type="button" className="hc-ctx-pill" data-tone={view.tone} aria-label={label} title={view.warning || 'Context window: click for a breakdown'}
+      aria-haspopup="dialog" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen(value => !value)}>
+      {/* The bar sits under the number so the pill stays narrow: a wider one pushed the chat header onto two rows at 1280 px. */}
+      <span className="hc-ctx-line">
+        {live ? <span className="hc-ctx-live" aria-hidden="true"/> : view.warning ? <span aria-hidden="true" style={{ color: 'var(--ctx-c)' }}>⚠</span> : null}
+        <span className="hc-ctx-num">{reading && !reading.measured ? '~' : ''}{formatTokens(shown)}</span>
+        {view.window > 0 && <span className="hc-ctx-of">/ {formatTokens(view.window)}</span>}
+        {live && speed > 0 && <span className="hc-ctx-speed">{speed} t/s</span>}
+      </span>
+      {view.window > 0 && <span className="hc-ctx-bar" aria-hidden="true">
+        <span className="hc-ctx-track"><i style={{ width: `${view.usedShare * 100}%` }}/><i style={{ width: `${(live ? view.workingShare : 0) * 100}%` }}/></span>
+        {limit > 0 && <span className="hc-ctx-tick" style={{ left: `${(limit / view.window) * 100}%` }}/>}
+      </span>}
+    </button>
+    {presence.mounted && createPortal(<div ref={panel} id={id} role="dialog" aria-label="What is using the context window" tabIndex={-1}
+      className="hc-popover hc-pop hc-ctx-pop" data-placement={position.up ? 'top' : 'bottom'} data-align="end" {...presence.props} style={position.style}>
+      <ContextBreakdown reading={reading} fallbackWindow={fallbackWindow} compactPercent={compactPercent} live={live}
+        onInspect={onInspect ? () => { close(false); onInspect(); } : null}/>
+    </div>, document.body)}
+  </>;
 }

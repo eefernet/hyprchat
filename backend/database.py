@@ -1516,7 +1516,7 @@ async def patch_message_presentation(conversation_id, message_id, *, content=Non
             metadata = {**previous, **metadata}
             if previous.get('server_persists'):
                 for key in ('server_persists','in_progress','delivery_status','review_history','effort',
-                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens','context',
+                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens','context','model','truncated','round_limit',
                             'run_ids','run_roles','run_types','has_full_product_build'):
                     if key in previous:
                         metadata[key] = previous[key]

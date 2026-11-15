@@ -292,3 +292,55 @@ def test_a_reply_cut_off_by_a_disconnect_is_saved_even_when_cancelled_twice(monk
 
     asyncio.run(scenario())
     assert saved[-1] == ('Half an answer', 'interrupted')
+
+
+# ── Chat bug-fix pass, stage 4 (2026-11-15) ──────────────────────────────────────────────────────────────
+
+def test_an_unexpected_failure_reaches_the_browser_as_an_error(capture):
+    # A bug or a malformed request inside the chat loop used to just close the connection: the browser
+    # took that for a finished reply, and the saved row said "interrupted" with no reason.
+    save, _ = capture
+    events = drain(source(INIT, {'type': 'token', 'content': 'Half an answer'}, KeyError('role')))
+    assert events[-1]['type'] == 'error' and 'KeyError' in events[-1]['error'] and events[-1]['saved_note'] is True
+    assert save.call_args.args[1].startswith('Half an answer\n\n_[interrupted: KeyError')
+    assert save.call_args.args[2]['delivery_status'] == 'failed'
+    events = drain(source(INIT, ValueError('bad request')))
+    assert [e['type'] for e in events][-2:] == ['token', 'error']
+    assert save.call_args.args[1] == '_[No response — ValueError: bad request]_'
+
+
+def test_an_error_event_says_the_saved_reply_already_carries_the_reason(capture):
+    # The browser drew its own ⚠ block under the server's note: the same error twice.
+    events = drain(source(INIT, {'type': 'error', 'error': 'boom'}))
+    assert events[-2] == {'type': 'token', 'content': '_[No response — boom]_'}
+    assert events[-1]['saved_note'] is True
+    events = drain(source(INIT, {'type': 'token', 'content': 'partial'}, {'type': 'error', 'error': 'boom'}))
+    assert events[-1]['saved_note'] is True and [e['type'] for e in events].count('token') == 1
+
+
+def test_the_reply_records_who_wrote_it_and_whether_it_was_cut_off(capture):
+    # The header showed the chat's CURRENT model on every reply, and "cut off" lived only in the browser's
+    # copy of the metadata, where it came back after a successful Continue.
+    save, _ = capture
+    drain(source(INIT, {'type': 'model_routed', 'model': 'big:27b'}, {'type': 'token', 'content': 'x'},
+                 {**DONE, 'done_reason': 'length'}))
+    assert save.call_args.args[2]['model'] == 'big:27b' and save.call_args.args[2]['truncated'] is True
+    drain(source(INIT, {'type': 'token', 'content': 'x'}, {**DONE, 'model': 'other:4b'}))
+    assert save.call_args.args[2]['model'] == 'other:4b' and save.call_args.args[2]['truncated'] is False
+    drain(source(INIT, {'type': 'token', 'content': 'x'}, {'type': 'error', 'error': 'boom'}))
+    assert save.call_args.args[2]['model'] == 'local' and save.call_args.args[2]['truncated'] is False
+
+
+def test_the_browsers_final_patch_cannot_bring_back_the_cut_off_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, 'DATABASE_PATH', str(tmp_path / 'p.db'))
+    async def run():
+        await db.init_db()
+        await db.create_conversation('c', model='local')
+        mid = await db.add_message('c', 'assistant', 'whole answer', metadata={'in_progress': True})
+        await db.save_chat_delivery(mid, 'whole answer', {'in_progress': False, 'delivery_status': 'completed',
+                                                          'model': 'local', 'truncated': False})
+        await db.patch_message_presentation('c', mid, metadata={'truncated': True, 'model': 'someone-else', 'saved_events': []})
+        row = next(m for m in (await db.get_conversation('c'))['messages'] if m['id'] == mid)
+        assert row['metadata']['truncated'] is False and row['metadata']['model'] == 'local'
+        assert row['metadata']['saved_events'] == []
+    asyncio.run(run())

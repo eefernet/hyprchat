@@ -354,6 +354,7 @@ class SkillTurn:
         self.announced: set = set()           # one bell notification per skill per turn, however many patches
         self.saved: set = set()               # names written this turn; a repeat call is answered, not refused
         self.reviewed = False                 # the post-turn review runs at most once per turn
+        self.hint = ""                        # the line added to this turn's user message (not kept next turn)
         budget = self.settings["index_chars"]
         if self.num_ctx:
             budget = min(budget, int(self.num_ctx * INDEX_WINDOW_SHARE * 4))
@@ -376,7 +377,8 @@ class SkillTurn:
             if hinted:
                 for message in reversed(messages):
                     if message.get("role") == "user" and isinstance(message.get("content"), str):
-                        message["content"] += "\n\n" + hint_text(hinted)
+                        self.hint = "\n\n" + hint_text(hinted)
+                        message["content"] += self.hint
                         break
         except Exception as error:
             print(f"[SKILLS] install failed (non-fatal): {error}")

@@ -14,7 +14,9 @@ from datetime import datetime
 import config
 import image_settings
 import chat_context
+import chat_rounds
 import chat_turns
+import context_breakdown
 import context_policy
 import database as db
 import model_providers
@@ -22,6 +24,7 @@ import persona_images
 import reasoning
 import provider_tools
 import skills as skill_library
+import tool_calls as call_scope   # `tool_calls` is the round's own list in the loop below
 import rag
 from agents import assistant as assistant_mod
 from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
@@ -1208,6 +1211,12 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     """
     conv_id = req.conversation_id
     ephemeral = bool(getattr(req, "ephemeral", False))
+    # A saved chat must be the caller's own. An unknown id used to run the whole turn anyway: nothing was
+    # saved, and its tool events went to whoever was listening on that id.
+    if conv_id and not ephemeral and not str(conv_id).startswith(("ghost-", "l-")) \
+            and not await db.owns_event_channel(conv_id):
+        yield f"data: {json.dumps({'type': 'error', 'error': 'This chat no longer exists. Start a new chat and send the message again.'})}\n\n"
+        return
     image_preferences = await image_settings.get_snapshot() if config.COMFYUI_URL else image_settings.legacy_snapshot()
 
     last_user_msg = ""
@@ -1522,6 +1531,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             workspace_memory_info = {"workspace": None, "context": "", "memory_ids": [], "block_ids": []}
 
     messages = []
+    _ledger = context_breakdown.Ledger()   # sizes of the named prompt blocks, for the context breakdown
     effective_system = persona_system_prompt if persona_system_prompt is not None else req.system_prompt
     # Current date/time in the user's timezone — without it the model guesses
     # the year for calendar events, reminders, and scheduled tasks.
@@ -1546,12 +1556,14 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         num_ctx=model_options.get("num_ctx") or 0, query=last_user_msg)
     if _skills.prompt_block:
         effective_system = (effective_system or "") + _skills.prompt_block
+        _ledger.note("skills", _skills.prompt_block)
     if kb_context:
         _cite_note = (
             "Excerpts are numbered [1]..[n]. When you use information from an "
             "excerpt, cite it inline as [n] immediately after the claim. Only "
             "cite numbers that exist. "
         ) if kb_sources else ""
+        _ledger.note("excerpts", kb_context)
         effective_system += (
             "\n\n=== RELEVANT KNOWLEDGE BASE CONTEXT ===\n"
             "The following excerpts were retrieved from your knowledge base based on "
@@ -1563,6 +1575,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             + kb_context
         )
     if global_memory_info.get("context"):
+        _ledger.note("memory", global_memory_info["context"])
         effective_system += (
             "\n\n=== HYPRCHAT MEMORY ===\n"
             "The following user profile and cross-chat memories were explicitly entered "
@@ -1572,6 +1585,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             + global_memory_info["context"]
         )
     if workspace_memory_info.get("context"):
+        _ledger.note("memory", workspace_memory_info["context"])
         effective_system += (
             "\n\n=== WORKSPACE MEMORY ===\n"
             "The following workspace memory was explicitly accepted or configured by the user. "
@@ -1692,6 +1706,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "The sandbox Python has pandas, openpyxl, and sympy installed — use sympy for symbolic math "
             "(solve, diff, integrate, simplify) instead of deriving algebra/calculus by hand. "
             "The prohibition above is purely about saving image files, not about running code.\n"
+            "When a task takes several tool calls, write one short sentence before each call, in the same "
+            "reply as the call, saying what you are about to do. Give each `execute_code` run a "
+            "`description` of a few words.\n"
             "\n"
             "### The compute-then-chart pattern\n"
             "When a task needs both math AND a visual:\n"
@@ -1902,6 +1919,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     # turn that calls one only ever produces draft skills.
     _skills.install(ollama_tools, available_tool_names, _extra_text_tool_defs, messages,
                     untrusted=connector_tool_name_map)
+    _ledger.note("excerpts", getattr(_skills, "hint", ""), in_history=True)
 
     print(f"[CHAT]   Tools: {sorted(available_tool_names)}")
 
@@ -1932,6 +1950,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 for m in reversed(messages):
                     if m["role"] == "user":
                         m["content"] = (m.get("content") or "") + "\n\n" + qs["context"]
+                        _ledger.note("excerpts", qs["context"], in_history=True)
                         break
         except Exception as e:
             print(f"[CHAT]   Quick search error: {e}")
@@ -1953,6 +1972,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             for _m in reversed(messages):
                 if _m["role"] == "user":
                     _m["content"] = (_m.get("content") or "") + _fail_note
+                    _ledger.note("excerpts", _fail_note, in_history=True)
                     break
 
     _persistent_coder = False
@@ -2097,8 +2117,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     if "repeat_penalty" not in model_options and available_tool_names:
         model_options["repeat_penalty"] = 1.1
 
-    _is_coder = _has_full_codeagent
-    MAX_ROUNDS = config.MAX_AGENT_ROUNDS_CODER if _is_coder else config.MAX_AGENT_ROUNDS
+    # Tool rounds for this reply (Settings; chat_rounds.py). Daedalus coding chats keep their own number.
+    MAX_ROUNDS = chat_rounds.limit(daedalus=bool(_is_v2_persona and _has_full_codeagent))
 
     # Phase 0.6: create the assistant-message stub at stream start so disconnects
     # don't lose work. The agent updates this row at every round boundary; if the
@@ -2112,12 +2132,19 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     if _continue_mode:
         # Resume a length-truncated assistant message: reuse the existing row
         # instead of creating a new stub. messages[] ends with the partial.
-        _assistant_msg_id = int(req.continue_message_id)
+        _prior_conv = await db.get_conversation(conv_id)
+        _continue_row, _continue_problem = chat_turns.continue_target(_prior_conv, req.continue_message_id)
+        if _continue_problem:
+            yield f"data: {json.dumps({'type': 'error', 'error': _continue_problem})}\n\n"
+            return
+        _assistant_msg_id = _continue_row['id']
         if messages and messages[-1].get("role") == "assistant":
             _continue_prior = messages[-1].get("content") or ""
-        _prior_conv = await db.get_conversation(conv_id)
-        _prior_meta = next((m.get('metadata') or {} for m in (_prior_conv or {}).get('messages', []) if m['id'] == _assistant_msg_id), {})
-        yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'prior_content': _continue_prior, 'prior_reviews': _prior_meta.get('review_history', [])})}\n\n"
+            if _model_provider == "anthropic" and _continue_prior != _continue_prior.rstrip():
+                # Anthropic refuses a prefill that ends in whitespace; the saved text keeps its own.
+                messages[-1] = {**messages[-1], "content": _continue_prior.rstrip()}
+        _prior_meta = _continue_row.get('metadata') or {}
+        yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'user_message_id': _user_message_id or None, 'prior_content': _continue_prior, 'prior_reviews': _prior_meta.get('review_history', [])})}\n\n"
         # Anthropic continues a trailing assistant message natively (prefill).
         # Ollama/OpenAI-style backends get an explicit in-memory-only user
         # nudge instead — thinking-model chat templates mangle raw prefill
@@ -2139,13 +2166,18 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             })
             # Tell the frontend the message_id so it can PATCH the final state on
             # stream-complete instead of POSTing a duplicate.
-            yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'prior_content': _continue_prior})}\n\n"
+            # Both ids, so the browser can act on the rows it just sent (delete, edit) without guessing.
+            yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'user_message_id': _user_message_id or None, 'prior_content': _continue_prior})}\n\n"
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
     _dispatch_guard = None
     if _persistent_coder:
         if not _user_message_id:
-            yield f"data: {json.dumps({'type':'error','error':'The original user message could not be saved; no coding job was started.'})}\n\n"
+            # A job is tied to the saved message that asked for it. Ghost mode saves nothing.
+            _no_job = ('Daedalus jobs need a saved chat. Ghost mode keeps nothing, so no coding job was started; '
+                       'turn Ghost mode off and send it again.' if ephemeral else
+                       'The original user message could not be saved; no coding job was started.')
+            yield f"data: {json.dumps({'type':'error','error':_no_job})}\n\n"
             return
         from agents.coder_dispatch import DispatchGuard
         _dispatch_guard = DispatchGuard(conv_id, _user_message_id, _content_to_save,
@@ -2153,7 +2185,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             new_project=REQUEST_OPTIONS.get().get('new_project', False))
         REQUEST_OPTIONS.set({**REQUEST_OPTIONS.get(), 'user_message_id': _user_message_id,
                              'origin_message_id': _assistant_msg_id})
-        _saved_dispatch = await _dispatch_guard.receipt()
+        _saved_dispatch, _dispatch_problem = await _dispatch_guard.saved()
+        if _dispatch_problem:
+            yield f"data: {json.dumps({'type':'error','error':_dispatch_problem})}\n\n"
+            return
         if _saved_dispatch:
             yield f"data: {json.dumps({'type':'token','content':_dispatch_guard.describe(_saved_dispatch)})}\n\n"
             yield f"data: {json.dumps({'type':'done','model':req.model,'message_id':_assistant_msg_id})}\n\n"
@@ -2252,14 +2287,16 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             if _step["event"]:
                 yield f"data: {json.dumps(_step['event'])}\n\n"
     # Search results and knowledge excerpts ride along for this turn only: working context, not conversation.
-    _turn_only_tokens = chat_context.estimate(kb_context or "") + chat_context.estimate(qs.get("context") or "")
+    _turn_only_tokens = _ledger.turn_only()
+    _ledger.start(messages)     # every message added from here on is this reply's own tool traffic
     _ctx_ratio = float((_ctx_previous or {}).get("ratio") or 0)   # real tokens per estimated token; 0 = not known yet
     _round_estimate = 0
-    _fixed_estimate = chat_context.fixed_estimate(messages, _history, ollama_tools)
+    _fixed_estimate = _ledger.fixed(messages, _history, ollama_tools)
 
     _gen_speed = 0.0  # tokens/sec of the most recent generation round
     _last_round_usage = (0, 0)  # (prompt_tokens, gen_tokens) Ollama reported for the previous round
     _round_start_len = len(messages)
+    _wrap_silent = False   # the loop ended on an empty reply, not on the round limit
     for round_num in range(MAX_ROUNDS):
         if round_num > 0:
             _last_round_usage = (prompt_tokens, gen_tokens)
@@ -2375,7 +2412,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         # Estimate prompt tokens so the frontend counter reflects context-in-flight,
         # not just live generation. Real prompt_eval_count arrives only at done=True.
         _round_estimate = chat_context.payload_estimate(messages, ollama_tools)
-        yield f"data: {json.dumps({'type': 'context_info', 'round': round_num, 'window': 0 if _is_cloud_provider else model_options.get('num_ctx'), 'prompt_estimate': _round_estimate, 'turn_only': _turn_only_tokens if round_num == 0 else 0, 'ratio': _ctx_ratio, 'fixed': _fixed_estimate})}\n\n"
+        yield f"data: {json.dumps({'type': 'context_info', 'round': round_num, 'window': 0 if _is_cloud_provider else model_options.get('num_ctx'), 'prompt_estimate': _round_estimate, 'turn_only': _turn_only_tokens if round_num == 0 else 0, 'ratio': _ctx_ratio, 'fixed': _fixed_estimate, 'parts': _ledger.sizes(messages, _history, ollama_tools)})}\n\n"
         _est_prompt_pre = round(_round_estimate * (_ctx_ratio or chat_context.DEFAULT_RATIO))
         if _est_prompt_pre:
             yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt_pre, 'live': True})}\n\n"
@@ -3179,7 +3216,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
             # ── Duplicate / near-duplicate detection ──
             if tool_calls:
-                _tool_key = json.dumps([(tc.get("function", {}).get("name"), json.dumps(tc.get("function", {}).get("arguments", {}), sort_keys=True)) for tc in tool_calls], sort_keys=True)
+                _tool_key = json.dumps([(tc.get("function", {}).get("name"), json.dumps(call_scope.comparable(tc.get("function", {}).get("name"), tc.get("function", {}).get("arguments", {})), sort_keys=True)) for tc in tool_calls], sort_keys=True)
                 _tc_names_dup = [tc.get("function", {}).get("name", "") for tc in tool_calls]
 
                 # The v2 fix loop is review → fixer → review → fixer …, so
@@ -3356,6 +3393,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 batch = _parsed_calls[batch_start:batch_end]
 
                 _futures = []
+                _event_call_ids = {}   # future -> the id its events carry
                 _metas = []  # (tool_name, tool_args, icon, label, detail)
                 # If every call in this batch is blocked as unauthorized, the
                 # results loop never runs — the post-loop checks below must see
@@ -3389,7 +3427,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     if tool_name == "run_shell":
                         _tool_detail = f": {tool_args.get('command', '')[:60]}"
                     elif tool_name == "execute_code":
-                        _tool_detail = f" ({tool_args.get('language', 'code')})"
+                        _run_description = call_scope.description(tool_args)
+                        _tool_detail = f": {_run_description[:60]}" if _run_description else f" ({tool_args.get('language', 'code')})"
                     elif tool_name == "write_file":
                         _tool_detail = f": {tool_args.get('path', '')}"
                     elif tool_name == "generate_code":
@@ -3418,16 +3457,21 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     # generate_image emits its own first status after resolving
                     # the final ComfyUI prompt, so the expandable pill can show
                     # the exact prompt/settings that will be submitted.
+                    # One id for every event of this call (tool_calls.py): the Activity list and the
+                    # output cards use it to tell one call's events from several calls.
+                    _event_call_id = call_scope.new_id(round_num)
                     if tool_name != "generate_image":
                         await events.emit(conv_id, "tool_start", {
                             "tool": tool_name, "icon": _tool_icon,
                             "status": f"{_tool_label}{_tool_detail}",
+                            "tool_call_id": _event_call_id,
                         })
 
                     # Execute via integrated CodeAgent — with keepalive loop
                     _tf = asyncio.get_running_loop().create_future()
                     _tool_chars = [0]
-                    async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids, _reply=content):
+                    async def _run_tool_bg(_n=tool_name, _a=tool_args, _c=conv_id, _f=_tf, _tc=_tool_chars, _kb=persona_kb_ids, _reply=content, _eid=_event_call_id):
+                        _call_scope = call_scope.begin(_eid)   # this task's own context
                         try:
                             _persona_context = None
                             if _n == "generate_image" and req.persona_id:
@@ -3478,15 +3522,15 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                             if not _f.done(): _f.set_result(r)
                         except Exception as _e:
                             if not _f.done(): _f.set_exception(_e)
+                        finally:
+                            call_scope.end(_call_scope)
 
                     _spawn_tool(_run_tool_bg())
+                    _event_call_ids[_tf] = _event_call_id
                     _futures.append((_tf, _tool_chars, tool_name, _tool_icon, _tool_label, _tool_detail, _tool_call_id, tool_args))
                     _round_tool_names.add(tool_name)
-                    if _dispatch_guard and tool_name in ('start_coder_workflow', 'ask_project'):
-                        _dispatch_refusal = _dispatch_guard.refusal(tool_result) or _dispatch_refusal
 
                 # Wait for all futures in this batch
-                _base_ctx = sum(len(m.get("content", "")) for m in messages) // 4
                 _loop = asyncio.get_running_loop()
                 _tool_start_time = _loop.time()
                 while _futures and not all(f[0].done() for f in _futures):
@@ -3498,10 +3542,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 await events.emit(conv_id, "tool_progress", {
                                     "tool": _tn, "icon": _ti,
                                     "status": f"{_tl}{_td} ({int(_elapsed)}s)",
+                                    "tool_call_id": _event_call_ids.get(_tf, ""),
                                 })
-                    _est_tool_tokens = sum(max(tc[0] // 4, 50) for _, tc, *_ in _futures)
-                    _est_ctx = _base_ctx + _est_tool_tokens
-                    yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_ctx, 'live': True})}\n\n"
+                    # What the tools have returned so far, on top of the last request (chat_context.tool_phase).
+                    yield f"data: {json.dumps(chat_context.tool_phase(messages, _round_start_len, sum(tc[0] for _, tc, *_ in _futures)))}\n\n"
                     yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
 
                 # Collect results in order
@@ -3510,6 +3554,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         tool_result = _tf.result()
                     except Exception as te:
                         tool_result = f"**Tool error ({tool_name}):** {str(te)}"
+                    if _dispatch_guard and tool_name in ('start_coder_workflow', 'ask_project'):
+                        _dispatch_refusal = _dispatch_guard.refusal(tool_result) or _dispatch_refusal
 
                     if tool_name.startswith("document_"):
                         from document_tools import apply_argument_retry
@@ -3647,8 +3693,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 if _all_parallel:
                     # Emit ctx_update so the frontend token counter reflects the
                     # batch's tool results before we leave the batch loop.
-                    _est_prompt = sum(len(m.get("content", "")) for m in messages) // 4
-                    yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
+                    yield f"data: {json.dumps(chat_context.tool_phase(messages, _round_start_len))}\n\n"
                     break  # All were in one batch
 
                 # Detect repeated errors — inject guidance, then force-stop if stuck
@@ -3694,20 +3739,14 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     _error_repeat_count = 0
 
                 # Emit ctx_update after tool result so frontend token counter updates live
-                _est_prompt = sum(len(m.get("content", "")) for m in messages) // 4
-                yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt, 'live': True})}\n\n"
+                yield f"data: {json.dumps(chat_context.tool_phase(messages, _round_start_len))}\n\n"
 
             if _dispatch_guard and _round_tool_names & {'start_coder_workflow', 'ask_project'}:
-                try:
-                    _saved_dispatch = await _dispatch_guard.receipt()
-                except ValueError as _receipt_error:
-                    # The request no longer matches the saved job (another project was picked): say so.
-                    _saved_dispatch, _dispatch_refusal = None, str(_receipt_error)
+                _saved_dispatch, _dispatch_problem = await _dispatch_guard.saved()
+                _dispatch_refusal = _dispatch_problem or _dispatch_refusal
                 # The router's own reason beats a generic line the user cannot act on.
-                _dispatch_text = (_dispatch_guard.describe(_saved_dispatch) if _saved_dispatch else
-                    f'No new Daedalus job was started for this message: {_dispatch_refusal}' if _dispatch_refusal else
-                    'No new Daedalus job was started for this message. The workflow tool did not produce a matching '
-                    'saved job. Check its result before retrying.')
+                _dispatch_text = (_dispatch_guard.describe(_saved_dispatch) if _saved_dispatch
+                                  else _dispatch_guard.not_started(_dispatch_refusal))
                 yield f"data: {json.dumps({'type':'token','content':_dispatch_text})}\n\n"
                 yield f"data: {json.dumps({'type':'done','model':req.model,'message_id':_assistant_msg_id})}\n\n"
                 return
@@ -3829,6 +3868,13 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'refinements': _review_round})}\n\n"
                 return
             # Empty content — try to recover
+            if round_num >= 3 and _tools_ran_this_turn and not _is_v2_persona:
+                # The model went quiet after its tools had run. Ask once, without tools to call, for the
+                # answer (chat_rounds.py) instead of ending on "no text response". Seen 2026-11-15 with a
+                # small model: three clean code runs, then nothing.
+                print(f"[CHAT]   Empty reply after {_tools_ran_this_turn} tool call(s) (round {round_num}); asking for the answer")
+                _wrap_silent = True
+                break
             if round_num >= 3:
                 # Don't leave an empty in_progress stub behind on reload.
                 if _assistant_msg_id is not None and not (content or "").strip():
@@ -3885,7 +3931,80 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'refinements': _review_round})}\n\n"
         return
 
-    # Reached MAX_ROUNDS without the model emitting final user-facing text.
+    if not _is_v2_persona:
+        # The rounds ran out while the model was still calling tools. Ask once more, for the answer,
+        # from what the tools returned (chat_rounds.py). This used to end on a warning and nothing else.
+        if _turn_text.strip() and not _turn_text.endswith("\n"):
+            yield f"data: {json.dumps({'type': 'token', 'content': chr(10) * 2})}\n\n"
+        _wrap_window = 0 if _is_cloud_provider else model_options.get("num_ctx")
+        _wrap_keep = lambda m: (m.get("content") or "").startswith(skill_library.VIEW_MARK)
+        for _wrap_cut in (0, _round_start_len, len(messages)):
+            if _wrap_cut:
+                chat_context.shorten_tool_results(messages, _wrap_cut, keep=_wrap_keep)
+            _wrap_request = chat_rounds.wrap_up_messages(messages, MAX_ROUNDS, _wrap_silent)
+            _wrap_fits = chat_rounds.fits(_wrap_request, ollama_tools, _wrap_window, _ctx_ratio)
+            if _wrap_fits:
+                break
+        _wrap, _wrap_streamed = None, False
+        if _wrap_fits:
+            _wrap_estimate = chat_context.payload_estimate(_wrap_request, ollama_tools)
+            # Marks where this call's text starts, so taking it back leaves the earlier rounds alone.
+            yield f"data: {json.dumps({'type': 'context_info', 'round': MAX_ROUNDS, 'window': _wrap_window, 'prompt_estimate': _wrap_estimate, 'turn_only': 0, 'ratio': _ctx_ratio, 'fixed': _fixed_estimate, 'parts': _ledger.sizes(_wrap_request, _history, ollama_tools)})}\n\n"
+            yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': round(_wrap_estimate * (_ctx_ratio or chat_context.DEFAULT_RATIO)), 'live': True})}\n\n"
+            if _assistant_msg_id is not None:
+                try:
+                    import context_inspector
+                    await context_inspector.capture(_assistant_msg_id, model=req.model, provider=_model_provider,
+                        options=model_options, memories={'global':global_memory_info,'workspace':workspace_memory_info},
+                        retrieved=kb_context, sources=qs.get('results') or qs.get('sources') or [], retrieved_sources=kb_sources,
+                        tools=available_tool_names, messages=_wrap_request, original_chars=sum(len(m.get("content", "")) for m in _wrap_request),
+                        thinking=False if _effort['thinking'] is not None else None, effort=_effort, knowledge_ids=persona_kb_ids)
+                except Exception as _wie:
+                    print(f"[CHAT] wrap-up context record failed (non-fatal): {_wie}")
+            await events.emit(conv_id, "tool_start", {"tool": "processing", "status": "✍️ Writing the answer from what was found...", "icon": "edit"})
+            if not _wrap_silent:
+                print(f"[CHAT] Round limit ({MAX_ROUNDS}) reached; asking for the answer")
+            async for _step in chat_rounds.wrap_up(
+                    http=http, provider=_model_provider,
+                    model=_provider_model_name if _model_provider == "ollama" else req.model, request_model=req.model,
+                    messages=messages, options=model_options, tools=ollama_tools,
+                    provider_tools=(ollama_tools if _native_cloud_tools else None),
+                    think=_effort['thinking'], rounds=MAX_ROUNDS, silent=_wrap_silent,
+                    looks_like_call=(lambda text: bool(parse_text_tool_calls(
+                        text, available_tool_names, native=bool(ollama_tools) and not _text_fallback_done)))
+                        if available_tool_names else None):
+                if _step.get("keepalive"):
+                    yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                elif _step.get("token"):
+                    _wrap_streamed = True
+                    yield f"data: {json.dumps({'type': 'token', 'content': _step['token']})}\n\n"
+                elif _step.get("usage"):
+                    prompt_tokens, gen_tokens = _step["usage"]["prompt_tokens"], _step["usage"]["gen_tokens"]
+                    yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens})}\n\n"
+                elif _step.get("result"):
+                    _wrap = _step["result"]
+            if _wrap and (_wrap["prompt_tokens"] or _wrap["gen_tokens"]):
+                yield f"data: {json.dumps({'type': 'usage_round', 'round': MAX_ROUNDS, 'model': req.model, 'prompt_tokens': _wrap['prompt_tokens'], 'gen_tokens': _wrap['gen_tokens'], 'elapsed_seconds': _wrap['elapsed']})}\n\n"
+                if _wrap["gen_tokens"] and _wrap["elapsed"]:
+                    _gen_speed = round(_wrap["gen_tokens"] / max(_wrap["elapsed"], 0.001), 1)
+                if _assistant_msg_id is not None:
+                    try:
+                        import context_inspector
+                        await context_inspector.record_usage(_assistant_msg_id, _wrap["prompt_tokens"], _wrap["gen_tokens"], _wrap["elapsed"])
+                    except Exception:
+                        pass
+        else:
+            print(f"[CHAT] Round limit ({MAX_ROUNDS}) reached; no room left to ask for the answer")
+        if not (_wrap and _wrap["ok"]):
+            if _wrap_streamed:
+                yield f"data: {json.dumps({'type': 'clear'})}\n\n"
+            if not _wrap_silent:      # a reply that stays empty gets the usual "no text response" note
+                yield f"data: {json.dumps({'type': 'token', 'content': chat_rounds.NOTICE})}\n\n"
+        await events.emit(conv_id, "complete", {"status": "Complete" if _wrap_silent else "Complete (round limit)"})
+        yield f"data: {json.dumps({'type': 'done', 'model': req.model, 'message_id': _assistant_msg_id, 'speed': _gen_speed, 'gen_tokens': gen_tokens, 'prompt_tokens': prompt_tokens, 'round_limit': 0 if _wrap_silent else MAX_ROUNDS})}\n\n"
+        return
+
+    # Daedalus chats: the rounds ran out without final user-facing text.
     # Synthesize a fallback summary so the conversation isn't a blank message —
     # tell the user we ran out of round budget, list the runs created, and
     # what the last reviewer (if any) reported. Stream + persist.

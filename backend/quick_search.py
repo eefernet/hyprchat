@@ -139,12 +139,24 @@ _OP_ON_ATTACHED_RE = re.compile(
 )
 
 
+# "continue", "keep going", the Continue button's "Continue from where you stopped.": an instruction to
+# carry on with the work, not something to look up. Seen live 2026-11-14: each "continue" of a code review
+# ran a web search about the previous topic first (about 2,700 tokens of excerpts per turn).
+_CARRY_ON_RE = re.compile(
+    r"^(?:please\s+|ok(?:ay)?[,\s]+)?(?:continue|keep going|go on|carry on|proceed|resume)"
+    r"(?:\s+(?:please|(?:from\s+)?where\s+you\s+(?:stopped|left\s+off)))?[!.\s]*$",
+    re.IGNORECASE,
+)
+
+
 def _should_skip(query: str) -> tuple[bool, str]:
     q = (query or "").strip()
     if not q or not any(c.isalnum() for c in q):
         return True, "empty"
     if _GREETING_RE.match(q):
         return True, "greeting"
+    if _CARRY_ON_RE.match(q):
+        return True, "carry on"
     if len(q) < 3:
         return True, "too short"
     # Pure arithmetic (no letters at all) — model can compute these directly.

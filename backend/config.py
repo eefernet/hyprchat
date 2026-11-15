@@ -282,7 +282,8 @@ DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", str(CONTEXT_DEFAUL
 # synthesis). Defaults higher than DEFAULT_NUM_CTX because depth 3-5 evidence
 # contexts overflow a 16K window; evidence budgets scale down to fit this.
 RESEARCH_NUM_CTX = coerce_num_ctx(os.getenv("RESEARCH_NUM_CTX", str(CONTEXT_DEFAULTS["research_num_ctx"])))
-MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
+# Tool rounds a plain chat reply gets (Settings → "Tool rounds per reply"; chat_rounds.py). Was 12.
+MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "40"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).
 

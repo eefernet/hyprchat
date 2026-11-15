@@ -109,7 +109,8 @@ def test_the_loops_rough_guesses_never_replace_a_real_count():
     meter.info({"round": 0, "window": 16384, "prompt_estimate": 3000})
     meter.usage({"round": 0, "prompt_tokens": 2500, "gen_tokens": 100})
     guess = meter.live({"type": "ctx_update", "prompt_tokens": 900, "gen_tokens": 0, "live": True}, "")
-    assert guess["used"] == 2500 and guess["working"] == 0
+    # The 100 tokens that call wrote are still in the window until the next request.
+    assert guess["used"] == 2500 and guess["working"] == 100
     real = meter.live({"type": "ctx_update", "prompt_tokens": 3900, "gen_tokens": 50}, "")
     assert real["used"] == 2500 and real["working"] == 1450
 
@@ -131,7 +132,7 @@ def test_compaction_in_the_middle_of_a_reply_lowers_the_conversation():
     meter = chat_context.TurnMeter()
     meter.info({"round": 0, "window": 8192, "prompt_estimate": 6000})
     meter.usage({"round": 0, "prompt_tokens": 6000, "gen_tokens": 100})
-    meter.compacted({"freed": 3500})
+    meter.compacted({"type": "context_compacted", "summarized": 4, "freed": 3500})
     assert meter.kept("") == 2500
 
 
@@ -335,7 +336,9 @@ def test_earlier_tool_results_are_shortened_first(monkeypatch):
     result = relieve(outgoing, history, options={"num_ctx": 8000}, used=7600, round_start=6,
                      keep=lambda message: message["content"].startswith("## SKILL"))
     assert len(turn[1]["content"]) < 300 and len(turn[2]["content"]) > 9000 and len(turn[4]["content"]) == 9000
-    assert result["freed"] > 2500 and result["event"] == {"type": "context_compacted", "summarized": 0, "freed": result["freed"]}
+    assert result["freed"] > 2500 and result["event"] == {
+        "type": "context_compacted", "summarized": 0, "freed": result["freed"],
+        "freed_history": 0, "freed_working": result["freed"]}
     assert not state["calls"]                           # enough room without touching the history
 
 
@@ -489,3 +492,74 @@ def test_the_fixed_cost_is_never_more_than_the_request_it_is_part_of():
     meter.info({"round": 0, "window": 131072, "prompt_estimate": 5000, "fixed": 4964})
     meter.usage({"round": 0, "prompt_tokens": 3880, "gen_tokens": 20})
     assert meter.reading("ok")["fixed"] == 3880
+
+
+# ── The reading while tools run (2026-11-15) ──
+
+def test_the_reading_does_not_fall_while_a_tool_runs():
+    # Live 2026-11-14: between two model calls the loop sent whole-prompt guesses that were ignored and a
+    # generated count of 0, so the figure dropped by the last call's output each time a tool started.
+    meter = chat_context.TurnMeter()
+    meter.info({"round": 0, "window": 32768, "prompt_estimate": 5000})
+    meter.live({"type": "ctx_update", "prompt_tokens": 4000, "gen_tokens": 600}, "")     # the call's real counts
+    before = meter.live({"type": "ctx_update", "prompt_tokens": 4000, "gen_tokens": 600}, "")["total"]
+    running = meter.live(chat_context.tool_phase([{"role": "assistant", "content": "x"}], 0), "")
+    assert before == 4600 and running["total"] == 4600 and running["working"] == 600
+
+
+def test_tool_results_count_as_soon_as_they_arrive():
+    meter = chat_context.TurnMeter()
+    meter.info({"round": 0, "window": 32768, "prompt_estimate": 5000})
+    meter.usage({"prompt_tokens": 4000, "gen_tokens": 600})
+    turn = [{"role": "assistant", "content": "", "tool_calls": [{}]}, {"role": "tool", "content": "R" * 6000}]
+    arrived = meter.live(chat_context.tool_phase(turn, 0), "")
+    assert arrived["total"] == 4600 + round(chat_context.estimate({"messages": turn[1:]}) * 0.8)
+    assert arrived["total"] > 6000 and arrived["used"] == 4000
+    # A result that is back but not in the list yet counts too.
+    waiting = meter.live(chat_context.tool_phase(turn[:1], 0, done_chars=6000), "")
+    assert waiting["total"] == 4600 + round(2000 * 0.8)
+    # The next request is predicted from the real count plus what was added, not re-estimated whole.
+    meter.info({"round": 1, "window": 32768, "prompt_estimate": 5000 + 2600})
+    predicted = meter.live({"type": "ctx_update", "prompt_tokens": 0, "gen_tokens": 0, "live": True}, "")
+    assert predicted["total"] == 4000 + round(2600 * 0.8)
+
+
+def test_shortened_tool_results_do_not_shrink_the_conversation():
+    # Making room mid-reply cuts this reply's own tool results. They were never conversation.
+    meter = chat_context.TurnMeter()
+    meter.info({"round": 0, "window": 8192, "prompt_estimate": 6000})
+    meter.usage({"prompt_tokens": 6000, "gen_tokens": 100})
+    meter.compacted({"type": "context_compacted", "summarized": 0, "freed": 2000, "freed_history": 0, "freed_working": 2000})
+    assert meter.kept("") == 6000
+    meter.compacted({"type": "context_compacted", "summarized": 3, "freed": 3000, "freed_history": 1000, "freed_working": 2000})
+    assert meter.kept("") == 5000
+    meter.compacted({"type": "context_compacted", "summarized": 0, "freed": 900})          # an older server's event
+    assert meter.kept("") == 5000
+
+
+def test_the_reading_carries_what_fills_the_window():
+    parts = {"instructions": 1500, "tools": 1500, "memory": 300, "skills": 200, "summary": 0, "messages": 2000,
+             "excerpts": 900, "tool_calls": 0}
+    meter = chat_context.TurnMeter()
+    meter.info({"round": 0, "window": 32768, "prompt_estimate": 6400, "turn_only": 900, "parts": parts})
+    live = meter.live({"type": "ctx_update", "prompt_tokens": 5120, "gen_tokens": 300}, "")
+    assert sum(live["parts"].values()) == live["total"] == 5420 and live["parts"]["reply"] == 300
+    meter.usage({"round": 0, "prompt_tokens": 5120, "gen_tokens": 300})
+    later = dict(parts, tool_calls=2500)
+    meter.info({"round": 1, "window": 32768, "prompt_estimate": 8900, "parts": later})
+    meter.usage({"round": 1, "prompt_tokens": 7100, "gen_tokens": 400})
+    reading = meter.reading("The answer. " * 20)
+    assert sum(reading["parts"].values()) == reading["used"]
+    assert set(reading["parts"]) == {"instructions", "tools", "memory", "skills", "summary", "messages"}
+    assert reading["peak"]["total"] == 7500 and sum(reading["peak"]["parts"].values()) == 7500
+    assert reading["peak"]["parts"]["tool_calls"] > 1500 and reading["peak"]["parts"]["reply"] == 400
+    assert reading["fixed"] == sum(reading["parts"][name] for name in ("instructions", "tools", "memory", "skills"))
+
+
+def test_a_request_without_a_breakdown_still_gets_a_reading():
+    meter = chat_context.TurnMeter()
+    meter.info({"round": 0, "window": 32768, "prompt_estimate": 5000, "parts": None})
+    update = meter.live({"type": "ctx_update", "prompt_tokens": 4000, "gen_tokens": 100}, "")
+    assert update["total"] == 4100 and "parts" not in update
+    reading = meter.reading("Answer.")
+    assert reading["used"] > 4000 and "parts" not in reading and "peak" not in reading

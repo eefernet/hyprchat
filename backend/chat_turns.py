@@ -34,3 +34,35 @@ def user_metadata(metadata: dict | None, shown: str, sent: str) -> dict | None:
     if not sent or sent == shown or len(sent) > MODEL_TEXT_LIMIT:
         return metadata
     return {**(metadata or {}), "model_content": sent}
+
+
+def continue_target(conversation: dict | None, message_id) -> tuple[dict | None, str]:
+    """(row, problem) for a Continue request. The row must be an assistant message of THIS conversation.
+
+    The id used to be trusted as sent: ``int(req.continue_message_id)`` went straight to the final save,
+    so an id from another chat had that chat's reply overwritten, and a non-numeric id raised inside the
+    stream."""
+    try:
+        wanted = int(message_id)
+    except (TypeError, ValueError):
+        return None, 'The reply to continue could not be identified. Reload the chat and try again.'
+    for row in (conversation or {}).get('messages', []):
+        if row.get('id') == wanted:
+            if row.get('role') != 'assistant':
+                break
+            return row, ''
+    return None, 'The reply to continue is not part of this chat any more. Reload the chat and try again.'
+
+
+NO_RESPONSE = '_[No response — {reason}]_'
+INTERRUPTED = '_[interrupted: {reason}]_'
+
+
+def failure_text(visible: str, reason: str) -> tuple[str, bool]:
+    """(text to keep on the saved reply, whether it is new text the browser has not been sent).
+
+    An empty reply becomes a one-line note; a partial reply keeps its text with the reason under it."""
+    reason = ' '.join(str(reason or '').split())[:160]
+    if not visible.strip():
+        return (NO_RESPONSE.format(reason=reason) if reason else '_[No response; generation failed.]_'), True
+    return (visible.rstrip() + '\n\n' + INTERRUPTED.format(reason=reason) if reason else visible), False

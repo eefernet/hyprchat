@@ -450,7 +450,7 @@ def _parse_python_args(tool_name: str, raw_args: str) -> dict | None:
 # Map positional args to known tool parameter names (used by the python-call
 # and loose-call text parsers)
 TOOL_PARAMS = {
-    "execute_code": ["code", "language"],
+    "execute_code": ["code", "language", "description"],
     "run_shell": ["command"],
     "write_file": ["path", "content"],
     "read_file": ["path"],

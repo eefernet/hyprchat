@@ -100,6 +100,13 @@ class TurnMeter:
         self.peak = 0
         self.prior = ""
         self.fixed_estimate = 0   # the estimator's figure for the system prompt and tool definitions
+        self.round_estimate = 0   # the estimator's figure for the request being made
+        self.round_gen = 0        # what the last finished call wrote: in the window until the next request
+        self.last_real = 0        # real size of the last finished request, and the estimate it had
+        self.last_estimate = 0
+        self.parts_units = None   # the request by category, estimator units (context_breakdown.py)
+        self.first_parts = None   # the first request by category, real tokens
+        self.peak_parts = None    # the fullest moment of the reply by category
 
     def begin(self, prior: str) -> None:
         """Text the reply already had (continue mode). It is in the prompt, so it must not be counted twice."""
@@ -115,7 +122,14 @@ class TurnMeter:
             self.fixed_estimate = int(event.get("fixed") or 0)
             self.base = max(0, round((size - self.turn_only) * self.ratio))
         if size:
-            self.round_prompt = round(size * self.ratio)
+            self.round_estimate = size
+            self.parts_units = event.get("parts") if isinstance(event.get("parts"), dict) else None
+            self.round_gen = 0      # the previous call's output is part of this request now
+            if self.measured and self.last_real and self.last_estimate:
+                # Only what was added since the last real count is an estimate.
+                self.round_prompt = max(0, self.last_real + round((size - self.last_estimate) * self.ratio))
+            else:
+                self.round_prompt = round(size * self.ratio)
 
     def usage(self, call: dict) -> None:
         """``usage_round``: real counts for one finished model call. The first one anchors the reading."""
@@ -126,13 +140,41 @@ class TurnMeter:
             self.measured = True
             self.ratio = ratio_of(prompt, self.first_estimate, self.ratio)
             self.base = max(0, prompt - round(self.turn_only * self.ratio))
-        self.round_prompt = prompt
-        self.peak = max(self.peak, prompt + generated)
+            self.first_parts = self._scaled(prompt)
+        self.round_prompt, self.round_gen = prompt, generated
+        self.last_real, self.last_estimate = prompt, self.round_estimate
+        self._peak(prompt + generated, generated, 0)
+
+    def _scaled(self, prompt: int):
+        try:
+            import context_breakdown
+            return context_breakdown.scale(self.parts_units, prompt, self.ratio)
+        except Exception:
+            return None
+
+    def _now(self, generated: int, appended: int):
+        """The window right now by category: the request, what was added since, and the reply being written."""
+        parts = self._scaled(self.round_prompt)
+        if not parts:
+            return None
+        parts["tool_calls"] += appended
+        parts["reply"] = generated
+        return parts
+
+    def _peak(self, total: int, generated: int, appended: int) -> None:
+        if total > self.peak:
+            self.peak = total
+            self.peak_parts = self._now(generated, appended) or self.peak_parts
 
     def compacted(self, event: dict) -> None:
         """``context_compacted`` in the middle of a reply: the conversation just got smaller."""
+        # Only summarized history shrinks the conversation. Shortening this reply's own tool results does
+        # not: they were never part of it (they used to be subtracted, so the figure dipped mid-reply).
+        freed = event.get("freed_history")
+        if freed is None:      # an event without the split: all of it was history unless it says nothing was summarized
+            freed = 0 if event.get("summarized") == 0 else event.get("freed")
         if self.measured:
-            self.base = max(0, self.base - int(event.get("freed") or 0))
+            self.base = max(0, self.base - int(freed or 0))
 
     def kept(self, visible: str) -> int:
         text = visible or ""
@@ -146,18 +188,29 @@ class TurnMeter:
         if prompt and not event.get("live"):      # "live" marks the loop's own rough guesses
             if not self.measured:                 # the first real count anchors the reading
                 self.usage({"prompt_tokens": prompt, "gen_tokens": generated})
-            self.round_prompt = prompt
-        total = self.round_prompt + generated
-        self.peak = max(self.peak, total)
+            self.round_prompt, self.round_gen = prompt, generated
+        # Between two model calls the window holds the last request, what that call wrote, and what the
+        # tools have returned since (``appended``, sized by ``tool_phase``). The loop's old whole-prompt
+        # guesses were ignored here and its ``gen_tokens`` was 0, so the figure dipped while a tool ran.
+        appended = round(int(event.get("appended") or 0) * self.ratio)
+        written = generated or self.round_gen
+        total = self.round_prompt + written + appended
+        self._peak(total, written, appended)
         kept = self.kept(visible)
-        return {**event, "used": kept, "working": max(0, total - kept), "window": self.window,
-                "measured": self.measured, "fixed": self.fixed()}
+        out = {**event, "used": kept, "working": max(0, total - kept), "total": total, "window": self.window,
+               "measured": self.measured, "fixed": self.fixed()}
+        parts = self._now(written, appended)
+        if parts:
+            out["parts"] = parts
+        return out
 
     def fixed(self) -> int:
         """Tokens every request spends before any conversation: system prompt and tool definitions.
         About 3,500 for an ordinary chat, which is most of a 4K window."""
         # Instructions and tool definitions tokenize at about DEFAULT_RATIO; the whole-prompt ratio falls
         # as prose is added (0.80 -> 0.61 over a ten-turn chat) and would shrink this figure with it.
+        if self.first_parts:      # the same split the breakdown shows
+            return sum(self.first_parts.get(name, 0) for name in ("instructions", "tools", "memory", "skills"))
         fixed = round(self.fixed_estimate * max(self.ratio, DEFAULT_RATIO))
         # Never more than the request it is part of (seen live: 3,971 "fixed" in a 3,887-token chat).
         return min(fixed, self.base) if self.measured and self.base else fixed
@@ -168,8 +221,27 @@ class TurnMeter:
         if not (self.base or self.peak):
             return None
         kept = self.kept(visible)
-        return {"used": kept, "working_peak": max(0, self.peak - kept), "window": self.window,
-                "measured": self.measured, "ratio": round(self.ratio, 3), "fixed": self.fixed()}
+        out = {"used": kept, "working_peak": max(0, self.peak - kept), "window": self.window,
+               "measured": self.measured, "ratio": round(self.ratio, 3), "fixed": self.fixed()}
+        try:
+            import context_breakdown
+            parts = context_breakdown.kept(self.first_parts, kept)
+            if parts:
+                out["parts"] = parts
+            if self.peak_parts:
+                out["peak"] = {"total": self.peak, "parts": self.peak_parts}
+        except Exception:
+            pass
+        return out
+
+
+def tool_phase(messages, round_start: int, done_chars: int = 0) -> dict:
+    """The ``ctx_update`` the chat loop sends between two model calls: the size of what has been added
+    since the last request (tool results and the loop's notes; the model's own message is already counted
+    as what it generated). ``done_chars``: results that are back but not in the list yet."""
+    added = [message for message in messages[max(0, int(round_start)):] if message.get("role") != "assistant"]
+    units = (estimate({"messages": added}) if added else 0) + max(0, int(done_chars or 0)) // 3
+    return {"type": "ctx_update", "live": True, "gen_tokens": 0, "prompt_tokens": 0, "appended": units}
 
 
 def fixed_estimate(messages, history, tools=None) -> int:
@@ -549,7 +621,7 @@ async def relieve(*, http, events, conv_id, messages, history, model, options, t
     """Make room in the middle of a reply. Steps like ``compact``; the last one is
     ``{"messages": [...], "history": [...], "freed": tokens, "event": {...} | None}``."""
     window = int(options.get("num_ctx") or 0)
-    freed = round(shorten_tool_results(messages, round_start, keep) / 3 * ratio)
+    working = freed = round(shorten_tool_results(messages, round_start, keep) / 3 * ratio)
     event = None
     if enabled() and window and used - freed >= window * share:
         async for step in compact(http=http, events=events, conv_id=conv_id, messages=messages,
@@ -560,8 +632,9 @@ async def relieve(*, http, events, conv_id, messages, history, model, options, t
                 continue
             messages, history, event = step["messages"], step["history"], step["event"]
             freed += int((event or {}).get("freed") or 0)
+    # ``freed`` is the room made in the window; only ``freed_history`` came out of the conversation.
     if freed and not event:
-        event = {"type": "context_compacted", "summarized": 0, "freed": freed}
+        event = {"type": "context_compacted", "summarized": 0, "freed": freed, "freed_history": 0, "freed_working": working}
     elif event:
-        event = {**event, "freed": freed}
+        event = {**event, "freed": freed, "freed_history": max(0, freed - working), "freed_working": working}
     yield {"messages": messages, "history": list(history or []), "freed": freed, "event": event}
