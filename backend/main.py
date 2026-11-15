@@ -366,6 +366,8 @@ async def lifespan(app: FastAPI):
         print(f"[Config] Loaded context compaction: {config.CONTEXT_COMPACTION}")
     if "chat_compaction_percent" in _settings:
         config.CHAT_COMPACTION_PERCENT = _settings["chat_compaction_percent"]
+    if "chat_tool_memory" in _settings:
+        config.CHAT_TOOL_MEMORY = "on" if str(_settings["chat_tool_memory"]).lower() in {"1", "true", "on", "yes"} else "off"
     if "chat_max_rounds" in _settings:
         import chat_rounds
         config.MAX_AGENT_ROUNDS = chat_rounds.setting(_settings["chat_max_rounds"])

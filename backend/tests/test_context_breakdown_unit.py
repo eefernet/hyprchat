@@ -83,13 +83,16 @@ def test_instructions_and_tools_keep_their_own_ratio():
     assert scaled["instructions"] == 2400 and scaled["tools"] == 1200
     assert scaled["messages"] == round(24500 * 0.61) - 3600
     only_fixed = breakdown.scale({"instructions": 900, "tools": 100}, 700, 0.8)
-    assert only_fixed == {"instructions": 630, "tools": 70, "memory": 0, "skills": 0, "summary": 0, "messages": 0, "excerpts": 0, "tool_calls": 0}
+    assert only_fixed == {"instructions": 630, "tools": 70, "memory": 0, "skills": 0, "summary": 0, "messages": 0,
+                          "kept_tools": 0, "excerpts": 0, "tool_calls": 0}
 
 
 def test_after_the_reply_messages_take_what_the_rest_leaves():
     first = {"instructions": 2400, "tools": 1200, "memory": 300, "skills": 100, "summary": 500, "messages": 3000, "excerpts": 900, "tool_calls": 0}
     kept = breakdown.kept(first, 8200)
-    assert kept == {"instructions": 2400, "tools": 1200, "memory": 300, "skills": 100, "summary": 500, "messages": 3700}
+    assert kept == {"instructions": 2400, "tools": 1200, "memory": 300, "skills": 100, "summary": 500, "kept_tools": 0, "messages": 3700}
+    # Records of earlier replies' tool calls are sent again, so they stay in the split.
+    assert breakdown.kept({**first, "kept_tools": 800}, 9000)["kept_tools"] == 800
     assert sum(breakdown.kept(first, 4400).values()) == 4400          # a small disagreement is absorbed
     assert breakdown.kept(first, 2000) is None                         # a large one shows no split
     assert breakdown.kept(None, 5000) is None

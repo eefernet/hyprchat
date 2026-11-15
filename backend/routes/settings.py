@@ -65,6 +65,7 @@ async def get_app_settings():
         "context_compaction": config.CONTEXT_COMPACTION,
         "chat_compaction_percent": chat_context.compact_percent(),
         "chat_max_rounds": chat_rounds.setting(),
+        "chat_tool_memory": config.CHAT_TOOL_MEMORY,
         "history_recall": config.HISTORY_RECALL,
         "rag_reranker": config.RAG_RERANKER,
         "model_routing": config.MODEL_ROUTING,
@@ -120,7 +121,7 @@ async def update_app_settings(body: dict = Body(...)):
     allowed = {"document_tools_enabled", "file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
-               "workspace_model", "context_compaction", "chat_compaction_percent", "chat_max_rounds", "history_recall", "rag_reranker", "model_routing",
+               "workspace_model", "context_compaction", "chat_compaction_percent", "chat_max_rounds", "chat_tool_memory", "history_recall", "rag_reranker", "model_routing",
                "qa_model",
                "openhands_num_ctx",
                "openhands_disable_thinking",
@@ -240,6 +241,10 @@ async def update_app_settings(body: dict = Body(...)):
         config.CHAT_COMPACTION_PERCENT = chat_context.compact_percent(body["chat_compaction_percent"])
         settings["chat_compaction_percent"] = config.CHAT_COMPACTION_PERCENT
         print(f"[Config] Chats compact at {config.CHAT_COMPACTION_PERCENT}% of the context window")
+    if "chat_tool_memory" in body:
+        config.CHAT_TOOL_MEMORY = "on" if str(body["chat_tool_memory"]).lower() in {"1", "true", "on", "yes"} else "off"
+        settings["chat_tool_memory"] = config.CHAT_TOOL_MEMORY
+        print(f"[Config] Chats keep tool results across turns: {config.CHAT_TOOL_MEMORY}")
     if "chat_max_rounds" in body:
         config.MAX_AGENT_ROUNDS = chat_rounds.setting(body["chat_max_rounds"])
         settings["chat_max_rounds"] = config.MAX_AGENT_ROUNDS
@@ -324,6 +329,7 @@ async def update_app_settings(body: dict = Body(...)):
         "context_compaction": config.CONTEXT_COMPACTION,
         "chat_compaction_percent": chat_context.compact_percent(),
         "chat_max_rounds": chat_rounds.setting(),
+        "chat_tool_memory": config.CHAT_TOOL_MEMORY,
 
         "current_qa_model":        config.QA_MODEL,
 

@@ -43,6 +43,14 @@ test('after the reply the tool work is gone from the rows and named in the peak 
   assert.equal(breakdownView({ ...READING, peak: { total: 5210, parts: { ...KEPT, reply: 62 } } }).peak, null);
 });
 
+test('tool results kept from earlier replies have their own row', () => {
+  // Since 2026-11-15 a reply's tool results are sent again on later turns, so they stay in the number.
+  const view = breakdownView({ ...READING, used: 8148, parts: { ...KEPT, kept_tools: 3000 } });
+  assert.equal(tokens(view).kept_tools, 3000);
+  assert.equal(view.rows.find(row => row.key === 'kept_tools').kept, true);
+  assert.equal(sum(view), 8148);
+});
+
 test('a message typed since the reading was saved goes to Messages', () => {
   const view = breakdownView({ ...READING, used: 5400, measured: false });
   assert.equal(sum(view), 5400);

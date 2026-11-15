@@ -550,7 +550,7 @@ def test_the_reading_carries_what_fills_the_window():
     meter.usage({"round": 1, "prompt_tokens": 7100, "gen_tokens": 400})
     reading = meter.reading("The answer. " * 20)
     assert sum(reading["parts"].values()) == reading["used"]
-    assert set(reading["parts"]) == {"instructions", "tools", "memory", "skills", "summary", "messages"}
+    assert set(reading["parts"]) == {"instructions", "tools", "memory", "skills", "summary", "messages", "kept_tools"}
     assert reading["peak"]["total"] == 7500 and sum(reading["peak"]["parts"].values()) == 7500
     assert reading["peak"]["parts"]["tool_calls"] > 1500 and reading["peak"]["parts"]["reply"] == 400
     assert reading["fixed"] == sum(reading["parts"][name] for name in ("instructions", "tools", "memory", "skills"))

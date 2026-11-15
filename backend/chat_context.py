@@ -107,6 +107,7 @@ class TurnMeter:
         self.parts_units = None   # the request by category, estimator units (context_breakdown.py)
         self.first_parts = None   # the first request by category, real tokens
         self.peak_parts = None    # the fullest moment of the reply by category
+        self.kept_units = 0       # this reply's tool record, sent again next turn (chat_tool_memory.py)
 
     def begin(self, prior: str) -> None:
         """Text the reply already had (continue mode). It is in the prompt, so it must not be counted twice."""
@@ -176,11 +177,18 @@ class TurnMeter:
         if self.measured:
             self.base = max(0, self.base - int(freed or 0))
 
+    def keep(self, event: dict) -> None:
+        """``context_kept``: the size of the record of this reply's tool calls, as the next turn will get it."""
+        self.kept_units = max(0, int(event.get("estimate") or 0))
+
+    def kept_tools(self) -> int:
+        return round(self.kept_units * self.ratio)
+
     def kept(self, visible: str) -> int:
         text = visible or ""
         if self.prior and text.startswith(self.prior):
             text = text[len(self.prior):]
-        return self.base + (round(estimate(text) * self.ratio) if text else 0)
+        return self.base + self.kept_tools() + (round(estimate(text) * self.ratio) if text else 0)
 
     def live(self, event: dict, visible: str) -> dict:
         """A ``ctx_update`` with what the browser shows added to it."""
@@ -225,8 +233,12 @@ class TurnMeter:
                "measured": self.measured, "ratio": round(self.ratio, 3), "fixed": self.fixed()}
         try:
             import context_breakdown
-            parts = context_breakdown.kept(self.first_parts, kept)
+            # This reply's own tool record is known exactly: split the rest, then add it to its row. (Taking
+            # it out of "messages" afterwards lost it whenever the fixed rows had left messages nothing.)
+            own = min(kept, self.kept_tools())
+            parts = context_breakdown.kept(self.first_parts, kept - own)
             if parts:
+                parts["kept_tools"] = parts.get("kept_tools", 0) + own
                 out["parts"] = parts
             if self.peak_parts:
                 out["peak"] = {"total": self.peak, "parts": self.peak_parts}

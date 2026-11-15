@@ -15,6 +15,7 @@ import config
 import image_settings
 import chat_context
 import chat_rounds
+import chat_tool_memory
 import chat_turns
 import context_breakdown
 import context_policy
@@ -1789,6 +1790,20 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         print(f"[CHAT] Injected active project context: {_active_project.get('name', '?')} ({len(_ap_files)} files)")
 
     _history = []   # (outgoing message, id the browser sent): lets chat_context cut exactly at a summary point
+    # What earlier replies' tools returned goes in front of each of those replies, on the message that
+    # asked (chat_tool_memory.py). Until 2026-11-15 only reply text came back, and "continue" redid the work.
+    _kept_records = {}
+    if not ephemeral and not _is_v2_persona:
+        _kept_after = 0
+        try:
+            if not _is_cloud_provider and chat_context.enabled():     # replies inside the summary are not sent
+                _kept_summary, _kept_cursor = await db.get_conversation_summary(conv_id)
+                _kept_after = int(_kept_cursor or 0) if (_kept_summary or "").strip() else 0
+        except Exception:
+            _kept_after = 0
+        _kept_records = await chat_tool_memory.load_for(
+            conv_id, req.messages, window=model_options.get("num_ctx") or 0, after=_kept_after)
+    _asked = None
     for m in req.messages:
         _content = m["content"]
         if persona_placeholder_ctx and m.get("role") in {"assistant", "system"}:
@@ -1800,6 +1815,12 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             _msg["images"] = m["images"]
         messages.append(_msg)
         _history.append((_msg, m.get("id")))
+        if m["role"] == "user":
+            _asked = _msg
+        elif m["role"] == "assistant" and _asked is not None and _kept_records:
+            _record = _kept_records.get(chat_context.message_id(m.get("id")))
+            if _record and isinstance(_asked.get("content"), str):
+                _asked["content"] += "\n\n" + _record
 
     # ── Context auto-compaction ──
     # A request that carries message ids is compacted just before the first model call
@@ -2170,6 +2191,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             yield f"data: {json.dumps({'type': 'init', 'message_id': _assistant_msg_id, 'user_message_id': _user_message_id or None, 'prior_content': _continue_prior})}\n\n"
         except Exception as _ase:
             print(f"[CHAT] Failed to create assistant message stub: {_ase}")
+    # Each tool call of this reply is stored with it, for later turns (inert for Ghost, Daedalus, scheduled runs).
+    _tool_memory = await chat_tool_memory.begin_turn(
+        req, conv_id, _assistant_msg_id, ephemeral=ephemeral, coder=_is_v2_persona,
+        window=model_options.get("num_ctx") or 0, private=connector_tool_name_map)
     _dispatch_guard = None
     if _persistent_coder:
         if not _user_message_id:
@@ -3627,6 +3652,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                     messages.append(_result_msg)
                     _tools_ran_this_turn += 1
                     await _skills.record(tool_name, tool_args, tool_result)
+                    if await _tool_memory.record(tool_name, tool_args, tool_result, _event_call_ids.get(_tf, ""), round_num):
+                        # The record grew: it is part of what the conversation holds from now on.
+                        yield f"data: {json.dumps({'type': 'context_kept', 'estimate': _tool_memory.estimate()})}\n\n"
                     print(f"[CHAT]   Tool result ({tool_name}): {len(tool_result)} chars")
 
                     if _record_blocked_tool_result(_blocked_tool_state, tool_name, tool_result):

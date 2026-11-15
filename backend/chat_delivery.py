@@ -79,6 +79,9 @@ async def deliver(stream, req):
                 event = meter.live(event, visible)
             elif kind == 'context_compacted':
                 meter.compacted(event)
+            elif kind == 'context_kept':                      # this reply's tool record grew (chat_tool_memory.py)
+                meter.keep(event)
+                continue
             elif kind == 'usage_round':
                 calls.append({k: v for k, v in event.items() if k != 'type'})
                 meter.usage(event)

@@ -14,6 +14,8 @@ export const CATEGORIES = [
   { key: 'skills', label: 'Skills', color: 'var(--hc-acc2)', kept: true },
   { key: 'summary', label: 'Summary of earlier messages', color: 'color-mix(in srgb, var(--hc-f4) 45%, var(--hc-pink))', kept: true },
   { key: 'messages', label: 'Messages', color: 'var(--hc-ok)', kept: true },
+  // What earlier replies' tools returned, sent again so the model does not redo the work (chat_tool_memory.py).
+  { key: 'kept_tools', label: 'Kept tool results', color: 'color-mix(in srgb, var(--hc-ok) 45%, var(--hc-accent))', kept: true },
   { key: 'excerpts', label: 'Search and knowledge excerpts', note: 'this turn', color: 'var(--hc-f1)', kept: false },
   { key: 'tool_calls', label: 'Tool calls and results', note: 'this reply', color: 'var(--hc-accent)', kept: false },
   { key: 'reply', label: 'Reply being written', color: 'var(--hc-secondary)', kept: false },

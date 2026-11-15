@@ -245,6 +245,8 @@ function HyprChat(){
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [contextCompaction,setContextCompaction]=useState(()=>{try{return localStorage.getItem("hc-context-compaction")==="on";}catch{return false;}});
   const [chatCompactionPercent,setChatCompactionPercent]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-compaction-percent"))||85;}catch{return 85;}});
+  // Keep what a reply's tools returned for later turns of the chat (backend/chat_tool_memory.py). On unless switched off.
+  const [chatToolMemory,setChatToolMemory]=useState(()=>{try{return localStorage.getItem("hc-chat-tool-memory")!=="off";}catch{return true;}});
   // Tool rounds one chat reply gets before it must answer (backend/chat_rounds.py).
   const [chatMaxRounds,setChatMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-max-rounds"))||40;}catch{return 40;}});
   const [ragReranker,setRagReranker]=useState(()=>{try{return localStorage.getItem("hc-rag-reranker")==="llm";}catch{return false;}});
@@ -503,6 +505,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
   useEffect(()=>{persistServerSetting("hc-chat-compaction-percent","chat_compaction_percent",chatCompactionPercent,String(chatCompactionPercent));},[chatCompactionPercent]);
   useEffect(()=>{persistServerSetting("hc-chat-max-rounds","chat_max_rounds",chatMaxRounds,String(chatMaxRounds));},[chatMaxRounds]);
+  useEffect(()=>{persistServerSetting("hc-chat-tool-memory","chat_tool_memory",chatToolMemory?"on":"off");},[chatToolMemory]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
@@ -1772,6 +1775,7 @@ function HyprChat(){
       if(d.context_compaction!=null)hydrateServerSetting("context_compaction",v=>setContextCompaction(v==="on"),d.context_compaction,contextCompaction?"on":"off");
       if(d.chat_compaction_percent!=null)hydrateServerSetting("chat_compaction_percent",v=>setChatCompactionPercent(Number(v)||85),d.chat_compaction_percent,chatCompactionPercent);
       if(d.chat_max_rounds!=null)hydrateServerSetting("chat_max_rounds",v=>setChatMaxRounds(Number(v)||40),d.chat_max_rounds,chatMaxRounds);
+      if(d.chat_tool_memory!=null)hydrateServerSetting("chat_tool_memory",v=>setChatToolMemory(v!=="off"),d.chat_tool_memory,chatToolMemory?"on":"off");
       if(d.rag_reranker!=null)hydrateServerSetting("rag_reranker",v=>setRagReranker(v==="llm"),d.rag_reranker,ragReranker?"llm":"none");
       if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
@@ -8178,6 +8182,14 @@ function HyprChat(){
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Tool rounds per reply</div>
           {chipRow([12,20,40,60,100].map(v=>({v,label:String(v),title:`A reply may call the model up to ${v} times while it uses tools`})),chatMaxRounds,setChatMaxRounds)}
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>How many times one reply may call the model while it works with tools (running code, searching, reading files). A reply that reaches the limit writes its answer from what it has found, and you can ask it to continue. Coding jobs have their own limits.</div>
+        </div>
+        <div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Keep Tool Results</div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:chatToolMemory?t.ok:t.dim,cursor:"pointer"}}>
+            <input type="checkbox" checked={chatToolMemory} onChange={e=>setChatToolMemory(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
+            {chatToolMemory?"Enabled":"Disabled"}
+          </label>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Later turns of a chat still get what earlier replies' tools ran and returned (code output, files read, pages fetched), trimmed to fit, so "continue" carries on instead of starting over. This uses more of the context window; auto-compaction folds it into the summary when the chat fills. Email, connector and chat-search results are never kept. Not used in Ghost chats or coding jobs.</div>
         </div>
         <div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>

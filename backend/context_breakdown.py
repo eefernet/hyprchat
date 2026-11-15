@@ -17,16 +17,25 @@ from __future__ import annotations
 import chat_context
 
 # In the order the browser lists them.
-CATEGORIES = ("instructions", "tools", "memory", "skills", "summary", "messages", "excerpts", "tool_calls")
+CATEGORIES = ("instructions", "tools", "memory", "skills", "summary", "messages", "kept_tools", "excerpts", "tool_calls")
 # Sent with every request, and close to code or JSON in how they tokenize.
 FIXED = ("instructions", "tools", "memory", "skills")
 # Sent again on the next turn. Excerpts ride along for one turn; this reply's tool traffic is dropped
 # when the reply ends.
-KEPT = ("instructions", "tools", "memory", "skills", "summary", "messages")
+KEPT = ("instructions", "tools", "memory", "skills", "summary", "messages", "kept_tools")
 
 
 def _units(message) -> int:
     return chat_context.estimate({key: value for key, value in message.items() if key != "images"})
+
+
+def _kept_tool_units(history) -> int:
+    try:
+        import chat_tool_memory
+        return sum(chat_context.estimate(block) for message in history
+                   for block in chat_tool_memory.blocks(message.get("content")))
+    except Exception:
+        return 0
 
 
 def _is_summary(message) -> bool:
@@ -73,12 +82,16 @@ class Ledger:
                             if id(message) not in self.base and not _is_summary(message))
             place = chat_context.region(messages, history)
             sent = sum(_units(message) for message in messages[place[0]:place[1]]) if place else 0
+            # Records of earlier replies' tool calls ride on the user messages that asked (chat_tool_memory.py).
+            # Sized from the messages themselves, so a compaction that folded some of them is reflected.
+            kept_tools = min(sent, _kept_tool_units(messages[place[0]:place[1]])) if place else 0
             excerpts = self.notes.get("excerpts", 0)
             memory, skills = self.notes.get("memory", 0), self.notes.get("skills", 0)
             lead_excerpts = max(0, excerpts - self.in_history)
             parts = {
                 "tools": tool_units, "memory": memory, "skills": skills, "summary": summary,
-                "messages": max(0, sent - self.in_history), "excerpts": excerpts, "tool_calls": added,
+                "messages": max(0, sent - self.in_history - kept_tools), "kept_tools": kept_tools,
+                "excerpts": excerpts, "tool_calls": added,
             }
             parts["instructions"] = max(0, total - tool_units - memory - skills - summary - sent - lead_excerpts - added)
             return {name: int(parts[name]) for name in CATEGORIES}

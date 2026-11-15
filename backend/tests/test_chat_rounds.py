@@ -308,8 +308,9 @@ def test_the_saved_reading_carries_the_breakdown_and_the_peak(harness, monkeypat
     assert max(e['parts']['tool_calls'] for e in updates) > 0
     reading = state.saved['metadata']['context']
     assert sum(reading['parts'].values()) == reading['used']
-    assert set(reading['parts']) == {'instructions', 'tools', 'memory', 'skills', 'summary', 'messages'}
+    assert set(reading['parts']) == {'instructions', 'tools', 'memory', 'skills', 'summary', 'messages', 'kept_tools'}
     assert reading['parts']['tools'] > 0 and reading['parts']['instructions'] > 0
+    assert reading['parts']['kept_tools'] > 0          # this reply's two tool results are kept for the next turn
     assert reading['peak']['total'] == reading['used'] + reading['working_peak']
     assert sum(reading['peak']['parts'].values()) == reading['peak']['total']
     assert next(e for e in events if e['type'] == 'done')['context'] == reading

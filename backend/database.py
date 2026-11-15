@@ -1137,6 +1137,8 @@ async def init_db():
         await migrate_library(db)
         from db.skill_store import migrate as migrate_skills
         await migrate_skills(db)
+        from db.tool_memory import migrate as migrate_tool_memory
+        await migrate_tool_memory(db)
     finally:
         await db.close()
 
@@ -4718,6 +4720,9 @@ async def fork_conversation(original_conv_id: str, fork_msg_id: int, new_conv_id
             FROM messages WHERE conversation_id = ? AND id <= ?
             ORDER BY id ASC
         """, (new_conv_id, original_conv_id, fork_msg_id))
+        # The fork keeps what its replies' tools returned (chat_tool_memory.py).
+        from db.tool_memory import copy_for_fork
+        await copy_for_fork(db, original_conv_id, new_conv_id, fork_msg_id)
         await db.commit()
         return await get_conversation(new_conv_id)
     finally:
