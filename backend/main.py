@@ -288,6 +288,13 @@ async def lifespan(app: FastAPI):
     except Exception as _re:
         print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
     try:
+        import chat_recovery
+        _replies = await chat_recovery.sweep()
+        if _replies:
+            print(f"[Startup] Marked {_replies} unfinished chat repl{'y' if _replies == 1 else 'ies'} as interrupted")
+    except Exception as _re:
+        print(f"[Startup] Chat reply sweep failed (non-fatal): {_re}")
+    try:
         _task_reaped = await db.reap_stale_task_runs()
         if _task_reaped:
             print(f"[Startup] Reaped {_task_reaped} stale scheduled-task runs")
@@ -368,6 +375,8 @@ async def lifespan(app: FastAPI):
         config.CHAT_COMPACTION_PERCENT = _settings["chat_compaction_percent"]
     if "chat_tool_memory" in _settings:
         config.CHAT_TOOL_MEMORY = "on" if str(_settings["chat_tool_memory"]).lower() in {"1", "true", "on", "yes"} else "off"
+    if "chat_time_notes" in _settings:
+        config.CHAT_TIME_NOTES = "on" if str(_settings["chat_time_notes"]).lower() in {"1", "true", "on", "yes"} else "off"
     if "chat_max_rounds" in _settings:
         import chat_rounds
         config.MAX_AGENT_ROUNDS = chat_rounds.setting(_settings["chat_max_rounds"])
@@ -4319,14 +4328,14 @@ async def generate_title(conv_id: str, body: dict = Body(default={})):
             "stream": False,
             "think": False,
             "options": {"num_ctx": context_policy.helper_context("title"), "temperature": 0.3}
-        }, timeout=30)
+        }, timeout=75)      # the helper model is often cold behind a large chat model: 30 s timed out live
         title = resp.json().get("message", {}).get("content", "").strip().strip('"\'')[:60]
         if title:
             await db.update_conversation(conv_id, title=title)
             return {"title": title}
         return {"title": ""}
     except Exception as e:
-        print(f"[AUTO-TITLE] Error: {e}")
+        print(f"[AUTO-TITLE] Error: {type(e).__name__}: {e}")     # a timeout has no message of its own
         return {"title": ""}
 
 # ============================================================

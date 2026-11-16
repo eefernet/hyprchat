@@ -73,6 +73,20 @@ async def for_messages(conversation_id: str, message_ids) -> dict[int, list[dict
     return found
 
 
+async def clear_conversation(conversation_id: str) -> int:
+    """Delete every kept tool result of one conversation of the current user. Returns how many rows."""
+    conn = await db.get_db()
+    try:
+        cursor = await conn.execute(
+            """DELETE FROM message_tool_results WHERE message_id IN (
+                   SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                   WHERE m.conversation_id = ? AND c.user_id = ?)""", (conversation_id, db._scope_user()))
+        await conn.commit()
+        return cursor.rowcount or 0
+    finally:
+        await conn.close()
+
+
 async def copy_for_fork(conn, original_conversation: str, new_conversation: str, fork_message_id: int) -> int:
     """Give a fork the rows of the messages it copied. The copy kept their order, so the nth message of
     the fork is the nth copied message of the original. Returns how many rows were copied."""

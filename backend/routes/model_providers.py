@@ -11,8 +11,11 @@ router = APIRouter()
 
 @router.get('/api/model-capabilities')
 async def model_capabilities(model: str):
+    import model_limits
     import reasoning
-    return await reasoning.capabilities(route_context().http, model)
+    http = route_context().http
+    # `context_limit`: the model's own window, 0 when unknown. A chat never gets more than this (model_limits.py).
+    return {**await reasoning.capabilities(http, model), 'context_limit': await model_limits.context_limit(http, model)}
 
 
 @router.get("/api/model-providers")

@@ -4,7 +4,7 @@ import usePresence from './usePresence.js';
 import useNewKeys from './useNewKeys.js';
 import {useChatFollow} from './useChatFollow.js';
 import {useBackgroundEvents} from './useBackgroundEvents.js';
-import {fromMessages,atStreamStart,applyUpdate,settle,compacted as contextCompacted,compactionIndex,compactionLimit,COMPACT_CHOICES,roomLeft} from './contextMeter.js';
+import {fromMessages,atStreamStart,applyUpdate,settle,compacted as contextCompacted,compactionIndex,compactionLimit,COMPACT_CHOICES,roomLeft,chatWindow,forRequest,keptReading,liveSpeed} from './contextMeter.js';
 import ContextMeter from './components/ContextMeter.jsx';
 import CompactionNotice from './components/CompactionNotice.jsx';
 import {showJumpButton} from './chatScroll.js';
@@ -55,10 +55,22 @@ import NewVersionBar from './components/NewVersionBar.jsx';
 import {isDaedalusPersona,codingRequestFields,workflowIds,backgroundJob,cancellableWorkflowIds} from './daedalusJobs.js';
 import {ownEvents,messageJobIds,loadingJob,hasJobCard,startsJob} from './daedalusCards.js';
 import {findSavedMessage,withUserId} from './messageIds.js';
-import {continueKind,continueText,withFailureNote,CONTINUE_WORK} from './continueReply.js';
+import {continueKind,continueText,withFailureNote,CONTINUE_WORK,requestError,needsRetry} from './continueReply.js';
 import {looksBinary} from './fileKinds.js';
 import {useRestoredRun} from './useRestoredRun.js';
-import {runIsLive} from './runState.js';
+import {runIsLive,replyOutcome,deliveryStatus,activityStatus} from './runState.js';
+import {trimHistory} from './historyTrim.js';
+import {editedMessage} from './editedMessage.js';
+import {needsTitle,renameTo} from './chatTitles.js';
+import ModelLimitNote from './components/ModelLimitNote.jsx';
+import OverflowNotice from './components/OverflowNotice.jsx';
+import DraftSizeNote from './components/DraftSizeNote.jsx';
+import {availableActions} from './contextActions.js';
+import {useChatDrafts} from './useChatDrafts.js';
+import {joinText} from './chatDrafts.js';
+import {useMessageQueue} from './useMessageQueue.js';
+import {submitAction} from './messageQueue.js';
+import QueuedMessages from './components/QueuedMessages.jsx';
 import CutOffNotice from './components/CutOffNotice.jsx';
 import * as ReactDOMFull from 'react-dom';
 import { createRoot, hydrateRoot } from 'react-dom/client';
@@ -247,6 +259,7 @@ function HyprChat(){
   const [chatCompactionPercent,setChatCompactionPercent]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-compaction-percent"))||85;}catch{return 85;}});
   // Keep what a reply's tools returned for later turns of the chat (backend/chat_tool_memory.py). On unless switched off.
   const [chatToolMemory,setChatToolMemory]=useState(()=>{try{return localStorage.getItem("hc-chat-tool-memory")!=="off";}catch{return true;}});
+  const [chatTimeNotes,setChatTimeNotes]=useState(()=>{try{return localStorage.getItem("hc-chat-time-notes")!=="off";}catch{return true;}});
   // Tool rounds one chat reply gets before it must answer (backend/chat_rounds.py).
   const [chatMaxRounds,setChatMaxRounds]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-max-rounds"))||40;}catch{return 40;}});
   const [ragReranker,setRagReranker]=useState(()=>{try{return localStorage.getItem("hc-rag-reranker")==="llm";}catch{return false;}});
@@ -266,6 +279,14 @@ function HyprChat(){
   // Context pill: one reading per conversation ({used, working, window, measured}); see contextMeter.js.
   const [contextReadings,setContextReadings]=useState({});
   const updateReading=(cid,change)=>setContextReadings(p=>{const next=change(p[cid]);return next===p[cid]?p:{...p,[cid]:next};});
+  // After "Compact now" or "Forget kept tool results" (contextActions.js): the summary cut and the reading
+  // saved on the newest reply have changed on the server. Take both from there; the messages stay as they are.
+  const refreshChatContext=async cid=>{
+    const full=await apiJson(`/api/conversations/${cid}`);
+    const saved=new Map((full.messages||[]).map(m=>[m.id,m]));
+    uConv(cid,c=>({...c,summary_until_msg_id:Number(full.summary_until_msg_id)||0,messages:(c.messages||[]).map(m=>saved.has(m.id)?{...m,metadata:saved.get(m.id).metadata}:m)}));
+    updateReading(cid,()=>fromMessages(full.messages)||undefined);
+  };
   const [previewFile,setPreviewFile]=useState(null);
   const [previewContent,setPreviewContent]=useState(null);
   const [previewError,setPreviewError]=useState(null);
@@ -388,6 +409,7 @@ function HyprChat(){
   const [convTags,setConvTags]=useState(()=>{try{return JSON.parse(localStorage.getItem("hc-conv-tags")||"{}");}catch{return {};}});
   const [activeTagFilter,setActiveTagFilter]=useState(null);
   const [showTagEditor,setShowTagEditor]=useState(null); // conv id
+  const [renamingConv,setRenamingConv]=useState(null); // {id, title}: the chat whose name is being typed
   const [newTagInput,setNewTagInput]=useState("");
   const [pasteMode,setPasteMode]=useState(false);
   const [pasteCode,setPasteCode]=useState("");
@@ -506,6 +528,7 @@ function HyprChat(){
   useEffect(()=>{persistServerSetting("hc-chat-compaction-percent","chat_compaction_percent",chatCompactionPercent,String(chatCompactionPercent));},[chatCompactionPercent]);
   useEffect(()=>{persistServerSetting("hc-chat-max-rounds","chat_max_rounds",chatMaxRounds,String(chatMaxRounds));},[chatMaxRounds]);
   useEffect(()=>{persistServerSetting("hc-chat-tool-memory","chat_tool_memory",chatToolMemory?"on":"off");},[chatToolMemory]);
+  useEffect(()=>{persistServerSetting("hc-chat-time-notes","chat_time_notes",chatTimeNotes?"on":"off");},[chatTimeNotes]);
   useEffect(()=>{persistServerSetting("hc-rag-reranker","rag_reranker",ragReranker?"llm":"none");},[ragReranker]);
   useEffect(()=>{persistServerSetting("hc-planning-model","planning_model",planningModel);},[planningModel]);
   useEffect(()=>{persistServerSetting("hc-coder-model","coder_model",coderModel);},[coderModel]);
@@ -530,7 +553,6 @@ function HyprChat(){
   useEffect(()=>{persistPref("nav-layout",navLayout);},[navLayout]);
   const [convs,setConvs]=useState([]);
   const [actId,setActId]=useState(null);
-  const [inp,setInp]=useState("");
   const [streaming,setStreaming]=useState(false);
   const [preparingSend,setPreparingSend]=useState("");
   const sendPrepRef=useRef(null);
@@ -715,10 +737,18 @@ function HyprChat(){
   const [visibleMessageCounts,setVisibleMessageCounts]=useState({});
   const [editingMsg,setEditingMsg]=useState(null); // {index, content}
   const [regenPopover,setRegenPopover]=useState(null); // {index, model, temperature, personaId}
+  const localChatIds=convs.filter(c=>/^(ghost|l)-/.test(String(c.id||""))).map(c=>c.id).join("|");
+  useEffect(()=>{const ids=localChatIds?localChatIds.split("|"):[];chatDrafts.pruneLocal(ids);messageQueue.pruneLocal(ids);},[localChatIds]);
+  // Both are keyed by a message's position: left open, they showed on the same position of the next chat
+  // opened, and Save then edited that chat.
+  useEffect(()=>{setEditingMsg(null);setRegenPopover(null);},[actId]);
   const [toasts,setToasts]=useState([]); // [{id,type,text,detail,action}]
   const [confirmDialog,setConfirmDialog]=useState(null);
   const [confirmPhrase,setConfirmPhrase]=useState("");
-  const [attachments,setAttachments]=useState([]); // [{name, content}]
+  // The message box is the draft of the chat on screen (chatDrafts.js): text and attachments used to be one
+  // piece of state for the whole app, so a draft followed you into whichever chat you opened next.
+  const chatDrafts=useChatDrafts({chatId:actId,userId:currentUserId,ephemeral:ghostMode||String(actId||"").startsWith("ghost-")});
+  const {text:inp,setText:setInp,attachments,setAttachments}=chatDrafts; // attachments: [{name, content}]
   const [coderProjUploading,setCoderProjUploading]=useState(false);
   const [coderProjInfo,setCoderProjInfo]=useState(null); // {name, file_count, language}
   const [coderWorkflows,setCoderWorkflows]=useState([]);
@@ -791,7 +821,7 @@ function HyprChat(){
     const activityId=addActivity({name:`Project upload: ${f.name}`,kind:"upload",message:"Uploading archive...",pct:0,chatId:cid});
     // Placeholder chip so user sees something is happening
     const placeholderName=`📦 uploading ${f.name}...`;
-    setAttachments(p=>[...p.filter(a=>!a.name.startsWith("📦 ")),{name:placeholderName,content:"[Project archive upload in progress]"}]);
+    chatDrafts.setAttachmentsFor(cid,p=>[...p.filter(a=>!a.name.startsWith("📦 ")),{name:placeholderName,content:"[Project archive upload in progress]"}]);
     try{
       const fd=new FormData();fd.append("file",f);fd.append("conv_id",cid);
       updateActivity(activityId,{status:"uploading",message:"Sending archive...",pct:35});
@@ -800,7 +830,7 @@ function HyprChat(){
       updateActivity(activityId,{status:"indexing",message:"Indexing project files...",pct:75});
       const data=await r.json();
       setCoderProjInfo({name:data.name,file_count:data.file_count,language:data.language,workflow_id:data.workflow_id,build_system:data.detected_build_system,test_cmd:data.detected_test_cmd,indexer_status:data.indexer_status});
-      setAttachments(p=>[
+      chatDrafts.setAttachmentsFor(cid,p=>[
         ...p.filter(a=>a.name!==placeholderName&&!a.name.startsWith("📦 project:")),
         {name:`📦 project: ${data.name} (${data.file_count} ${data.language} files)`,content:`[Uploaded project attached to sandbox at ${data.sandbox_path}; workflow_id=${data.workflow_id||"n/a"}]`}
       ]);
@@ -808,7 +838,7 @@ function HyprChat(){
       notify({type:"success",text:"Project uploaded",detail:`${data.name} is ready for Daedalus.`});
       refreshCoderWorkflows(cid);
     }catch(e){
-      setAttachments(p=>p.filter(a=>a.name!==placeholderName));
+      chatDrafts.setAttachmentsFor(cid,p=>p.filter(a=>a.name!==placeholderName));
       updateActivity(activityId,{status:"error",error:e.message,message:"Upload failed"});
       notify({type:"error",text:"Project upload failed",detail:e.message});
     }finally{
@@ -861,6 +891,10 @@ function HyprChat(){
   const [councilReport,setCouncilReport]=useState(null); // {council_id, ...analysis data}
   const [councilReportLoading,setCouncilReportLoading]=useState(false);
   const [councilRunning,setCouncilRunning]=useState(false);
+  // Messages sent while a reply is being written wait here and go out when it has finished (messageQueue.js).
+  const messageQueue=useMessageQueue({chatId:actId,userId:currentUserId,
+    busy:streaming||councilRunning||loadingConv||!!preparingSend||!!confirmDialog,
+    canSend:()=>!sendPrepRef.current&&!turnBusyRef.current,send:item=>send(item)});
   const [councilResponses,setCouncilResponses]=useState({}); // {memberId: {model,content,done}}
   const [councilHostContent,setCouncilHostContent]=useState("");
   const [councilUsage,setCouncilUsage]=useState(null);
@@ -1776,6 +1810,7 @@ function HyprChat(){
       if(d.chat_compaction_percent!=null)hydrateServerSetting("chat_compaction_percent",v=>setChatCompactionPercent(Number(v)||85),d.chat_compaction_percent,chatCompactionPercent);
       if(d.chat_max_rounds!=null)hydrateServerSetting("chat_max_rounds",v=>setChatMaxRounds(Number(v)||40),d.chat_max_rounds,chatMaxRounds);
       if(d.chat_tool_memory!=null)hydrateServerSetting("chat_tool_memory",v=>setChatToolMemory(v!=="off"),d.chat_tool_memory,chatToolMemory?"on":"off");
+      if(d.chat_time_notes!=null)hydrateServerSetting("chat_time_notes",v=>setChatTimeNotes(v!=="off"),d.chat_time_notes,chatTimeNotes?"on":"off");
       if(d.rag_reranker!=null)hydrateServerSetting("rag_reranker",v=>setRagReranker(v==="llm"),d.rag_reranker,ragReranker?"llm":"none");
       if(d.model_routing&&typeof d.model_routing==="object")setModelRouting({enabled:!!d.model_routing.enabled,chat:d.model_routing.chat||"",code:d.model_routing.code||"",reasoning:d.model_routing.reasoning||"",long_context:d.model_routing.long_context||""});
       if(d.current_planning_model!=null)hydrateServerSetting("planning_model",setPlanningModel,d.current_planning_model,planningModel);
@@ -1849,6 +1884,7 @@ function HyprChat(){
   useRestoredRun(restoredRunCid,cid=>{
     setRestoredRunCid(null);
     if(streamingCidRef.current!==cid)return;   // a reply started here since (sending stops this watch)
+    messageQueue.settle(cid,"unknown",actIdRef.current===cid);
     streamingCidRef.current=null;setStreaming(false);
     if(actIdRef.current===cid)loadConversation(cid,{force:true});
   });
@@ -2601,8 +2637,13 @@ function HyprChat(){
   const newChat=async(forceBlank=false,opts={})=>{
     if(chatCreationBusy.current)return null;
     chatCreationBusy.current=true;
-    try{return await createNewChat(forceBlank,{...opts,navigation:chatNavigation.current});}
-    finally{chatCreationBusy.current=false;}
+    const fromBlank=!actId;       // read before the chat exists: what is in the box now was typed for it
+    try{
+      const made=await createNewChat(forceBlank,{...opts,navigation:chatNavigation.current});
+      const madeId=made&&typeof made==="object"?made.id:made;
+      if(madeId&&fromBlank)chatDrafts.adopt(madeId);   // also when the send then fails: the draft stays visible in the new chat
+      return made;
+    }finally{chatCreationBusy.current=false;}
   };
   const createNewChat=async(forceBlank=false,opts={})=>{
     if(!opts.sendPreparation)cancelSendPreparation();
@@ -2728,8 +2769,8 @@ function HyprChat(){
     setActId(null);
     clearPendingProfile();
     setPanel("chat");
-    setInp("");
-    setAttachments([]);
+    // Only the not-yet-created chat's own draft is cleared: this used to clear the box of the chat being left.
+    if(!actId){setInp("");setAttachments([]);}
     setEvts([]);
     setQuickResults([]);
     setCouncilRunning(false);
@@ -2793,6 +2834,7 @@ function HyprChat(){
   const delChat=async id=>{
     if(!String(id||"").startsWith("ghost-"))fetch(`${API}/api/conversations/${id}`,{method:"DELETE"}).catch(()=>{});
     setConvTags(p=>{const n={...p};delete n[id];return n;});
+    chatDrafts.drop(id);messageQueue.drop(id);
     setConvs(p=>{const n=p.filter(c=>c.id!==id);if(actId===id){setActId(n[0]?.id||null);setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");}return n;});
   };
 
@@ -2901,6 +2943,7 @@ function HyprChat(){
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
+      chatDrafts.clearAll();messageQueue.reset();
       notify({type:"success",text:"Chats deleted",detail:`Deleted ${d.deleted||0} conversations.`});
     }catch(e){notify({type:"error",text:"Delete failed",detail:e.message});}
   };
@@ -3105,7 +3148,6 @@ function HyprChat(){
   };
 
   // Rough token estimate: ~4 chars per token
-  const estimateTokens = (msgs) => msgs.reduce((sum,m)=>sum+Math.ceil((m.content||"").length/4),0);
 
   // ── Prompt library insertion (slash menu, quick-menu picker, panel Use button) ──
   const PROMPT_VAR_RE=/\{\{\s*([\w][\w .\-]*?)\s*\}\}/g;
@@ -3125,7 +3167,7 @@ function HyprChat(){
     const q=(text||"").slice(1).toLowerCase().trim();
     return validPrompts.filter(p=>!q||(p.title||"").toLowerCase().includes(q)||(p.category||"").toLowerCase().includes(q)).slice(0,8);
   };
-  const slashMenuActive=()=>!act?.is_council&&!streaming&&!preparingSend&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&validPrompts.length>0;
+  const slashMenuActive=()=>!act?.is_council&&!preparingSend&&!slashVarFill&&inp.startsWith("/")&&!inp.includes("\n")&&!slashDismissed&&validPrompts.length>0;
 
   // Core send logic — used by send, regenerate, and edit
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
@@ -3136,12 +3178,16 @@ function HyprChat(){
     streamSaveEvtsRef.current=[];
     streamTextLenRef.current=(overrides.prefill||"").length;
     streamingCidRef.current=cid;
-    chatFollow.follow();
+    if(!overrides.fromQueue)chatFollow.follow();     // a queued message going out does not pull a reader back down
+    let _queueOutcome="failed";                      // how this reply ended, for the queue (messageQueue.js)
     const activityKey=`${cid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     uConv(cid,c=>{const messages=[...(c.messages||[])];const last=messages.length-1;if(messages[last]?.role==="assistant")messages[last]={...messages[last],_activityKey:activityKey,_activityStatus:"running"};return{...c,messages};});
     // Cancellation can happen before init arrives; only persist a known server row.
     let _streamMsgId=null;
     streamMsgIdRef.current=null;
+    // The reading as this stream moves it (the state copy cannot be read back here), whether the server
+    // said the reply ended, and the live tokens-per-second sample.
+    let _shadow=atStreamStart(messagesToSend,null),_finalContext=null,_sawEnd=false,_roundLimit=0,_speed=null,_streamOpen=false,_overflow=null;
     // User message persistence is handled server-side by chat_stream_generate's defensive save —
     // doing it from the client too would race and create duplicates.
     try{
@@ -3184,7 +3230,7 @@ function HyprChat(){
       };
       const sendTemp=overrides.temperature!==undefined?overrides.temperature:resolveParam(mp.temperature,defaultTemp);
       const sendTopP=resolveParam(mp.top_p,defaultTopP);
-      const sendNumCtx=resolveParam(mp.num_ctx,numCtx)||undefined;
+      const sendNumCtx=chatWindow(mp.num_ctx,numCtx).asked||undefined;   // the same rule the context pill uses
       const sendTopK=mp.top_k&&mp.top_k!=="default"?parseInt(mp.top_k)||undefined:undefined;
       const sendRepeatPenalty=mp.repeat_penalty&&mp.repeat_penalty!=="default"?parseFloat(mp.repeat_penalty)||undefined:undefined;
 
@@ -3194,13 +3240,10 @@ function HyprChat(){
       const codingContext=(cv?.tool_ids||[]).includes('codeagent')||isCoderPersonaName(cv?.persona_name);
       // With compaction on the server keeps the request inside the window (backend/chat_context.py):
       // trimming here dropped messages before they could be summarized, and later the summary itself.
-      if(effectiveLimit>0&&!codingContext&&!contextCompaction){
-        let est=estimateTokens(am);
-        while(est>effectiveLimit && am.length>2){
-          am.splice(0,1);
-          est=estimateTokens(am);
-        }
-      }
+      // Not for cloud models either: the local context setting says nothing about their window.
+      if(effectiveLimit>0&&!codingContext&&!contextCompaction&&!isCloudModelName(modelName))am=trimHistory(am,effectiveLimit);
+      // The reply is about to run with this model and context size: a window read from another one no longer applies.
+      updateReading(cid,r=>forRequest(r,{model:modelName,asked:codingContext||isCloudModelName(modelName)?0:(sendNumCtx||0)}));
 
       const ctrl=new AbortController();abortR.current=ctrl;
       const body={conversation_id:cid,model:modelName,messages:am,system_prompt:cv?.system_prompt||"",tool_ids:cv?.tool_ids||[],persona_id:overrides.persona_id!==undefined?overrides.persona_id:(cv?.model_config_id||null),use_memories:!isGhostSend&&(cv?.use_memories==="1"||cv?.use_memories===1||cv?.use_memories===true)};
@@ -3257,7 +3300,8 @@ function HyprChat(){
       };
       try{
         const res=await fetch(`${API}/api/chat/stream`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal:ctrl.signal});
-        if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(`HTTP ${res.status}: ${errText}`);}
+        if(!res.ok){const errText=await res.text().catch(()=>res.statusText);throw new Error(requestError(res.status,errText));}
+        _streamOpen=true;
         const rdr=res.body.getReader(),dec=new TextDecoder();
         while(true){
           const{done,value}=await rdr.read();if(done)break;
@@ -3280,18 +3324,21 @@ function HyprChat(){
               else if(d.type==="review_status"){recordActivity({type:"tool_done",data:{tool:"refinement",status:d.notice,outcome:"retained"}});notify({type:"info",text:"Answer retained",detail:d.notice});}
               else if(d.type==="clear"){full=full.slice(0,d.keep||0);streamTextLenRef.current=full.length;resetOffsets(streamSaveEvtsRef.current,"clear",full.length);const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:true};return{...c,messages:m};});}
               else if(d.type==="refinement_start"){reviewingAnswer=true;refinementsCount=d.round||refinementsCount;recordActivity({type:"tool_start",data:{tool:"refinement",status:`Reviewing answer (${d.round}/${d.total})`,round:d.round,total:d.total}});}
-              else if(d.type==="done"){if(d.review_notice)recordActivity({type:"tool_done",data:{tool:"refinement",status:d.review_notice,outcome:"retained"}});if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);updateReading(cid,r=>settle(r,d.context));if(d.gen_tokens){setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
-              else if(d.type==="ctx_update"){if(d.gen_tokens)setTokC(d.gen_tokens);updateReading(cid,r=>applyUpdate(r,d));}
-              else if(d.type==="context_compacted"){updateReading(cid,r=>contextCompacted(r,d));if(d.cursor)uConv(cid,c=>({...c,summary_until_msg_id:d.cursor}));}
+              else if(d.type==="done"){_sawEnd=true;_finalContext=d.context||null;if(d.round_limit)_roundLimit=d.round_limit;if(d.overflow)_overflow=d.overflow;if(d.review_notice)recordActivity({type:"tool_done",data:{tool:"refinement",status:d.review_notice,outcome:"retained"}});if(d.message_id)_streamMsgId=d.message_id;setTokS(d.speed);updateReading(cid,r=>settle(r,d.context));if(d.gen_tokens){setTokC(d.gen_tokens);_doneStats={gen_tokens:d.gen_tokens,...(d.speed?{speed:d.speed}:{})};}if(d.done_reason==="length")_doneTruncated=true;if(d.refinements)refinementsCount=d.refinements;}
+              else if(d.type==="ctx_update"){if(d.gen_tokens){setTokC(d.gen_tokens);_speed=liveSpeed(_speed,d.gen_tokens,Date.now());if(_speed.speed)setTokS(_speed.speed);}_shadow=applyUpdate(_shadow,d);updateReading(cid,r=>applyUpdate(r,d));}
+              else if(d.type==="context_compacted"){_shadow=contextCompacted(_shadow,d);updateReading(cid,r=>contextCompacted(r,d));if(d.cursor)uConv(cid,c=>({...c,summary_until_msg_id:d.cursor}));}
+              else if(d.type==="context_overflow"){_overflow={needed:d.needed,window:d.window};}   // the model read only part of the request (contextFit.js)
               else if(d.type==="model_routed"){_routedModel=d.model;}
-              else if(d.type==="error"){if(reviewingAnswer){streamFailed=true;recordActivity({type:"tool_error",data:{tool:"refinement",status:d.error||"Review failed; answer retained"}});notify({type:"error",text:"Review failed; answer retained",detail:d.error});continue;}streamFailed=true;full=withFailureNote(full,d.error,d.saved_note);streamTextLenRef.current=full.length;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
+              else if(d.type==="error"){if(reviewingAnswer){streamFailed=true;recordActivity({type:"tool_error",data:{tool:"refinement",status:d.error||"Review failed; answer retained"}});notify({type:"error",text:"Review failed; answer retained",detail:d.error});continue;}streamFailed=true;_sawEnd=true;if(d.context)_finalContext=d.context;updateReading(cid,r=>settle(r,d.context));full=withFailureNote(full,d.error,d.saved_note);streamTextLenRef.current=full.length;const shown=replacePersonaPlaceholdersForConversation(full,cv);uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:shown,isS:false};return{...c,messages:m};});}
             }catch{}}
         }
       }catch(e){
-        if(e.name!=="AbortError")throw e;
         // Finalize and persist the partial reply through the same path as a
         // completed stream, including tool metadata and the server's row id.
-        wasStopped=true;
+        if(e.name==="AbortError")wasStopped=true;
+        // A connection that broke after the reply had started (the server went away) ends the same way as
+        // one that closed quietly: an interrupted reply with Continue, not a "network error" block.
+        else if(!_streamOpen)throw e;
       }
       if(_routedModel)_doneStats={...(_doneStats||{}),routed_model:_routedModel};
       // Capture relevant events into metadata for persistence (tool status + search results + source links)
@@ -3328,12 +3375,21 @@ function HyprChat(){
       if(overrides.priorMeta){const _joined=mergeContinued(overrides.priorMeta.saved_events,_msgMeta.saved_events);_msgMeta={...overrides.priorMeta,..._msgMeta,...(_joined.length?{saved_events:_joined}:{})};}
       // Stated either way: the server merges this patch into what it saved, so a flag that is merely left
       // out (after a Continue that finished) would stay set and the Continue button came back.
-      _msgMeta.truncated=!!_doneTruncated&&!wasStopped&&!streamFailed;
-      _msgMeta.delivery_status=wasStopped?"interrupted":streamFailed?"failed":"completed";
+      // How the stream ended (runState.js). A connection that closed before the server said "done" (a
+      // restart, a lost network) used to be recorded as a finished reply, with no Continue.
+      const outcome=replyOutcome({stopped:wasStopped,failed:streamFailed,ended:_sawEnd,roundLimit:_roundLimit,truncated:_doneTruncated,startedJob:_streamWorkflowIds.length>0});
+      _queueOutcome=outcome;
+      const cutShort=outcome==="stopped"||outcome==="interrupted";
+      if(outcome==="interrupted")notify({type:"warning",text:"Connection lost",detail:"The reply stopped before it was finished. Continue picks it up from there."});
+      // Without the server's final reading the pill would stay as it was in the middle of the reply.
+      if(!_finalContext)updateReading(cid,r=>settle(r,null));
+      const _localContext=_finalContext||keptReading(settle(_shadow,null));
+      _msgMeta.truncated=!!_doneTruncated&&!cutShort&&!streamFailed;
+      _msgMeta.delivery_status=deliveryStatus(outcome);
       const finalFull=replacePersonaPlaceholdersForConversation(full,cv);
       // Auto-play the reply when the Voice "Auto-play replies" toggle is on
-      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend&&!wasStopped){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?String(_streamMsgId):`auto-${Date.now()}`);}catch{}},80);}
-      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,_activityStatus:wasStopped?"stopped":streamFailed?"failed":"completed",metadata:_msgMeta,...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
+      if(ttsAutoplay&&ttsUrl&&finalFull&&!isGhostSend&&!cutShort){setTimeout(()=>{try{speak(finalFull,_streamMsgId!=null?String(_streamMsgId):`auto-${Date.now()}`);}catch{}},80);}
+      uConv(cid,c=>{const m=[...(c.messages||[])];m[m.length-1]={...m[m.length-1],role:"assistant",content:finalFull,isS:false,_activityStatus:activityStatus(outcome),metadata:{..._msgMeta,...(_localContext?{context:_localContext}:{}),...(_overflow?{overflow:_overflow}:{})},...(_streamMsgId?{id:_streamMsgId}:{})};return{...c,messages:m};});
       // Save final assistant message state to DB. PATCH the row the backend already
       // created at stream start (preferred — exactly one row per turn). Fall back to
       // POST for older backends or if init/done didn't include a message_id.
@@ -3342,17 +3398,31 @@ function HyprChat(){
         // Ghost chats are intentionally local-only: no assistant PATCH/POST,
         // no title generation, no workspace memory suggestion source row.
       }else if(_streamMsgId){
-        _saved=persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({...(serverPersists?{}:{content:finalFull}),metadata:_msgMeta})},{label:"Message save"});
+        const saveMeta=()=>persistFetch(`${API}/api/conversations/${cid}/messages/${_streamMsgId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({...(serverPersists?{}:{content:finalFull}),metadata:_msgMeta})},{label:"Message save"});
+        // After a lost connection the server is usually restarting: saving at once only produced a
+        // "Message save failed" notice. Wait for it to answer again (about half a minute at most).
+        const serverBack=tries=>fetch(`${API}/api/health`).then(r=>{if(!r.ok)throw new Error("not ready");}).catch(e=>{if(tries>1)return new Promise(next=>setTimeout(next,3000)).then(()=>serverBack(tries-1));throw e;});
+        _saved=outcome==="interrupted"?serverBack(10).then(saveMeta,saveMeta):saveMeta();
       }else if(!wasStopped){
         persistFetch(`${API}/api/conversations/${cid}/messages`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({role:"assistant",content:finalFull,metadata:_msgMeta})},{label:"Message save"});
       }
       if(serverPersists&&!isGhostSend&&!wasStopped){
         const completedMessageId=_streamMsgId;
-        Promise.resolve(_saved).catch(()=>{}).then(()=>apiJson(`/api/conversations/${cid}`)).then(saved=>{if(streamingCidRef.current)return;const message=(saved.messages||[]).find(m=>m.id===completedMessageId);if(message)uConv(cid,c=>({...c,messages:(c.messages||[]).map(m=>m.id===completedMessageId?{...message,_activityKey:m._activityKey,_activityStatus:message.metadata?.delivery_status||m._activityStatus}:m)}));}).catch(e=>{if(e.name!=='AbortError')notify({type:'warning',text:'Reload saved response to see final status',detail:e.message});});
+        // After a lost connection the server may be restarting: try a few times. A row it still calls
+        // "running" keeps the status the browser worked out.
+        const reread=tries=>apiJson(`/api/conversations/${cid}`).then(saved=>{if(streamingCidRef.current)return;const message=(saved.messages||[]).find(m=>m.id===completedMessageId);if(message)uConv(cid,c=>({...c,messages:(c.messages||[]).map(m=>{if(m.id!==completedMessageId)return m;const status=message.metadata?.delivery_status;
+          // The server saves a reply in progress every few seconds, so after an interruption its copy can be a
+          // little behind what is on screen. Keep the longer text: Continue carries on from what the reader sees.
+          const ahead=outcome==="interrupted"&&String(m.content||"").length>String(message.content||"").length;
+          return{...message,...(ahead?{content:m.content}:{}),_activityKey:m._activityKey,_activityStatus:status&&status!=="running"?status:m._activityStatus};})}));}).catch(e=>{if(e.name!=='AbortError'&&tries>1)return new Promise(next=>setTimeout(next,2500)).then(()=>reread(tries-1));throw e;});
+        Promise.resolve(_saved).catch(()=>{}).then(()=>reread(outcome==="interrupted"?3:1)).catch(e=>{if(e.name!=='AbortError'&&outcome!=="interrupted")notify({type:'warning',text:'Reload saved response to see final status',detail:e.message});});
       }
       // Auto-generate title after first exchange
-      if(!wasStopped&&!isGhostSend&&autoTitle&&appendUser){const cv2=convs.find(c=>c.id===cid);const curTitle=cv2?.title||"";if(!curTitle||curTitle==="New Chat"||curTitle===appendUser.slice(0,40))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
-    }catch(e){if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});
+      // While the chat still wears its placeholder name (chatTitles.js): the one attempt after the first
+      // reply was lost for good when that reply was stopped or the title call timed out.
+      if(!cutShort&&!streamFailed&&!isGhostSend&&autoTitle){const cv2=convs.find(c=>c.id===cid)||cv;if(needsTitle(cv2))fetch(`${API}/api/conversations/${cid}/generate-title`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:wsModel||""})}).then(r=>r.json()).then(d=>{if(d.title)uConv(cid,{title:d.title});}).catch(()=>{});}
+    }catch(e){if(e.name==="AbortError")_queueOutcome="stopped";if(e.name!=="AbortError"){setCurrentRunNotice({type:"failed",label:"Failed",detail:e.message||"Stream failed",at:Date.now()});
+      updateReading(cid,r=>settle(r,null));
       // Keep what was already written; the error goes under it. The server saved the partial reply
       // itself, so re-read that row (it carries the id that rate, continue and delete need).
       uConv(cid,c=>{const m=[...(c.messages||[])];const last=m[m.length-1]||{};const kept=last.role==="assistant"?String(last.content||""):"";m[m.length-1]={...last,role:"assistant",content:`${kept}${kept?"\n\n":""}\`\`\`\n⚠ ${e.message}\n\`\`\``,isS:false,_activityStatus:"failed"};return{...c,messages:m};});
@@ -3360,10 +3430,17 @@ function HyprChat(){
     }}
     // Attachments are cleared when a message is sent, not here: files added while the reply was still
     // being written vanished the moment it finished.
+    // In the same update that ends the reply: only a reply that really finished, in the chat on screen, lets
+    // the next queued message go.
+    messageQueue.settle(cid,_queueOutcome,actIdRef.current===cid);
     setStreaming(false);streamingCidRef.current=null;streamMsgIdRef.current=null;
   };
 
-  const send=async()=>{
+  const send=async(queued)=>{
+    // `queued`: a message from the queue (messageQueue.js) instead of the box. A click event is not one.
+    const item=queued&&queued.queueId?queued:null;
+    if(item&&item.chatId!==actId)return;
+    const inp=item?item.text:chatDrafts.text,attachments=item?(item.attachments||[]):chatDrafts.attachments;
     if(sendPrepRef.current||turnBusyRef.current||councilRunning||loadingConv||(!inp.trim()&&!attachments.length))return;
     if(streaming){if(streamingCidRef.current&&streamingCidRef.current!==actId)notify({type:"info",text:"Another chat is still replying",detail:"Wait for it to finish, or stop it in that chat, then send."});return;}
     if(attachments.some(a=>a.loading)){notify({type:"warning",text:"Attachment still processing",detail:"Wait for extraction to finish or remove the file."});return;}
@@ -3383,7 +3460,7 @@ function HyprChat(){
       const cv=createdConv||convs.find(c=>c.id===cid);
       const useDocumentAssets=documentsEnabled&&(attachments.some(a=>a.type==="office")||(cv?.tool_ids||[]).includes("documents"))&&!ghostMode&&!isGhostConv(cv);
       // Route council chats to council sender
-      if(cv?.is_council){prep.preparing=false;setPreparingSend("");await sendCouncil();return;}
+      if(cv?.is_council){prep.preparing=false;setPreparingSend("");if(!item)await sendCouncil();return;}
       // Stage data-file attachments (CSV/Excel/JSON) into the Hephaestus workspace so
       // the model analyzes the FULL file via execute_code instead of a truncated
       // inline paste. Keep the whole draft if any attachment cannot be staged.
@@ -3469,10 +3546,12 @@ function HyprChat(){
       const _now=new Date().toISOString();
       const um={role:"user",content:displayContent,_fullContent:modelContent,_images:imageBase64s.length?imageBase64s:undefined,metadata:{pdfs:pdfAttachments.length?pdfAttachments:undefined,images:imageAttachments.length?imageAttachments:undefined},created_at:_now};
       uConv(cid,c=>{const existing=c.messages||[];const hasRealMessages=existing.some(m=>!(m.metadata&&m.metadata.persona_first_message));return{...c,title:!hasRealMessages?(displayContent||pdfAttachments.map(p=>p.name).join(", ")).slice(0,40):c.title,messages:[...existing,um,{role:"assistant",content:"",isS:true,created_at:_now}]};});
-      setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
-      chatFollow.follow();
+      // The message is in the chat now: a queued one leaves the queue, the box is cleared otherwise.
+      if(item)item.accepted();
+      else{setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}chatFollow.follow();}
       const am=[...(cv?.messages||[]),um];
       const sendOverrides={};
+      if(item)sendOverrides.fromQueue=true;
       if(atts.some(a=>a.type==="office"))sendOverrides.documents=true;
       if(pendingEffortForSend!==undefined)sendOverrides.effort=pendingEffortForSend;
       if(createdConv){sendOverrides.conversation=createdConv;sendOverrides.freshChat=true;}
@@ -3484,6 +3563,41 @@ function HyprChat(){
     }finally{
       if(sendPrepRef.current===prep){sendPrepRef.current=null;setPreparingSend("");}
     }
+  };
+
+  // Enter or the Send button. While this chat is replying the message is queued (messageQueue.js); the
+  // decision is made here because send() keeps its own guard up for as long as a reply runs.
+  const submitComposer=()=>{
+    const action=submitAction({streamingHere:streaming&&streamingCidRef.current===actId,dispatching:!!messageQueue.queue.sending,council:!!act?.is_council,hasText:!!inp.trim(),attachments,uploading:coderProjUploading});
+    if(action==="send")return send();
+    if(action==="wait"){notify({type:"warning",text:"Attachment still processing",detail:"Wait for it to finish or remove the file."});return;}
+    if(action!=="queue")return;
+    messageQueue.add(actId,{text:inp.trim(),attachments});
+    setInp("");setAttachments([]);if(inpRef.current){inpRef.current.style.height="auto";}
+  };
+  // A queued message goes back into the box, in front of anything typed since.
+  const editQueued=id=>{
+    const item=messageQueue.take(actId,id);if(!item)return;
+    setInp(p=>joinText(item.text,p));setAttachments(p=>[...(item.attachments||[]),...p]);focusComposer();
+  };
+  const sendQueuedNow=()=>{
+    if(streaming&&streamingCidRef.current&&streamingCidRef.current!==actId){notify({type:"info",text:"Another chat is still replying",detail:"Wait for it to finish, or stop it in that chat, then send."});return;}
+    messageQueue.release(actId);
+  };
+
+  // Chats could not be renamed, and a title the model never wrote stayed the first words of the first message.
+  const saveRename=()=>{
+    if(!renamingConv)return;
+    const change=renameTo(convs.find(c=>c.id===renamingConv.id),renamingConv.title);
+    if(change)uConv(renamingConv.id,change);
+    setRenamingConv(null);
+  };
+  const generateTitle=async id=>{
+    try{
+      const d=await apiJson(`/api/conversations/${id}/generate-title`,{method:"POST",body:{model:wsModel||""}});
+      if(d.title)uConv(id,c=>({...c,title:d.title}));
+      else notify({type:"warning",text:"No title was written",detail:"The title model did not answer. Try again, or rename the chat yourself."});
+    }catch(e){notify({type:"error",text:"Title not generated",detail:e.message||String(e)});}
   };
 
   // Regenerating or editing an older message removes every later turn of the chat. Ask first.
@@ -3529,9 +3643,7 @@ function HyprChat(){
     // Rebuild the user message carrying attachment metadata/_images through;
     // drop the stale _fullContent — the send mapper reconstructs the image
     // hint from metadata.images when _fullContent is absent.
-    const rebuilt={role:"user",content:newContent,
-      ...(orig?.metadata?{metadata:orig.metadata}:{}),
-      ...(Array.isArray(orig?._images)&&orig._images.length?{_images:orig._images}:{})};
+    const rebuilt=editedMessage(orig,newContent);   // keeps the PDF text the model was given (editedMessage.js)
     uConv(cid,c=>{const m=(c.messages||[]).slice(0,msgIndex);const _now=new Date().toISOString();m.push({...rebuilt,created_at:_now});m.push({role:"assistant",content:"",isS:true,created_at:_now});return{...c,messages:m};});
     const msgsUpToEdit=(cv?.messages||[]).slice(0,msgIndex);
     msgsUpToEdit.push(rebuilt);
@@ -3569,7 +3681,8 @@ function HyprChat(){
     try{
       const full=await(await fetch(`${API}/api/conversations/${cid}`)).json();
       const local=convs.find(c=>c.id===cid)?.messages||[];
-      return findSavedMessage(full.messages||[],target,msgIndex,local.length);
+      // The whole list goes along: a row is only looked for between its neighbours' saved rows.
+      return findSavedMessage(full.messages||[],target,msgIndex,local.length,local);
     }catch{}
     return null;
   };
@@ -3653,7 +3766,8 @@ function HyprChat(){
     const cv=convs.find(c=>c.id===cid);
     const removed=cv?.messages?.[msgIndex];
     if(!removed)return;
-    const localCount=(cv.messages||[]).length;
+    const onScreen=cv.messages||[];   // as it was with the message in it: the row is looked for between its neighbours
+    const localCount=onScreen.length;
     uConv(cid,c=>({...c,messages:(c.messages||[]).filter((_,ix)=>ix!==msgIndex)}));
     const tid=Math.random().toString(36).slice(2,9);
     let undone=false;
@@ -3666,10 +3780,12 @@ function HyprChat(){
       try{
         // A message sent in this session used to have no id here: it was only hidden, and came back on reload.
         let mid=removed.id;
-        if(!mid){const full=await(await fetch(`${API}/api/conversations/${cid}`)).json();mid=findSavedMessage(full.messages||[],removed,msgIndex,localCount);}
+        if(!mid){const full=await(await fetch(`${API}/api/conversations/${cid}`)).json();mid=findSavedMessage(full.messages||[],removed,msgIndex,localCount,onScreen);}
         if(!mid)return;   // never saved: nothing to delete
         const r=await fetch(`${API}/api/conversations/${cid}/messages/${mid}`,{method:"DELETE"});
         if(!r.ok&&r.status!==404)throw new Error(`HTTP ${r.status}`);
+        // The server drops the summary when the deleted message was inside it: so does the line in the chat.
+        uConv(cid,c=>Number(c.summary_until_msg_id)>=Number(mid)?{...c,summary_until_msg_id:0}:c);
       }catch(e){
         restore();
         notify({type:"error",text:"Message not deleted",detail:`The server could not delete it (${e.message||e}), so it was put back.`});
@@ -3683,6 +3799,10 @@ function HyprChat(){
     // `created` is the chat this drop made for itself (a project archive in a new chat); until React has
     // rendered it the ref still holds the old value.
     const current=()=>origin.epoch===hcCaptureUserContext().epoch&&[origin.conversationId,origin.created].includes(actIdRef.current);
+    // Files finish in the chat they were added to, also when another chat has been opened meanwhile: a PDF
+    // still being read used to leave a "loading" chip behind that blocked sending for good.
+    const sameUser=()=>origin.epoch===hcCaptureUserContext().epoch;
+    const draftChat=()=>origin.created||origin.conversationId;
     if(sendPrepRef.current?.preparing)return;
     // If Coder Bot is active, intercept archive drops and route them to the
     // project upload endpoint instead of treating them as text attachments.
@@ -3711,7 +3831,7 @@ function HyprChat(){
     }
     const newAttachments=[];
     for(const file of remaining){
-      if(!current())return;
+      if(!sameUser())return;
       if(isImage(file)){
         if(file.size>20*1024*1024){console.warn(`Skipped ${file.name} — image too large (max 20MB)`);notify({type:"warning",text:"Image skipped",detail:`${file.name} is larger than 20MB.`});continue;}
         try{
@@ -3726,18 +3846,18 @@ function HyprChat(){
         if(file.size>250*1024*1024){console.warn(`Skipped ${file.name} — too large (max 250MB)`);notify({type:"warning",text:"PDF skipped",detail:`${file.name} is larger than 250MB.`});continue;}
         const attachmentId=crypto.randomUUID();
         // Add a loading placeholder immediately
-        setAttachments(p=>[...p,{attachmentId,name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
+        chatDrafts.setAttachmentsFor(draftChat(),p=>[...p,{attachmentId,name:file.name,content:"",type:"pdf",pages:0,loading:true}]);
         try{
           const fd=new FormData();fd.append("file",file);
           const r=await fetch(`${API}/api/extract-pdf`,{method:"POST",body:fd});
           if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||`HTTP ${r.status}`);}
           const d=await r.json();
-          if(!current())return;
-          setAttachments(p=>p.map((a,i)=>a.attachmentId===attachmentId&&a.loading?{name:file.name,content:d.text||"No text extracted.",type:"pdf",pages:d.total_pages||0,loading:false}:a));
+          if(!sameUser())return;
+          chatDrafts.setAttachmentsFor(draftChat(),p=>p.map((a,i)=>a.attachmentId===attachmentId&&a.loading?{name:file.name,content:d.text||"No text extracted.",type:"pdf",pages:d.total_pages||0,loading:false}:a));
         }catch(e){
-          if(!current())return;
+          if(!sameUser())return;
           console.error("PDF extraction failed:",e);
-          setAttachments(p=>p.map(a=>a.attachmentId===attachmentId&&a.loading?{name:file.name,content:"",type:"pdf",pages:0,loading:false,error:e.message,file}:a));
+          chatDrafts.setAttachmentsFor(draftChat(),p=>p.map(a=>a.attachmentId===attachmentId&&a.loading?{name:file.name,content:"",type:"pdf",pages:0,loading:false,error:e.message,file}:a));
           notify({type:"error",text:"PDF extraction failed",detail:file.name});
         }
         continue;
@@ -3765,7 +3885,7 @@ function HyprChat(){
         newAttachments.push({name:file.name,content:`[Binary file: ${file.name}, ${(file.size/1024).toFixed(1)}KB]`,type:"binary"});
       }
     }
-    if(current()&&newAttachments.length)setAttachments(p=>[...p,...newAttachments]);
+    if(sameUser()&&newAttachments.length)chatDrafts.setAttachmentsFor(draftChat(),p=>[...p,...newAttachments]);
   };
 
   const stop=()=>{
@@ -3790,6 +3910,8 @@ function HyprChat(){
         fetch(`${API}/api/runs/${rid}/cancel`,{method:"POST"}).catch(()=>{});
       }
     }catch{}
+    // Before the abort: a Stop that lands just as the reply finishes must still hold the queue.
+    messageQueue.hold(streamingCidRef.current||actId,"stopped");
     abortR.current?.abort();
     setStreaming(false);setRestoredRunCid(null);
     streamingCidRef.current=null;
@@ -4959,6 +5081,15 @@ function HyprChat(){
       {extras?<div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>{extras}</div>:null}
     </div>);
   const standaloneCoderJobs=coderWorkflows.filter(w=>w.workflow_version===3&&w.conversation_id===actId);
+  // The model and context window the chat on screen will use for its next reply (context pill, draft size note).
+  const activeChatContext=()=>{
+    const modelName=modelChoiceRef.current.byConv[actId]||act?.model||models[0]||"";
+    const mp=modelParams[modelName]||{};
+    const cloudModel=isCloudModelName(modelName);
+    const codingContext=isCoderPersonaName(act?.persona_name)||(act?.tool_ids||[]).includes("codeagent");
+    const chatCtx=chatWindow(mp.num_ctx,numCtx||tokenLimit,effortCaps[modelName]?.context_limit);
+    return{modelName,cloudModel,codingContext,chatCtx,maxCtx:cloudModel?0:codingContext?(coderChatCtx||coderNumCtx||numCtx):chatCtx.window};
+  };
   const isEmptyChatSurface=panel==="chat"&&!loadingConv&&!councilRunning&&!streaming&&!standaloneCoderJobs.length&&(!act||(!(act.messages||[]).length&&!act.is_council));
   // Starter chips for the empty chat surface: prompt-library picks, the latest workspace, and two generic nudges.
   const starterItems=isEmptyChatSurface?[
@@ -5084,7 +5215,7 @@ function HyprChat(){
   const newMessageKeys=useNewKeys((act?.messages||[]).map((m,idx)=>`${actId}:${m._activityKey||m.id||idx}`),actId);
   const _uiScale=uiFontSize/14;
   return <PlayfulStatusContext.Provider value={funVerbs}><div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
-    {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>({...c,messages:(c.messages||[]).map(m=>m.id===id?{...m,...saved}:m)})))}/>}
+    {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>(c.messages||[]).some(m=>m.id===id)?{...c,...(Number(c.summary_until_msg_id)>=Number(id)?{summary_until_msg_id:0}:{}),messages:c.messages.map(m=>m.id===id?{...m,...saved}:m)}:c))}/>}
     {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${isLightTheme?THEMES[tm].text:THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
     <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0}/>
     {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
@@ -5216,6 +5347,8 @@ function HyprChat(){
           <div style={{flexShrink:0,marginLeft:8}}>
             <ActionMenu label={`Actions for ${title}`} compact items={[
               {label:isPinned?'Unpin':'Pin to top',onClick:()=>{const pinned=isPinned?'0':'1';uConv(c.id,{pinned});fetch(`${API}/api/conversations/${c.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({pinned})});}},
+              {label:'Rename',onClick:()=>setRenamingConv({id:c.id,title:c.title||''})},
+              ...(isGhostConv(c)||/^l-/.test(String(c.id))?[]:[{label:'Generate title',onClick:()=>generateTitle(c.id)}]),
               {label:'Edit tags',onClick:()=>{setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput('');}},
               {label:'Delete conversation',destructive:true,onClick:()=>delChat(c.id)},
             ]}/>
@@ -5223,6 +5356,13 @@ function HyprChat(){
         </div>
         {tags.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:2,padding:"1px 8px 4px"}}>
           {tags.map(tag=><span key={tag} onClick={e=>{e.stopPropagation();setActiveTagFilter(activeTagFilter===tag?null:tag);}} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 5px",borderRadius:"var(--hc-radius)",background:`${t.warm}18`,color:t.warm,border:`1px solid ${t.warm}28`,cursor:"pointer"}}>{tag}</span>)}
+        </div>}
+        {renamingConv?.id===c.id&&<div style={{padding:"4px 8px 6px",animation:"fadeIn .15s"}} onClick={e=>e.stopPropagation()}>
+          <div style={{display:"flex",gap:4}}>
+            <input autoFocus aria-label="Chat name" value={renamingConv.title} maxLength={80} onChange={e=>setRenamingConv({id:c.id,title:e.target.value})} onFocus={e=>e.target.select()} onKeyDown={e=>{if(e.nativeEvent?.isComposing||e.keyCode===229)return;if(e.key==="Enter"){e.preventDefault();saveRename();}if(e.key==="Escape"){e.stopPropagation();setRenamingConv(null);}}} placeholder="Chat name" style={{...inputS,flex:1,minWidth:0,padding:"4px 8px",fontSize:"var(--hc-text-control)"}}/>
+            <button aria-label="Save name" onClick={saveRename} style={{...btnS(t.ok),padding:"3px 9px",fontSize:"var(--hc-text-control)"}}>Save</button>
+            <button aria-label="Cancel" onClick={()=>setRenamingConv(null)} style={{...btnS(t.mut),padding:"3px 7px",fontSize:"var(--hc-text-control)"}}>×</button>
+          </div>
         </div>}
         {showTagEditor===c.id&&<div style={{padding:"4px 8px 6px",animation:"fadeIn .15s"}} onClick={e=>e.stopPropagation()}>
           <div style={{display:"flex",gap:4}}>
@@ -5447,14 +5587,21 @@ function HyprChat(){
           </>}
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
           {!isMobile&&panel==="chat"&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" className="hc-chip" style={{"--chip-c":t.mut,background:"transparent",fontFamily:font}}><IC.Download/> Import</button>}
-          {panel==="chat"&&act&&(()=>{
-            // Context pill. The reading comes from the server (contextMeter.js); this is only the limit to
-            // show before the first reply of a chat has reported the window it ran with.
-            const modelName=act?.model||models[0]||"";
-            const mp=modelParams[modelName]||{};
-            const codingContext=isCoderPersonaName(act?.persona_name)||(act?.tool_ids||[]).includes("codeagent");
-            const maxCtx=isCloudModelName(modelName)?0:codingContext?(coderChatCtx||coderNumCtx||numCtx):(mp.num_ctx&&mp.num_ctx!=="default"?parseInt(mp.num_ctx)||0:numCtx||tokenLimit||0);
-            return <ContextMeter reading={contextReadings[actId]} fallbackWindow={maxCtx} compactPercent={contextCompaction&&!codingContext&&!isCloudModelName(modelName)?chatCompactionPercent:0} live={streaming&&streamingCidRef.current===actId} speed={tokS} onInspect={(()=>{const last=[...(act?.messages||[])].reverse().find(m=>m.role==="assistant"&&m.id!=null&&!m.isS);return last?()=>setInspectorMessage(last.id):null;})()}/>;
+          {panel==="chat"&&act&&!(act.is_council==="1"||act.is_council===1||act.is_council===true)&&(()=>{
+            // Context pill. The reading comes from the server (contextMeter.js); this is the window the
+            // next reply will get: shown before a chat's first reply, and when the chat's model or context
+            // size has changed since the reading was taken. Council replies have no reading: no pill.
+            const {modelName,cloudModel,codingContext,chatCtx,maxCtx}=activeChatContext();
+            const compactPercent=contextCompaction&&!codingContext&&!cloudModel?chatCompactionPercent:0;
+            const live=streaming&&streamingCidRef.current===actId;
+            // Summarize now, read the summary, forget kept tool results (contextActions.js).
+            const actions={
+              available:availableActions({reading:contextReadings[actId],live,compactPercent,saved:!/^(ghost|l)-/.test(String(actId)),summarized:contextCompaction&&Number(act.summary_until_msg_id)>0}),
+              onCompact:async()=>{const cid=actId;const d=await apiJson(`/api/conversations/${cid}/compact`,{method:"POST",body:{model:modelName,num_ctx:chatCtx.asked||null}});if(d.compacted)await refreshChatContext(cid);return d;},
+              onForget:async()=>{const cid=actId;const d=await apiJson(`/api/conversations/${cid}/tool-results`,{method:"DELETE"});if(d.removed)await refreshChatContext(cid);return d;},
+              loadSummary:async()=>(await apiJson(`/api/conversations/${actId}`)).summary||"",
+            };
+            return <ContextMeter reading={contextReadings[actId]} expect={{model:modelName,asked:cloudModel||codingContext?0:chatCtx.asked}} fallbackWindow={maxCtx} compactPercent={compactPercent} live={live} actions={actions} speed={tokS} onInspect={(()=>{const last=[...(act?.messages||[])].reverse().find(m=>m.role==="assistant"&&m.id!=null&&!m.isS);return last?()=>setInspectorMessage(last.id):null;})()}/>;
           })()}
         </div>
       </div>
@@ -6760,6 +6907,7 @@ function HyprChat(){
                     </div>
                     <input aria-label="Model context tokens" type="number" min="1" step="1" value={isDefault?"":ctxVal} placeholder={`Global: ${numCtx}`} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:e.target.value}}))} style={{...inputS,marginTop:8}}/>
                     {effectiveCtx>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:isDefault?t.mut:t.acc,marginTop:4,fontWeight:600}}>{effectiveCtx>=1024?`${(effectiveCtx/1024).toFixed(0)}K`:effectiveCtx} tokens{isDefault?" (from Settings)":""}</div>}
+                    <ModelLimitNote model={m} asked={effectiveCtx} t={t}/>
                   </div>;
                 })()}
               </div>
@@ -7532,6 +7680,8 @@ function HyprChat(){
               const ownsJob=startsJob(act.messages,i,coderWorkflows);
               // A reply that hit the output limit, was stopped, or failed part-way can be carried on (continueReply.js).
               const cutOff=!isU&&!ownsJob&&!act?.is_council?continueKind({...msg,metadata:meta},i===(act.messages||[]).length-1):"";
+              // Failed or stopped with nothing to continue: offer to write it again (continueReply.needsRetry).
+              const retry=!cutOff&&!isU&&!ownsJob&&!act?.is_council&&!meta.persona_first_message&&needsRetry({...msg,metadata:meta},i===(act.messages||[]).length-1);
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               // Tool cards render where they happened in the reply (messageParts.js). While streaming read the uncapped stream buffer.
@@ -7542,7 +7692,7 @@ function HyprChat(){
               const quickSearchPayload=renderOpts?.quickSearch;
               const refinedN=(!isU&&!msg.isS)?(meta.refinements||0):0;
               return <CodeMessageBoundary key={`${actId}:${msg._activityKey||msg.id||i}`} identity={msg._activityKey||msg.id||i} live={!!msg.isS}>
-              {i===compactedFrom&&<CompactionNotice conversationId={actId} t={t} font={font}/>}
+              {i===compactedFrom&&<CompactionNotice key={act.summary_until_msg_id} conversationId={actId} t={t} font={font}/>}
               <div id={msg.id!=null?`saved-message-${msg.id}`:undefined} className={`msg-row${isU?" is-user":" is-assistant"}${newMessageKeys.has(`${actId}:${msg._activityKey||msg.id||i}`)?" hc-msg-enter":""}`} style={{scrollMarginTop:80,marginBottom:nextGrouped?(compactMode?4:7):(compactMode?7:18),display:"flex",gap:9,alignItems:"flex-start"}}>
                 {grouped?<div className="msg-avatar" style={{width:isU?28:40,flexShrink:0}}/>
                 :<div className="msg-avatar" style={{width:isU?28:40,height:isU?28:40,borderRadius:"50%",alignItems:"center",justifyContent:"center",background:isU?"var(--hc-sunken)":`${personaColor}14`,border:"none",color:isU?t.f4:personaColor,flexShrink:0,marginTop:isU?3:1,overflow:"hidden"}}>
@@ -7588,7 +7738,8 @@ function HyprChat(){
                     </div>}
                     {msg.isS&&msg.content&&!isEditing&&<span style={{display:"inline-block",width:2,height:14,background:t.acc,marginLeft:1,animation:"blink .8s step-end infinite",verticalAlign:"text-bottom"}}/>}
                   </div>
-                  {!isU&&!isDaedalusOutput&&!isEditing&&cutOff&&<CutOffNotice kind={cutOff} meta={meta} onContinue={()=>cutOff==="rounds"?continueWork():continueMessage(i)} disabled={streaming} t={t} font={font}/>}
+                  {!isU&&!isEditing&&meta.overflow&&<OverflowNotice overflow={meta.overflow} t={t} font={font}/>}
+                  {!isU&&!isDaedalusOutput&&!isEditing&&(cutOff||retry)&&<CutOffNotice kind={cutOff||"retry"} meta={meta} onContinue={()=>!cutOff?regenerate(i):cutOff==="rounds"?continueWork():continueMessage(i)} disabled={streaming} t={t} font={font}/>}
                   {!isU&&!isDaedalusOutput&&<ToolStatus evts={isLastAssistant&&evts.length?evts:savedEvents} savedEvts={savedEvents} historical={!msg.isS} showActivity={false} hideCards msgContent={renderedContent} t={t} onPreview={openPreview} onOpenArtifact={openArtifact} md={md}/>}
                   {!isU&&hasDocumentActivity&&<DocumentActivity runIds={docRunIds} events={documentEvents} live={!!msg.isS} t={t} onPreview={openPreview}/>}
                   {isDaedalusOutput&&<DaedalusSummary runIds={daedalusRunIds} savedEvents={savedEvents} liveEvts={liveEventsForMsg} workflows={messageWorkflows} t={t} font={font} md={md} msgContent={renderedContent} live={!!msg.isS} onPreview={openPreview} onOpenArtifact={openArtifact} onQuickAction={text=>{setInp(text);setTimeout(()=>{if(inpRef.current){inpRef.current.style.height="auto";inpRef.current.style.height=Math.min(inpRef.current.scrollHeight,120)+"px";inpRef.current.focus();}},50);}}/>}
@@ -7635,6 +7786,7 @@ function HyprChat(){
                   })()}
                   {!isU&&!isDaedalusOutput&&quickSearchPayload&&<QuickSearchSourcesPanel payload={quickSearchPayload} t={t} font={font}/>}
                   {!msg.isS&&!isEditing&&<div className="msg-toolbar" style={{...msgToolbarS,flexWrap:"wrap",maxWidth:"100%",rowGap:4}}>
+                    {isU&&msg.content&&<button onClick={()=>cp(msg.content,mid)} className="hc-icon-btn" data-tip={copied===mid?"Copied":"Copy"} aria-label="Copy your message" style={{color:copied===mid?t.ok:t.mut}}>{copied===mid?<IC.Check/>:<IC.Copy/>}</button>}
                     {!isU&&msg.content&&<button onClick={()=>cp(renderedContent,mid)} className="hc-icon-btn" data-tip={copied===mid?"Copied":"Copy"} aria-label="Copy message" style={{color:copied===mid?t.ok:t.mut}}>{copied===mid?<IC.Check/>:<IC.Copy/>}</button>}
                     {!isU&&msg.id!=null&&<button onClick={()=>setInspectorMessage(msg.id)} className="hc-icon-btn" data-tip="Response context" aria-label="Response context" style={{color:t.mut}}><IC.Layers/></button>}
                     {!isU&&msg.content&&ttsUrl&&(()=>{const smid=msg.id!=null?String(msg.id):mid;const generating=ttsLoadingMid===smid,playing=speakingMid===smid;return <button onClick={()=>speak(renderedContent,smid)} className={generating?undefined:"hc-icon-btn"} data-tip={generating?undefined:playing?"Stop playback":"Read aloud"} aria-label={(playing||generating)?"Stop playback":"Read aloud"} style={generating?msgActionS(t.warm):{color:playing?t.acc:t.mut}}>
@@ -7718,6 +7870,13 @@ function HyprChat(){
               {pct!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,whiteSpace:"nowrap"}}>{pct}%</span>}
               {streaming&&streamingCidRef.current===actId&&<button onClick={stop} title="Stop generation" style={{background:"none",border:`1px solid ${currentRun.color}35`,color:currentRun.color,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Stop</button>}
             </div>;
+          })()}
+          {!act?.is_council&&<QueuedMessages queue={messageQueue.queue} idle={!streaming&&!preparingSend} onEdit={editQueued} onRemove={id=>messageQueue.remove(actId,id)} onSendNow={sendQueuedNow} maxWidth={chatWidth}/>}
+          {act&&!(act.is_council==="1"||act.is_council===1||act.is_council===true)&&(()=>{
+            // Before a draft that cannot fit the model's window is sent (contextFit.js). Not for coding chats:
+            // their window is set by the coding policy.
+            const {codingContext,maxCtx}=activeChatContext();const reading=contextReadings[actId];
+            return codingContext?null:<DraftSizeNote text={inp} attachments={attachments} window={maxCtx} fixed={reading?.fixed} ratio={reading?.ratio} maxWidth={chatWidth} t={t} font={font}/>;
           })()}
           {/* Attachment chips */}
           {quickSearchError&&<div style={{maxWidth:chatWidth,margin:"0 auto",padding:"0 0 6px",display:"flex",justifyContent:"flex-start"}}>
@@ -7844,9 +8003,9 @@ function HyprChat(){
                 }
                 if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setSlashDismissed(true);setSlashIdx(0);return;}
               }
-              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
-              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":isMobile?"Message…":"What's on your mind?"}`} rows={1}
-              disabled={(streaming&&streamingCidRef.current===actId)||councilRunning||loadingConv||!!preparingSend}
+              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submitComposer();}}}
+              placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":streaming&&streamingCidRef.current===actId?(isMobile?"Queue the next message…":"Type your next message: Enter adds it to the queue"):isMobile?"Message…":"What's on your mind?"}`} rows={1}
+              disabled={councilRunning||loadingConv||(!!preparingSend&&!messageQueue.queue.sending)}
               style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
@@ -7879,8 +8038,11 @@ function HyprChat(){
             </button>}
             {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
             :councilRunning?<button aria-label="Stop" onClick={()=>{councilAbortRef.current?.abort();if(councilStreamRef.current){councilStreamRef.current.running=false;councilStreamRef.current=null;}setCouncilRunning(false);}} style={{background:t.pink,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,animation:"pCouncilGlow 1.5s ease-in-out infinite"}}><IC.Stop/></button>
-            :streaming&&streamingCidRef.current===actId?<button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
-            :<button onClick={send} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
+            :streaming&&streamingCidRef.current===actId?<>
+              {!act?.is_council&&(inp.trim()||attachments.length>0)&&<button onClick={submitComposer} className="hc-icon-btn is-lg" title="Add to the queue: sent when this reply finishes" aria-label="Add to the queue" style={{color:t.warm}}><IC.Plus/></button>}
+              <button onClick={stop} className="hc-send-btn" data-state="stop" title="Stop response" aria-label="Stop response" style={{background:t.err,border:"none",color:t.bg,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
+            </>
+            :<button onClick={submitComposer} className="hc-send-btn" data-state="send" disabled={!inp.trim()&&!attachments.length} title={(inp.trim()||attachments.length)?"Send message":"Type a message or attach a file"} style={{background:(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):`${t.sfBri}88`,border:`1px solid ${(inp.trim()||attachments.length)?(act?.is_council?t.pink:t.warm):t.brd}22`,color:(inp.trim()||attachments.length)?t.bg:t.mut,width:36,height:36,minWidth:36,minHeight:36,padding:0,cursor:(inp.trim()||attachments.length)?"pointer":"default",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background-color var(--hc-dur-2) var(--hc-ease-out),border-color var(--hc-dur-2),color var(--hc-dur-2),opacity var(--hc-dur-2),transform var(--hc-dur-1) var(--hc-ease-out)",opacity:(inp.trim()||attachments.length)?1:.62}}>{act?.is_council?<IC.Council/>:<IC.Send/>}</button>}
           </div>
         </div>
         </div>
@@ -8190,6 +8352,14 @@ function HyprChat(){
             {chatToolMemory?"Enabled":"Disabled"}
           </label>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Later turns of a chat still get what earlier replies' tools ran and returned (code output, files read, pages fetched), trimmed to fit, so "continue" carries on instead of starting over. This uses more of the context window; auto-compaction folds it into the summary when the chat fills. Email, connector and chat-search results are never kept. Not used in Ghost chats or coding jobs.</div>
+        </div>
+        <div>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Message Times</div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:chatTimeNotes?t.ok:t.dim,cursor:"pointer"}}>
+            <input type="checkbox" checked={chatTimeNotes} onChange={e=>setChatTimeNotes(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
+            {chatTimeNotes?"Enabled":"Disabled"}
+          </label>
+          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>The model is told when each of your messages was sent, and when there was a long pause before one ("3 days after the previous message"), so it can answer questions about time and tell today's messages from older ones. Nothing changes in what you see. Not used in Ghost chats or coding chats.</div>
         </div>
         <div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>

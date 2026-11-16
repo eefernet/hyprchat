@@ -14,12 +14,16 @@ from datetime import datetime
 import config
 import image_settings
 import chat_context
+import chat_overflow
+import chat_payload
 import chat_rounds
+import chat_times
 import chat_tool_memory
 import chat_turns
 import context_breakdown
 import context_policy
 import database as db
+import model_limits
 import model_providers
 import persona_images
 import reasoning
@@ -1477,6 +1481,14 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             model_options.pop("num_ctx", None)
     if "num_ctx" not in model_options:
         model_options["num_ctx"] = config.coerce_num_ctx(config.DEFAULT_NUM_CTX)
+    # A model is loaded with at most its own limit (model_limits.py). Plan with the window it will really
+    # get: compaction, the context-full check, the budgets below and the context pill all read this value.
+    _asked_ctx, _own_limit = model_options["num_ctx"], 0
+    if not _is_cloud_provider:
+        _own_limit = await model_limits.context_limit(http, _provider_model_name)
+        if model_limits.effective(_asked_ctx, _own_limit) < _asked_ctx:
+            print(f"[CHAT] {req.model}: {_asked_ctx:,} tokens of context asked for, the model's own limit is {_own_limit:,}")
+            model_options["num_ctx"] = _own_limit
 
     global_memory_enabled = False
     if not ephemeral:
@@ -1546,6 +1558,8 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         effective_system += (
             f"\n\nToday's date: {_now_local.strftime('%A, %Y-%m-%d')} (timezone {_tz_name})."
         )
+        if chat_times.enabled() and conv_id and not ephemeral and not _is_v2_persona:
+            effective_system += "\n" + chat_times.INSTRUCTION      # what the lines in front of user messages are
     except Exception:
         pass
     # Skills: procedures saved from earlier chats. The index sits right after the
@@ -1803,11 +1817,21 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             _kept_after = 0
         _kept_records = await chat_tool_memory.load_for(
             conv_id, req.messages, window=model_options.get("num_ctx") or 0, after=_kept_after)
+    # When each message was written, for the model (chat_times.py). Read from the saved rows, so a
+    # message carries the same line on every turn.
+    _time_lines = {}
+    if conv_id and not ephemeral and not _is_v2_persona:
+        try:
+            _time_lines = await chat_times.stamps(conv_id, req.messages, newest_id=_user_message_id)
+        except Exception as _time_error:
+            print(f"[CHAT] message times unavailable (non-fatal): {_time_error}")
     _asked = None
-    for m in req.messages:
+    for _position, m in enumerate(req.messages):
         _content = m["content"]
         if persona_placeholder_ctx and m.get("role") in {"assistant", "system"}:
             _content = _replace_persona_placeholders(_content, **persona_placeholder_ctx)
+        if _position in _time_lines and isinstance(_content, str):
+            _content = f"{_time_lines[_position]}\n{_content}"
         _msg = {"role": m["role"], "content": _content}
         # Pass image attachments through to vision-capable Ollama models.
         # Non-vision models silently ignore the field.
@@ -2322,6 +2346,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     _last_round_usage = (0, 0)  # (prompt_tokens, gen_tokens) Ollama reported for the previous round
     _round_start_len = len(messages)
     _wrap_silent = False   # the loop ended on an empty reply, not on the round limit
+    _budget_notes = chat_rounds.BudgetNotes(MAX_ROUNDS)   # tells the model when rounds or context run low
     for round_num in range(MAX_ROUNDS):
         if round_num > 0:
             _last_round_usage = (prompt_tokens, gen_tokens)
@@ -2363,12 +2388,23 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 await events.emit(conv_id, "error", {"status": _full_msg[:200]})
                 yield f"data: {json.dumps({'type': 'error', 'error': _full_msg})}\n\n"
                 return
+            # Few rounds or little context left: say so after the newest tool result (chat_rounds.BudgetNotes).
+            # The note is not part of the tool's result, so it is not kept in tool memory.
+            if not (_is_v2_persona and _has_full_codeagent) and len(messages) > _round_start_len:
+                _budget_note = _budget_notes.note(
+                    round_num, used=_used, window=0 if _is_cloud_provider else (model_options.get("num_ctx") or 0),
+                    share=_full_share)
+                _newest = messages[-1]
+                if _budget_note and _newest.get("role") in ("tool", "user") and isinstance(_newest.get("content"), str):
+                    _newest["content"] += "\n\n" + _budget_note
+                    print(f"[CHAT]   Told the model before round {round_num}: {_budget_note}")
         _round_start_len = len(messages)
         content = ""
         thinking = ""
         tool_calls = []
         gen_tokens = 0
         prompt_tokens = 0
+        _prompt_seconds = 0.0   # time Ollama spent reading the prompt: near zero when its cache covered it
         _round_done_reason = "unexpected_eof"  # Requires an explicit provider finish.
         _gen_pill_started = False  # First "generating" pill uses tool_start; subsequent ones use tool_progress so the frontend collapses them into one updating pill
         _streamed_content = False
@@ -2376,7 +2412,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
         # ── Context window management: prune old tool results to stay under budget ──
         _ctx_size = sum(len(m.get("content", "")) for m in messages)
-        if not (_is_v2_persona and _has_full_codeagent) and _ctx_size > model_options["num_ctx"] * 4 and len(messages) > 6:
+        # Not for cloud models: num_ctx is the local setting and says nothing about their window.
+        if (not _is_cloud_provider and not (_is_v2_persona and _has_full_codeagent)
+                and _ctx_size > model_options["num_ctx"] * 4 and len(messages) > 6):
             # Summarize old tool results (keep system prompt + last 6 messages intact)
             for mi in range(1, len(messages) - 6):
                 m = messages[mi]
@@ -2410,7 +2448,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 return
         payload = {
             "model": _provider_model_name if _model_provider == "ollama" else req.model,
-            "messages": messages,
+            "messages": chat_payload.shape(_chat_model, messages),   # one system message for strict templates
             "stream": True,
             "options": model_options,
             "keep_alive": "10m",
@@ -2425,11 +2463,14 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
 
         if _assistant_msg_id is not None:
             import context_inspector
-            await context_inspector.capture(_assistant_msg_id, model=req.model, provider=_model_provider,
-                options=model_options, memories={'global':global_memory_info,'workspace':workspace_memory_info},
-                retrieved=kb_context, sources=qs.get('results') or qs.get('sources') or [], retrieved_sources=kb_sources,
-                tools=available_tool_names, messages=messages, original_chars=_ctx_size,
-                thinking=payload.get('think'), effort=_effort,knowledge_ids=persona_kb_ids)
+            try:      # a record of what was sent: a database error here must not fail the reply
+                await context_inspector.capture(_assistant_msg_id, model=req.model, provider=_model_provider,
+                    options=model_options, memories={'global':global_memory_info,'workspace':workspace_memory_info},
+                    retrieved=kb_context, sources=qs.get('results') or qs.get('sources') or [], retrieved_sources=kb_sources,
+                    tools=available_tool_names, messages=messages, original_chars=_ctx_size,
+                    thinking=payload.get('think'), effort=_effort,knowledge_ids=persona_kb_ids)
+            except Exception as _capture_error:
+                print(f"[CHAT]   response context not recorded (non-fatal): {_capture_error}")
 
         # Keepalive before Ollama call — prevents browser/proxy timeout during prompt eval
         yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
@@ -2437,7 +2478,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
         # Estimate prompt tokens so the frontend counter reflects context-in-flight,
         # not just live generation. Real prompt_eval_count arrives only at done=True.
         _round_estimate = chat_context.payload_estimate(messages, ollama_tools)
-        yield f"data: {json.dumps({'type': 'context_info', 'round': round_num, 'window': 0 if _is_cloud_provider else model_options.get('num_ctx'), 'prompt_estimate': _round_estimate, 'turn_only': _turn_only_tokens if round_num == 0 else 0, 'ratio': _ctx_ratio, 'fixed': _fixed_estimate, 'parts': _ledger.sizes(messages, _history, ollama_tools)})}\n\n"
+        yield f"data: {json.dumps({'type': 'context_info', 'round': round_num, 'window': 0 if _is_cloud_provider else model_options.get('num_ctx'), 'asked': 0 if _is_cloud_provider else (_asked_ctx if model_options.get('num_ctx') == _own_limit else model_options.get('num_ctx')), 'prompt_estimate': _round_estimate, 'turn_only': _turn_only_tokens if round_num == 0 else 0, 'ratio': _ctx_ratio, 'fixed': _fixed_estimate, 'parts': _ledger.sizes(messages, _history, ollama_tools)})}\n\n"
         _est_prompt_pre = round(_round_estimate * (_ctx_ratio or chat_context.DEFAULT_RATIO))
         if _est_prompt_pre:
             yield f"data: {json.dumps({'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': _est_prompt_pre, 'live': True})}\n\n"
@@ -2591,6 +2632,12 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         await events.emit(conv_id, "tool_end", {"tool": "processing", "status": f"Model not found: {req.model}", "icon": "alert"})
                         yield f"data: {json.dumps({'type': 'error', 'error': _msg})}\n\n"
                         return
+                    if chat_payload.wants_single_system(error_body) and not chat_payload.is_strict(_chat_model):
+                        # The model's template takes one system message, first. Send them merged from
+                        # now on (chat_payload.py); this round is spent on finding that out.
+                        print(f"[CHAT] Model {req.model} takes one system message — sending them merged")
+                        chat_payload.remember(_chat_model)
+                        continue
                     if "does not support tools" in error_body.lower() and not _text_fallback_done:
                         # Model doesn't support native tools — switch to text-based
                         print(f"[CHAT] Model {req.model} rejected native tools — switching to text-based")
@@ -2903,6 +2950,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                 _in_thinking = False
                             gen_tokens = chunk.get("eval_count", 0)
                             prompt_tokens = chunk.get("prompt_eval_count", 0)
+                            _prompt_seconds = round((chunk.get("prompt_eval_duration", 0) or 0) / 1e9, 3)
                             _round_done_reason = chunk.get("done_reason") or ""
                             _eval_dur_ns = chunk.get("eval_duration", 0) or 0
                             if gen_tokens and _eval_dur_ns:
@@ -2962,15 +3010,27 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             yield f"data: {json.dumps({'type': 'error', 'error': err_msg})}\n\n"
             return
 
-        yield f"data: {json.dumps({'type': 'usage_round', 'round': round_num, 'model': req.model, 'prompt_tokens': prompt_tokens, 'gen_tokens': gen_tokens, 'elapsed_seconds': round(time.monotonic() - _call_started, 3)})}\n\n"
+        yield f"data: {json.dumps({'type': 'usage_round', 'round': round_num, 'model': req.model, 'prompt_tokens': prompt_tokens, 'gen_tokens': gen_tokens, 'elapsed_seconds': round(time.monotonic() - _call_started, 3), **({'prompt_seconds': _prompt_seconds} if _prompt_seconds else {})})}\n\n"
+        _ctx_ratio_before = _ctx_ratio
         _ctx_ratio = chat_context.ratio_of(prompt_tokens, _round_estimate, _ctx_ratio)
+        if round_num == 0 and not _is_cloud_provider and not (_is_v2_persona and _has_full_codeagent):
+            # Ollama cuts a request that does not fit and says nothing (chat_overflow.py): tell the user.
+            _overflow = chat_overflow.check(_round_estimate, prompt_tokens, model_options.get("num_ctx"), _ctx_ratio_before)
+            if _overflow:
+                _ctx_ratio = _ctx_ratio_before      # the cut count says nothing about this chat's token rate
+                print(f"[CHAT]   Request did not fit: about {_overflow['needed']:,} tokens needed, window "
+                      f"{_overflow['window']:,}, the model read {_overflow['read']:,}")
+                yield f"data: {json.dumps({'type': 'context_overflow', 'needed': _overflow['needed'], 'window': _overflow['window'], 'ratio': _ctx_ratio_before})}\n\n"
         if round_num == 0 and not _is_cloud_provider:
             _loaded_window = await chat_context.loaded_window(http, _chat_model)
             if _loaded_window and _loaded_window != model_options.get("num_ctx"):
                 yield f"data: {json.dumps({'type': 'context_info', 'round': round_num, 'loaded_window': _loaded_window})}\n\n"
         if _assistant_msg_id is not None:
             import context_inspector
-            await context_inspector.record_usage(_assistant_msg_id, prompt_tokens, gen_tokens, time.monotonic() - _call_started)
+            try:
+                await context_inspector.record_usage(_assistant_msg_id, prompt_tokens, gen_tokens, time.monotonic() - _call_started)
+            except Exception as _usage_error:
+                print(f"[CHAT]   response usage not recorded (non-fatal): {_usage_error}")
 
         # ── Leaked-reasoning finalize net: if the round's content still starts
         # with a plain-text "thought\n" CoT dump (slipped past the stream guard,

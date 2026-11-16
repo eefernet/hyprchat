@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { findSavedMessage, withUserId } from './messageIds.js';
+import { findSavedMessage, savedRange, withUserId } from './messageIds.js';
 
 const user = (content, id) => ({ role: 'user', content, ...(id == null ? {} : { id }) });
 const reply = (content, id) => ({ role: 'assistant', content, ...(id == null ? {} : { id }) });
@@ -42,4 +42,45 @@ test('position is the last resort and only when both lists line up', () => {
   assert.equal(findSavedMessage(saved, user('Hi Ethan'), 1, 2), null);     // wrong role at that position
   assert.equal(findSavedMessage([], reply('x'), 0, 1), null);
   assert.equal(findSavedMessage(saved, null, 0, 2), null);
+});
+
+// 2026-11-16, found while checking the Retry button: the sixteenth message of a chat was a reply stopped
+// before it had any text or id. An earlier reply (row 8) had been stopped the same way, so "same role,
+// same text" matched it, and Regenerate sent DELETE …/messages?from_id=8: every later turn was removed on
+// the server while the screen still showed them.
+const longChat = () => [
+  user('one', 1), reply('first answer', 2), user('two', 3), reply('second answer', 4),
+  user('three', 5), reply('third answer', 6), user('harbour', 7), reply('', 8),
+  user('four', 9), reply('ok', 10), user('five', 11), reply('fine', 12),
+  user('six', 13), reply('partly written', 14),
+];
+
+test('retrying a reply stopped before any text does not delete an earlier empty reply and the turns after it', () => {
+  const saved = [...longChat(), user('mountain hut', 15)];             // the stopped reply was never saved
+  const onScreen = [...longChat(), user('mountain hut'), reply('')];   // Stop came before the ids arrived
+  assert.equal(findSavedMessage(saved, onScreen[15], 15, onScreen.length, onScreen), null);   // was: row 8
+  assert.equal(findSavedMessage(saved, onScreen[14], 14, onScreen.length, onScreen), 15);
+  // The server did save the empty reply: that row, never the earlier one.
+  const withRow = [...saved, reply('', 16)];
+  assert.equal(findSavedMessage(withRow, onScreen[15], 15, onScreen.length, onScreen), 16);
+});
+
+test('a saved row that another message on screen already is can never be chosen', () => {
+  const saved = [user('yes', 1), reply('', 2), user('yes', 3)];
+  const onScreen = [user('yes', 1), reply('', 2), user('yes', 3), reply('')];
+  assert.equal(findSavedMessage(saved, onScreen[3], 3, onScreen.length, onScreen), null);     // row 2 is message 1
+  assert.deepEqual(savedRange(saved, onScreen, 3), { after: 2, before: 3 });
+  assert.deepEqual(savedRange(saved, onScreen, 1), { after: 0, before: 2 });
+  assert.deepEqual(savedRange(saved, null, 1), { after: -1, before: 3 });
+});
+
+test('a reply the server saved with its own note is still found when it is the only one it can be', () => {
+  // On screen: a greeting that was never saved (the lists do not line up) and a stopped reply with no text.
+  const saved = [user('q', 1), reply('a', 2), user('again', 3), reply('_[interrupted: stopped]_', 4)];
+  const onScreen = [reply('Hello, I am Sage.'), user('q', 1), reply('a', 2), user('again'), reply('')];
+  assert.equal(findSavedMessage(saved, onScreen[4], 4, onScreen.length, onScreen), 4);
+  assert.equal(findSavedMessage(saved, onScreen[3], 3, onScreen.length, onScreen), 3);
+  // Two replies without an id in that stretch: it cannot be told which one the row is.
+  const twoReplies = [user('q', 1), reply('a', 2), user('again'), reply('x'), reply('')];
+  assert.equal(findSavedMessage(saved, twoReplies[4], 4, twoReplies.length + 1, twoReplies), null);
 });

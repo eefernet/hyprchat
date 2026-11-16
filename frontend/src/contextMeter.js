@@ -6,6 +6,9 @@
 //   parts    the same tokens by category, when the server sent a split (contextBreakdown.js draws it):
 //            while a reply runs they add up to used + working, afterwards to used
 //   peak     { total, parts } of the fullest moment of the last reply
+//   model    the model that wrote the reply the reading came from, and
+//   asked    the context size the chat was set to then: when either no longer matches the chat, the
+//            window above is not the one the next reply will get (forDisplay)
 //
 // The server works these out (backend/chat_context.py) and saves the final reading on each reply as
 // metadata.context. This file restores it when a chat opens, keeps it sensible between events, and never
@@ -37,11 +40,15 @@ const split = context => ({
   ...(isSplit(context?.peak) && isSplit(context.peak.parts) ? { peak: context.peak } : {}),
 });
 const without = (reading, ...keys) => { const copy = { ...reading }; keys.forEach(key => delete copy[key]); return copy; };
+// What a reading was taken with, only when known (readings are compared key by key in the tests).
+const takenWith = (model, asked) => ({ ...(model ? { model: String(model) } : {}), ...(number(asked) ? { asked: number(asked) } : {}) });
+// The request of the reply did not fit the window: how many tokens it needed (backend/chat_overflow.py).
+const cut = context => (number(context?.overflow) ? { overflow: number(context.overflow) } : {});
 
 function saved(message) {
   const context = meta(message).context;
   if (context && number(context.used)) {
-    return { used: number(context.used), working: 0, window: number(context.window), measured: !!context.measured, ratio: Number(context.ratio) || DEFAULT_RATIO, fixed: number(context.fixed), ...split(context) };
+    return { used: number(context.used), working: 0, window: number(context.window), measured: !!context.measured, ratio: Number(context.ratio) || DEFAULT_RATIO, fixed: number(context.fixed), ...split(context), ...takenWith(meta(message).model, context.asked), ...cut(context) };
   }
   // Replies saved before readings existed still carry each model call's real counts.
   const first = (meta(message).usage_calls || [])[0];
@@ -86,7 +93,53 @@ export function applyUpdate(reading, event) {
 export function settle(reading, context) {
   // Without a final reading (a stopped reply) the split still describes the moment it stopped: drop it.
   if (!context || !number(context.used)) return reading ? { ...without(reading, 'parts', 'peak'), working: 0 } : reading;
-  return { used: number(context.used), working: 0, window: number(context.window) || reading?.window || 0, measured: !!context.measured, ratio: Number(context.ratio) || reading?.ratio || DEFAULT_RATIO, fixed: number(context.fixed) || reading?.fixed || 0, ...split(context) };
+  return { used: number(context.used), working: 0, window: number(context.window) || reading?.window || 0, measured: !!context.measured, ratio: Number(context.ratio) || reading?.ratio || DEFAULT_RATIO, fixed: number(context.fixed) || reading?.fixed || 0, ...split(context), ...takenWith(reading?.model, context.asked || reading?.asked), ...cut(context) };
+}
+
+// The window a chat's next reply will get: the per-model setting, else the default, and never more than
+// the model's own limit (0 = not known; backend/model_limits.py). One rule for the pill and the request:
+// they used to read the per-model setting differently, so an unreadable value gave the pill no window.
+export function chatWindow(perModel, fallback, limit = 0) {
+  const own = perModel === undefined || perModel === null || perModel === '' || perModel === 'default' ? NaN : parseFloat(perModel);
+  const asked = number(Number.isFinite(own) && own > 0 ? own : fallback);
+  return { asked, window: number(limit) && asked ? Math.min(asked, number(limit)) : asked };
+}
+
+// A reading describes the reply it came from. Once the chat is switched to another model, or its context
+// size is changed, the next reply runs in a different window (the pill kept showing the old one, also
+// after a switch to a cloud model whose window is not known at all).
+export function staleWindow(reading, expect) {
+  if (!reading || !expect) return false;
+  if (reading.model && expect.model && expect.model !== 'auto' && reading.model !== expect.model) return true;
+  return !!(reading.asked && expect.asked && reading.asked !== expect.asked);
+}
+
+// What the pill and the breakdown draw: the reading, without a window that no longer applies.
+export const forDisplay = (reading, expect) => (staleWindow(reading, expect) ? { ...reading, window: 0 } : reading);
+
+// A reply is about to run with this model and context size: the reading is now about that.
+export function forRequest(reading, expect) {
+  if (!reading) return reading;
+  return { ...forDisplay(reading, expect), ...takenWith(expect?.model || reading.model, expect?.asked || reading.asked) };
+}
+
+// What to keep on the browser's own copy of a reply that ended without a final reading (stopped, or the
+// connection was lost): enough for the next send to start from it instead of from a guess that leaves
+// out the instructions and tools (the pill dipped by about 3k tokens until the first count arrived).
+export function keptReading(reading) {
+  if (!reading || !number(reading.used)) return null;
+  return { used: number(reading.used), window: number(reading.window), measured: false, ratio: Number(reading.ratio) || DEFAULT_RATIO, ...(number(reading.fixed) ? { fixed: number(reading.fixed) } : {}), ...(number(reading.asked) ? { asked: number(reading.asked) } : {}) };
+}
+
+// Tokens per second while a reply streams, from the stream's own running count of generated tokens.
+// `previous` is the sample returned last time; a count that went down is a new model call starting over.
+export function liveSpeed(previous, tokens, now) {
+  const count = number(tokens);
+  if (!previous || count < previous.tokens) return { at: now, tokens: count, speed: 0 };
+  const seconds = (now - previous.at) / 1000;
+  if (seconds < 1) return previous;
+  const speed = (count - previous.tokens) / seconds;
+  return { at: now, tokens: count, speed: speed >= 10 ? Math.round(speed) : Math.round(speed * 10) / 10 };
 }
 
 // `context_compacted`: earlier messages were summarized, so the conversation really is smaller now.
@@ -141,7 +194,9 @@ export function meterView(reading, fallbackWindow = 0, compactPercent = 0) {
   const fixed = reading?.fixed || 0;
   if (fixed) parts.push(`Instructions and tools, sent every turn: ${fixed.toLocaleString()}`);
   const { room, tight } = fixed ? roomLeft(window, fixed) : { room: 0, tight: false };
-  const warning = tight ? `Only about ${room.toLocaleString()} tokens are left for the conversation and replies. Replies will be cut off: raise the context size in Settings.` : '';
+  const warning = number(reading?.overflow)
+    ? `The last request needed about ${number(reading.overflow).toLocaleString()} tokens and did not fit: the model read only part of it.`
+    : tight ? `Only about ${room.toLocaleString()} tokens are left for the conversation and replies. Replies will be cut off: raise the context size in Settings.` : '';
   if (warning) parts.unshift(warning);
   const { limit } = compactionLimit(window, compactPercent);
   if (limit) parts.push(`Auto-compaction at ${limit.toLocaleString()} tokens`);

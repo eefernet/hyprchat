@@ -1518,7 +1518,7 @@ async def patch_message_presentation(conversation_id, message_id, *, content=Non
             metadata = {**previous, **metadata}
             if previous.get('server_persists'):
                 for key in ('server_persists','in_progress','delivery_status','review_history','effort',
-                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens','context','model','truncated','round_limit',
+                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens','context','model','truncated','round_limit','overflow',
                             'run_ids','run_roles','run_types','has_full_product_build'):
                     if key in previous:
                         metadata[key] = previous[key]
@@ -4249,33 +4249,18 @@ async def build_global_memory_context(*, query: str = "", max_chars: int = 4200)
     finally:
         await db.close()
 
+    # All of them in a fixed order when they fit, so the block is the same text every turn and Ollama's
+    # cache keeps covering the chat that follows it (memory_selection.py).
+    import memory_selection
     q_tokens = _content_tokens(query)
-    scored = []
-    for row in rows:
-        mem = _normalize_memory_row(row)
-        m_tokens = _content_tokens(mem.get("content") or "")
-        overlap = len(q_tokens & m_tokens)
-        score = (20 if mem.get("pinned") else 0) + int(mem.get("importance") or 3) * 4 + overlap * 6
-        scored.append((score, mem))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
     memory_ids = []
     grouped = {"semantic": [], "episodic": [], "procedural": []}
-    for _, mem in scored:
-        if remaining <= 500:
-            break
-        content = (mem.get("content") or "").strip()
-        if not content:
-            continue
-        prefix = "[pinned] " if mem.get("pinned") else ""
-        item = f"- {prefix}{content}"
-        if len(item) > remaining:
-            item = item[:remaining - 20] + "..."
+    for mem, item in memory_selection.choose(
+            [_normalize_memory_row(row) for row in rows], room=remaining - 500, cap=12,
+            overlap=lambda mem: len(q_tokens & _content_tokens(mem.get("content") or ""))):
         grouped.setdefault(mem.get("type") or "semantic", []).append(item)
         memory_ids.append(mem["id"])
         remaining -= len(item)
-        if len(memory_ids) >= 12:
-            break
 
     for typ, title in [("semantic", "Facts and Preferences"), ("episodic", "Past Events"), ("procedural", "Procedures")]:
         if grouped.get(typ):
@@ -4347,33 +4332,18 @@ async def build_workspace_memory_context(
     finally:
         await db.close()
 
+    # All of them in a fixed order when they fit, so the block is the same text every turn and Ollama's
+    # cache keeps covering the chat that follows it (memory_selection.py).
+    import memory_selection
     q_tokens = _content_tokens(query)
-    scored = []
-    for row in rows:
-        mem = _normalize_memory_row(row)
-        m_tokens = _content_tokens(mem.get("content") or "")
-        overlap = len(q_tokens & m_tokens)
-        score = (20 if mem.get("pinned") else 0) + int(mem.get("importance") or 3) * 4 + overlap * 6
-        scored.append((score, mem))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
     memory_ids = []
     grouped = {"semantic": [], "episodic": [], "procedural": []}
-    for _, mem in scored:
-        if remaining <= 500:
-            break
-        content = (mem.get("content") or "").strip()
-        if not content:
-            continue
-        prefix = "[pinned] " if mem.get("pinned") else ""
-        item = f"- {prefix}{content}"
-        if len(item) > remaining:
-            item = item[:remaining - 20] + "..."
+    for mem, item in memory_selection.choose(
+            [_normalize_memory_row(row) for row in rows], room=remaining - 500, cap=10,
+            overlap=lambda mem: len(q_tokens & _content_tokens(mem.get("content") or ""))):
         grouped.setdefault(mem.get("type") or "semantic", []).append(item)
         memory_ids.append(mem["id"])
         remaining -= len(item)
-        if len(memory_ids) >= 10:
-            break
 
     for typ, title in [("semantic", "Facts and Preferences"), ("episodic", "Past Decisions and Events"), ("procedural", "Procedures")]:
         if grouped.get(typ):

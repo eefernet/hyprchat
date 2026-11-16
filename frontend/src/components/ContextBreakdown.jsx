@@ -1,10 +1,12 @@
 import React from 'react';
 import { breakdownView, percentText } from '../contextBreakdown.js';
 import { formatTokens } from '../contextMeter.js';
+import { anyAction } from '../contextActions.js';
+import ContextActions from './ContextActions.jsx';
 
 // What the context pill opens: a segmented bar and one row per category, then where auto-compaction
 // fires and what the last reply held at its fullest. Pure display; ContextMeter owns opening and placing.
-export default function ContextBreakdown({ reading, fallbackWindow, compactPercent, live, onInspect }) {
+export default function ContextBreakdown({ reading, fallbackWindow, compactPercent, live, onInspect, actions }) {
   const view = breakdownView(reading, { fallbackWindow, compactPercent, live });
   const count = value => Math.round(value).toLocaleString();
   const dropped = view.peak?.rows.map(row => `${formatTokens(row.tokens)} of ${row.label.toLowerCase()}`).join(' and ');
@@ -43,6 +45,7 @@ export default function ContextBreakdown({ reading, fallbackWindow, compactPerce
       {view.estimate && !view.empty && <div>An estimate until the model reports its own count.</div>}
       {!view.legacy && <div>Totals are the model's own counts. The split between rows is an estimate.</div>}
     </div>
+    {anyAction(actions?.available) && <ContextActions {...actions}/>}
     {onInspect && <button type="button" className="hc-ctx-link" onClick={onInspect}>See what was sent with the last reply</button>}
   </>;
 }

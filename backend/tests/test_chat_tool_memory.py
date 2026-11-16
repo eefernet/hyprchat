@@ -418,7 +418,7 @@ def test_tool_results_of_a_reply_are_sent_again_on_the_next_turn(loop):
         before = len(loop.calls)
         await loop.turn(as_history(saved) + [{'role': 'user', 'content': 'What was the number?'}], turn='new')
         request = loop.calls[before]
-        asked = next(m for m in request['messages'] if m['role'] == 'user' and m['content'].startswith('Find the number'))
+        asked = next(m for m in request['messages'] if m['role'] == 'user' and 'Find the number' in m['content'].split('\n')[1 if m['content'].startswith('[') else 0])     # after its time line (chat_times.py)
         assert memory.OPEN in asked['content'] and 'the secret number is 4711' in asked['content']
         assert '#1 execute_code: Find the number (ok)' in asked['content'] and 'print(4711)' in asked['content']
         # No extra messages: the record rides on the message that asked, so compaction still finds the history.

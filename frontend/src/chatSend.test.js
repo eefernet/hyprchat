@@ -57,6 +57,9 @@ function setup(overrides = {}) {
     fetch: async () => staged(),
     ...overrides,
   };
+  // send() reads the box through the drafts hook (chatDrafts.js); here that is the context's own inp/attachments.
+  calls.adopted = [];
+  context.chatDrafts = { get text() { return context.inp; }, get attachments() { return context.attachments; }, adopt: id => calls.adopted.push(id) };
   vm.createContext(context);
   context.cancelSendPreparation = handler('cancelSendPreparation', context);
   vm.runInContext(fs.readFileSync(new URL('./api.js',import.meta.url),'utf8').replace(/^import .*$/m,'').replace('export async function','async function'),context);
@@ -214,4 +217,48 @@ test('workspace repeated clicks create once and late navigation never activates 
   assert.equal(await first,null);
   assert.equal(creates,1);assert.equal(context.actId,'conv-1');
   assert.equal(context.chatCreationBusy.current,false);
+});
+
+// ── A queued message (messageQueue.js) ─────────────────────────────────────────
+
+test('a queued message is sent from the queue and leaves the box alone', async () => {
+  const {context, calls, send} = setup({inp: 'still typing this', attachments: []});
+  let accepted = 0;
+  await send({queueId: 'q1', chatId: 'conv-1', text: 'queued earlier', attachments: [], accepted: () => { accepted++; }});
+  assert.equal(calls.sent.length, 1);
+  assert.equal(calls.sent[0][2], 'queued earlier');
+  assert.equal(calls.sent[0][3].fromQueue, true);
+  assert.equal(accepted, 1);
+  assert.equal(context.inp, 'still typing this');           // what is in the box now is not the queued message
+});
+
+test('a queued message is not sent into a different chat', async () => {
+  const {calls, send} = setup({inp: '', attachments: []});
+  let accepted = 0;
+  await send({queueId: 'q1', chatId: 'conv-other', text: 'queued in another chat', attachments: [], accepted: () => { accepted++; }});
+  assert.equal(calls.sent.length, 0);
+  assert.equal(accepted, 0);
+});
+
+test('a queued message that fails to upload is not reported as sent', async () => {
+  const {calls, send} = setup({inp: '', attachments: [], fetch: async () => ({ok: false, status: 500, json: async () => ({detail: 'sandbox down'})})});
+  let accepted = 0;
+  await send({queueId: 'q1', chatId: 'conv-1', text: 'with a file', attachments: [attachment()], accepted: () => { accepted++; }});
+  assert.equal(calls.sent.length, 0);
+  assert.equal(accepted, 0);                                  // it stays in the queue
+});
+
+test('the Send button\'s click event is not mistaken for a queued message', async () => {
+  const {context, calls, send} = setup({inp: 'typed in the box', attachments: []});
+  await send({type: 'click', target: {}});
+  assert.equal(calls.sent.length, 1);
+  assert.equal(calls.sent[0][2], 'typed in the box');
+  assert.equal(context.inp, '');
+});
+
+test('the first send of a new chat takes its draft with it', async () => {
+  const {calls, send} = setup({actId: null, inp: 'first message of a new chat', attachments: [], convs: [],
+    fetch: async () => ({ok: true, json: async () => ({id: 'conv-new', title: 'New Chat', messages: []})})});
+  await send();
+  assert.ok(calls.adopted.length >= 1, 'the draft was moved to the new chat');
 });

@@ -36,19 +36,20 @@ export default function SidePane({previewFile,previewContent,previewError,previe
     {!isMobile&&<div onMouseDown={startDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
     {bench&&workbench.kind==='daedalus'
       ?<DaedalusWorkbench key={workbench.job?.id} job={workbench.job} tab={workbench.tab} t={t} font={font} md={md} onOpenArtifact={onOpenArtifact} onClose={close}/>
+      :bench
+      // A chat HTML preview draws its own header and runs edge to edge (HtmlLivePreview.jsx).
+      ?<HtmlLivePreview html={workbench.html} font={font} onClose={close}/>
       :<>
         <div style={{padding:"9px 12px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}F5`}}>
-          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{bench?workbench.html?.title||'Preview':previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
-          {bench?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>live</span>
-            :<><span style={{fontSize:"var(--hc-text-secondary)",color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
-            {previewFile.isExternal
-              ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
-              :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}</>}
+          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
+          <span style={{fontSize:"var(--hc-text-secondary)",color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
+          {previewFile.isExternal
+            ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
+            :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}
           <button onClick={close} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1,display:"flex"}}><IC.X/></button>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:14,display:"flex",flexDirection:"column"}}>
-          {bench?<HtmlLivePreview html={workbench.html} font={font}/>
-            :<FilePreviewBody previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onRevision={onRevision} t={t} font={font} md={md} codeFont={codeFont} evts={evts}/>}
+          <FilePreviewBody previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onRevision={onRevision} t={t} font={font} md={md} codeFont={codeFont} evts={evts}/>
         </div>
       </>}
   </div>;

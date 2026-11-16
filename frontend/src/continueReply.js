@@ -34,6 +34,14 @@ export function continueKind(message, isLast) {
   return roundLimit(meta) ? 'rounds' : '';
 }
 
+// A reply that failed or was stopped with nothing to carry on from: only writing it again helps. It used
+// to show nothing at all; Regenerate was in the toolbar that appears on hover.
+export function needsRetry(message, isLast) {
+  if (!isLast || !message || message.role !== 'assistant' || message.isS || continueKind(message, isLast)) return false;
+  const status = message._activityStatus || metadataOf(message).delivery_status || '';
+  return ['stopped', 'interrupted', 'failed'].includes(status);
+}
+
 // How many tool rounds the reply used when it ran out, or 0. Replies saved before 2026-11-15 only say
 // that they ran out (`max_rounds_reached`) and which round they were on.
 export function roundLimit(meta) {
@@ -50,6 +58,7 @@ export function cutOffLine(kind, meta) {
     const limit = roundLimit(meta);
     return limit ? `This reply stopped at the limit of ${limit} tool rounds.` : 'This reply stopped at the tool round limit.';
   }
+  if (kind === 'retry') return 'This reply ended before anything was written.';
   return kind === 'length' ? 'This reply was cut off at the output limit.'
     : kind === 'interrupted' ? 'This reply stopped before it was finished.' : '';
 }
@@ -64,4 +73,17 @@ export function withFailureNote(full, error, savedNote) {
   if (!savedNote) return `${text}${text ? '\n\n' : ''}\`\`\`\n⚠ ${error}\n\`\`\``;
   if (!text.trim() || NO_RESPONSE.test(text) || !reason) return text;
   return `${text.replace(/\s+$/, '')}\n\n_[interrupted: ${reason}]_`;
+}
+
+// What to show when the server refuses a chat request outright. The reply used to carry the raw response
+// body, usually a line of JSON.
+export function requestError(status, body) {
+  let reason = String(body || '').trim();
+  try {
+    const detail = JSON.parse(reason)?.detail;
+    if (typeof detail === 'string') reason = detail;
+    else if (Array.isArray(detail)) reason = detail.map(item => item?.msg || '').filter(Boolean).join('; ') || reason;
+  } catch { /* not JSON: show the text itself */ }
+  reason = reason.replace(/\s+/g, ' ').slice(0, 300);
+  return reason ? `${reason} (HTTP ${status})` : `The server refused the request (HTTP ${status})`;
 }

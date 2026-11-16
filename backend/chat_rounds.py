@@ -14,6 +14,7 @@ import json
 import time
 
 import chat_context
+import chat_payload
 import config
 import model_providers
 
@@ -35,6 +36,8 @@ SILENT = (
     "Do not repeat text you already wrote in this reply."
 )
 NOTICE = "_[The tool rounds ran out before a final answer was written.]_"
+LOW_ROUNDS = 3            # the model is told when this many tool rounds are left
+LOW_CONTEXT = 0.8         # ...and once when the window is this far towards the point where room is made
 SILENCE_SECONDS = 15
 
 
@@ -48,6 +51,34 @@ def limit(*, daedalus: bool) -> int:
     """Rounds for this reply. Daedalus coding chats keep their own number (they hand work to jobs)."""
     source, fallback = (config.MAX_AGENT_ROUNDS_CODER, 30) if daedalus else (config.MAX_AGENT_ROUNDS, DEFAULT)
     return config.coerce_int(source, fallback, minimum=1, maximum=MAXIMUM)
+
+
+class BudgetNotes:
+    """What to tell the model about its own limits while it works with tools.
+
+    A reply that ran out of rounds, or filled the window, used to be stopped from outside: the model had
+    no way to know either limit was near. It is now told, in one bracketed line added after the newest
+    tool result: the end of the request, so nothing before it changes and the prompt cache holds.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = int(limit or 0)
+        self.context_said = False
+
+    def note(self, round_number: int, *, used: int = 0, window: int = 0, share: float = 0.92) -> str:
+        """The line to add before model call ``round_number`` (0-based), or ''. ``used`` and ``window`` are
+        in tokens; ``share`` is where room is made (chat_context.full_share)."""
+        said = []
+        left = self.limit - int(round_number)
+        if left == 1:
+            said.append("This is your last tool round for this reply: after it, write your answer.")
+        elif 1 < left <= LOW_ROUNDS:
+            said.append(f"{left} tool rounds are left for this reply. Finish the task, or write your answer.")
+        if window and not self.context_said and used >= window * share * LOW_CONTEXT:
+            self.context_said = True
+            said.append(f"The context window is about {round(100 * used / window)}% full. "
+                        "Finish with what you have, and avoid tool calls that return a lot of text.")
+        return f"[Note from HyprChat: {' '.join(said)}]" if said else ""
 
 
 def wrap_up_messages(messages: list, rounds: int, silent: bool = False) -> list:
@@ -167,7 +198,8 @@ async def wrap_up(*, http, provider: str, model: str, request_model: str, messag
     failure = ""
     try:
         if provider == "ollama":
-            payload = {"model": model, "messages": sent, "stream": True, "options": options, "keep_alive": "10m"}
+            payload = {"model": model, "messages": chat_payload.shape(model, sent), "stream": True,
+                       "options": options, "keep_alive": "10m"}
             if tools:
                 payload["tools"] = tools
             if think is not None:

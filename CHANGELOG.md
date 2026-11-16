@@ -28,6 +28,14 @@
 - **Runs say what they did** — each code run carries a few words from the model ("Clone the repository"); older replies use the first line of the code that says something. A run that printed nothing gets its line too.
 - **The Activity badge counts calls** — it showed "26 tools" for twelve code runs and a search, and briefly doubled the count right after a reply.
 - **"continue" no longer searches the web first** — a bare "continue" or "keep going" ran a web search about the earlier topic before carrying on.
+- **Type while it answers** — the message box stays usable while a reply is being written. Enter (or the Queue button beside Stop) puts your message in a list above the box, and each one is sent when the reply before it finishes. Click a queued message to put it back in the box; ✕ removes it.
+- **The queue waits when something went wrong** — after Stop, a failure, a lost connection, the tool-round limit, a reply cut by the output limit, a reply that started a coding job, or a reply that finished while you were in another chat, nothing is sent by itself: the list says why and has a **Send now** button. Queued messages are never sent after a reload; their text comes back as that chat's draft.
+- **Drafts stay with their chat** — what you typed, and the files you attached, used to follow you into whichever chat you opened. Each chat now keeps its own draft, and the text survives a reload (attachments do not; Ghost chat drafts are never stored).
+- **Rename a chat, or have its title written again** — "Rename" and "Generate title" in the chat's menu.
+- **Retry** — a reply that failed or was stopped before anything was written shows "This reply ended before anything was written" with a Retry button.
+- **Copy your own messages** — a Copy button on the messages you sent.
+- **A roomier HTML preview** — the live preview of a page from a reply now has one header row: a status dot, the title, the width buttons (Fill / 768 / 390), the CDN / Strict switch, reload, download and close. The second toolbar row, the "live" badge and the note under the page are gone (the dot's tooltip says the page is sandboxed), and the page runs edge to edge and to the bottom of the pane. In a narrow pane the buttons move under the title.
+- **The preview is shown at real size** — the page is no longer scaled with the UI scale setting, so 768 and 390 are true widths. This is also meant to remove the white bar that showed beside the page at UI scales other than 14.
 
 ## Chat fixes
 
@@ -56,6 +64,15 @@
 - **Each reply shows the model that wrote it** — not the model the chat is set to now.
 - **Errors appear once, and always appear** — an error was sometimes shown twice; an unexpected failure used to end the reply with no message at all.
 - **Smaller chat fixes** — files that are not text are refused with a note instead of being sent as garbage; an empty edit of a reply is not saved; search cards from a replaced reply no longer stay on the new one; Continue is refused for a reply that belongs to another chat.
+- **Models that allow one system message work** — two installed Qwen3.8 builds failed every chat with "System message must be at the beginning". HyprChat now sends such a model its instructions as one message, and remembers which models need it.
+- **A lost connection is not a finished reply** — when the server restarts or the network drops in the middle of a reply, the reply is marked as stopped and offers Continue. It used to look complete, or end in a "network error" box.
+- **Replies survive a restart** — the text written so far is saved every few seconds, and replies left "running" by a restart are marked as stopped when the server starts, so they can be continued after a reload. They used to stay "running" forever, with no text.
+- **Editing a message keeps its PDF** — after an edit the bubble still showed the PDF, but the model no longer got its text.
+- **Edit boxes stay in their chat** — an edit box or regenerate menu left open in one chat appeared on the next chat you opened, and Save then edited that chat.
+- **Titles get a second chance** — a chat whose first reply was stopped, or whose title timed out, kept the first 40 characters of your message as its name. It is now tried again after the next reply.
+- **Refused requests are readable** — the server's message is shown instead of a line of JSON.
+- **Regenerate cannot remove the wrong messages** — for a reply that had been stopped before the server gave it an id, the saved copy was looked up by its (empty) text, and an earlier stopped reply could match: Regenerate then removed that reply and every turn after it on the server, while the screen still showed them. A saved message is now only looked for between its neighbours. Deleting such a message was affected the same way.
+- **A file still being read stays with its chat** — switching chats while a PDF was loading left a "loading" chip that blocked sending for good.
 
 ## Context
 
@@ -73,6 +90,16 @@
 - **Tool work counts while it happens** — while a reply runs, the pill's number is everything in the window right now, tool calls and results included. It no longer dips when a tool starts, and it rises as each result arrives. After the reply it shows what the conversation keeps, and the breakdown says how full the window got.
 - **A slimmer pill** — the number over a thin bar, green to amber to red as before, with a tick where auto-compaction fires.
 - **"Instructions and tools" no longer counts excerpts** — knowledge excerpts were counted both there and as this turn's working context.
+- **A model's own limit is respected** — some models have a smaller context window than the setting asks for (one installed model has 8,192 and was asked for 32,768). Ollama quietly ran it at 8,192 while HyprChat planned with 32,768, so such chats never compacted and silently lost their oldest messages. The chat now uses the model's real window everywhere, and the Model Manager says so under the context setting.
+- **The pill follows the model** — after switching a chat to another model, or changing the context size, the pill kept showing the previous window until the next reply.
+- **The pill settles when a reply stops** — after Stop, an error or a lost connection it stayed as it was mid-reply, and it dipped for a moment at the start of the next message (in Ghost chats on every message).
+- **Tokens per second while a reply is written** — the pill had a place for it that never showed.
+- **Memory no longer slows every message** — which memories were sent, and in what order, changed with every message. Because they sit near the top of the request, the model had to read the whole chat again each time. Measured on a 9,000-token chat: 1.1 to 1.4 seconds of reading per message before, 0.12 after. Memories are now sent in a fixed order, all of them when they fit.
+- **Smaller context fixes** — no pill in Council chats (it never updated there); the "earlier messages are summarized" line goes away when the summary does and shows the newest summary; with auto-compaction off, old messages are no longer dropped from cloud chats by the local setting, and a reply is never left without its question.
+- **A warning when a message does not fit** — a large PDF or paste in a small context window was cut by Ollama without a word, and the model answered from a fragment (measured: a message of twice the window was read as exactly half the window). A reply to such a request now says so underneath, with the size that was needed, and the pill turns red. Before you send, a line above the message box tells you when a draft and its attachments cannot fit.
+- **Compact now** — the context breakdown has a "Compact now" button that summarizes the earlier messages at once instead of waiting for the limit, "Read the summary" to see what the chat is using in their place, and "Forget kept tool results" for chats that keep them.
+- **The model knows when it is running low** — when three or fewer tool rounds are left for a reply, or the context window is nearly full, the model is told in one line so it can finish by itself instead of being cut off.
+- **The model knows when you wrote** — each of your messages is sent with the time it was written and, after a long pause, how long it had been ("3 days after the previous message"), so the model can answer questions about time and tell today's messages from older ones. Nothing changes in what you see. Settings → Model & Generation → "Message Times" turns it off; it is not used in Ghost or coding chats.
 
 </details>
 

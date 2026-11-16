@@ -5,6 +5,7 @@
 // keeps. Totals are the model's own counts; the split between rows is an estimate scaled to that total.
 
 import { compactionLimit, roomLeft } from './contextMeter.js';
+import { overflowWarning } from './contextFit.js';
 
 // In the order they are listed. `kept: false` rows are in the window for this turn or this reply only.
 export const CATEGORIES = [
@@ -82,7 +83,7 @@ export function breakdownView(reading, { fallbackWindow = 0, compactPercent = 0,
     rows, free, freeShare: window > 0 ? free / window : 0, freeColor: FREE_COLOR,
     legacy: !parts, estimate: !!reading && !reading.measured, empty: !reading,
     compactAt: limit, compactPercent: limit ? compactPercent : 0, capped,
-    warning: tight ? `Only about ${room.toLocaleString()} tokens are left for the conversation and replies. Raise the context size in Settings.` : '',
+    warning: overflowWarning(reading?.overflow) || (tight ? `Only about ${room.toLocaleString()} tokens are left for the conversation and replies. Raise the context size in Settings.` : ''),
     peak,
   };
 }

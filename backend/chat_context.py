@@ -29,6 +29,7 @@ import json
 
 import httpx
 
+import chat_payload
 import config
 import context_policy
 import database as db
@@ -108,6 +109,9 @@ class TurnMeter:
         self.first_parts = None   # the first request by category, real tokens
         self.peak_parts = None    # the fullest moment of the reply by category
         self.kept_units = 0       # this reply's tool record, sent again next turn (chat_tool_memory.py)
+        self.loaded = 0           # the window Ollama reported for the loaded model, once known
+        self.asked = 0            # the window the chat asked for (more than a small model has)
+        self.over = 0             # tokens the request needed when it did not fit the window (chat_overflow.py)
 
     def begin(self, prior: str) -> None:
         """Text the reply already had (continue mode). It is in the prompt, so it must not be counted twice."""
@@ -115,7 +119,11 @@ class TurnMeter:
 
     def info(self, event: dict) -> None:
         """``context_info``: sent before every model call with the window and the request's estimated size."""
-        self.window = int(event.get("loaded_window") or event.get("window") or self.window or 0)
+        # What Ollama loaded is the truth for the rest of the reply. The next round's event used to put
+        # the asked-for number back, so a reply with several model calls saved the wrong window.
+        self.loaded = int(event.get("loaded_window") or 0) or self.loaded
+        self.window = self.loaded or int(event.get("window") or self.window or 0)
+        self.asked = int(event.get("asked") or 0) or self.asked
         size = int(event.get("prompt_estimate") or 0)
         if not self.measured and int(event.get("round") or 0) == 0 and size:
             self.ratio = ratio_of(float(event.get("ratio") or 0), 1.0, self.ratio)
@@ -177,6 +185,13 @@ class TurnMeter:
         if self.measured:
             self.base = max(0, self.base - int(freed or 0))
 
+    def overflowed(self, event: dict) -> None:
+        """``context_overflow``: the model read only part of the request, so its count says nothing about
+        what the conversation holds. The reading shows what was needed, and the token rate that the cut
+        count produced (far too low) is put back."""
+        self.over = max(0, int(event.get("needed") or 0))
+        self.ratio = ratio_of(float(event.get("ratio") or 0), 1.0, DEFAULT_RATIO)
+
     def keep(self, event: dict) -> None:
         """``context_kept``: the size of the record of this reply's tool calls, as the next turn will get it."""
         self.kept_units = max(0, int(event.get("estimate") or 0))
@@ -188,7 +203,8 @@ class TurnMeter:
         text = visible or ""
         if self.prior and text.startswith(self.prior):
             text = text[len(self.prior):]
-        return self.base + self.kept_tools() + (round(estimate(text) * self.ratio) if text else 0)
+        held = self.base + self.kept_tools() + (round(estimate(text) * self.ratio) if text else 0)
+        return max(held, self.over)      # a request that was cut holds what it needed, not what was read
 
     def live(self, event: dict, visible: str) -> dict:
         """A ``ctx_update`` with what the browser shows added to it."""
@@ -231,6 +247,11 @@ class TurnMeter:
         kept = self.kept(visible)
         out = {"used": kept, "working_peak": max(0, self.peak - kept), "window": self.window,
                "measured": self.measured, "ratio": round(self.ratio, 3), "fixed": self.fixed()}
+        if self.asked:      # what the chat was set to; the browser compares it with the setting now
+            out["asked"] = self.asked
+        if self.over:       # the request did not fit: no split of a figure the model never read
+            out["overflow"] = self.over
+            return out
         try:
             import context_breakdown
             # This reply's own tool record is known exactly: split the rest, then add it to its row. (Taking
@@ -426,7 +447,7 @@ async def _chat_model_summary(http, model, options, tools, prefix, words) -> str
     """Ask the chat model itself, with the same prompt prefix the last turn used, so Ollama's cache covers
     the part being summarized and no second model is loaded. Streams, so Stop aborts the runner."""
     payload = {"model": model, "stream": True, "think": False, "keep_alive": "10m",
-               "messages": [*prefix, {"role": "user", "content": INSTRUCTION.format(words=words)}],
+               "messages": chat_payload.shape(model, [*prefix, {"role": "user", "content": INSTRUCTION.format(words=words)}]),
                "options": {**options, "temperature": 0.2, "num_predict": words * 2 + 200}}
     if tools:
         payload["tools"] = tools

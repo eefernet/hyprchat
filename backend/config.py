@@ -204,6 +204,8 @@ CONTEXT_COMPACTION = os.getenv("CONTEXT_COMPACTION", "off")
 CHAT_COMPACTION_PERCENT = os.getenv("CHAT_COMPACTION_PERCENT", "85")
 # Keep what a reply's tools returned for later turns of the chat (chat_tool_memory.py).
 CHAT_TOOL_MEMORY = "on" if os.getenv("CHAT_TOOL_MEMORY", "on").lower() in {"1", "true", "on", "yes"} else "off"
+# Tell the model when each message was written (chat_times.py).
+CHAT_TIME_NOTES = "on" if os.getenv("CHAT_TIME_NOTES", "on").lower() in {"1", "true", "on", "yes"} else "off"
 # Chat-history recall: global kill-switch for indexing/searching past turns.
 # ANDs with the per-conversation memory toggle — turns are only ever indexed
 # from conversations where the user enabled memory.

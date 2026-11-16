@@ -1,6 +1,6 @@
 import React, { useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { compactionLimit, formatTokens, meterView } from '../contextMeter.js';
+import { compactionLimit, forDisplay, formatTokens, meterView } from '../contextMeter.js';
 import useAnchoredPopover from '../useAnchoredPopover.js';
 import useFocusScope from '../useFocusScope.js';
 import usePresence from '../usePresence.js';
@@ -11,7 +11,9 @@ import './contextMeter.css';
 // now (the conversation plus this reply's tool calls, results and excerpts); when it ends, what the
 // conversation keeps. The bar's solid part is the conversation, the lighter part this reply's working
 // context, and the tick is where auto-compaction fires. Click it for the breakdown.
-export default function ContextMeter({ reading, fallbackWindow, compactPercent, live, speed, onInspect }) {
+export default function ContextMeter({ reading: taken, expect, fallbackWindow, compactPercent, live, speed, onInspect, actions }) {
+  // A window read from another model or another context size is not the one the next reply gets.
+  const reading = live ? taken : forDisplay(taken, expect);
   const [open, setOpen] = useState(false);
   const trigger = useRef(null), id = useId();
   const presence = usePresence(open);
@@ -39,7 +41,7 @@ export default function ContextMeter({ reading, fallbackWindow, compactPercent, 
     </button>
     {presence.mounted && createPortal(<div ref={panel} id={id} role="dialog" aria-label="What is using the context window" tabIndex={-1}
       className="hc-popover hc-pop hc-ctx-pop" data-placement={position.up ? 'top' : 'bottom'} data-align="end" {...presence.props} style={position.style}>
-      <ContextBreakdown reading={reading} fallbackWindow={fallbackWindow} compactPercent={compactPercent} live={live}
+      <ContextBreakdown reading={reading} fallbackWindow={fallbackWindow} compactPercent={compactPercent} live={live} actions={actions}
         onInspect={onInspect ? () => { close(false); onInspect(); } : null}/>
     </div>, document.body)}
   </>;

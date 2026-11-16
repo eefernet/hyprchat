@@ -9,6 +9,10 @@ import database as db
 
 
 _SAVES: set = set()     # final saves still running after their request was cancelled
+# How often the reply written so far is saved while it streams. When the service stops in the middle of a
+# reply (a deploy, a crash) the final save does not run: checked 2026-11-15 with a graceful stop, the row
+# was left "running" with no text at all, so after a reload there was nothing to continue.
+PARTIAL_SAVE_SECONDS = 5
 
 
 def sse(payload):
@@ -35,6 +39,8 @@ async def deliver(stream, req):
     model = getattr(req, 'model', '') or ''
     truncated = False
     round_limit = 0      # the reply used every tool round it had (chat_rounds.py)
+    saved_at = time.monotonic()
+    overflow = None      # {needed, window} when the model read only part of this request
 
     async def save(status):
         if message_id is not None and not ephemeral:
@@ -47,6 +53,7 @@ async def deliver(stream, req):
                 'total_prompt_tokens': sum(c.get('prompt_tokens', 0) for c in calls),
                 'total_gen_tokens': sum(c.get('gen_tokens', 0) for c in calls),
                 **({'context': reading} if (reading := meter.reading(visible)) else {}),
+                **({'overflow': overflow} if overflow else {}),
             })
 
     try:
@@ -79,6 +86,9 @@ async def deliver(stream, req):
                 event = meter.live(event, visible)
             elif kind == 'context_compacted':
                 meter.compacted(event)
+            elif kind == 'context_overflow':                  # the request did not fit the window (chat_overflow.py)
+                meter.overflowed(event)
+                overflow = {'needed': int(event.get('needed') or 0), 'window': int(event.get('window') or 0)}
             elif kind == 'context_kept':                      # this reply's tool record grew (chat_tool_memory.py)
                 meter.keep(event)
                 continue
@@ -103,6 +113,12 @@ async def deliver(stream, req):
                     candidate += event.get('content', '')
                     continue
                 visible += event.get('content', '')
+                if time.monotonic() - saved_at >= PARTIAL_SAVE_SECONDS:
+                    saved_at = time.monotonic()
+                    try:
+                        await save('running')
+                    except Exception as error:      # a missed partial save must not fail the reply
+                        print(f"[CHAT] partial reply not saved (non-fatal): {error}")
             elif kind == 'clear':
                 if reviewing:
                     candidate = '' if event.get('all') else candidate[:candidate_start]
@@ -126,6 +142,9 @@ async def deliver(stream, req):
                 if reviewing:
                     candidate = ''
                     yield sse({'type': 'replace', 'content': visible})
+                # The saved reading, as `done` carries it: without it the browser's pill stayed mid-reply.
+                if (reading := meter.reading(visible)):
+                    event['context'] = reading
                 await save('failed')
                 terminal = True
             elif kind == 'done':
@@ -146,6 +165,8 @@ async def deliver(stream, req):
                 event['total_gen_tokens'] = sum(c.get('gen_tokens', 0) for c in calls)
                 if (reading := meter.reading(visible)):
                     event['context'] = reading
+                if overflow:
+                    event['overflow'] = overflow
                 await save('completed')
                 terminal = True
             yield sse(event)
@@ -162,7 +183,8 @@ async def deliver(stream, req):
                     yield sse({'type': 'token', 'content': visible})
             await save('failed')
             terminal = True
-            yield sse({'type': 'error', 'error': reason, 'saved_note': True})
+            yield sse({'type': 'error', 'error': reason, 'saved_note': True,
+                       **({'context': reading} if (reading := meter.reading(visible)) else {})})
     finally:
         try:
             await stream.aclose()
