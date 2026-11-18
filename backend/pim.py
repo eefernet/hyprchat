@@ -112,6 +112,39 @@ async def update_event(event_id: str, fields: dict, user_id: str | None = None) 
     return updated
 
 
+def rearm_note_reminder(note: dict, fields: dict) -> dict:
+    """``fields`` with ``reminded`` cleared when the edit changes WHEN the note reminds.
+
+    A note reminds at ``remind_at``, or at ``due_at`` when it has no reminder time. Re-arming on every save
+    that merely carried the reminder field re-fired an old reminder after a title edit; never re-arming on
+    a due-date change left a todo that was moved to next week silent.
+    """
+    def trigger(source):
+        return source.get("remind_at") or source.get("due_at") or None
+    after = {**{k: note.get(k) for k in ("remind_at", "due_at")}, **{k: fields[k] for k in ("remind_at", "due_at") if k in fields}}
+    fields = {k: v for k, v in fields.items() if k != "reminded"}
+    if trigger(after) and trigger(after) != trigger(note):
+        fields["reminded"] = False
+    return fields
+
+
+async def cancel_occurrence(event_id: str, recurrence_id: str, user_id: str | None = None) -> dict | None:
+    """Remove ONE occurrence of a repeating event; the series stays. Marks the row dirty for CalDAV."""
+    existing = await db.get_calendar_event(event_id, user_id=user_id)
+    if not existing:
+        return None
+    if existing.get("sync_state") == "conflict":
+        raise ValueError("Resolve the saved synchronization conflict before editing")
+    tz = await user_timezone(user_id)
+    from calendar_resources import edit_resource
+    resource_ics = edit_resource(existing, {"cancel_occurrence": True}, _tz(existing.get("timezone") or tz), recurrence_id)
+    updated = await db.update_calendar_event(event_id, {"resource_ics": resource_ics, "sync_state": "dirty"}, user_id=user_id,
+                                             expected_updated_at=existing["updated_at"])
+    if updated is None:
+        raise ValueError("Calendar event changed during editing; refresh before saving")
+    return updated
+
+
 async def delete_event(event_id: str, user_id: str | None = None) -> bool:
     """Tombstone synced events (remote delete happens on next sync); hard-delete
     purely local ones."""
@@ -131,7 +164,11 @@ async def delete_event(event_id: str, user_id: str | None = None) -> bool:
 async def reminder_scan() -> int:
     """Fire due note/event reminders. Cross-user select; per-row contextvar."""
     from calendar_resources import deliver_occurrence_reminders
-    fired = await deliver_occurrence_reminders()
+    try:
+        fired = await deliver_occurrence_reminders()
+    except Exception as error:                # recurring-event trouble never blocks note and event reminders
+        print(f"[PIM] recurring reminders failed: {type(error).__name__}: {error}")
+        fired = 0
     due = await db.due_reminders(datetime.utcnow().isoformat())
     for note in due["notes"]:
         token = db.set_current_user_id(note["user_id"])

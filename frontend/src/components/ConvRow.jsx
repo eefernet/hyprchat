@@ -43,7 +43,7 @@ export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,qu
       </div>
       <div className="conv-menu">
         <ActionMenu label={`Actions for ${title}`} compact items={[
-          {label:pinned?'Unpin':'Pin to top',onClick:on.pin},
+          ...(on.pin?[{label:pinned?'Unpin':'Pin to top',onClick:on.pin}]:[]),   // not for chats that are not saved: the server has nothing to pin
           {label:'Rename',onClick:on.startRename},
           ...(on.generateTitle?[{label:'Generate title',onClick:on.generateTitle}]:[]),
           {label:'Edit tags',onClick:on.toggleTags},

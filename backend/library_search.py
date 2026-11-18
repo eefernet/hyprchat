@@ -93,3 +93,34 @@ async def rebuild():
         await conn.commit()
         return {'status':'rebuilt'}
     finally: await conn.close()
+
+
+GROUP_POOL = 300
+
+
+async def search_grouped(query, *, kind='', workspace_id='', start='', end='', limit=50, offset=0):
+    """Search for the Library panel: one result per chat, with its best-matching message.
+
+    The index has one entry per message, so a chat that mentions the word in seven messages used to be
+    listed seven times. The best ``GROUP_POOL`` hits are grouped (a chat by its conversation, anything else
+    by itself); each result keeps the best hit's fields, so a click still opens that message, and carries
+    ``matches``, the number of hits it stands for. Paging is over the grouped results.
+    """
+    limit, offset = max(1, min(int(limit or 50), 100)), max(0, int(offset or 0))
+    rows = []
+    for start_at in range(0, GROUP_POOL, 100):
+        page = (await search(query, kind=kind, workspace_id=workspace_id, start=start, end=end,
+                             limit=100, offset=start_at))['results']
+        rows.extend(page)
+        if len(page) < 100:
+            break
+    groups = {}
+    for row in rows:
+        key = (row['kind'], row['parent_id'] if row['kind'] == 'chat' and row.get('parent_id') else row['source_id'])
+        if key in groups:
+            groups[key]['matches'] += 1
+        else:
+            groups[key] = {**row, 'matches': 1}
+    ordered = list(groups.values())
+    return {'results': ordered[offset:offset + limit], 'total': len(ordered)}
+

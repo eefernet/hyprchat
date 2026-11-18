@@ -6,6 +6,7 @@ import {apiJson} from '../api.js';
 import EmptyState from '../components/EmptyState.jsx';
 import Pager from '../components/Pager.jsx';
 import {Dots} from '../components/Spinner.jsx';
+import {fmtAnyToLocal} from '../datetime.js';
 export default function LibrarySearchPanel({t,inputS,btnS,onNavigate,state,setState,embedded=false,workspaceId='',active=true}){
   const {query,kind,workspace,start,end,offset}=state;
   const update=(key,value)=>setState(p=>({...p,[key]:value,offset:0,scroll:0}));
@@ -42,8 +43,9 @@ export default function LibrarySearchPanel({t,inputS,btnS,onNavigate,state,setSt
     {error&&<p role="alert" style={{color:t.err}}>{error}</p>}
     {loading&&<div className="hc-secondary" style={{display:'flex',gap:8,alignItems:'center'}}><Dots/> Searching…</div>}{!loading&&!error&&!results.length&&<EmptyState compact icon={<IC.Search/>} title={query?'No matching saved content':'Search saved content'} hint={query?'Try fewer words or reset the filters.':'Enter a search term to find chats, notes, reports and artifacts.'}/>}
     {!loading&&results.map(result=><button className="hc-workspace-card hc-search-result" key={result.kind+result.source_id} onClick={()=>onNavigate(result)}>
-      <strong>{result.title||'Untitled'}</strong><div className="hc-secondary">{result.kind} · {result.created_at}</div>
+      <strong>{result.title||'Untitled'}</strong><div className="hc-secondary">{result.kind} · {fmtAnyToLocal(result.created_at)}</div>
       <div style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{result.excerpt}</div>
+      {result.matches>1&&<div className="hc-secondary">+{result.matches-1} more {result.matches===2?'match':'matches'} in this {result.kind==='chat'?'chat':'item'}</div>}
     </button>)}
     <Pager page={Math.floor(offset/50)} pageSize={50} count={results.length} hasMore={results.length>=50} busy={loading} onPage={p=>setState(prev=>({...prev,offset:p*50,scroll:0}))} label="Search result pages"/>
   </section>;

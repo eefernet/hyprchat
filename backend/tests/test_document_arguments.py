@@ -48,6 +48,20 @@ def test_nested_validation_explains_field(fmt, content, path):
         validate_content(fmt, content)
 
 
+def test_worksheet_rows_may_be_blank_or_uneven():
+    """Found 2026-11-17: a budget sheet with a heading row and a blank spacer row was refused
+    ("rows[2] has an invalid number of items") because every row needed at least one cell."""
+    budget = {'sheets': [{'name': 'Budget', 'rows': [
+        ['Monthly budget'], [], ['Item', 'Planned', 'Actual'], ['Rent', 1200, 1200], ['Food', 400],
+        [], ['Total', '=SUM(B4:B5)', '=SUM(C4:C5)']]}]}
+    assert validate_content('xlsx', budget) == budget
+    # Word and slide tables still need cells in every row.
+    with pytest.raises(ValueError, match=r'rows\[1\] has 0 items; it needs 1 to'):
+        validate_content('docx', {'blocks': [{'type': 'table', 'rows': [['A'], []]}]})
+    with pytest.raises(ValueError, match=r'content\.sheets\[0\]\.rows has 0 items; it needs 1 to'):
+        validate_content('xlsx', {'sheets': [{'name': 'Empty', 'rows': []}]})
+
+
 def test_invalid_arguments_allow_one_correction_then_disable_only_that_tool():
     import json
     from document_tools import DOCUMENT_TOOLS, apply_argument_retry

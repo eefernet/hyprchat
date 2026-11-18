@@ -421,7 +421,10 @@ async def begin_turn(req, conv_id: str, *, ephemeral: bool = False, coder: bool 
     try:
         user_id = db.current_user_id()
         import skills_learning
-        skills_learning.cancel_pending(user_id)      # a new message wants the model slot more than a review does
+        # A new message from the USER wants the model slot more than a review does. A scheduled run is not
+        # that: a check-in firing a few seconds after a reply used to cancel the review of that reply.
+        if (getattr(req, "user_metadata", None) or {}).get("source") != "scheduled_task":
+            skills_learning.cancel_pending(user_id)
         if conv_id and not (ephemeral or coder or roleplay):
             config = await settings(user_id)
             if config["enabled"]:

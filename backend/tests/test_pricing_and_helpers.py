@@ -104,3 +104,14 @@ class TestKbUrlSlug:
 
     def test_length_cap(self):
         assert len(self.main._kb_url_slug("x" * 300)) <= 80
+
+    def test_page_title_entities_do_not_end_up_in_the_file_name(self):
+        # Found 2026-11-17: "highlights-nbsp-nbsp-google-…", "…-8212-python-…", "getting-started-mdash-…".
+        title = self.main._kb_url_title
+        slug = self.main._kb_url_slug
+        assert slug(title("Highlights &nbsp;|&nbsp; Google developer documentation style guide")) == \
+            "highlights-google-developer-documentation-style-guide"
+        assert slug(title("argparse &#8212; Python 3.15.2 documentation")) == "argparse-python-3-15-2-documentation"
+        assert slug(title("Getting Started &mdash; OpenZFS documentation")) == "getting-started-openzfs-documentation"
+        assert title(" Tom &amp; Jerry\n <b>guide</b> ") == "Tom & Jerry guide"
+        assert title(None) == ""

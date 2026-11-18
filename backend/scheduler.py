@@ -67,6 +67,23 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
 
 def compute_next_run(schedule_kind: str, schedule_json: dict, tz_name: str,
                      after_utc: datetime | None = None) -> str | None:
+    """``_next_run`` with one guarantee added: a repeating schedule never returns a time that has passed.
+
+    On the night clocks go back a wall time happens twice. Asked between the two (01:10 the second time,
+    for a 01:30 task), the candidate "today 01:30" resolves to the FIRST 01:30, which is over: the task was
+    claimed again on every 30 s tick for up to an hour. Asking again from an hour later moves past it.
+    """
+    now = after_utc or datetime.utcnow()
+    result = _next_run(schedule_kind, schedule_json, tz_name, now)
+    for attempt in range(1, 4):
+        if not result or schedule_kind not in ("daily", "weekly", "monthly") or result > now.isoformat():
+            break
+        result = _next_run(schedule_kind, schedule_json, tz_name, now + timedelta(hours=attempt))
+    return result
+
+
+def _next_run(schedule_kind: str, schedule_json: dict, tz_name: str,
+              after_utc: datetime | None = None) -> str | None:
     """Next fire time as naive-UTC ISO, or None for event/webhook/expired-once.
 
     `schedule_json` fields per kind:
@@ -327,7 +344,7 @@ async def _handle_due_task(task: dict) -> None:
         # actively working in — defer, don't skip.
         delivery = task.get("delivery_json") or {}
         if delivery.get("conversation", True) and task.get("conversation_id"):
-            if await _user_active_recently(user_id):
+            if await _user_active_recently(user_id, task["conversation_id"]):
                 deferred = (datetime.utcnow() + timedelta(
                     minutes=config.SCHEDULER_FOREGROUND_DEFER_MIN)).isoformat()
                 await db.update_scheduled_task(task["id"], {"next_run": deferred})
@@ -350,9 +367,13 @@ async def _handle_due_task(task: dict) -> None:
         db.reset_current_user_id(token)
 
 
-async def _user_active_recently(user_id: str, seconds: int = 180) -> bool:
+async def _user_active_recently(user_id: str, conversation_id: str = "", seconds: int = 180) -> bool:
+    """Whether the user is working in the conversation the task would post into: they sent a message there
+    in the last three minutes. The session's last-seen time is not that signal: every request updates it,
+    and an open tab polls for notifications every 45 s, so tasks used to be put off for as long as HyprChat
+    was open in any tab."""
     try:
-        last_seen = await db.user_last_seen_at(user_id)
+        last_seen = await db.user_last_message_at(conversation_id, user_id)
         if not last_seen:
             return False
         seen = datetime.fromisoformat(str(last_seen).replace("Z", ""))
@@ -556,7 +577,9 @@ async def _deliver_result(task: dict, status: str, result_text: str, error: str)
         title = task.get("title") or "Check-in"
     else:
         title = f"Task {'done' if status == 'succeeded' else status}: {task.get('title') or task['id']}"
-    body = error if status != "succeeded" else (result_text or "")[:500]
+    # A run that ended "partial" (a research report cut short) has a result and no error: its
+    # notification used to be empty.
+    body = (error or result_text or "")[:500] if status != "succeeded" else (result_text or "")[:500]
     await notifications.notify(
         title, body, kind="checkin" if is_checkin else "task",
         source_task_id=task["id"],

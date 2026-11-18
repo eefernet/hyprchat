@@ -55,7 +55,7 @@ async def restore_message_review(message_id: int, revision: int, background_task
 @router.get('/api/library/search')
 async def library_search(query: str, kind: str = '', workspace_id: str = '', start: str = '', end: str = '', limit: int = 50, offset: int = 0):
     import library_search as library
-    return await library.search(query,kind=kind,workspace_id=workspace_id,start=start,end=end,limit=limit,offset=offset)
+    return await library.search_grouped(query,kind=kind,workspace_id=workspace_id,start=start,end=end,limit=limit,offset=offset)
 
 
 @router.post('/api/library/rebuild')

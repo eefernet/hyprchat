@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {applyJobEvent,consumeSseFrames,terminalJobStates,backgroundJob,cancellableWorkflowIds} from './daedalusJobs.js';
+import {applyJobEvent,consumeSseFrames,terminalJobStates,backgroundJob,cancellableWorkflowIds,jobBlockerMessage} from './daedalusJobs.js';
 
 test('replayed and out-of-order progress cannot regress the job',()=>{
  const job={id:'job',state:'checking'};
@@ -104,3 +104,14 @@ test('normalized activity events cannot overwrite workflow identity or state',()
   const result=applyJobEvent(job,{seq:2,type:'activity',data:{id:'file-event',state:'completed',path:'app.js'}},1);
   assert.equal(result.job.id,'workflow');assert.equal(result.job.state,'coding');assert.equal(result.job.revision_id,'reviewed');assert.equal(result.lastSequence,2);
 });
+
+test('a model that could not load at its context is explained, not shown raw',()=>{
+  const told=jobBlockerMessage('RuntimeError: Ollama did not allocate the configured 131072 context. Adjust Settings or runtime memory.');
+  assert.match(told,/could not load at its configured context \(131,072 tokens\)/);
+  assert.match(told,/press Continue once it has unloaded/);
+  assert.doesNotMatch(told,/RuntimeError|did not allocate/);
+  assert.match(jobBlockerMessage('ValueError: qwen3-coder:30b does not fit in GPU memory at 65536 context'),/65,536 tokens/);
+  assert.match(jobBlockerMessage('ValueError: the model spilled to the CPU and Ollama will not unload a runner'),/GPU memory was in use/);
+  assert.equal(jobBlockerMessage('Something else happened'),'Something else happened');
+});
+

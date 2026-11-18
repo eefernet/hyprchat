@@ -96,6 +96,14 @@ def test_excel_targeted_edit_preserves_unknown_parts_and_formulas(tmp_path):
     assert all(after[k] == v for k, v in before.items() if "/charts/" in k)
 
 
+def test_excel_blank_and_uneven_rows_keep_their_positions(tmp_path):
+    path = tmp_path / "budget.xlsx"
+    create_document(path, {"sheets": [{"name": "Budget", "rows": [["Monthly budget"], [], ["Item", "Cost"], ["Rent", 1200], ["Total", "=SUM(B4:B4)"]]}]})
+    sheet = load_workbook(path)["Budget"]
+    assert sheet["A1"].value == "Monthly budget" and sheet["A2"].value is None
+    assert sheet["A3"].value == "Item" and sheet["B4"].value == 1200 and sheet["B5"].value == "=SUM(B4:B4)"
+
+
 def test_excel_formula_edit_new_cell_and_literal_equals(tmp_path):
     path, output = tmp_path / "book.xlsx", tmp_path / "edited.xlsx"
     create_document(path, {"sheets": [{"name": "Sheet", "rows": [[1]]}]})

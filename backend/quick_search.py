@@ -1414,6 +1414,23 @@ async def _enrich_og_images(http, results: list, max_fetch: int = 6) -> None:
 # Public entry points
 # ============================================================
 
+def plain_turns(request_messages) -> list:
+    """The conversation as the user and the model wrote it, for the search code.
+
+    The list the chat loop sends to the model has things added to its user messages: the time line
+    (chat_times), a skills hint, kept tool records. Search reads the user's text out of the list it is
+    given, so it must not get that one. Found 2026-11-17: the Sources row showed
+    "[Wednesday 18 November 2026, 3:19 AM] Briefly, what does th…" as the query, the stamp went into the
+    web queries, and a stamped "thanks" or "/online …" was no longer recognised.
+    """
+    out = []
+    for message in request_messages or []:
+        role, content = message.get("role"), message.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            out.append({"role": role, "content": content})
+    return out
+
+
 async def run_quick_search_for_chat(
     http, ollama_url: str, workspace_model: str, events, conv_id: str, messages: list,
     *, default_model: str = "", chat_model: str = "", context_hint: str = "",

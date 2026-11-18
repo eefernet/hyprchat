@@ -25,3 +25,43 @@ test('exports retain failure status and evidence limitations',()=>{
   assert.ok(exported.includes('Report status: partial'));
   assert.ok(exported.includes('Unknown citations: S99'));
 });
+
+test('a source count past its target is not shown as a fraction', async () => {
+  const { targetTile } = await import('./researchState.js');
+  assert.deepEqual(targetTile('Sources', 12, 48), ['Sources', '12/48']);
+  assert.deepEqual(targetTile('Sources', 48, 48), ['Sources', '48/48']);
+  assert.deepEqual(targetTile('Sources', 59, 48), ['Sources · target 48', '59']);
+  assert.deepEqual(targetTile('Pages', 7, 0), ['Pages', '7']);
+  assert.deepEqual(targetTile('Searches', undefined, 10), ['Searches', '0/10']);
+});
+
+test('a report card counts sources from a list row and from a full record', async () => {
+  const { reportSourceCount } = await import('./researchState.js');
+  assert.equal(reportSourceCount({ source_count: 59 }), 59);
+  assert.equal(reportSourceCount({ metrics: { source_count: 59 }, sources: [] }), 59);
+  assert.equal(reportSourceCount({ sources: [{}, {}, {}] }), 3);
+  assert.equal(reportSourceCount({}), 0);
+});
+
+test('a report card line skips the Method section of older summaries', async () => {
+  const { reportCardSummary } = await import('./researchState.js');
+  assert.equal(reportCardSummary({ summary: '## Method Collected 59 source records using 12 searches. ## Key Findings ZFS **snapshots** are cheap.' }),
+    'Key Findings ZFS snapshots are cheap.');
+  assert.equal(reportCardSummary({ summary: '## Method Collected 59 source records', query: 'zfs snapshots' }), 'zfs snapshots');
+  assert.equal(reportCardSummary({ summary: 'Plain summary.' }), 'Plain summary.');
+  assert.equal(reportCardSummary({ query: 'q' }), 'q');
+});
+
+test('opening a report keeps its place in the list; a new report goes on top', async () => {
+  const { putReport } = await import('./researchState.js');
+  const list = [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'c', title: 'C' }];
+  assert.deepEqual(putReport(list, { id: 'b', title: 'B2' }).map(r => r.title), ['A', 'B2', 'C']);
+  assert.deepEqual(putReport(list, { id: 'n', title: 'New' }).map(r => r.id), ['n', 'a', 'b', 'c']);
+  assert.deepEqual(putReport(null, { id: 'n' }), [{ id: 'n' }]);
+});
+
+test('an interrupted report is finished, not running', () => {
+  assert.equal(researchTerminal('interrupted'), true);
+  assert.equal(researchTerminal('running'), false);
+});
+

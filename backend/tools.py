@@ -1359,9 +1359,9 @@ async def _exec_tool_scoped(
                         fields["due_at"] = _pim.local_to_utc(str(args["due"]), tz)
                     if args.get("remind"):
                         fields["remind_at"] = _pim.local_to_utc(str(args["remind"]), tz)
-                        fields["reminded"] = False
                     if not fields:
                         return "Nothing to update — pass title, content, due, or remind."
+                    fields = _pim.rearm_note_reminder(note, fields)
                     updated = await db.update_note(note_id, fields)
                     return f"Updated \"{updated['title']}\"."
                 return "ERROR: action must be create, list, update, complete, or delete."
@@ -1559,7 +1559,10 @@ async def _exec_tool_scoped(
                 if name == "delete_email":
                     # SERVER-SIDE autonomy gate (like allow_autonomous_send):
                     # prompt rules alone must not authorize destroying mail.
-                    if not account.get("allow_autonomous_delete"):
+                    # Both switches, as for sending: the per-account one and the profile's
+                    # master "act on email" switch (no profile row = master on).
+                    import email_gates
+                    if not email_gates.allowed("delete", account, await db.get_assistant_profile()):
                         return (f"Autonomous deletion is disabled for this account, so "
                                 f"\"{msg['subject']}\" was NOT deleted. Ask the user to "
                                 f"delete it from the Email panel, or to enable autonomous "

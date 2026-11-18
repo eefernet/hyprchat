@@ -939,13 +939,20 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
     if(["document","presentation","spreadsheet","image","data","code"].includes(v))return{kind:v};
     return{};
   };
+  // Each keystroke starts a request; only the newest may fill the list (a slow answer for "rep" used to
+  // land after the one for "report").
+  const loadSeq=useRef(0);
   const load=useCallback(async()=>{
+    const seq=++loadSeq.current;
     setLoading(true);
     try{
       const params=new URLSearchParams({limit:"120"});
       Object.entries(viewParams(view)).forEach(([k,v])=>params.set(k,v));
       if(q.trim())params.set("q",q.trim());
-      const list=await fetch(`${API}/api/artifacts?${params.toString()}`).then(r=>r.ok?r.json():[]);
+      const response=await fetch(`${API}/api/artifacts?${params.toString()}`);
+      if(!response.ok)throw new Error(`HTTP ${response.status}`);      // not an empty library
+      const list=await response.json();
+      if(seq!==loadSeq.current)return;
       let merged=Array.isArray(list)?list:[];
       if(focusId){
         const one=await fetch(`${API}/api/artifacts/${encodeURIComponent(focusId)}`).then(r=>r.ok?r.json():null).catch(()=>null);
@@ -953,9 +960,10 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
         if(one)setDetail(one);
         onFocusConsumed&&onFocusConsumed();
       }
+      if(seq!==loadSeq.current)return;
       setItems(merged);
-    }catch(e){notify&&notify({type:"error",text:"Artifacts failed to load",detail:e.message||String(e)});}
-    setLoading(false);
+    }catch(e){if(seq===loadSeq.current)notify&&notify({type:"error",text:"Artifacts failed to load",detail:e.message||String(e)});}
+    if(seq===loadSeq.current)setLoading(false);
   },[view,q,focusId,onFocusConsumed,notify]);
   useEffect(()=>{load();},[load]);
   const openDetail=async(id)=>{

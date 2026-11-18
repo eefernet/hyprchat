@@ -86,7 +86,7 @@ export const WELCOME_FALLBACKS_NAMED = [
   "{name}, the terminal keeps secrets. Spill yours.",
   "Plot something elegant, {name}. Or something cursed.",
 ];
-export const WELCOME_VERSION="fun-3";
+export const WELCOME_VERSION="fun-4";
 export const localDayKey=()=>{
   const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -121,7 +121,8 @@ export function interfaceTheme(theme) {
 export const UI_THEMES = Object.fromEntries(Object.entries(THEMES).map(([id,theme]) => [id,interfaceTheme(theme)]));
 export function codeThemeTokens(t) {
   const slots={keyword:'pink',string:'ok',number:'warm',function:'acc',type:'f1',operator:'acc2',comment:'mut',punctuation:'dim'};
-  return Object.fromEntries(Object.entries(slots).map(([name,slot])=>[`--code-${name}`,readableColor(t[slot],[t.bgDeep],4.5)]));
+  return {...Object.fromEntries(Object.entries(slots).map(([name,slot])=>[`--code-${name}`,readableColor(t[slot],[t.bgDeep],4.5)])),
+    '--code-deleted':readableColor(t.err,[t.bgDeep],4.5)};
 }
 export function presentationTokens(t, font, codeFont, scale = 1) {
   return {'--hc-font-ui':font,'--hc-font-code':codeFont,'--hc-ui-scale':scale,
@@ -130,3 +131,26 @@ export function presentationTokens(t, font, codeFont, scale = 1) {
     '--hc-accent':t.acc,'--hc-danger':t.err,
     ...elevationTokens(t),...codeThemeTokens(t)};
 }
+
+// The "degraded" amber is the same in every theme on purpose (some themes' warm colour equals their error
+// colour). As TEXT it must still be readable: on the two light themes the raw amber was 1.9:1.
+const DEGRADED = '#f0a030';
+const degradedCache = new WeakMap();
+export function degradedColor(theme) {
+  if (!theme) return DEGRADED;
+  if (!degradedCache.has(theme)) degradedCache.set(theme, readableColor(DEGRADED, [theme.bg, theme.bgDeep, theme.surface], 4.5));
+  return degradedCache.get(theme);
+}
+
+// A fixed identity colour (a quantization level, a capability badge) as readable text on this theme. The
+// hue is kept and only moved toward the text colour until it reads: the raw badge colours were 1.6:1 to
+// 2.2:1 on the light themes. Anything that is not a six-digit hex is returned unchanged.
+const readableCache = new WeakMap();
+export function readableOn(theme, color) {
+  if (!theme || !/^#[0-9a-f]{6}$/i.test(color || '')) return color;
+  let known = readableCache.get(theme);
+  if (!known) readableCache.set(theme, known = new Map());
+  if (!known.has(color)) known.set(color, readableColor(color, [theme.bg, theme.bgDeep, theme.surface], 4.5));
+  return known.get(color);
+}
+

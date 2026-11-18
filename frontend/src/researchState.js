@@ -1,4 +1,6 @@
-export const researchTerminal = status => ['complete','partial','failed','cancelled'].includes(String(status||'').toLowerCase());
+// `interrupted` is what a report cut off by a restart is marked (reap_stale_runs). Left out, such a report
+// read as still running: a live badge, a Stop button, Start disabled and polling that never ended.
+export const researchTerminal = status => ['complete','partial','failed','cancelled','interrupted'].includes(String(status||'').toLowerCase());
 export const researchRevision = report => Number(report?.metrics?.snapshot_revision||0);
 export function researchExportMarkdown(report, body) {
   const warnings=[...(report?.metrics?.completion_checks?.issues||[])];
@@ -34,3 +36,40 @@ export function linkResearchCitations(markdown, sources) {
       (group.match(/\d+/g)||[]).map(n=>ids.has(String(Number(n)))?`[S${Number(n)}](#research-source-S${Number(n)})`:`[S${Number(n)}]`).join(' '))).join('');
   }).join('\n');
 }
+
+// A counter tile: "12/48" while under the target. Past it the target was a plan that was exceeded, not a
+// total ("59/48" read like an error: follow-up search rounds add sources after the target is reached),
+// so the tile shows the count and the label carries the target.
+export function targetTile(label, value, target) {
+  const count = Number(value) || 0, goal = Number(target) || 0;
+  if (!goal) return [label, String(count)];
+  return count > goal ? [`${label} · target ${goal}`, String(count)] : [label, `${count}/${goal}`];
+}
+
+// A report's source count. List rows carry `source_count`; a full record (which replaces the row once
+// the report is opened or polled) has only `metrics` and `sources`, so cards used to say "0 sources".
+export function reportSourceCount(report) {
+  const direct = Number(report?.source_count);
+  if (direct > 0) return direct;
+  return Number(report?.metrics?.source_count) || (Array.isArray(report?.sources) ? report.sources.length : 0) || 0;
+}
+
+// The card line under a report title. Summaries saved before 2026-11-18 start with the Method section
+// ("## Method Collected 59 source records…"): skip to the text after it and drop Markdown marks.
+export function reportCardSummary(report) {
+  let text = String(report?.summary || '').trim();
+  if (/^#{1,6}\s*Method\b/i.test(text)) {
+    const next = text.slice(2).search(/#{2,6}\s+\S/);
+    text = next === -1 ? '' : text.slice(2 + next);
+  }
+  text = text.replace(/>\s*\[![A-Z]+\]\s*/g, '').replace(/(^|\s)#{1,6}\s+/g, '$1').replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
+  return text || String(report?.query || '');
+}
+
+// The report list with `report` updated where it already is, or added on top when it is new. Opening or
+// polling a report used to move it to the top of the list, under the pointer that had just clicked it.
+export function putReport(list, report) {
+  const rows = list || [];
+  return rows.some(row => row.id === report.id) ? rows.map(row => (row.id === report.id ? report : row)) : [report, ...rows];
+}
+

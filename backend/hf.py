@@ -1,6 +1,7 @@
 """
 HuggingFace model browser — search, info, readme, download endpoints.
 """
+import asyncio
 import json
 import os
 import re
@@ -191,6 +192,8 @@ async def hf_download(http, request: Request):
                         if key == "error":
                             pull_err = sse
                             break
+                        if key == "done":
+                            continue      # the pull finished; "ready" is said once, after the alias exists
                         yield sse
                     if not pull_err:
                         pull_ok = True
@@ -205,10 +208,22 @@ async def hf_download(http, request: Request):
                         json={"name": model_name, "from": hf_pull_name, "stream": True},
                         timeout=httpx.Timeout(60.0, connect=10.0),
                     ) as resp2:
-                        async for line in resp2.aiter_lines():
-                            sse, _ = parse_ollama_progress(line, model_name)
-                            if sse:
-                                yield sse
+                        create_err = None
+                        if resp2.status_code != 200:
+                            create_err = (await resp2.aread()).decode(errors="replace")[:200] or f"HTTP {resp2.status_code}"
+                        else:
+                            async for line in resp2.aiter_lines():
+                                sse, key = parse_ollama_progress(line, model_name)
+                                if key == "error":
+                                    create_err = json.loads(sse[6:])["message"]
+                                    break
+                                if sse and key != "done":
+                                    yield sse
+                    if create_err:
+                        # The files are downloaded, but the name the user asked for does not exist: say so
+                        # instead of "ready" (the toast used to report success).
+                        yield f"data: {json.dumps({'status': 'error', 'message': f'Downloaded as {hf_pull_name}, but the name {model_name!r} could not be created: {create_err}'})}\n\n"
+                        return
                 yield f"data: {json.dumps({'status': 'done', 'message': f'✓ {model_name!r} ready!', 'model_name': model_name})}\n\n"
                 return
 

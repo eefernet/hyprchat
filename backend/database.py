@@ -1414,6 +1414,34 @@ async def release_working_pointers(db, user_id: str, conversation_id: str | None
                          f"WHERE user_id=? AND {pointer}_job_id IN ({jobs})", (user_id, user_id))
 
 
+async def delete_all_conversations() -> list[str]:
+    """Delete every conversation of the current user with the same cleanup as ``delete_conversation``:
+    artifact links, run events, the Assistant's pinned-chat pointer and task targets. Returns the ids, so
+    the caller can drop what was indexed from them (history recall)."""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        mine = "SELECT id FROM conversations WHERE user_id=?"
+        ids = [row["id"] for row in await db.execute_fetchall(mine, (user_id,))]
+        if not ids:
+            return []
+        await db.execute(f"UPDATE artifacts SET conversation_id=NULL, message_id=NULL, updated_at=CURRENT_TIMESTAMP "
+                         f"WHERE user_id=? AND conversation_id IN ({mine})", (user_id, user_id))
+        await db.execute(f"DELETE FROM messages WHERE conversation_id IN ({mine})", (user_id,))
+        await db.execute(f"DELETE FROM conversation_files WHERE conversation_id IN ({mine})", (user_id,))
+        await db.execute(f"DELETE FROM workspace_conversations WHERE conversation_id IN ({mine})", (user_id,))
+        await db.execute(f"DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE conversation_id IN ({mine}))", (user_id,))
+        await db.execute("UPDATE assistant_profiles SET conversation_id='' WHERE user_id=?", (user_id,))
+        await db.execute(f"UPDATE scheduled_tasks SET conversation_id='' WHERE user_id=? AND conversation_id IN ({mine})", (user_id, user_id))
+        # Daedalus jobs cascade with their conversations; project pointers naming them must not dangle.
+        await release_working_pointers(db, user_id)
+        await db.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
+        await db.commit()
+        return ids
+    finally:
+        await db.close()
+
+
 async def delete_conversation(id: str):
     user_id = _scope_user()
     db = await get_db()
@@ -1437,6 +1465,19 @@ async def delete_conversation(id: str):
         await release_working_pointers(db, user_id, id)
         await db.execute("DELETE FROM conversations WHERE id = ?", (id,))
         await db.commit()
+    finally:
+        await db.close()
+
+
+async def message_exists(message_id: int) -> bool:
+    """Whether the current user still has this message."""
+    user_id = _scope_user()
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT 1 FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE m.id=? AND c.user_id=?",
+            (message_id, user_id))
+        return bool(rows)
     finally:
         await db.close()
 
@@ -1653,12 +1694,21 @@ async def create_kb(id: str, name: str, description: str = ""):
         await db.close()
 
 
-async def get_kbs():
+async def get_kbs(include_internal: bool = True):
+    """The user's knowledge bases with their files. ``include_internal=False`` leaves out the stores that
+    workspaces keep their own documents in (workspace_service.document_store)."""
     user_id = _scope_user()
     db = await get_db()
     try:
         cursor = await db.execute("SELECT * FROM knowledge_bases WHERE user_id=? ORDER BY updated_at DESC", (user_id,))
         kbs = [dict(r) for r in await cursor.fetchall()]
+        if kbs and not include_internal:
+            try:
+                cursor = await db.execute("SELECT kb_id FROM workspace_document_stores")
+                internal = {row[0] for row in await cursor.fetchall()}
+            except Exception:                 # the table is created with the first workspace store
+                internal = set()
+            kbs = [kb for kb in kbs if kb["id"] not in internal]
         if kbs:
             ids = [kb["id"] for kb in kbs]
             placeholders = ",".join("?" * len(ids))
@@ -1703,11 +1753,22 @@ async def add_kb_file(kb_id: str, filename: str, filepath: str, file_size: int, 
         rows = await db.execute_fetchall("SELECT id FROM knowledge_bases WHERE id=? AND user_id=?", (kb_id, user_id))
         if not rows:
             return 0
-        cursor = await db.execute(
-            "INSERT INTO kb_files (kb_id, filename, filepath, file_size, file_type, source_url) VALUES (?, ?, ?, ?, ?, ?)",
-            (kb_id, filename, filepath, file_size, file_type, source_url or "")
-        )
-        file_id = cursor.lastrowid
+        # One row per file name in a knowledge base. A second upload under the same name has already
+        # overwritten the file on disk, so it replaces the row too (and re-indexing replaces the passages):
+        # two rows for one file meant deleting either broke the other.
+        same = await db.execute_fetchall("SELECT id FROM kb_files WHERE kb_id=? AND filename=? ORDER BY id", (kb_id, filename))
+        if same:
+            file_id = same[0]["id"]
+            await db.execute("UPDATE kb_files SET filepath=?, file_size=?, file_type=?, source_url=? WHERE id=?",
+                             (filepath, file_size, file_type, source_url or "", file_id))
+            for extra in same[1:]:
+                await db.execute("DELETE FROM kb_files WHERE id=?", (extra["id"],))
+        else:
+            cursor = await db.execute(
+                "INSERT INTO kb_files (kb_id, filename, filepath, file_size, file_type, source_url) VALUES (?, ?, ?, ?, ?, ?)",
+                (kb_id, filename, filepath, file_size, file_type, source_url or "")
+            )
+            file_id = cursor.lastrowid
         await db.execute("UPDATE knowledge_bases SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (kb_id,))
         await db.commit()
         return file_id
@@ -5708,7 +5769,7 @@ async def get_task_by_webhook_token(token: str) -> dict | None:
     db = await get_db()
     try:
         rows = await db.execute_fetchall(
-            "SELECT * FROM scheduled_tasks WHERE webhook_token=? AND enabled=1 LIMIT 1",
+            "SELECT * FROM scheduled_tasks WHERE webhook_token=? AND enabled=1 AND schedule_kind='webhook' LIMIT 1",
             (token,))
         return _row_to_scheduled_task(rows[0]) if rows else None
     finally:
@@ -5948,6 +6009,22 @@ async def upsert_assistant_profile(*, model_config_id: str | None = None,
     finally:
         await db.close()
     return await get_assistant_profile(user_id=uid)
+
+
+async def user_last_message_at(conversation_id: str, user_id: str | None = None) -> str | None:
+    """When the user last sent a message in this conversation (naive UTC), or None. The scheduler's
+    "is the user working in this chat right now" check."""
+    uid = _scope_user(user_id)
+    if not conversation_id:
+        return None
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            "SELECT MAX(m.created_at) AS sent FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+            "WHERE m.conversation_id=? AND c.user_id=? AND m.role='user'", (conversation_id, uid))
+        return rows[0]["sent"] if rows else None
+    finally:
+        await db.close()
 
 
 async def user_last_seen_at(user_id: str | None = None) -> str | None:

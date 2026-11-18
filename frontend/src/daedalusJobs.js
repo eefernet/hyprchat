@@ -106,6 +106,13 @@ export function jobBlockerMessage(value){
   if(message.includes('output_limit')||message.includes('configured output allowance'))return 'The model could not finish a response within its output limit. Review the saved checkpoint; extra job allowance does not increase that response limit.';
   if(message.includes('Model-call allowance exhausted'))return 'The model-call allowance is used up. Choose an additional allowance to continue, or adjust it in Settings → Daedalus.';
   if(message.includes('Execution allowance exhausted'))return 'The execution allowance is used up. Choose an additional allowance for more time, or adjust it in Settings → Daedalus.';
+  // coder_inference.ensure_context: the model did not load at the configured window, usually because another
+  // model held the GPU memory (found 2026-11-17: the raw "Ollama did not allocate the configured 131072
+  // context" was shown, and Continue worked a little later).
+  if(/did not allocate the configured \d+ context|does not fit in GPU memory|spilled to the CPU/i.test(message)){
+    const size=message.match(/configured (\d+) context|at (\d+) context/);const tokens=Number(size?.[1]||size?.[2]||0);
+    return `The coding model could not load at its configured context${tokens?` (${tokens.toLocaleString('en-US')} tokens)`:''} because the GPU memory was in use. If another model was loaded, press Continue once it has unloaded. If it keeps happening, lower the context in Settings → Daedalus.`;
+  }
   if(/schema|validation|JSON|parse|ValueError|Traceback/i.test(message))return 'A check could not be completed. Open details for the diagnostic and saved checkpoint.';
   return message.split('\n\nConversation logs are stored at:')[0];
 }

@@ -347,3 +347,8 @@ CONTEXT_SETTINGS = {**CONTEXT_DEFAULTS, "default_num_ctx": DEFAULT_NUM_CTX,
                     "openhands_num_ctx": OPENHANDS_NUM_CTX,
                     "research_num_ctx": RESEARCH_NUM_CTX}
 DEFAULT_SETTINGS.update(CONTEXT_SETTINGS)
+
+
+# Serializes read-modify-write of settings.json (routes/settings.py PATCH, the HyprFit hardware rescan).
+import asyncio as _asyncio
+SETTINGS_LOCK = _asyncio.Lock()

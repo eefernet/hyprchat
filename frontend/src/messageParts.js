@@ -8,6 +8,8 @@
 //
 // Events without a stamp (every message saved before this existed) keep the old layout: after the text.
 
+import { withoutLinkedFiles } from './fileLinks.js';
+
 const CARD_TYPES = new Set(['code_output', 'file_ready']);
 const FENCE = /^ {0,3}(```|~~~)/gm;
 const FOOTNOTE = /^\[\^[^\]\s]+\]:/m;   // footnotes are resolved across the whole reply, so it cannot be split
@@ -76,7 +78,10 @@ export function messageParts(content, events) {
       cards.push({ type: event.type, data: event.data || {}, versions: 1, at: event.at, seq: cards.length });
     }
   }
-  if (!cards.some(placed) || FOOTNOTE.test(text)) return { parts: [{ text, cards: [] }], trailing: cards };
+  // A file with a card is not also drawn as a link card from the reply's own "[Download …](address)" line.
+  const linked = cards.filter(card => card.type === 'file_ready').map(card => card.data.url).filter(Boolean);
+  const shown = part => linked.length ? withoutLinkedFiles(part, linked) : part;
+  if (!cards.some(placed) || FOOTNOTE.test(text)) return { parts: [{ text: shown(text), cards: [] }], trailing: cards };
 
   const byPoint = new Map();
   for (const card of cards.filter(placed)) {
@@ -87,10 +92,10 @@ export function messageParts(content, events) {
   const parts = [];
   let start = 0;
   for (const point of [...byPoint.keys()].sort((a, b) => a - b)) {
-    parts.push({ text: text.slice(start, point), cards: byPoint.get(point) });
+    parts.push({ text: shown(text.slice(start, point)), cards: byPoint.get(point) });
     start = point;
   }
-  if (text.slice(start).trim()) parts.push({ text: text.slice(start), cards: [] });
+  if (shown(text.slice(start)).trim()) parts.push({ text: shown(text.slice(start)), cards: [] });
   return { parts, trailing: cards.filter(card => !placed(card)) };
 }
 

@@ -172,6 +172,9 @@ async def poll_due_accounts(http) -> bool:
             token = db.set_current_user_id(account["user_id"])
             try:
                 last_seen = int(account.get("last_seen_uid") or 0)
+                # A first import (new account, or every UID reassigned) brings in mail that is already
+                # old: it must not start "when an email arrives" tasks or send urgent alerts.
+                backlog = last_seen == 0
                 result = await email_client.fetch_new(account, last_seen)
                 if (account.get("last_uidvalidity") and result["uidvalidity"]
                         and result["uidvalidity"] != account["last_uidvalidity"]):
@@ -184,9 +187,12 @@ async def poll_due_accounts(http) -> bool:
                     print(f"[EMAIL] UIDVALIDITY changed for {account['id']} — "
                           f"purged {purged} stale cached messages")
                     result = await email_client.fetch_new(account, 0)
+                    backlog = True
+                imported = []
                 for msg in result["messages"]:
+                    imported.append(f"mail-{_uuid.uuid4().hex[:12]}")
                     await db.upsert_email_message(
-                        f"mail-{_uuid.uuid4().hex[:12]}", account_id=account["id"],
+                        imported[-1], account_id=account["id"],
                         uid=msg["uid"], folder="INBOX", subject=msg["subject"],
                         from_addr=msg["from"], to_addrs=msg["to"], date_at=msg["date"],
                         snippet=msg["snippet"], unread=msg["unread"],
@@ -201,7 +207,10 @@ async def poll_due_accounts(http) -> bool:
                     "last_uidvalidity": result["uidvalidity"],
                     "last_checked_at": now.isoformat(), "last_error": ""},
                     user_id=account["user_id"])
-                if result["messages"]:
+                if backlog:
+                    for message_id in imported:
+                        await db.update_email_message(message_id, {"notified": True}, user_id=account["user_id"])
+                elif result["messages"]:
                     import scheduler
                     for _ in result["messages"][:EVENT_FIRE_CAP_PER_POLL]:
                         await scheduler.fire_event("email_received", user_id=account["user_id"])

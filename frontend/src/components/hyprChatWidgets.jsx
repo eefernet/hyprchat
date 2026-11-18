@@ -35,6 +35,7 @@ import {Spinner} from './Spinner.jsx';
 import {humanize} from '../workspaceLabels.js';
 import { IC } from './icons.jsx';
 import { Collapsible } from './markdownBlocks.jsx';
+import {targetTile} from '../researchState.js';
 
 // Detail content shares the activity panel's single scroll container.
 const ActivityDetail = ({ev,t,active=false})=>{
@@ -945,8 +946,8 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
       <div style={{height:"100%",width:`${pct}%`,background:`linear-gradient(90deg, ${t.acc}, ${t.f1})`,boxShadow:`0 0 18px ${t.acc}66`,transition:"width .45s ease"}}/>
     </div>
     <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:7,marginBottom:14}}>
-      {metricLine.map(([label,value,target])=><div key={label} style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"7px 8px",background:`${t.bgDeep}F5`,minWidth:0}}>
-        <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{target?`${value}/${target}`:value}</div>
+      {metricLine.map(([name,count,target])=>target?targetTile(name,count,target):[name,count]).map(([label,value])=><div key={label} style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"7px 8px",background:`${t.bgDeep}F5`,minWidth:0}}>
+        <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:label==="Elapsed"?t.mut:t.text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{value}</div>
         <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,marginTop:2}}>{label}</div>
       </div>)}
     </div>
@@ -1455,7 +1456,7 @@ function WorkspaceDetail({ws,wsLoading,t,API,workspaces,setWorkspaces,setActiveW
     setWorkspaces(p=>p.map(w=>w.id===ws.id?{...w,conv_count:Math.max(0,(w.conv_count||0)-1)}:w));
   });
   const deleteWs=()=>run(async()=>{
-    if(!await confirmAction({title:"Delete workspace",body:"Remove this workspace and its memory? Linked content is kept. Scheduled tasks are paused and detached.",confirmLabel:"Delete workspace",tone:"danger"}))return;
+    if(!await confirmAction({title:"Delete workspace",body:"Remove this workspace, its memory and the documents uploaded to it? Linked chats, notes, reports and knowledge bases are kept. Scheduled tasks are paused and detached.",confirmLabel:"Delete workspace",tone:"danger"}))return;
     await fetch(`${API}/api/workspaces/${ws.id}`,{method:"DELETE"});
     setWorkspaces(p=>p.filter(w=>w.id!==ws.id));
     setActiveWs(null);setWsDetail(null);

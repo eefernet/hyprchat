@@ -10,6 +10,7 @@ import {
 } from './modelHelpers.js';
 import { IC } from './components/icons.jsx';
 import usePresence from './usePresence.js';
+import {readableOn} from './theme.js';
 
 // ============================================================
 // ModelPicker — custom dropdown replacing plain <select> for model selection
@@ -154,7 +155,7 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
           <span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:700}}>{tag}</span>
           {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{paramSz}</span>}
           {ctxLen>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{formatModelCtx(ctxLen)} ctx</span>}
-          {caps.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"0px 4px",borderRadius:"var(--hc-radius-sm)",background:`${c.color}20`,color:c.color,fontWeight:600}}>{c.emoji}</span>)}
+          {caps.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"0px 4px",borderRadius:"var(--hc-radius-sm)",background:`${c.color}20`,color:readableOn(t,c.color),fontWeight:600}}>{c.emoji}</span>)}
         </div>}
       </div>
       {onRefresh&&<span onClick={e=>{e.stopPropagation();onRefresh();}} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,cursor:"pointer",opacity:.5,display:"flex",alignItems:"center",padding:"0 2px"}} title="Refresh models"><IC.Refresh/></span>}
@@ -183,14 +184,14 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",alignItems:"center",gap:4}}>
                   <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:sel?700:500,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{displayName}</div>
-                  {isHF&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:"#ff660022",color:"#ff6600",fontWeight:600,flexShrink:0}}>HF</span>}
+                  {isHF&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:"#ff660022",color:readableOn(t,"#ff6600"),fontWeight:600,flexShrink:0}}>HF</span>}
                   {provider&&(()=>{const pc=provider==="openai"?t.ok:provider==="anthropic"?t.pink:"#4aa3ff";const pl=provider==="openai"?"OpenAI":provider==="anthropic"?"Claude":(mdi.details?.provider_label||"Custom");return <span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${pc}22`,color:pc,fontWeight:600,flexShrink:0,maxWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pl}</span>;})()}
                 </div>
                 <div style={{display:"flex",gap:3,alignItems:"center",marginTop:1,flexWrap:"wrap"}}>
                   <span style={{fontSize:"var(--hc-text-secondary)",color:sc2,fontWeight:700}}>{mt}</span>
                   {ps&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{ps}</span>}
                   {ctx2>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{formatModelCtx(ctx2)} ctx</span>}
-                  {mc.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${c.color}20`,color:c.color,fontWeight:600}}>{c.emoji} {c.label}</span>)}
+                  {mc.map(c=><span key={c.label} style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${c.color}20`,color:readableOn(t,c.color),fontWeight:600}}>{c.emoji} {c.label}</span>)}
                 </div>
               </div>
               {sel&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.acc,flexShrink:0}}>✓</span>}

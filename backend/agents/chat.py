@@ -36,8 +36,8 @@ from agents import assistant as assistant_mod
 from tools import (CODEAGENT_TOOLS, exec_tool, parse_text_tool_calls,
                    strip_tool_calls, _v2_name_match)
 from connectors import tool_def_from_connector_tool
-from events import inject_text_tool_prompt, parse_tool_params
-from quick_search import run_quick_search_for_chat
+from events import inject_text_tool_prompt, parse_tool_params, after_reply as _after_reply
+from quick_search import run_quick_search_for_chat, plain_turns
 
 
 # Background tasks (best-effort memory suggestion) — held in a set so the
@@ -1034,6 +1034,10 @@ async def _index_history_turn_bg(conv_id, assistant_msg_id, user_text, assistant
             await rag.index_history_turn(uid, conv_id, user_row_id, "user", user_text, title, now)
         if assistant_msg_id and (assistant_text or "").strip():
             await rag.index_history_turn(uid, conv_id, int(assistant_msg_id), "assistant", assistant_text, title, now)
+            # Embedding takes a moment. A reply regenerated or deleted meanwhile must not come back into
+            # recall: its removal may already have run.
+            if not await db.message_exists(int(assistant_msg_id)):
+                await rag.remove_history_message(int(assistant_msg_id))
     except Exception as e:
         print(f"[CHAT] history indexing failed (non-fatal): {e}")
 
@@ -1993,7 +1997,9 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 http,
                 config.OLLAMA_URL,
                 config.WORKSPACE_MODEL or config.DEFAULT_MODEL,
-                events, conv_id, messages,
+                # The request's own text, not `messages`: that list carries time lines, the skills
+                # hint and kept tool records on its user messages (quick_search.plain_turns).
+                events, conv_id, plain_turns(req.messages),
                 default_model=config.DEFAULT_MODEL,
                 chat_model=req.model or "",
                 context_hint=_quick_search_context_hint,
@@ -3938,22 +3944,28 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                 # done. Run it in the background so `done` fires immediately;
                 # the suggesters emit their own SSE events over the persistent
                 # conversation bus.
+                # They get the WHOLE visible reply: every round's text, and in continue mode the part
+                # written before. `content` alone is the last round, so recall for a tool-using reply
+                # held only its tail, and Continue replaced a reply's index entry with the continued part.
+                # Their events are marked with this reply's id (events.after_reply), so a reply that is
+                # already streaming behind it does not take them.
+                _whole_reply = (_turn_text + content) if _turn_text else content
                 if global_memory_enabled:
-                    _spawn_bg(_suggest_global_memories(
+                    _spawn_bg(_after_reply(_assistant_msg_id, _suggest_global_memories(
                         req, http, events, conv_id,
-                        last_user_msg, content, _assistant_msg_id,
-                    ))
+                        last_user_msg, _whole_reply, _assistant_msg_id,
+                    )))
                     # Chat-history recall rides the same memory consent switch
                     if getattr(config, "HISTORY_RECALL", "on") == "on":
                         _spawn_bg(_index_history_turn_bg(
-                            conv_id, _assistant_msg_id, last_user_msg, content))
-                _spawn_bg(_suggest_workspace_memories(
+                            conv_id, _assistant_msg_id, last_user_msg, _whole_reply))
+                _spawn_bg(_after_reply(_assistant_msg_id, _suggest_workspace_memories(
                     req, http, events, conv_id,
                     workspace_memory_info.get("workspace"),
-                    last_user_msg, content, _assistant_msg_id,
-                ))
+                    last_user_msg, _whole_reply, _assistant_msg_id,
+                )))
                 # Learn a reusable skill from this turn's work (no-op for most turns).
-                _spawn_bg(_skills.review(http, events, last_user_msg, content))
+                _spawn_bg(_after_reply(_assistant_msg_id, _skills.review(http, events, last_user_msg, _whole_reply)))
             await events.emit(conv_id, "complete", {"status": "Complete"})
             _done_payload = {"type": "done", "model": req.model, "message_id": _assistant_msg_id,
                              "speed": _gen_speed, "gen_tokens": gen_tokens, "prompt_tokens": prompt_tokens}

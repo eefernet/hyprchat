@@ -179,6 +179,8 @@ async def _cleanup_loop():
 
 events = EventBus()
 import documents
+import daily_message
+from html import unescape as _html_unescape
 documents.configure(events)
 
 # ============================================================
@@ -884,8 +886,12 @@ async def hyprfit_rescan_hardware():
         hyprfit.clean_ollama_scan_ssh_settings(settings, config.OLLAMA_URL, include_password=True),
     )
     if result.get("persisted"):
-        settings["model_hardware_profile"] = result["profile"]
-        save_settings(settings)
+        # The scan takes seconds: write only the profile into the settings as they are NOW, not into the
+        # copy read before it (a setting saved meanwhile was lost at the next restart).
+        async with config.SETTINGS_LOCK:
+            settings = load_settings()
+            settings["model_hardware_profile"] = result["profile"]
+            save_settings(settings)
     return result
 
 async def _delete_ollama_model(model_name: str) -> dict:
@@ -1577,10 +1583,22 @@ def _research_default_depth(report_type: str, depth: Optional[int]) -> int:
     tmpl = REPORT_TEMPLATE_MAP.get(report_type or "analyst") or REPORT_TEMPLATE_MAP["analyst"]
     return int(tmpl.get("default_depth") or 3)
 
+async def _owned_kb_ids(kb_ids) -> list[str]:
+    """The ids among ``kb_ids`` that are this user's knowledge bases, in order. Retrieval itself is not
+    user-scoped (rag.hybrid_query, kb_fts_search), so every caller that takes ids from a request filters
+    here: research and councils used to quote any knowledge base whose id the caller knew."""
+    owned = []
+    for kb_id in dict.fromkeys(str(k) for k in (kb_ids or []) if k):
+        if await db.get_kb(kb_id):
+            owned.append(kb_id)
+    return owned
+
+
 async def _create_and_start_research_report(req: ResearchReportCreate) -> dict:
     query = (req.query or "").strip()
     if not query:
         raise HTTPException(400, "Research query is required")
+    req.kb_ids = await _owned_kb_ids(req.kb_ids)
     report_type = req.report_type if req.report_type in REPORT_TEMPLATE_MAP else "analyst"
     depth = _research_default_depth(report_type, req.depth)
     report_id = f"research-{uuid.uuid4().hex[:10]}"
@@ -1942,29 +1960,12 @@ async def delete_conversation(conv_id: str):
 @app.delete("/api/conversations")
 async def delete_all_conversations():
     """Delete all conversations for the active local user/profile."""
-    conn = await db.get_db()
     user_id = db.current_user_id()
-    try:
-        row = await conn.execute_fetchall("SELECT COUNT(*) AS n FROM conversations WHERE user_id=?", (user_id,))
-        count = row[0]["n"] if row else 0
-        await conn.execute(
-            "DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-            (user_id,),
-        )
-        await conn.execute(
-            "DELETE FROM conversation_files WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-            (user_id,),
-        )
-        await conn.execute(
-            "DELETE FROM workspace_conversations WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
-            (user_id,),
-        )
-        # Daedalus jobs cascade with their conversations; project pointers naming them must not dangle.
-        await db.release_working_pointers(conn, user_id)
-        await conn.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
-        await conn.commit()
-    finally:
-        await conn.close()
+    ids = await db.delete_all_conversations()
+    count = len(ids)
+    # What history recall indexed from them goes too: it used to stay searchable after "Delete all chats".
+    for conv_id in ids:
+        _track_bg(rag.remove_history_conversation(conv_id))
     print(f"[Cleanup] Deleted {count} conversations and related data for user {user_id}")
     return {"deleted": count}
 
@@ -2118,7 +2119,9 @@ async def search_chat_history(q: str, limit: int = 12):
 # ============================================================
 @app.get("/api/knowledge-bases")
 async def list_kbs():
-    return await db.get_kbs()
+    # A workspace's own document store is an internal knowledge base (random file names, managed from the
+    # workspace): not listed here, so the panel and every picker show only the ones the user made.
+    return await db.get_kbs(include_internal=False)
 
 @app.post("/api/knowledge-bases")
 async def create_kb(req: KBCreate):
@@ -2196,6 +2199,12 @@ async def upload_kb_file(kb_id: str, file: UploadFile = File(...)):
 
 _URL_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
+def _kb_url_title(raw) -> str:
+    """A page's <title> as plain text. Entities are decoded first: file names used to come out as
+    "highlights-nbsp-nbsp-google-…", "…-8212-python-3-15-2-documentation" and "getting-started-mdash-…"."""
+    return re.sub(r"\s+", " ", _html_unescape(re.sub(r"<[^>]+>", "", raw or ""))).strip()[:200]
+
+
 def _kb_url_slug(text: str, fallback: str = "page") -> str:
     slug = _URL_SLUG_RE.sub("-", (text or "").lower()).strip("-")[:80]
     return slug or fallback
@@ -2253,7 +2262,7 @@ async def ingest_kb_url(kb_id: str, body: dict = Body(...)):
         except Exception:
             html = raw.decode("utf-8", errors="replace")
         tm = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-        title = re.sub(r"\s+", " ", tm.group(1)).strip()[:200] if tm else ""
+        title = _kb_url_title(tm.group(1)) if tm else ""
         text = ""
         if qs_module._HAS_TRAFILATURA:
             try:
@@ -3087,7 +3096,14 @@ async def update_workspace_ep(ws_id: str, body: dict = Body(...)):
 
 @app.delete("/api/workspaces/{ws_id}")
 async def delete_workspace_ep(ws_id: str):
+    # The workspace's own document store goes with it. It is an internal knowledge base; left behind it
+    # lost its "internal" marker with the workspace and showed up in the Knowledge Bases list, full of
+    # files named by random ids.
+    import workspace_service
+    store = await workspace_service.document_store_id(ws_id) if await db.get_workspace_basic(ws_id) else ""
     await db.delete_workspace(ws_id)
+    if store and await db.get_kb(store):
+        await delete_kb(store)
     return {"ok": True}
 
 @app.post("/api/workspaces/{ws_id}/conversations")
@@ -4146,7 +4162,7 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
         raise HTTPException(422, str(exc)) from exc
 
     # Merge kb_ids from council config and request
-    kb_ids = list(set((council.get("kb_ids") or []) + (req.kb_ids or [])))
+    kb_ids = await _owned_kb_ids((council.get("kb_ids") or []) + (req.kb_ids or []))
     user_id = db.current_user_id()
 
     async def _stream():
@@ -4251,63 +4267,25 @@ async def get_conversation_forks(conv_id: str):
 # ============================================================
 @app.post("/api/daily-message")
 async def generate_daily_message(request: Request, body: dict = Body(default={})):
-    # Background helper call — never route to a paid cloud API (reject_cloud).
-    model = (
-        model_providers.reject_cloud(body.get("model") or "")
-        or model_providers.reject_cloud(config.WORKSPACE_MODEL or "")
-        or config.DEFAULT_MODEL
-    )
+    # Background helper call: always the Workspace model, never a paid cloud API (reject_cloud). The model
+    # the browser names is ignored (a fresh browser used to send a stale default before settings loaded).
+    model = model_providers.reject_cloud(config.WORKSPACE_MODEL or "") or config.DEFAULT_MODEL
+    user_id = _request_user_id(request)
     name = str(body.get("user_name") or "").strip()
     if not name:
         try:
-            user = await db.get_user_private(_request_user_id(request))
+            user = await db.get_user_private(user_id)
             name = str((user or {}).get("name") or "").strip()
         except Exception:
             name = ""
-    name = re.sub(r"[\r\n]+", " ", name).strip()[:40]
-    if name.lower() in ("main", "default", "user"):
-        name = ""  # generic seed profile names — greet namelessly
+    name = daily_message.clean_name(name)
     daypart = str(body.get("daypart") or "").strip().lower()
-    if daypart not in ("morning", "afternoon", "evening", "night"):
-        h = datetime.now().hour
-        daypart = "morning" if 5 <= h < 12 else "afternoon" if 12 <= h < 17 else "evening" if 17 <= h < 22 else "night"
-    fallback = (
-        f"Feed me a problem, {name}. I've been chewing drywall." if name
-        else "The GPUs are warm and morally flexible."
-    )
-    try:
-        resp = await http.post(f"{config.OLLAMA_URL}/api/chat", json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": (
-                    "You write the single greeting line for HyprChat's empty new-chat screen. "
-                    "Voice: unhinged but brilliant — a chaotic-genius AI that has been alone in the "
-                    "server rack too long and is thrilled the user showed up. Weird imagery, deadpan "
-                    "menace, feral enthusiasm, and the occasional gentle roast of the user by name are "
-                    "all fair game. ONE line, 4-14 words. If a name is given you may address them by it "
-                    "(first name only). Banned: corporate cheer, the words unleash/empower/journey/"
-                    "possibilities, generic productivity slogans, being boring. No quotes, no emoji, "
-                    "no markdown, no brand name. Roast lightly; never actually cruel."
-                )},
-                {"role": "user", "content": (
-                    f"User's name: {name or 'unknown'}. It is {daypart} on {time.strftime('%A, %B %d, %Y')}. "
-                    "Write one fresh line greeting them into a new chat. Do not be tame."
-                )}
-            ],
-            "stream": False,
-            "think": False,
-            "options": {"num_ctx": context_policy.helper_context("title"), "temperature": 1.15}
-        }, timeout=20)
-        msg = resp.json().get("message", {}).get("content", "").strip()
-        msg = re.sub(r"^[\"'`“”]+|[\"'`“”]+$", "", msg)
-        msg = re.sub(r"\s+", " ", msg.splitlines()[0] if msg else "").strip()
-        msg = re.sub(r"^(tagline|line|greeting)\s*:\s*", "", msg, flags=re.I).strip()
-        if not msg or len(msg) > 110:
-            msg = fallback
-        return {"message": msg, "model": model}
-    except Exception as e:
-        print(f"[DAILY-MESSAGE] Error: {e}")
-        return {"message": fallback, "model": model, "fallback": True}
+    result = await daily_message.get(
+        user_id, name, daypart,
+        lambda: daily_message.ask_model(http, config.OLLAMA_URL, model, context_policy.helper_context("title"),
+                                        name, daypart if daypart in daily_message.DAYPARTS
+                                        else daily_message.daypart_of(datetime.now().hour)))
+    return {**result, "model": model}
 
 @app.post("/api/conversations/{conv_id}/generate-title")
 async def generate_title(conv_id: str, body: dict = Body(default={})):

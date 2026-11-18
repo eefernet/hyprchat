@@ -35,8 +35,10 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
   const loadLatest=useRef(load);loadLatest.current=load;
   useEffect(()=>{let alive=true;load();if(workspace)apiJson("/api/notes").then(d=>{if(alive)setAllNotes(d);}).catch(()=>{});return()=>{alive=false;};},[load,workspace,refreshKey]);
 
+  const saving=useRef(false);
   const save=async()=>{
-    if(!form?.title?.trim())return;
+    if(!form?.title?.trim()||saving.current)return;      // a double click used to create the note twice
+    saving.current=true;
     setErr("");
     try{
       const r=await fetch(`${API}/api/notes${form.id?`/${form.id}`:""}`,{
@@ -46,6 +48,7 @@ export default function NotesPanel({t,btnS,cardS,inputS,confirmAction,notify,ini
       if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||`HTTP ${r.status}`);}
       setForm(null);loadLatest.current();
     }catch(e){setErr(String(e.message||e));}
+    finally{saving.current=false;}
   };
   const toggleDone=async n=>{
     try{await apiJson(`/api/notes/${n.id}`,{method:"PATCH",body:{done:!n.done}});}

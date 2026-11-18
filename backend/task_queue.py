@@ -5,6 +5,11 @@ from datetime import datetime
 
 import database as db
 
+# Triggers that carry something a running run has not seen (a payload, an event count): they get one
+# follow-up run instead of being merged into the run in progress. Scheduled overlaps still coalesce.
+FOLLOW_UP = ('webhook', 'event')
+SEPARATOR = '\n\n--- next trigger ---\n\n'
+
 TASK_FIELDS = ('id', 'user_id', 'title', 'prompt', 'task_type', 'model',
                'tool_ids', 'delivery_json', 'conversation_id', 'workspace_id')
 
@@ -31,11 +36,19 @@ async def enqueue(task, *, trigger, extra_context='', advance=None):
                 (advance['next_run'], advance.get('enabled', current['enabled']),
                  datetime.utcnow().isoformat(), task['id']))
         active = await conn.execute_fetchall(
-            "SELECT id FROM task_runs WHERE task_id=? AND user_id=? AND status IN ('queued','running','cancelling') ORDER BY started_at LIMIT 1",
+            "SELECT id,status FROM task_runs WHERE task_id=? AND user_id=? AND status IN ('queued','running','cancelling') ORDER BY started_at",
             (task['id'], owner))
+        waiting = [row['id'] for row in active if row['status'] == 'queued']
+        if active and trigger in FOLLOW_UP and not waiting:
+            active = []        # the run in progress cannot take this in: one more run is queued behind it
+        elif active and trigger in FOLLOW_UP and extra_context:
+            # A run is already waiting: it takes this payload too (a second webhook call during a run used
+            # to be dropped while the caller was told "started").
+            await conn.execute("UPDATE task_run_inputs SET extra_context=substr(extra_context || ? || ?, 1, 32768) WHERE run_id=?",
+                               (SEPARATOR, extra_context, waiting[0]))
         if active:
             await conn.commit()
-            return active[0]['id']
+            return (waiting or [active[0]['id']])[0]
         run_id = 'taskrun-' + uuid.uuid4().hex
         snapshot = {key: task.get(key) for key in TASK_FIELDS}
         snapshot['user_id'] = owner

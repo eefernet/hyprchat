@@ -1,4 +1,38 @@
 <details open>
+<summary>Alpha v18.3.1 — Nov 18, 2026</summary>
+
+> Fixes for bugs found while taking the README screenshots.
+
+## Bug fixes
+
+- **The welcome line can no longer stall the server** — one greeting is kept per user and part of the day, only one is written at a time, and the model call is short and stops when HyprChat gives up on it. A burst of page loads used to queue one unlimited model call each.
+- **Excel sheets with blank or uneven rows** — a budget sheet with a heading row, spacer rows and totals is accepted (`[]` is a blank row). The error for a wrong row now says how many items it had and how many are allowed.
+- **A delivered file shows once** — the reply's own download link is no longer drawn as a second card named after its address (`f8725496-name.docx`), and files made by the document tools are listed once.
+- **Web search uses what you typed** — the hidden message-time line, the skills hint and kept tool results no longer leak into search queries or the Sources row, and "thanks", "continue" and `/online` are recognised again.
+- **Deep Research** — a source count past its target shows the count with "target 48" beside its label instead of "59/48"; report cards show the real source count and a plain summary instead of "## Method…"; the search warning appears only when search itself fell short, and a report cut off while writing says so; the "Add to workspace" menu on cards is an icon instead of a clipped box.
+- **Knowledge-base file names from web pages** — HTML entities in the page title are decoded, so names no longer contain `nbsp`, `mdash` or `8212`.
+- **Workspace document stores are not listed as knowledge bases** — they no longer appear in the Knowledge Bases panel or in any knowledge-base picker.
+- **Library Search lists a chat once** — with its best-matching message and "+N more matches in this chat".
+- **Tables** — short cells such as times and dates stay on one line ("09:30" no longer breaks), and Assistant briefs write times as HH:MM.
+- **Tip callouts** — show an icon instead of the word "tip".
+- **HyprFit** — shows the curated catalog by default; "Hugging Face trending" is now a switch that is remembered.
+- **Daedalus** — when the coding model could not load because the GPU memory was in use, the job card says so and that Continue will work once the other model has unloaded.
+- **Calendar** — deleting one occurrence of a repeating event asks "this occurrence or the whole series" (it used to delete every occurrence, also on the synced calendar). An invitation from Outlook no longer breaks the calendar, and one unreadable event no longer stops reminders for everyone.
+- **Scheduled tasks and check-ins** — they run while HyprChat is open in a tab (they were put off for as long as any tab was open), saving the Assistant profile no longer pushes a due brief to tomorrow, and a weekly or monthly task no longer fires repeatedly on the night clocks go back. A webhook or event that arrives during a run gets its own run instead of being dropped. A webhook address stops working once its task is no longer a webhook task.
+- **Reminders** — a note reminds again only when its time actually changes (editing the title no longer re-fires it; moving the due date now re-arms it), and an event moved on the calendar server reminds again.
+- **Email** — adding an account no longer triggers automations and urgent alerts for old mail, message times are shown in your own time and sorted correctly, and the assistant may move mail to Trash only when both the account's delete switch and the master "act on email" switch are on.
+- **Knowledge bases** — uploading a file under an existing name replaces it (it used to leave two entries for one file), deleting a knowledge base or file asks first and reports a failure, and a failed "New KB" no longer shows a made-up entry. Deleting a workspace also removes the documents uploaded to it.
+- **Research** — a report interrupted by a restart no longer looks like it is still running, finished reports count as ready in workspaces, opening a report no longer moves it in the list, and research and councils can only read knowledge bases that are yours.
+- **Hugging Face downloads** — the exact file you picked is pulled again (a missing import had silently disabled that), and a download no longer says "ready" when the model name could not be created.
+- **Canvas** — an AI edit is applied where its text is now, or refused if that text changed, instead of overwriting whatever sits at the old position.
+- **Chat** — "Delete all chats" stops the reply or council that is running and removes the chats from history recall; deleting a council chat stops the council; only one council runs at a time; a message cannot be sent while a project archive is still uploading; replies with tool rounds are remembered in full for history recall and memory; Continue and Pin are no longer offered in chats that are not saved.
+- **Themes** — diff lines in code blocks, the warning colour and the model badges (quantization, capabilities) are readable on every theme; the two light themes were the worst. Diff lines no longer show their + or - twice, and nested list items render as list items.
+- **Backgrounds** — with "reduce motion" on, the background shows a still picture instead of going blank; small layout changes no longer restart the animation; moving the window to another display keeps it sharp.
+- **Smaller fixes** — settings saved at the same moment no longer overwrite each other, briefs give task times in your time zone, the "message too large" warning counts non-Latin text correctly, a renamed skill is not half-saved when the name is taken, and building a large bundle no longer stalls other requests.
+
+</details>
+
+<details>
 <summary>Alpha v18.3 — Nov 18, 2026</summary>
 
 > HyprChat now learns from its own work with automated skills. Massive updates to chat rendering when it comes to tool calling, updated to settings. Compaction to chats has been added as well as a way for the user to view what is using context by clicking on the context meter. Updated preview panel when the model generates a webview or a document/MD file. Massive fixes to overall chat logic

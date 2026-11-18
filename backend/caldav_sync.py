@@ -314,6 +314,8 @@ async def sync_account(account: dict) -> dict:
                     "Both versions are saved. Choose which version to use in Calendar.",
                     kind="system", user_id=user_id)
                 continue
+            if remote["start_at"] != local.get("start_at"):
+                fields["reminded"] = False        # moved on the server: its reminder is due again
             changed=await db.update_calendar_event(local["id"], fields, user_id=user_id, expected_updated_at=local['updated_at'])
             if changed:
                 pulled += 1

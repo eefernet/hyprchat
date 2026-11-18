@@ -7,7 +7,22 @@ import ast
 import re
 import time
 
+import contextvars
+
 import tool_calls
+
+# The reply (saved message id) that work running after a turn belongs to. Memory suggestions and the skill
+# review finish up to a minute after their reply; with a queued message the next reply is already streaming
+# by then and used to take their events into its own activity and saved events. Set only inside those
+# background tasks (`after_reply`), so nothing else is stamped.
+reply_scope: contextvars.ContextVar = contextvars.ContextVar("hyprchat_reply_scope", default=None)
+
+
+async def after_reply(message_id, work):
+    """Run ``work`` (an awaitable) with its events marked as belonging to reply ``message_id``."""
+    if message_id is not None:
+        reply_scope.set(message_id)
+    return await work
 
 
 class EventBus:
@@ -33,6 +48,8 @@ class EventBus:
         """Emit a status event to all subscribers of a conversation."""
         # Tool events sent while a tool call is running carry that call's id (tool_calls.py).
         event = {"type": event_type, "data": tool_calls.stamp(event_type, data), "timestamp": time.time()}
+        if reply_scope.get() is not None:
+            event["reply_id"] = reply_scope.get()
         async with self._lock:
             targets = list(self._subscribers.get(conv_id, []))
         for q in targets:

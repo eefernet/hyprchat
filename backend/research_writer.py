@@ -117,6 +117,34 @@ def normalize_review(value):
     return result
 
 
+
+def search_degraded(diagnostics) -> bool:
+    """Whether search itself fell short: a provider failure, a search that kept nothing, or most results
+    off-topic. One discarded result in one search is ordinary filtering, not limited coverage (it used to
+    put "Some searches failed…" on nearly every report, also on one that was only cut short while writing)."""
+    rows = [d for d in diagnostics or [] if isinstance(d, dict)]
+    if any(d.get('status') not in (None, 'ok') for d in rows):
+        return True
+    discarded = sum(int(d.get('discarded_results') or 0) for d in rows)
+    retained = sum(int(d.get('retained_results') or 0) for d in rows)
+    if any(int(d.get('discarded_results') or 0) and not int(d.get('retained_results') or 0) for d in rows):
+        return True
+    return discarded > retained
+
+
+def unfinished_note(reasons) -> str:
+    """Why writing did not finish, named by cause. 'length' is the model's output limit, not a search problem."""
+    reasons = [str(r or 'unknown') for r in reasons]
+    cut = sum(1 for r in reasons if r == 'length')
+    other = sorted({r for r in reasons if r != 'length'})
+    parts = []
+    if cut:
+        parts.append(f"{cut} section{'s' if cut != 1 else ''} reached the output length limit and may end early")
+    if other:
+        parts.append('writing stopped early (' + ', '.join(other) + ')')
+    return 'Unfinished generation: ' + '; '.join(parts)
+
+
 def report_checks(text, sections, sources, target, results, evidence_by_section=None):
     ids = citation_ids(text)
     allowed = {'S' + str(s['index']) for s in sources}
@@ -153,7 +181,7 @@ def report_checks(text, sections, sources, target, results, evidence_by_section=
         issues.append('Unclosed code or visual fence')
     incomplete = [r.finish_reason for r in results if not r.complete]
     if incomplete:
-        issues.append('Unfinished generation: ' + ', '.join(incomplete))
+        issues.append(unfinished_note(incomplete))
     return dict(word_count=words, word_target=target, missing_sections=missing,
                 invalid_citations=invalid, uncited_sections=uncited, unavailable_evidence_sections=unavailable, cited_sources=len(ids), issues=issues,
                 generation_complete=not incomplete)
@@ -191,7 +219,7 @@ async def compose_report(*, http, ollama_url, events, report_id, query, focus, t
         method += '> [!WARNING]\n> No full web pages were read. Any web claims require further verification.\n\n'
     if metrics.get('evidence_index', {}).get('truncated_documents'):
         method += '> [!NOTE]\n> Some source text reached the documented evidence storage limits.\n\n'
-    degraded_search = any(d.get('status') not in (None, 'ok') or d.get('discarded_results') for d in metrics.get('search_diagnostics', []))
+    degraded_search = search_degraded(metrics.get('search_diagnostics', []))
     if degraded_search:
         method += '> [!WARNING]\n> Some searches failed, returned no usable matches, or contained off-topic results. Search coverage is limited; diagnostics are retained with this report.\n\n'
     metrics.update(word_target=target, requested_word_target=requested_target, evidence_limited=sparse,

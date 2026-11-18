@@ -99,7 +99,10 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
   const [proposals,setProposals]=useState([]);
   const [conflicts,setConflicts]=useState([]);
 
+  // Paging quickly through months starts a request per step; only the newest may fill the grid.
+  const loadSeq=useRef(0);
   const load=useCallback(async()=>{
+    const seq=++loadSeq.current;
     let start,end;
     if(view==="month"){
       start=new Date(anchor.getFullYear(),anchor.getMonth(),1);start.setDate(start.getDate()-7);
@@ -112,10 +115,12 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
       end=new Date(anchor);end.setDate(end.getDate()+1);
     }
     try{
-      setEvents(await apiJson(`/api/calendar/events?start_local=${dkey(start)}T00:00&end_local=${dkey(end)}T23:59`));
+      const listed=await apiJson(`/api/calendar/events?start_local=${dkey(start)}T00:00&end_local=${dkey(end)}T23:59`);
+      if(seq!==loadSeq.current)return;
+      setEvents(listed);
       setProposals(await apiJson('/api/calendar/proposals'));
       setConflicts(await apiJson('/api/calendar/conflicts'));
-    }catch(e){setErr(String(e.message||e));}
+    }catch(e){if(seq===loadSeq.current)setErr(String(e.message||e));}
     finally{setLoaded(true);}
   },[anchor,view]);
   const loadAccounts=useCallback(async()=>{
@@ -147,9 +152,18 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
       setForm(null);load();
     }catch(e){setErr(String(e.message||e));}
   };
-  const remove=async id=>{
-    if(!await confirmAction({title:"Delete event",body:"Delete this event?",confirmLabel:"Delete",tone:"danger"}))return;
-    try{await apiJson(`/api/calendar/events/${id}`,{method:"DELETE"});}
+  // `e` is an occurrence row: its id is the SERIES id. Deleting one occurrence of a repeating event used
+  // to delete every occurrence (and, for a synced calendar, the event on the server at the next sync).
+  const remove=async e=>{
+    const id=e.series_id||e.id;
+    const repeats=!!(e.rrule||(e.recurrence_id&&e.occurrence_id!==id));
+    let query="";
+    if(repeats){
+      const one=await confirmAction({title:"Delete repeating event",body:`"${e.title||"This event"}" repeats. Delete only this occurrence?`,confirmLabel:"This occurrence",cancelLabel:"More options",tone:"danger"});
+      if(one)query=`?recurrence_id=${encodeURIComponent(e.recurrence_id||"")}`;
+      else if(!await confirmAction({title:"Delete the whole series?",body:`Every occurrence of "${e.title||"this event"}" will be deleted${e.caldav_uid?", also on the synced calendar":""}.`,confirmLabel:"Delete series",cancelLabel:"Keep it",tone:"danger"}))return;
+    }else if(!await confirmAction({title:"Delete event",body:"Delete this event?",confirmLabel:"Delete",tone:"danger"}))return;
+    try{await apiJson(`/api/calendar/events/${id}${query}`,{method:"DELETE"});}
     catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Delete failed",detail:String(e.message||e)});}
     finally{load();}
   };
@@ -329,7 +343,7 @@ export default function CalendarPanel({t,btnS,cardS,inputS,confirmAction,notify}
             <span style={{color:t.acc,fontWeight:700,minWidth:118,fontSize:"var(--hc-text-secondary)"}}>{fmtLocalMinute(e.start_local)}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.title}{e.location?<span style={{color:t.mut}}> @ {e.location}</span>:null}</span>
             {e.sync_state==="synced"&&<span title="Synced via CalDAV" style={{fontSize:"var(--hc-text-secondary)",color:t.ok,display:"inline-flex"}}><IC.Refresh/></span>}
-            <button aria-label="Delete" onClick={()=>remove(e.id)} style={{...btnS(t.err),padding:"2px 7px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
+            <button aria-label="Delete" onClick={()=>remove(e)} style={{...btnS(t.err),padding:"2px 7px",fontSize:"var(--hc-text-control)"}}><IC.Trash/></button>
           </div>)}
         </div>
       </div>

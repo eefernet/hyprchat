@@ -12,7 +12,7 @@ import asyncio
 import base64
 import html as html_mod
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formataddr, parseaddr
 
@@ -63,6 +63,16 @@ def _html_to_text(html: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
+def _utc_naive_iso(value) -> str | None:
+    """A message date as naive-UTC ISO, like every other stored time. Kept with the sender's own offset,
+    the inbox was sorted as text (so by the sender's wall clock) and showed the sender's time of day."""
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat()
+
+
 def _msg_snippet(msg) -> str:
     body = (msg.text or "").strip() or _html_to_text(msg.html or "")
     return re.sub(r"\s+", " ", body)[:500]
@@ -94,7 +104,7 @@ def _fetch_new_blocking(account: dict, last_seen_uid: int) -> dict:
                 "subject": msg.subject or "(no subject)",
                 "from": msg.from_ or "",
                 "to": ", ".join(msg.to or ()),
-                "date": msg.date.isoformat() if isinstance(msg.date, datetime) else None,
+                "date": _utc_naive_iso(msg.date),
                 "snippet": _msg_snippet(msg),
                 "unread": "\\Seen" not in (msg.flags or ()),
             })

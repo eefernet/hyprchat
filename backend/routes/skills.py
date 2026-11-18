@@ -152,6 +152,10 @@ async def update_skill(skill_id: str, req: SkillUpdate):
         fields["name"] = skills.slug(req.name)
         if not skills.NAME.match(fields["name"]):
             raise HTTPException(400, "name must be 2-48 characters of lowercase letters, digits and hyphens")
+        # Checked BEFORE anything is saved: the body used to be written first, so a rename onto an existing
+        # name answered 409 while the text change had already gone through.
+        if await skill_store.get_by_name(fields["name"]):
+            raise HTTPException(409, f"a skill named '{fields['name']}' already exists")
     if req.description is not None or req.body is not None:
         _, description, body = _checked(
             skills.validate, skill["name"],

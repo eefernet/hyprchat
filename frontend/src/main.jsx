@@ -9,6 +9,9 @@ import ContextMeter from './components/ContextMeter.jsx';
 import CompactionNotice from './components/CompactionNotice.jsx';
 import {showJumpButton} from './chatScroll.js';
 import {messageParts,stampCard,resetOffsets,capSavedEvents,mergeContinued} from './messageParts.js';
+import {downloadLabel} from './fileLinks.js';
+import {withFile,withoutFile,failureDetail} from './kbFiles.js';
+import {foreignReplyEvent} from './streamOwner.js';
 import {withRunCode,slimSaved} from './codeRuns.js';
 import MessageBody from './components/MessageBody.jsx';
 import {MessageCards} from './components/ToolOutputCards.jsx';
@@ -39,7 +42,7 @@ import {documentArtifactId,documentRunIds,isDocumentEvent} from "./documentFiles
 // component code below — which references window.Prism / window.katex etc. —
 // keeps working untouched.
 import './vendor.js';
-import {mergeResearchReport,researchRevision,researchTerminal,researchHeadings,linkResearchCitations,researchExportMarkdown} from './researchState.js';
+import {mergeResearchReport,researchRevision,researchTerminal,researchHeadings,linkResearchCitations,researchExportMarkdown,targetTile,reportSourceCount,reportCardSummary,putReport} from './researchState.js';
 import { parseCodeFence } from './syntaxHighlight.js';
 import CodeCard,{CodeCardSession,CodeMessageBoundary} from './components/CodeCard.jsx';
 import {ActivityLabel,PlayfulStatusContext} from './components/hyprChatWidgets.jsx';
@@ -101,6 +104,8 @@ import {
   UI_FONTS,
   THEMES,
   WELCOME_VERSION,
+  degradedColor,
+  readableOn,
   fallbackWelcome,
   localDayKey,
 } from './theme.js';
@@ -232,6 +237,8 @@ function HyprChat(){
   const [fi,setFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-font")||"0");return Number.isInteger(saved)&&FONTS[saved]?saved:0;}catch{return 0;}});
   // Interface font: -1 matches the code font (default); otherwise an index into UI_FONTS (sans faces).
   const [funVerbs,setFunVerbs]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-fun-verbs::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
+  // HyprFit: also list live Hugging Face trending repos. Off unless switched on: the trending list put audio models and odd fine-tunes ahead of the curated picks.
+  const [hyprfitLive,setHyprfitLive]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-hyprfit-live::${hcStoredUserId()||"default"}`)||"false")===true;}catch{return false;}});
   const [previewAutoOpen,setPreviewAutoOpen]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-preview-auto-open::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
   const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
   const [tokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
@@ -428,6 +435,7 @@ function HyprChat(){
   const [hfSearch,setHfSearch]=useState("");
   const [hfResults,setHfResults]=useState([]);
   const [hfLoading,setHfLoading]=useState(false);
+  const hfSelectSeq=useRef(null);
   const [hfSelected,setHfSelected]=useState(null); // model object from search
   const [hfModelInfo,setHfModelInfo]=useState(null); // detailed info + files
   const [hfReadme,setHfReadme]=useState(null);
@@ -530,6 +538,7 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
   useEffect(()=>{persistPref("fun-verbs",funVerbs);},[funVerbs]);
+  useEffect(()=>{persistPref("hyprfit-live",hyprfitLive);},[hyprfitLive]);
   useEffect(()=>{persistPref("preview-auto-open",previewAutoOpen);configureWorkbench({autoOpen:previewAutoOpen});},[previewAutoOpen]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
@@ -656,7 +665,6 @@ function HyprChat(){
   // declarations because its deps close over them (TDZ during render otherwise).
   useEffect(()=>{
     const date=localDayKey();
-    const model=wsModel||"";
     const uid=currentUserId||"";
     const daypart=daypartOf(new Date().getHours());
     // Re-fire at the next daypart boundary so an evening session doesn't keep the morning line.
@@ -668,23 +676,29 @@ function HyprChat(){
     const bt=setTimeout(()=>setDpTick(v=>v+1),Math.max(30000,boundary-now));
     try{
       const cached=JSON.parse(localStorage.getItem("hc-daily-welcome")||"{}");
-      if(cached.version===WELCOME_VERSION&&cached.date===date&&cached.model===model&&cached.uid===uid&&cached.daypart===daypart&&cached.message){setDailyWelcome(cached.message);return()=>clearTimeout(bt);}
+      if(cached.version===WELCOME_VERSION&&cached.date===date&&cached.uid===uid&&cached.daypart===daypart&&cached.message){setDailyWelcome(cached.message);return()=>clearTimeout(bt);}
     }catch{}
     // Personalized interim fallback while the fetch runs (backend also resolves
     // the name from the X-HyprChat-User header when user_name is empty).
     setDailyWelcome(fallbackWelcome(greetableName(currentUser)));
+    // The server picks the model, keeps one line per user and daypart, and writes one at a time; the
+    // request is dropped after 18 s so a slow model never holds the page (the fallback line stays).
     let cancelled=false;
-    fetch(`${API}/api/daily-message`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model,user_name:greetableName(currentUser),daypart})})
+    const ctl=new AbortController();
+    const giveUp=setTimeout(()=>ctl.abort(),18000);
+    fetch(`${API}/api/daily-message`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user_name:greetableName(currentUser),daypart}),signal:ctl.signal})
       .then(r=>r.ok?r.json():null)
       .then(d=>{
         const msg=(d?.message||"").trim();
         if(cancelled||!msg)return;
         setDailyWelcome(msg);
-        try{localStorage.setItem("hc-daily-welcome",JSON.stringify({version:WELCOME_VERSION,date,model,uid,daypart,message:msg}));}catch{}
+        // A fallback line (model busy or slow) is shown but not kept, so the next load asks again.
+        if(!d.fallback){try{localStorage.setItem("hc-daily-welcome",JSON.stringify({version:WELCOME_VERSION,date,uid,daypart,message:msg}));}catch{}}
       })
-      .catch(()=>{});
-    return ()=>{cancelled=true;clearTimeout(bt);};
-  },[wsModel,currentUserId,dpTick]);
+      .catch(()=>{})
+      .finally(()=>clearTimeout(giveUp));
+    return ()=>{cancelled=true;clearTimeout(bt);clearTimeout(giveUp);ctl.abort();};
+  },[currentUserId,dpTick]);
   // ── Server-backed user prefs (prompts, model params, quotes, tags, effort) ──
   // Debounced PUTs to /api/prefs/{key}; namespaced localStorage cache per user.
   const prefsSyncRef=useRef(null);
@@ -729,6 +743,8 @@ function HyprChat(){
   const [kbs,setKbs]=useState([]);
   const kbSaveTimersRef=useRef(new Map());
   const [uploadProgress,setUploadProgress]=useState({});  // {kbId: {filename, progress, status, error}}
+  const [kbUrlBusy,setKbUrlBusy]=useState({});      // {kbId: true} while that card's URL is being fetched
+  const kbBusyRef=useRef({});
   const [kbUrlInputs,setKbUrlInputs]=useState({});  // {kbId: url string} — Add URL composer per KB card
   const [tools,setTools]=useState([]);
   const [mcs,setMcs]=useState([]);
@@ -849,7 +865,7 @@ function HyprChat(){
     const activityId=addActivity({name:`Project upload: ${f.name}`,kind:"upload",message:"Uploading archive...",pct:0,chatId:cid});
     // Placeholder chip so user sees something is happening
     const placeholderName=`📦 uploading ${f.name}...`;
-    chatDrafts.setAttachmentsFor(cid,p=>[...p.filter(a=>!a.name.startsWith("📦 ")),{name:placeholderName,content:"[Project archive upload in progress]"}]);
+    chatDrafts.setAttachmentsFor(cid,p=>[...p.filter(a=>!a.name.startsWith("📦 ")),{name:placeholderName,content:"[Project archive upload in progress]",loading:true}]);   // loading: this chat cannot send until the archive is in (the placeholder text used to go to the model, and the job built a new project)
     try{
       const fd=new FormData();fd.append("file",f);fd.append("conv_id",cid);
       updateActivity(activityId,{status:"uploading",message:"Sending archive...",pct:35});
@@ -972,6 +988,16 @@ function HyprChat(){
     return true;
   };
   const stopStrandedRef=useRef(stopStrandedStream);stopStrandedRef.current=stopStrandedStream;
+  // The same for a council: its stream is separate from a normal reply's. A deleted council chat kept
+  // calling its members (real money for cloud councils) because only the on-screen state was cleared.
+  const stopCouncilIn=goneIds=>{
+    const run=councilStreamRef.current;
+    if(!run||!goneIds.includes(run.cid))return false;
+    try{councilAbortRef.current?.abort();}catch{}
+    run.running=false;councilStreamRef.current=null;councilAbortRef.current=null;
+    setCouncilRunning(false);setCouncilResponses({});setCouncilHostContent("");setCouncilVotes([]);setCouncilVoting(false);
+    return true;
+  };
   useEffect(()=>{
     const prep=sendPrepRef.current;
     if(prep?.preparing&&(prep.conversationId!==actId||prep.userId!==currentUserId))cancelSendPreparation();
@@ -1497,13 +1523,40 @@ function HyprChat(){
     saveKb(kb);
   };
   const createKb=async()=>{
-    const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})}).catch(()=>null);
-    if(r){const kb=await r.json();setKbs(p=>[...p,{...kb,files:[]}]);}else{setKbs(p=>[...p,{id:`kb-${Date.now()}`,name:"New KB",description:"",files:[]}]);}
+    // One at a time, and only what the server created is listed (a failed request used to add a made-up row).
+    if(kbBusyRef.current.create)return;
+    kbBusyRef.current.create=true;
+    try{
+      const r=await fetch(`${API}/api/knowledge-bases`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New KB",description:""})});
+      if(!r.ok)throw new Error(await failureDetail(r));
+      const kb=await r.json();
+      setKbs(p=>[...p,{...kb,files:[]}]);
+    }catch(e){notify({type:"error",text:"Knowledge base not created",detail:e.message});}
+    finally{kbBusyRef.current.create=false;}
+  };
+  const deleteKb=async(kb)=>{
+    const count=(kb.files||[]).length;
+    if(!await confirmAction({title:"Delete this knowledge base?",body:`"${kb.name||"Untitled"}"${count?` and its ${count} file${count===1?"":"s"}`:""} will be deleted, with everything indexed from ${count===1?"it":"them"}. This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;
+    try{
+      const r=await fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"});
+      if(!r.ok)throw new Error(await failureDetail(r));
+      setKbs(p=>p.filter(k=>k.id!==kb.id));
+    }catch(e){notify({type:"error",text:"Knowledge base not deleted",detail:e.message});}
+  };
+  const deleteKbFile=async(kb,f)=>{
+    if(!await confirmAction({title:"Delete this file?",body:`"${f.filename||f.name||"File"}" and its indexed passages will be removed from "${kb.name||"this knowledge base"}".`,confirmLabel:"Delete",tone:"danger"}))return;
+    try{
+      if(f.id){const r=await fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"});if(!r.ok)throw new Error(await failureDetail(r));}
+      setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:withoutFile(k.files,f)}:k));
+    }catch(e){notify({type:"error",text:"File not deleted",detail:e.message});}
   };
   const addKbUrl=async(kbId)=>{
     const origin=hcCaptureUserContext();
     const url=(kbUrlInputs[kbId]||"").trim();
-    if(!url)return;
+    if(!url||kbBusyRef.current[`url:${kbId}`])return;   // Enter twice used to fetch and list the page twice
+    kbBusyRef.current[`url:${kbId}`]=true;
+    setKbUrlBusy(p=>({...p,[kbId]:true}));
+    const release=()=>{kbBusyRef.current[`url:${kbId}`]=false;setKbUrlBusy(p=>({...p,[kbId]:false}));};
     const pKey=`${kbId}:url:${Date.now()}`;
     const clearLater=(ms)=>setTimeout(()=>setUploadProgress(p=>{const n={...p};delete n[pKey];return n;}),ms);
     setUploadProgress(p=>({...p,[pKey]:{filename:url.slice(0,60),progress:40,status:"uploading"}}));
@@ -1512,8 +1565,9 @@ function HyprChat(){
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       setKbUrlInputs(p=>({...p,[kbId]:""}));
+      release();
       setUploadProgress(p=>({...p,[pKey]:{filename:d.filename,progress:100,status:"indexing"}}));
-      if(!d.replaced)setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename,file_size:d.file_size,source_url:d.source_url}]}:k));
+      setKbs(p=>p.map(k=>k.id===kbId?{...k,files:withFile(k.files,{id:d.id,filename:d.filename,file_size:d.file_size,source_url:d.source_url})}:k));
       for(let i=0;i<60;i++){
         await new Promise(res=>setTimeout(res,2000));
         if(origin.epoch!==hcCaptureUserContext().epoch)return;
@@ -1527,6 +1581,7 @@ function HyprChat(){
       }
       setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"pending"}}));
     }catch(e){
+      release();
       if(e.name==="AbortError"||origin.epoch!==hcCaptureUserContext().epoch)return;
       setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"error",error:e.message}}));
       notify({type:"error",text:"URL ingest failed",detail:e.message||String(e)});
@@ -1629,6 +1684,7 @@ function HyprChat(){
         {key:"think-mode",legacy:"hc-think-mode",set:setThinkMode,fallback:"auto"},
         {key:"native-effort",legacy:"hc-native-effort",set:setNativeEffort,fallback:{},convMap:true},
         {key:"fun-verbs",legacy:"hc-fun-verbs",set:setFunVerbs,fallback:true},
+        {key:"hyprfit-live",set:setHyprfitLive,fallback:false},
         {key:"preview-auto-open",legacy:"hc-preview-auto-open",set:setPreviewAutoOpen,fallback:true},
         {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
@@ -1649,6 +1705,7 @@ function HyprChat(){
           val=Object.fromEntries(Object.entries(val).filter(([k])=>!k.startsWith("ghost-")&&!k.startsWith("l-")));
         }
         if(d.key==='fun-verbs')val=typeof val==='boolean'?val:true;
+        if(d.key==='hyprfit-live')val=val===true;
         if(d.key==='preview-auto-open')val=typeof val==='boolean'?val:true;
         if(d.key==='effort-level')val=reviewLevel(val);
         if(d.key==='think-mode'&&!['auto','on','off'].includes(val))val='auto';
@@ -1906,7 +1963,11 @@ function HyprChat(){
     const connect=()=>{
       if(closed)return;
       const es=new EventSource(userScopedUrl(`/api/events/${actId}`));
-      es.onmessage=e=>{try{const ev=JSON.parse(e.data);if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);
+      es.onmessage=e=>{try{const ev=JSON.parse(e.data);
+        // Work that finishes after its reply (memory suggestions, the skill review) is marked with that
+        // reply's id. While a LATER reply is streaming here it is not that reply's activity: skip it.
+        if(foreignReplyEvent(ev,streamingCidRef.current===actId?streamMsgIdRef.current:null))return;
+        if(ev.type!=="heartbeat"&&ev.type!=="keepalive"){setEvts(p=>[...p.slice(-200),ev]);
         // Only buffer events for the conversation that is actually streaming —
         // switching to another chat with an in-flight background run otherwise
         // persists THAT chat's events into this stream's message metadata.
@@ -1984,7 +2045,7 @@ function HyprChat(){
     setResearchEvents(d.events_log||[]);
     setResearchLiveMarkdown(cleanResearchMarkdown(d.report_markdown||""));
     setResearchRunning(!researchTerminal(d.status));
-    setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);
+    setResearchReports(p=>putReport(p,d));
   },[]);
 
   const loadResearchReport=useCallback(async(id,{openPanel=true}={})=>{
@@ -2093,7 +2154,7 @@ function HyprChat(){
       researchSelectedRef.current=d.id;researchRevisionRef.current=researchRevision(d);setResearchEvidence(null);
       researchAppliedRef.current=d;
       setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);
-      setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);
+      setResearchReports(p=>putReport(p,d));
       setResearchDraft(p=>({...p,query:"",focus:"",inputs:[]}));
       setResearchInputText("");
       setPanel("research");
@@ -2124,7 +2185,7 @@ function HyprChat(){
       if(request!==researchRequestRef.current)return;
       researchSelectedRef.current=d.id;researchRevisionRef.current=researchRevision(d);setResearchEvidence(null);
       researchAppliedRef.current=d;
-      setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)]);setPanel("research");
+      setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>putReport(p,d));setPanel("research");
     }catch(e){if(request===researchRequestRef.current){setResearchRunning(false);notify({type:"error",text:"Research rerun failed",detail:e.message||String(e)});}}
   };
 
@@ -2920,6 +2981,7 @@ function HyprChat(){
     if(!isGhostConv(chat)&&!await confirmAction({title:"Delete this chat?",body:`"${chat.title||"Untitled chat"}" and its messages will be deleted.${replying?" The reply still being written in it will be stopped.":""} This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;
     deletedChatsRef.current.add(id);
     stopStrandedStream([id]);
+    stopCouncilIn([id]);
     const at=convsRef.current.findIndex(c=>c.id===id);
     const {nextId,changed}=afterDelete(convsRef.current,id,actIdRef.current);
     setConvs(p=>p.filter(c=>c.id!==id));
@@ -3047,9 +3109,15 @@ function HyprChat(){
     const ok=await confirmAction({title:"Delete all chats",body:"Delete all conversations? This cannot be undone.",confirmLabel:"Delete All Chats",tone:"danger"});
     if(!ok)return;
     try{
+      // Whatever is replying is stopped first and its chat marked deleted, as for a single delete: the
+      // reply used to run on unseen, block new sends ("Another chat is still replying") and end with
+      // "Message save failed".
+      const allIds=convsRef.current.map(c=>c.id);
+      allIds.forEach(id=>deletedChatsRef.current.add(id));
+      stopStrandedStream(allIds);stopCouncilIn(allIds);
       const r=await fetch(`${API}/api/conversations`,{method:"DELETE"});
       const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+      if(!r.ok){allIds.forEach(id=>deletedChatsRef.current.delete(id));throw new Error(d.detail||`HTTP ${r.status}`);}
       setConvs([]);setVisibleMessageCounts({});setActId(null);setEvts([]);evtsRef.current=[];streamSaveEvtsRef.current=[];setCoderWorkflows([]);
       chatDrafts.clearAll();messageQueue.reset();
       notify({type:"success",text:"Chats deleted",detail:`Deleted ${d.deleted||0} conversations.`});
@@ -3148,6 +3216,9 @@ function HyprChat(){
   // Send a message to the council
   const sendCouncil=async()=>{
     if(!inp.trim()||councilRunning)return;
+    // One council at a time: its live state is shared, so a second run in another chat used to mix both
+    // councils' replies and lose the first one's Stop button. (`councilRunning` is reset per chat.)
+    if(councilStreamRef.current?.running){notify({type:"info",text:"Another council is still replying",detail:"Wait for it to finish, or stop it in its chat."});return;}
     const cid=actId;const cv=convs.find(c=>c.id===cid);
     if(!cv?.council_config_id)return;
     const userMsg=inp.trim();setInp("");setCouncilSuggestions([]);if(inpRef.current){inpRef.current.style.height="auto";}
@@ -3192,7 +3263,7 @@ function HyprChat(){
                 fetch(`${API}/api/conversations/${cid}`).then(r=>r.ok?r.json():null).then(full=>{
                   if(full?.messages){
                     const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-                    setConvs(prev=>prev.map(c=>c.id===cid?{...c,messages:full.messages.map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)}))}:c));
+                    setConvs(prev=>prev.map(c=>c.id===cid?{...c,messages:full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),created_at:m.created_at,rating:m.rating}))}:c));
                   }
                 }).catch(()=>{});
               }
@@ -3210,7 +3281,7 @@ function HyprChat(){
               fetch(`${API}/api/conversations/${cid}`).then(r=>r.ok?r.json():null).then(full=>{
                 if(full?.messages){
                   const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-                  setConvs(prev=>prev.map(c=>c.id===cid?{...c,messages:full.messages.map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)}))}:c));
+                  setConvs(prev=>prev.map(c=>c.id===cid?{...c,messages:full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),created_at:m.created_at,rating:m.rating}))}:c));
                 }
               }).catch(()=>{});
             }else if(d.type==="council_vote"){
@@ -3231,7 +3302,7 @@ function HyprChat(){
                   const full=await fullR.json();
                   if(full&&full.messages){
                     const parseMeta=m=>{if(typeof m.metadata==="string"){try{return JSON.parse(m.metadata);}catch{return{};}}return m.metadata||{};};
-                    setConvs(prev=>prev.map(c=>c.id===cid?{...c,messages:full.messages.map(m=>({role:m.role,content:m.content,metadata:parseMeta(m)}))}:c));
+                    setConvs(prev=>prev.map(c=>c.id===cid?{...c,messages:full.messages.map(m=>({id:m.id,role:m.role,content:m.content,metadata:parseMeta(m),created_at:m.created_at,rating:m.rating}))}:c));
                   }
                 }
               }catch(e){console.error("Failed to reload council conversation",e);notify({type:"warning",text:"Council history reload failed",detail:e.message||String(e),duration:5000});}
@@ -3685,7 +3756,7 @@ function HyprChat(){
   // Enter or the Send button. While this chat is replying the message is queued (messageQueue.js); the
   // decision is made here because send() keeps its own guard up for as long as a reply runs.
   const submitComposer=()=>{
-    const action=submitAction({streamingHere:streaming&&streamingCidRef.current===actId,dispatching:!!messageQueue.queue.sending,council:!!act?.is_council,hasText:!!inp.trim(),attachments,uploading:coderProjUploading});
+    const action=submitAction({streamingHere:streaming&&streamingCidRef.current===actId,dispatching:!!messageQueue.queue.sending,council:!!act?.is_council,hasText:!!inp.trim(),attachments,uploading:attachments.some(a=>a.loading)});   // this chat's own uploads, not an upload running in another chat
     if(action==="send")return send();
     if(action==="wait"){notify({type:"warning",text:"Attachment still processing",detail:"Wait for it to finish or remove the file."});return;}
     if(action!=="queue")return;
@@ -4403,10 +4474,10 @@ function HyprChat(){
 
   // Refresh models from Ollama (single source of truth)
   const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}}catch{}};
-  const loadHyprfit=async(refresh=false)=>{
+  const loadHyprfit=async(refresh=false,live=hyprfitLive)=>{
     setHyprfitLoading(true);
     try{
-      const params=new URLSearchParams({live:"true"});
+      const params=new URLSearchParams({live:live?"true":"false"});
       if(refresh)params.set("refresh","true");
       const r=await fetch(`${API}/api/models/hyprfit?${params}`);
       const d=await r.json();
@@ -4659,6 +4730,9 @@ function HyprChat(){
     }).join("");
   };
   const hfSelectModel=async(model)=>{
+    // Only the model picked last may fill the detail view: clicking B while A was loading showed A's
+    // files under B, and Download then asked for A's file names in B's repository.
+    hfSelectSeq.current=model.id;
     setHfSelected(model);setHfModelInfo(null);setHfReadme(null);setHfSelectedFiles([]);
     setModelParamsOpen(null);
     const repoId=model.id;
@@ -4670,6 +4744,7 @@ function HyprChat(){
       fetch(`${API}/api/hf/model?repo_id=${encodeURIComponent(repoId)}`).then(r=>r.json()),
       fetch(`${API}/api/hf/readme?repo_id=${encodeURIComponent(repoId)}`).then(r=>r.json()),
     ]);
+    if(hfSelectSeq.current!==repoId)return;
     if(infoR.status==="fulfilled")setHfModelInfo(infoR.value);
     if(readmeR.status==="fulfilled")setHfReadme(hfCleanReadme(readmeR.value?.content||""));
     setHfReadmeLoading(false);
@@ -4741,7 +4816,7 @@ function HyprChat(){
   // capTags colors are intentionally fixed (not theme tokens): they mirror ModelPicker.modelCaps as cross-theme capability identity badges.
   const capTags=(n)=>{const b=(n||"").toLowerCase();const caps=[];if(b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});if(b.match(/llava|vision|[\-:]vl$|[\-:]vl[\-:]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});if(b.match(/mixtral|moe|dbrx|switch|jamba|arctic/))caps.push({label:"MoE",emoji:"🔀",color:"#f39c12"});if(b.match(/qwen3(?!\.5)|deepseek-r1|r1-|thinking|reflection|reason/i)&&!b.match(/qwen3\.5/))caps.push({label:"Thinking",emoji:"💭",color:"#a78bfa"});if(b.match(/abliterated|uncensored|unfiltered|dolphin/))caps.push({label:"Uncensored",emoji:"🔓",color:"#ef4444"});if(b.match(/instruct|chat|it(?:$|[\-:])/))caps.push({label:"Instruct",emoji:"📝",color:"#64748b"});return caps;};
   const quantLabel=(filename)=>{if(!filename)return null;const m=filename.match(/[_\-\.](Q[0-9]_[A-Z_]+|[FQIB][0-9]+(?:_[A-Z0-9]+)?|fp16|bf16|f32|f16|int[48])/i);return m?m[1].toUpperCase():null;};
-  const quantColor=(q)=>{if(!q)return"#888";const l=q.toLowerCase();if(l.match(/^(f32|fp32)$/))return"#ef4444";if(l.match(/^(f16|fp16|bf16)$/))return"#f97316";if(l.match(/^q8/))return"#eab308";if(l.match(/^q6/))return"#84cc16";if(l.match(/^q5/))return"#22c55e";if(l.match(/^q4/))return"#06b6d4";if(l.match(/^q3|^q2|^iq/))return"#8b5cf6";return"#94a3b8";};
+  const quantColor=(q)=>{if(!q)return"#888888";const l=q.toLowerCase();if(l.match(/^(f32|fp32)$/))return"#ef4444";if(l.match(/^(f16|fp16|bf16)$/))return"#f97316";if(l.match(/^q8/))return"#eab308";if(l.match(/^q6/))return"#84cc16";if(l.match(/^q5/))return"#22c55e";if(l.match(/^q4/))return"#06b6d4";if(l.match(/^q3|^q2|^iq/))return"#8b5cf6";return"#94a3b8";};
   const isMultiPart=(files)=>files.some(f=>/\d{5}-of-\d{5}\.gguf$/i.test(f.name));
   const getPartGroups=(files)=>{
     const groups={};
@@ -4825,7 +4900,7 @@ function HyprChat(){
       if(boldLinkMatch){
         const [,lt,lu]=boldLinkMatch;
         if((lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))){
-          const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):lu.split("/").pop();
+          const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):downloadLabel(lt,lu);
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
             <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
               <span style={{fontSize:"var(--hc-text-title)"}}>📁</span><span>{fn}</span><span style={{fontSize:"var(--hc-text-secondary)",opacity:.6,marginLeft:4}}>⬇</span>
@@ -4855,7 +4930,7 @@ function HyprChat(){
         const [,lt,lu]=linkMatch;
         if(lu.startsWith("#research-source-"))return <a key={k} href={lu} onClick={e=>{e.preventDefault();document.getElementById(lu.slice(1))?.scrollIntoView({behavior:'smooth',block:'center'});}} style={{color:t.acc,textDecoration:'underline'}}>{lt}</a>;
         if((lu.startsWith("/api/downloads/")||lu.startsWith("/api/documents/files/"))){
-          const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):lu.split("/").pop();
+          const fn=lu.startsWith("/api/documents/files/")?lt.replace(/^Download\s+/i,""):downloadLabel(lt,lu);
           return <span key={k} style={{display:"inline-flex",alignItems:"center",gap:0,margin:"6px 0"}}>
             <a href={userScopedUrl(lu)} download={fn} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"8px 16px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:700,cursor:"pointer",transition:"all .15s"}}>
               <span style={{fontSize:"var(--hc-text-title)"}}>📁</span><span>{fn}</span><span style={{fontSize:"var(--hc-text-secondary)",opacity:.6,marginLeft:4}}>⬇</span>
@@ -5025,9 +5100,9 @@ function HyprChat(){
           }
           const cfg={
             NOTE:{color:rt.acc,icon:"i",label:"Note"},
-            TIP:{color:rt.ok,icon:"tip",label:"Tip"},
+            TIP:{color:rt.ok,icon:"✦",label:"Tip"},
             IMPORTANT:{color:rt.warm,icon:"*",label:"Important"},
-            WARNING:{color:STATUS_DEGRADED,icon:"⚠",label:"Warning"},
+            WARNING:{color:degradedColor(rt),icon:"⚠",label:"Warning"},
             CAUTION:{color:rt.err,icon:"!",label:"Caution"}
           }[ctype];
           return <div key={j} style={{borderLeft:`3px solid ${cfg.color}`,background:`${cfg.color}12`,padding:"8px 12px 10px",borderRadius:"0 6px 6px 0",margin:"8px 0"}}>
@@ -5065,6 +5140,16 @@ function HyprChat(){
           </div>;
         }
         if(ln.match(/^>\s?[—–]\s/))return null;
+        // Nested items: an indented "- item" or "1. item" is a list item one level in (models write nested
+        // lists all the time; they used to show as plain text with the dash). Two spaces or a tab per level.
+        const listIndent=(ln.match(/^(\s+)(?:[-*+]|\d+\.)\s+/)||[])[1];
+        if(listIndent&&!printMode){
+          const depth=Math.min(4,Math.max(1,Math.round(listIndent.replace(/\t/g,"  ").length/2)));
+          const inner=ln.slice(listIndent.length);
+          const numbered=inner.match(/^(\d+)\.\s+(.*)$/);
+          const text=numbered?numbered[2]:inner.replace(/^[-*+]\s+/,"");
+          return <div key={j} style={{display:"flex",gap:7,alignItems:"flex-start",paddingLeft:4+depth*18,margin:"1px 0"}}>{numbered?<span style={{color:rt.acc,minWidth:18,flexShrink:0,fontWeight:600,fontSize:"0.9em"}}>{numbered[1]}.</span>:<span style={{color:rt.acc,marginTop:"0.3em",fontSize:"0.6em",flexShrink:0,opacity:.8}}>○</span>}<span style={{flex:1}}>{ip(text)}</span></div>;
+        }
         if(ln.match(/^[-*+]\s+/)){
           const rest=ln.replace(/^[-*+]\s+/,"");
           const taskMatch=rest.match(/^\[([ xX])\]\s+(.*)$/);
@@ -5100,7 +5185,7 @@ function HyprChat(){
           return <div key={j} className="hc-table-wrap">
             <table className="hc-table">
               {header&&<thead><tr>{header.map((h,hi)=><th key={hi} style={{textAlign:tableAlign[hi]}}>{ip(h)}</th>)}</tr></thead>}
-              <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} style={{textAlign:tableAlign[ci],fontVariantNumeric:tableAlign[ci]==="right"?"tabular-nums":undefined}}>{ip(c)}</td>)}</tr>)}</tbody>
+              <tbody>{body.map((row,ri)=><tr key={ri}>{row.map((c,ci)=><td key={ci} className={c.trim().length<=14?"hc-cell-short":undefined} style={{textAlign:tableAlign[ci],fontVariantNumeric:tableAlign[ci]==="right"?"tabular-nums":undefined}}>{ip(c)}</td>)}</tr>)}</tbody>
             </table>
           </div>;
         }
@@ -5134,7 +5219,7 @@ function HyprChat(){
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
-  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${serviceLabel(n)}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
+  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?degradedColor(t):t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${serviceLabel(n)}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -5323,7 +5408,8 @@ function HyprChat(){
   const mmPanelStrongS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",boxShadow:"none"};
   const mmKickerS={fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600};
   const mmMetaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4};
-  const mmChipS=(c=t.acc,bg)=>({fontSize:"var(--hc-text-secondary)",padding:"2px 7px",borderRadius:"var(--hc-radius)",background:bg||`${c}16`,border:`1px solid ${c}35`,color:c,fontWeight:600,lineHeight:1.15,whiteSpace:"nowrap"});
+  // The tint and border keep the badge's own colour; the text is that colour made readable on this theme.
+  const mmChipS=(c=t.acc,bg)=>({fontSize:"var(--hc-text-secondary)",padding:"2px 7px",borderRadius:"var(--hc-radius)",background:bg||`${c}16`,border:`1px solid ${c}35`,color:readableOn(t,c),fontWeight:600,lineHeight:1.15,whiteSpace:"nowrap"});
   const mmIconBtnS=(c=t.mut)=>({width:28,height:28,borderRadius:"var(--hc-radius)",border:`1px solid ${c}30`,background:`${c}10`,color:c,cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",padding:0,flexShrink:0});
   const mmSectionTitleS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.dim,textTransform:"none",letterSpacing:0,marginBottom:10};
 
@@ -5475,7 +5561,7 @@ function HyprChat(){
             accent={isCouncil||profileType==="persona"?t.pink:t.acc} pinned={isPinned}
             tags={convTags[c.id]||[]} tagFilter={activeTagFilter}
             rename={renamingConv?.id===c.id?renamingConv.title:null} tagEditor={showTagEditor===c.id?newTagInput:null}
-            on={{open:()=>loadConversation(c.id),pin:()=>togglePin(c,isPinned),
+            on={{open:()=>loadConversation(c.id),pin:/^(ghost|l)-/.test(String(c.id))?undefined:()=>togglePin(c,isPinned),
               startRename:()=>setRenamingConv({id:c.id,title:c.title||''}),renameChange:title=>setRenamingConv({id:c.id,title}),renameSave:saveRename,renameCancel:()=>setRenamingConv(null),
               generateTitle:local?null:()=>generateTitle(c.id),
               toggleTags:()=>{setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput('');},tagInput:setNewTagInput,addTag,
@@ -5749,17 +5835,17 @@ function HyprChat(){
           </div>
           <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
             <label htmlFor={`kb-upload-${kb.id}`} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.f1}10`,border:`1px dashed ${t.f1}44`,borderRadius:"var(--hc-radius)",cursor:"pointer",fontSize:"var(--hc-text-secondary)",color:t.f1}}><IC.Upload/> Upload files</label>
-            <button aria-label="Delete" onClick={async()=>{fetch(`${API}/api/knowledge-bases/${kb.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.filter(k=>k.id!==kb.id));}} style={btnS(t.err)}><IC.Trash/></button>
+            <button aria-label="Delete knowledge base" title="Delete knowledge base" onClick={()=>deleteKb(kb)} style={btnS(t.err)}><IC.Trash/></button>
           </div>
         </div>
         <div style={{maxHeight:240,overflowY:"auto",marginBottom:10,display:"flex",flexDirection:"column",gap:6}}>
-          {(kb.files||[]).map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)"}}>
+          {(kb.files||[]).map((f,i)=><div key={f.id??`n:${f.filename||f.name||i}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:`${t.surface}F5`,borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)"}}>
             <span style={{color:t.f1,flexShrink:0}}>{(()=>{if(f.source_url)return"🌐";const ext=((f.filename||f.name||"").split(".").pop()||"").toLowerCase();if(ext==="pdf")return"📕";if(["doc","docx"].includes(ext))return"📘";if(["xls","xlsx","csv"].includes(ext))return"📊";if(["json","xml","yaml","yml"].includes(ext))return"🗂";if(["py","js","ts","rs","go","java","c","cpp","h","rb","sh"].includes(ext))return"💻";if(["md"].includes(ext))return"📝";if(["txt","text","log"].includes(ext))return"📝";if(["html","htm"].includes(ext))return"🌐";if(["png","jpg","jpeg","gif","svg","webp"].includes(ext))return"🖼";if(["zip","tar","gz","rar","7z"].includes(ext))return"📦";return"📄";})()}</span>
             <span style={{flex:1,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{f.filename||f.name}</span>
             {f.source_url&&<a href={f.source_url} target="_blank" rel="noreferrer" title={f.source_url} style={{fontSize:"var(--hc-text-secondary)",color:t.f1,flexShrink:0,textDecoration:"none"}}>↗</a>}
             <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>{((f.file_size||f.size||0)/1024).toFixed(1)}KB</span>
             {f.id&&<button onClick={async()=>{const fn=(f.filename||f.name||"").toLowerCase();const ext=fn.split(".").pop();if(ext==="pdf"){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isPdf:true,pdfFullView:false,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/pdf-text?pages=10`);const d=await r.json();setKbPreview(p=>({...p,content:d.content,total_pages:d.total_pages,previewed_pages:d.previewed_pages,truncated:d.truncated,loading:false}));}catch(e){setKbPreview(p=>({...p,content:"Failed to extract PDF text: "+e.message,loading:false}));}}else if(["png","jpg","jpeg","gif","svg","webp","bmp"].includes(ext)){setKbPreview({filename:f.filename||f.name,rawUrl:userScopedUrl(`/api/knowledge-bases/${kb.id}/files/${f.id}/raw`),isImage:true,loading:false});}else{setKbPreview({filename:f.filename||f.name,content:null,loading:true});try{const r=await fetch(`${API}/api/knowledge-bases/${kb.id}/files/${f.id}/preview`);const d=await r.json();setKbPreview({filename:d.filename,content:d.content,truncated:d.truncated,total_lines:d.total_lines,loading:false});}catch(e){setKbPreview({filename:f.filename||f.name,content:"Failed to load preview: "+e.message,loading:false});}}}} style={{background:`${t.acc}15`,border:`1px solid ${t.acc}33`,color:t.acc,cursor:"pointer",padding:"2px 8px",borderRadius:"var(--hc-radius-sm)",fontSize:"var(--hc-text-control)",fontWeight:600,flexShrink:0}}>Preview</button>}
-            <button onClick={()=>{if(f.id)fetch(`${API}/api/knowledge-bases/files/${f.id}`,{method:"DELETE"}).catch(()=>{});setKbs(p=>p.map(k=>k.id===kb.id?{...k,files:(k.files||[]).filter((_,j)=>j!==i)}:k));}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:"var(--hc-text-control)",opacity:.6,flexShrink:0,display:"flex"}} title="Delete file" aria-label="Delete file"><IC.X/></button>
+            <button onClick={()=>deleteKbFile(kb,f)} style={{background:"none",border:"none",color:t.err,cursor:"pointer",padding:"2px 4px",fontSize:"var(--hc-text-control)",opacity:.6,flexShrink:0,display:"flex"}} title="Delete file" aria-label="Delete file"><IC.X/></button>
           </div>)}
           {!(kb.files||[]).length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic",padding:"4px 0"}}>No files uploaded</span>}
         </div>
@@ -5767,7 +5853,7 @@ function HyprChat(){
         {/* Add web page by URL */}
         <div style={{display:"flex",gap:6,marginBottom:8}}>
           <input value={kbUrlInputs[kb.id]||""} onChange={e=>setKbUrlInputs(p=>({...p,[kb.id]:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addKbUrl(kb.id);}}} placeholder="https://…  add a web page or PDF by URL" style={{flex:1,fontSize:"var(--hc-text-control)",padding:"6px 9px",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,borderRadius:"var(--hc-radius)",fontFamily:font,boxSizing:"border-box"}}/>
-          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()?1:.5,whiteSpace:"nowrap"}}><IC.Globe/> Add URL</button>
+          <button onClick={()=>addKbUrl(kb.id)} disabled={!(kbUrlInputs[kb.id]||"").trim()||!!kbUrlBusy[kb.id]} style={{...btnS(t.f1),opacity:(kbUrlInputs[kb.id]||"").trim()&&!kbUrlBusy[kb.id]?1:.5,whiteSpace:"nowrap"}}><IC.Globe/> {kbUrlBusy[kb.id]?"Adding…":"Add URL"}</button>
         </div>
         {/* Upload progress bars */}
         {Object.keys(uploadProgress).some(k=>k.startsWith(kb.id+":"))&&<div style={{border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:"8px 10px",marginBottom:8,display:"flex",flexDirection:"column",gap:6}}>
@@ -5806,7 +5892,7 @@ function HyprChat(){
                   setUploadProgress(p=>({...p,[pKey]:{...p[pKey],status:"indexing",progress:100}}));
                   updateActivity(activityId,{status:"indexing",pct:90,message:"Indexing file..."});
                   // Add file to KB state immediately with server-returned id
-                  setKbs(p=>p.map(k=>k.id===kbId?{...k,files:[...(k.files||[]),{id:d.id,filename:d.filename||f.name,file_size:d.file_size||f.size}]}:k));
+                  setKbs(p=>p.map(k=>k.id===kbId?{...k,files:withFile(k.files,{id:d.id,filename:d.filename||f.name,file_size:d.file_size||f.size})}:k));
                   // Poll indexing status then auto-dismiss
                   const poll=async()=>{
                     for(let i=0;i<60;i++){
@@ -6082,7 +6168,7 @@ function HyprChat(){
     </div>
   </div>
 
-      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],interrupted:[t.warm,"Interrupted"],cancelling:[t.warm,"Cancelling"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const fmtTarget=(v,target)=>target?`${v||0}/${target}`:(v||0);const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],interrupted:[t.warm,"Interrupted"],cancelling:[t.warm,"Cancelling"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
     <div style={{padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:"var(--hc-text-control)",padding:"5px 9px",borderRadius:"var(--hc-radius)",border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
       {researchView==="reports"&&<div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
@@ -6197,12 +6283,13 @@ function HyprChat(){
             <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
               <span style={{width:7,height:7,borderRadius:"50%",background:sm[0],boxShadow:r.status==="running"?`0 0 8px ${sm[0]}99`:"none",flexShrink:0}}/>
               <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{r.title||r.query}</span>
-              {workspaces.length>0&&<select value="" title="Add to workspace" onClick={e=>e.stopPropagation()} onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(r.id,wsId);}} style={{maxWidth:92,fontSize:"var(--hc-text-control)",padding:"3px 5px",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line)",background:t.bgDeep,color:t.mut,fontFamily:font}}><option value="">Workspace</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select>}
+              {/* A folder icon that opens the native menu: a visible select was either clipped ("Workspa") or took the title's room in this narrow card. */}
+              {workspaces.length>0&&<span title="Add to workspace" onClick={e=>e.stopPropagation()} style={{position:"relative",display:"inline-flex",alignItems:"center",padding:2,color:t.mut,flexShrink:0}}><IC.Folder/><select value="" aria-label="Add to workspace" onChange={e=>{const wsId=e.target.value;if(wsId)addResearchReportToWorkspace(r.id,wsId);}} style={{position:"absolute",inset:0,width:"100%",height:"100%",minWidth:0,minHeight:0,padding:0,opacity:0,cursor:"pointer"}}><option value="">Add to workspace…</option>{workspaces.map(ws=><option key={ws.id} value={ws.id}>{ws.name}</option>)}</select></span>}
               <button aria-label="Delete" onClick={e=>{e.stopPropagation();deleteResearchReport(r.id);}} style={{background:"none",border:"none",color:t.err,cursor:"pointer",display:"flex",padding:2,opacity:.75}}><IC.Trash/></button>
             </div>
-            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{r.summary||r.query}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.35,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{reportCardSummary(r)}</div>
             <div style={{display:"flex",gap:5,alignItems:"center",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
-              <span>{sm[1]}</span><span>·</span><span>{r.report_type}</span><span>·</span><span>{r.source_count||0} sources</span>
+              <span>{sm[1]}</span><span>·</span><span>{r.report_type}</span><span>·</span><span>{reportSourceCount(r)} sources</span>
             </div>
           </div>;})}
           {!filteredReports.length&&<EmptyState t={t} font={font} compact icon={<IC.Search/>} title="No research reports yet" hint="Run a deep research report and it will be saved here." action={<button onClick={()=>setResearchView("new")} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}><IC.Plus/> New Report</button>}/>}
@@ -6237,7 +6324,7 @@ function HyprChat(){
       </div>
       <ResponsiveDrawer inline={contentWidth>=1200} open={researchDetailsOpen} onClose={()=>setResearchDetailsOpen(false)} title="Research evidence"><div className="hc-research-side">
         <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8}}>
-          {[["Sources",fmtTarget(sources.length||metrics.source_count||0,metrics.target_sources),t.acc],["Pages",fmtTarget(metrics.pages_read||0,metrics.target_pages),t.f1],["Searches",fmtTarget(metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:"var(--hc-radius)",border:`1px solid ${c}2e`,background:`${c}0d`}}>
+          {[[...targetTile("Sources",sources.length||metrics.source_count||0,metrics.target_sources),t.acc],[...targetTile("Pages",metrics.pages_read||0,metrics.target_pages),t.f1],[...targetTile("Searches",metrics.searches||0,metrics.target_queries),t.warm],["Elapsed",elapsedLabel,t.mut]].map(([l,v,c])=><div key={l} style={{padding:10,borderRadius:"var(--hc-radius)",border:`1px solid ${c}2e`,background:`${c}0d`}}>
             <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:c,lineHeight:1}}>{v}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,marginTop:5}}>{l}</div>
           </div>)}
         </div>
@@ -7420,7 +7507,8 @@ function HyprChat(){
                 {hyprfit?.live_enabled&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit?.live_count||0} live</span>}
               </div>
             </div>
-            <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:16}}>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:16,alignItems:"center"}}>
+              <button role="switch" aria-checked={hyprfitLive} disabled={hyprfitLoading} title="Also list repos trending on Hugging Face right now. Off shows the curated catalog only." onClick={()=>{const next=!hyprfitLive;setHyprfitLive(next);loadHyprfit(false,next);}} style={{...btnS(hyprfitLive?t.acc:t.mut,hyprfitLive?`${t.acc}1A`:`${t.surface}44`),padding:"7px 10px",fontSize:"var(--hc-text-control)",borderColor:hyprfitLive?`${t.acc}66`:`${t.brd}22`,whiteSpace:"nowrap",order:99,marginLeft:"auto"}}>Hugging Face trending: {hyprfitLive?"On":"Off"}</button>
               {cats.map(c=>{
                 const active=c.id===activeCat;
                 const count=c.count??(grouped[c.id]||[]).length;
@@ -7786,14 +7874,15 @@ function HyprChat(){
               // Regenerate or Edit here would cut the job's card out of the chat while the job keeps running.
               const ownsJob=startsJob(act.messages,i,coderWorkflows);
               // A reply that hit the output limit, was stopped, or failed part-way can be carried on (continueReply.js).
-              const cutOff=!isU&&!ownsJob&&!act?.is_council?continueKind({...msg,metadata:meta},i===(act.messages||[]).length-1):"";
+              const cutOff=!isU&&!ownsJob&&!act?.is_council?continueKind({...msg,metadata:meta},i===(act.messages||[]).length-1,/^(ghost|l)-/.test(String(actId||""))):"";
               // Failed or stopped with nothing to continue: offer to write it again (continueReply.needsRetry).
               const retry=!cutOff&&!isU&&!ownsJob&&!act?.is_council&&!meta.persona_first_message&&needsRetry({...msg,metadata:meta},i===(act.messages||[]).length-1);
               const liveQuickSearchPayload=isLastAssistant?_quickSearchPayloadFromEvents(evts,quickResults):null;
               const renderOpts=citeOptsFor(msg,liveQuickSearchPayload);
               // Tool cards render where they happened in the reply (messageParts.js). While streaming read the uncapped stream buffer.
               const cardEvents=isU||isDaedalusOutput?[]:msg.isS?activityEvents:(savedEvents.length?savedEvents:liveEventsForMsg);
-              const body=isU?null:messageParts(msg.content||"",withRunCode(cardEvents));
+              // Files the document tools made are listed once, by DocumentActivity below.
+              const body=isU?null:messageParts(msg.content||"",withRunCode(hasDocumentActivity?cardEvents.filter(e=>!(e.type==="file_ready"&&isDocumentEvent(e)&&e.data?.artifact_id)):cardEvents));
               const hasPlacedCards=!!body&&body.parts.some(part=>part.cards.length);
               const trailingCards=body?[...body.trailing.filter(card=>card.type==="file_ready"),...body.trailing.filter(card=>card.type!=="file_ready")]:[];
               const quickSearchPayload=renderOpts?.quickSearch;
@@ -8251,14 +8340,14 @@ function HyprChat(){
               <span style={{fontSize:"var(--hc-text-control)"}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
             </button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?STATUS_DEGRADED:s?.status?t.err:t.mut;const label=serviceLabel(n);return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?STATUS_DEGRADED:t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
+            {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?degradedColor(t):s?.status?t.err:t.mut;const label=serviceLabel(n);return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?degradedColor(t):t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
               <span style={{fontWeight:700,color:t.dim}}>{label}</span>
               {s?.response_ms!=null&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{s.response_ms}ms</span>}
-              {rl&&<span style={{padding:"1px 6px",borderRadius:"var(--hc-radius-sm)",background:`${STATUS_DEGRADED}20`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:STATUS_DEGRADED}}>Limited</span>}
+              {rl&&<span style={{padding:"1px 6px",borderRadius:"var(--hc-radius-sm)",background:`${degradedColor(t)}20`,border:`1px solid ${degradedColor(t)}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:degradedColor(t)}}>Limited</span>}
             </div>;})}
           </div>
-        ,<div>Runtime endpoint health at a glance.{health.searxng?.search_summary&&<div role="status" style={{marginTop:6,color:health.searxng.status==="ok"?t.dim:STATUS_DEGRADED,overflowWrap:"anywhere"}}>{health.searxng.search_summary}<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{searchHealthSample(health.searxng)}</div></div>}</div>)}
+        ,<div>Runtime endpoint health at a glance.{health.searxng?.search_summary&&<div role="status" style={{marginTop:6,color:health.searxng.status==="ok"?t.dim:degradedColor(t),overflowWrap:"anywhere"}}>{health.searxng.search_summary}<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{searchHealthSample(health.searxng)}</div></div>}</div>)}
         {settingSection("Cloud Models",<button onClick={async()=>{await refreshModelProviders();await refreshModels();}} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"5px 9px"}}><IC.Refresh/> Refresh</button>,
           <div style={{display:"grid",gridTemplateColumns:"1fr",gap:10}}>
             {[["openai","OpenAI","sk-...","ChatGPT / GPT models"],["anthropic","Anthropic","sk-ant-...","Claude models"],["custom","Custom","(optional key)","Any OpenAI-compatible endpoint — OpenRouter, Groq, vLLM, llama.cpp..."]].map(([provider,label,placeholder,hint])=>{
@@ -8962,7 +9051,7 @@ function HyprChat(){
       {!healthHistory?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading uptime data...</div>
       :Object.keys(healthHistory.services||{}).length===0?<EmptyState compact icon={<IC.Activity/>} title="No health data yet" hint="Checks run every 5 minutes — data will appear shortly."/>
       :Object.entries(healthHistory.services).map(([svc,data])=>{
-        const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?STATUS_DEGRADED:t.err;
+        const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?degradedColor(t):t.err;
         const statusLabel=data.current_status==="ok"?"Operational":data.current_status==="degraded"?"Degraded":"Down";
         const days=data.days||[];
         // Pad to 90 days with gray (no data) bars
@@ -8979,15 +9068,15 @@ function HyprChat(){
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text}}>{serviceLabel(svc)}</span>
-              {isRL&&<span style={{padding:"3px 10px",borderRadius:"var(--hc-radius)",background:`${STATUS_DEGRADED}18`,border:`1px solid ${STATUS_DEGRADED}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:STATUS_DEGRADED}}>Still Operational, limited engine usage</span>}
+              {isRL&&<span style={{padding:"3px 10px",borderRadius:"var(--hc-radius)",background:`${degradedColor(t)}18`,border:`1px solid ${degradedColor(t)}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:degradedColor(t)}}>Still Operational, limited engine usage</span>}
             </div>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:isRL?STATUS_DEGRADED:statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
+            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:isRL?degradedColor(t):statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
           </div>
           {/* Uptime bar chart */}
           <div style={{display:"flex",gap:1,height:34,alignItems:"flex-end",marginBottom:6}}>
             {padded.map((d,i)=>{
               const hasData=d.total_checks>0;
-              const barColor=!hasData?`${t.brd}33`:d.error_pct>50?t.err:d.error_pct>0?"#e05050":d.degraded_pct>30?STATUS_DEGRADED:d.degraded_pct>0?"#b8d040":t.ok;
+              const barColor=!hasData?`${t.brd}33`:d.error_pct>50?t.err:d.error_pct>0?"#e05050":d.degraded_pct>30?degradedColor(t):d.degraded_pct>0?"#b8d040":t.ok;
               const title=hasData?`${d.day}\n${d.ok_pct}% ok, ${d.degraded_pct}% degraded, ${d.error_pct}% down\n${d.total_checks} checks, avg ${d.avg_ms}ms`:`${d.day}\nNo data`;
               return <div key={i} title={title} style={{flex:1,height:hasData?34:20,background:barColor,borderRadius:"var(--hc-radius-sm)",cursor:"pointer",opacity:hasData?1:.3,transition:"opacity .15s"}}
                 onMouseEnter={e=>e.target.style.opacity="0.7"} onMouseLeave={e=>e.target.style.opacity=hasData?"1":"0.3"}/>;
@@ -9004,7 +9093,7 @@ function HyprChat(){
 
       {/* Legend */}
       <div style={{display:"flex",gap:12,padding:"8px 0",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
-        {[[t.ok,"Operational"],[STATUS_DEGRADED,"Degraded"],[t.err,"Down"],[`${t.brd}33`,"No data"]].map(([c,l])=><div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
+        {[[t.ok,"Operational"],[degradedColor(t),"Degraded"],[t.err,"Down"],[`${t.brd}33`,"No data"]].map(([c,l])=><div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
           <div style={{width:12,height:12,borderRadius:"var(--hc-radius-sm)",background:c}}/>{l}
         </div>)}
       </div>

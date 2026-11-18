@@ -1336,6 +1336,22 @@ def _safe_json_obj(text: str, fallback):
     return fallback
 
 
+def _report_summary(report: str, limit: int = 320) -> str:
+    """Plain text for a report card: the first real prose of the report, without the title, the Method
+    section (it comes first in sectioned reports, so cards used to read "## Method Collected 59 source
+    records…"), callouts or Markdown marks."""
+    text = re.sub(r"\A\s*# .*\n?", "", (report or "").strip())
+    text = re.sub(r"(?ms)^## +Method\b.*?(?=^## |\Z)", "", text)
+    lines = [l for l in text.splitlines() if not l.lstrip().startswith((">", "|", "```", "---"))]
+    lines = [l for l in lines if not re.match(r"\s{0,3}#{1,6}\s", l)]
+    text = "\n".join(re.sub(r"^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+)", "", l) for l in lines)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[S\d+(?:\s*,\s*S\d+)*\]", "", text)
+    text = re.sub(r"(\*\*|__|\*|_|`)(.+?)\1", r"\2", text)
+    return _one_line(re.sub(r"\s+([.,;:!?])", r"\1", text), limit)
+
+
 def _one_line(text: str, limit: int = 180) -> str:
     return re.sub(r"\s+", " ", text or "").strip()[:limit]
 
@@ -2137,6 +2153,8 @@ def _normalize_report_sources(
     seen_urls = {s.get("url") for s in direct_sources if s.get("url")}
     sources: list[dict] = []
     target_web_sources = max(0, int(budget.get("target_sources") or 0) - len(input_sources) - len(direct_sources))
+    # The target is per search pass on purpose: follow-up rounds fill gaps after the first pass reached
+    # it, so a report can end with more sources than its target (the panel shows "59 (target 48)").
 
     def result_priority(item):
         url = _normalize_url(item.get("url", ""))
@@ -3110,7 +3128,7 @@ Return strict JSON:
             plan=plan, sources=sources, findings=findings, audit=audit, metrics=metrics)
         citation_audit = _validate_report_citations(report, sources)
         renderable_audit = _report_renderable_audit(report)
-        summary = _one_line(re.sub(r"^# .+?\n", "", report.strip(), flags=re.DOTALL), 320)
+        summary = _report_summary(report)
         if not summary:
             summary = f"{template['label']} on {query}"
 

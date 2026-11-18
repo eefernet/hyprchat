@@ -275,6 +275,7 @@ function deleteSetup({answer = {ok: true, status: 200}, confirm = true, streamin
     isGhostConv: c => !!c?.ephemeral,
     confirmAction: async opts => { calls.asked.push(opts); return confirm; },
     stopStrandedStream: ids => { calls.stopped.push(ids); },
+    stopCouncilIn: ids => { (calls.councilStopped ||= []).push(ids); },
     setConvs: fn => { context.convsRef.current = fn(context.convsRef.current); },
     setActId: id => { context.actIdRef.current = id; },
     loadConversation: id => { calls.loaded.push(id); context.actIdRef.current = id; },

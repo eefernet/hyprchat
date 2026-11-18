@@ -36,3 +36,11 @@ export function createStreamTurns() {
     isLatest: turn => turn === latest,
   };
 }
+
+// An event marked as belonging to another reply than the one streaming now (`reply_id`, backend/events.py
+// `after_reply`). Unmarked events, and any event while no reply id is known, are never foreign.
+export function foreignReplyEvent(event, streamingReplyId) {
+  if (event?.reply_id == null || streamingReplyId == null) return false;
+  return String(event.reply_id) !== String(streamingReplyId);
+}
+

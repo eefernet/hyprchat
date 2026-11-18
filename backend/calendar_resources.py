@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import database as db
+import timeutil
 
 UTC = timezone.utc
 MAX_OCCURRENCES = 2000
@@ -61,7 +62,7 @@ def _instant(value, tz):
 def occurrences(event, start, end, tz_name='UTC'):
     import recurring_ical_events
     from caldav_sync import _event_fields_from_vevent
-    tz = ZoneInfo(event.get('timezone') or tz_name)
+    tz = timeutil.safe_zone(event.get('timezone') or tz_name)      # an Outlook TZID ("Eastern Standard Time") is not a zone name
     begin = datetime.fromisoformat(start).replace(tzinfo=UTC)
     stop = datetime.fromisoformat(end).replace(tzinfo=UTC)
     if stop <= begin or stop - begin > timedelta(days=366):
@@ -111,6 +112,15 @@ def edit_resource(event, changes, tz, recurrence_id=''):
     masters=[c for c in cal.walk('VEVENT') if not c.get('RECURRENCE-ID')]
     if not masters: raise ValueError('Calendar resource has no editable series')
     target=masters[0]
+    if recurrence_id and changes.get('cancel_occurrence'):
+        # One occurrence removed: an exception date on the series, and its own override (if it was edited
+        # before) goes. The rest of the series is untouched.
+        at=datetime.fromisoformat(recurrence_id).replace(tzinfo=UTC)
+        master_start=target['DTSTART'].dt
+        if not target.get('RRULE'): raise ValueError('This event does not repeat; delete the event instead')
+        target.add('exdate', at.astimezone(master_start.tzinfo or tz) if isinstance(master_start,datetime) else at.astimezone(tz).date())
+        cal.subcomponents=[c for c in cal.subcomponents if not (c.name=='VEVENT' and c.get('RECURRENCE-ID') and _instant(c['RECURRENCE-ID'].dt,tz)==recurrence_id)]
+        return cal.to_ical().decode()
     if recurrence_id:
         at=datetime.fromisoformat(recurrence_id).replace(tzinfo=UTC)
         match=next((c for c in recurring_ical_events.of(cal).between(at-timedelta(days=2),at+timedelta(days=2))
@@ -200,7 +210,12 @@ async def deliver_occurrence_reminders(now=None):
             event=dict(raw)
             tz=await pim.user_timezone(event['user_id'])
             minutes=max(0,min(int(event['remind_minutes']),364*1440))
-            for occurrence in occurrences(event,(now-timedelta(days=1)).isoformat(),(now+timedelta(minutes=minutes,seconds=1)).isoformat(),tz):
+            try:
+                due=occurrences(event,(now-timedelta(days=1)).isoformat(),(now+timedelta(minutes=minutes,seconds=1)).isoformat(),tz)
+            except Exception as error:        # one unreadable event must not stop reminders for everyone
+                print(f"[PIM] reminders skipped for event {event['id']}: {type(error).__name__}: {error}")
+                continue
+            for occurrence in due:
                 if datetime.fromisoformat(occurrence['start_at'])-timedelta(minutes=minutes)>now:continue
                 await conn.execute('BEGIN IMMEDIATE')
                 claim=await conn.execute('INSERT OR IGNORE INTO calendar_reminders(occurrence_id,event_id,user_id) VALUES(?,?,?)',

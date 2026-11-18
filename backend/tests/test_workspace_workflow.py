@@ -270,3 +270,16 @@ def test_workspace_memory_tool_honors_selection_and_opt_out(isolated):
         result=await exec_tool(None,events,'save_memory',{'content':'Remember another project fact.','scope':'workspace'},'c')
         assert result.startswith('ERROR') and not await db.list_global_memories(status='all')
     asyncio.run(run())
+
+
+def test_workspace_document_store_is_not_listed_as_a_knowledge_base(isolated):
+    """Found 2026-11-17: "Home Lab Rebuild documents" showed in the Knowledge Bases panel and every KB
+    picker, with random file names. It is the workspace's internal store."""
+    async def run():
+        await db.create_workspace('a','Home Lab Rebuild');await db.create_kb('kb','Python Reference')
+        store=await ws.document_store('a')
+        every={k['id'] for k in await db.get_kbs()}
+        assert store in every and 'kb' in every                       # ownership checks still see it
+        assert [k['id'] for k in await db.get_kbs(include_internal=False)]==['kb']
+    asyncio.run(run())
+

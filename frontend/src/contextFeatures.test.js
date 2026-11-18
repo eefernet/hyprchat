@@ -108,3 +108,12 @@ test('each action says what it did', () => {
   assert.equal(forgetLine({ removed: 0, freed: 0 }), 'This chat keeps no tool results.');
   assert.equal(compactLine(null), '');
 });
+
+test('the too-big warning counts bytes, as the server does', async () => {
+  const { draftFit } = await import('./contextFit.js');
+  const latin = 'a'.repeat(9000), chinese = '汉'.repeat(9000);        // 9,000 bytes against 27,000
+  assert.equal(draftFit({ text: latin, window: 8192 }), null);
+  const fit = draftFit({ text: chinese, window: 8192 });
+  assert.ok(fit && fit.tokens > fit.room, 'a draft three times the size in bytes must be flagged');
+});
+

@@ -71,7 +71,7 @@ async def list_events(start_local: str = "", end_local: str = ""):
     from calendar_resources import list_occurrences
     try:
         events = await list_occurrences(start=start, end=end)
-    except ValueError as exc:
+    except (ValueError, KeyError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return [_localized(e, tz) for e in events]
 
@@ -105,7 +105,15 @@ async def update_event(event_id: str, req: EventUpdate):
 
 
 @router.delete("/api/calendar/events/{event_id}")
-async def delete_event(event_id: str):
+async def delete_event(event_id: str, recurrence_id: str = ""):
+    """Delete an event. With ``recurrence_id`` only that occurrence of a repeating event is removed."""
+    if recurrence_id:
+        try:
+            if not await pim.cancel_occurrence(event_id, recurrence_id):
+                raise HTTPException(404, "Event not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"status": "occurrence_deleted"}
     if not await pim.delete_event(event_id):
         raise HTTPException(404, "Event not found")
     return {"status": "deleted"}

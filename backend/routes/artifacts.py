@@ -614,17 +614,21 @@ async def revise_artifact_ep(artifact_id: str, req: ArtifactReviseRequest):
     except ValueError:
         raise HTTPException(400, "Invalid revision filename")
     new_name, dest = spot.filename, spot.path
+    # File work runs off the event loop: copying and reading a large document or spreadsheet used to hold
+    # up every other request (chats, event streams) until it finished.
     if req.content is not None:
-        with open(dest, "w", encoding="utf-8") as f:
-            f.write(req.content)
+        def _write_revision():
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(req.content)
+        await asyncio.to_thread(_write_revision)
     elif filepath:
-        shutil.copy2(filepath, dest)
+        await asyncio.to_thread(shutil.copy2, filepath, dest)
     else:
         raise HTTPException(404, "Original artifact file is missing; provide content to revise")
     mime_type = db.artifact_mime_type_for_filename(new_name)
     kind = db.artifact_kind_for_filename(new_name, mime_type)
-    meta = artifact_file_metadata(dest)
-    content_text = extract_indexable_text(dest, kind, mime_type)
+    meta = await asyncio.to_thread(artifact_file_metadata, dest)
+    content_text = await asyncio.to_thread(extract_indexable_text, dest, kind, mime_type)
     parent_id = artifact.get("parent_artifact_id") or artifact["id"]
     new_artifact = await db.add_artifact(
         conversation_id=artifact.get("conversation_id"),
@@ -720,17 +724,20 @@ async def bundle_artifacts_ep(req: ArtifactBundleRequest):
     except ValueError:
         raise HTTPException(400, "Invalid bundle filename")
     dest = bundle_spot.path
-    with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        used_names = set()
-        for artifact, filepath, safe_name in artifacts:
-            arcname = safe_name
-            if arcname in used_names:
-                stem, ext = os.path.splitext(arcname)
-                arcname = f"{stem}-{artifact['id']}{ext}"
-            used_names.add(arcname)
-            zf.write(filepath, arcname)
-    meta = artifact_file_metadata(dest)
-    content_text = extract_indexable_text(dest, "archive", "application/zip")
+    def _write_bundle():
+        with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            used_names = set()
+            for artifact, filepath, safe_name in artifacts:
+                arcname = safe_name
+                if arcname in used_names:
+                    stem, ext = os.path.splitext(arcname)
+                    arcname = f"{stem}-{artifact['id']}{ext}"
+                used_names.add(arcname)
+                zf.write(filepath, arcname)
+    # Compressing up to a hundred files runs off the event loop (see revise above).
+    await asyncio.to_thread(_write_bundle)
+    meta = await asyncio.to_thread(artifact_file_metadata, dest)
+    content_text = await asyncio.to_thread(extract_indexable_text, dest, "archive", "application/zip")
     workspace_ids = req.workspace_ids
     if workspace_ids is None:
         ws_seen = set()

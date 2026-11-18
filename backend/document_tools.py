@@ -62,7 +62,8 @@ unless the user requests restyling. Follow next_offset to read more, or select a
 Examples:
 document_create(format="docx", content={"blocks":[{"heading":1,"text":"Report"},{"text":"Summary"}]})
 document_create(format="pptx", content={"slides":[{"title":"Results","bullets":["Finding one"],"notes":"Speaker notes"}]})
-document_create(format="xlsx", content={"sheets":[{"name":"Budget","rows":[["Item","Cost"],["Hosting",20]],"cells":{"B3":"=SUM(B2:B2)"}}]})
+document_create(format="xlsx", content={"sheets":[{"name":"Budget","rows":[["Monthly budget"],[],["Item","Cost"],["Hosting",20],["Total","=SUM(B4:B4)"]]}]})
+Worksheet rows may differ in length; [] is a blank row. Cells are plain values or "=FORMULA" strings, never objects or lists.
 document_edit(artifact_id=ID, expected_sha256=HASH, operations=[{"op":"replace_text","target":TARGET,"find":"old","text":"new"}])
 Other edits: set_text(target,text), format_text(target,style), set_cell(target,value OR formula),
 format_cell(target,style), replace_image(target,image_artifact_id), reorder_slides(order=[2,1]),

@@ -49,6 +49,13 @@ LibreOffice pagination, fonts and advanced features can differ from Microsoft Of
 Native-format conversion intentionally re-saves through LibreOffice and reports this
 limitation. Preview failure retains a valid downloadable Office file with a warning.
 
+A new workbook is described as `{"sheets": [{"name": "Budget", "rows": [["Monthly budget"], [],
+["Item", "Cost"], ["Rent", 1200], ["Total", "=SUM(B4:B4)"]]}]}`. Rows are written from row 1 down and
+need not match in length; `[]` leaves a blank row. A cell is text, a number, true/false, empty or a
+formula string starting with `=`. `cells` (`{"B7": value}`), `formats`, `column_widths`, `freeze_panes`,
+`tables` and `charts` are optional. Word and slide tables are different: every row there needs the same
+number of cells.
+
 Formula inspection shows source formulas and cached values. Targeted edits request
 recalculation when Excel opens the file; they do not fabricate fresh cached results.
 CSV exports use cached values, which can be empty or stale. LibreOffice PDF rendering

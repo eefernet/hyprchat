@@ -114,3 +114,19 @@ test("a card's sequence number does not depend on the part it lands in", () => {
   assert.deepEqual(seqs(early), [['a', 0], ['b', 1]]);
   assert.deepEqual(seqs(later), [['a', 0], ['b', 1]]);
 });
+
+test('a file with a card is not drawn again from the reply\'s own download link', () => {
+  const url = '/api/downloads/f8725496-sourdough-weekend.docx';
+  const text = `Your plan is ready.\n\n**[Download sourdough-weekend.docx](${url})**`;
+  const file = { type: 'file_ready', data: { filename: 'sourdough-weekend.docx', url } };
+  // Unplaced card (an older message): the link line goes, the card trails the text.
+  const old = messageParts(text, [file]);
+  assert.equal(old.parts[0].text.trim(), 'Your plan is ready.');
+  assert.equal(old.trailing.length, 1);
+  // Placed card: same, and no empty last part is left behind.
+  const placed = messageParts(text, [{ ...file, at: 19 }]);
+  assert.deepEqual(placed.parts.map(part => part.text.trim()), ['Your plan is ready.']);
+  assert.equal(placed.parts[0].cards.length, 1);
+  // Without a card the link stays.
+  assert.equal(messageParts(text, []).parts[0].text, text);
+});

@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 
 import { API } from '../session.js';
 import { SkeletonText } from './Skeleton.jsx';
+import {locateEdit} from '../canvasEdit.js';
 
 // Artifact Canvas — full-screen CodeMirror editor overlay for text-like
 // artifacts. Select text → "AI Edit" → instruction → diff preview →
@@ -97,7 +98,13 @@ export default function ArtifactCanvas({artifact,t,font,onClose,notify,confirmAc
 
   const applyEdit=()=>{
     if(!pendingEdit||!edRef.current)return;
-    edRef.current.replaceRange(pendingEdit.from,pendingEdit.to,pendingEdit.replacement);
+    // The document may have been edited while the model worked: apply where the original text is now.
+    const at=locateEdit(edRef.current.getDoc(),pendingEdit);
+    if(!at){
+      notify&&notify({type:"warning",text:"Edit not applied",detail:"The text this edit was written for has changed. Discard it and run the edit again."});
+      return;
+    }
+    edRef.current.replaceRange(at.from,at.to,pendingEdit.replacement);
     setPendingEdit(null);
     setInstruction("");
     setDirty(true);

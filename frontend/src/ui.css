@@ -199,7 +199,10 @@ pre, code, kbd, samp, .cm-editor, .cm-scroller { font-family: var(--hc-font-code
 .hc-table-wrap { max-width:100%; overflow-x:auto; margin:16px 0; }
 .hc-table { border-collapse:collapse; width:100%; font-size:var(--hc-text-control); font-family:inherit; }
 .hc-table th { padding:10px 12px; border-block:1px solid var(--hc-line-strong); font-weight:600; color:var(--hc-text); font-size:var(--hc-text-secondary); white-space:nowrap; }
-.hc-table td { padding:10px 12px; border-bottom:1px solid var(--hc-line-subtle); color:var(--hc-secondary); line-height:1.6; vertical-align:top; }
+/* Cells do not inherit .hc-prose's overflow-wrap:anywhere: with it the table could shrink a column below
+   one token ("09:3" / "0"). Short cells (times, dates, amounts) stay on one line. */
+.hc-table td { padding:10px 12px; border-bottom:1px solid var(--hc-line-subtle); color:var(--hc-secondary); line-height:1.6; vertical-align:top; overflow-wrap:break-word; }
+.hc-table td.hc-cell-short { white-space:nowrap; }
 .hc-table th:first-child,.hc-table td:first-child { padding-left:4px; }
 .hc-table th:last-child,.hc-table td:last-child { padding-right:4px; }
 .hc-theme-preview { border:1px solid var(--hc-line); border-radius:var(--hc-radius-card); padding:16px; margin:12px 0; background:var(--hc-elev-0); color:var(--hc-text); }

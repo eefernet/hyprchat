@@ -53,6 +53,15 @@ async def execute(identity):
         if await asyncio.to_thread(digest,job['filepath']) != job['sha256']:
             raise ValueError('Source changed after submission; upload or reindex its current version')
         result=await rag.index_file(job['kb_id'],job['filename'],job['filepath'])
+        # Embedding a large file takes minutes. If the knowledge base or the file was deleted meanwhile,
+        # what was just written is an orphan that search would still return: take it out again.
+        owner=await db.get_kb(job['kb_id'])
+        if not owner:
+            await rag.delete_kb_index(job['kb_id'])
+            raise LookupError('Knowledge base was deleted while this file was being indexed')
+        if not any(f.get('filename')==job['filename'] for f in owner.get('files') or []):
+            await rag.remove_file(job['kb_id'],job['filename'])
+            raise LookupError('File was removed while it was being indexed')
         if result.get('error'): raise ValueError(result['error'])
         state='partial' if result.get('warnings') else 'succeeded'
         return result

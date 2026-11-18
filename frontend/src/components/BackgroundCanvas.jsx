@@ -112,17 +112,27 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       else if(["quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint","signal","sacred"].includes(effect))particles=Array.from({length:clampCount(area/15000,55,260)},(_,i)=>makePoint(w,h,i));
       else particles=[];
     };
+    let seeded=null;      // the size the particles were last laid out for
     const resize=()=>{
       const rect=canvas.getBoundingClientRect();
       const dpr=Math.min(window.devicePixelRatio||1,2);
-      view={w:Math.max(1,rect.width),h:Math.max(1,rect.height),dpr};
+      const next={w:Math.max(1,rect.width),h:Math.max(1,rect.height),dpr};
+      // The observer also fires for changes that are not one (its first callback, a sub-pixel reflow).
+      // Setting canvas.width clears the picture, so an unchanged size is left alone: with motion reduced
+      // that first callback used to wipe the one still frame and leave the background blank.
+      if(seeded&&next.w===view.w&&next.h===view.h&&next.dpr===view.dpr)return;
+      view=next;
       canvas.width=Math.max(1,Math.floor(view.w*dpr));
       canvas.height=Math.max(1,Math.floor(view.h*dpr));
       ctx.setTransform(dpr,0,0,dpr,0,0);
       ctx.imageSmoothingEnabled=false;
       sprites.clear();
-      seed(view.w,view.h);
+      // Lay the particles out again only when the area really changed (first run, a window resize, the
+      // side pane opening). A small change keeps them, so the animation does not restart.
+      const grown=!seeded||Math.abs(view.w*view.h-seeded.w*seeded.h)>seeded.w*seeded.h*.15;
+      if(grown){seed(view.w,view.h);seeded={w:view.w,h:view.h};}
       ctx.clearRect(0,0,view.w,view.h);
+      if(reduced)still();
     };
     const drawRain=(time,w,h,dtf)=>{
       ctx.clearRect(0,0,w,h);
@@ -394,20 +404,7 @@ export default function BackgroundCanvas({effect,t,energy=0}){
     const drawBlueprint=(time,w,h)=>{
       ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.3),oy(.3));ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let i=0;i<16;i++){const x=(particles[i]?.x||0),y=(particles[i]?.y||0),ww=60+(i%5)*26,hh=30+(i%4)*18;ctx.globalAlpha=.045+(i%3)*.02;ctx.strokeRect(snap(x,16),snap(y,16),ww,hh);ctx.beginPath();ctx.moveTo(snap(x,16)-16,snap(y,16)+hh/2);ctx.lineTo(snap(x,16)+ww+16,snap(y,16)+hh/2);ctx.moveTo(snap(x,16)+ww/2,snap(y,16)-16);ctx.lineTo(snap(x,16)+ww/2,snap(y,16)+hh+16);ctx.stroke();}ctx.restore();ctx.globalAlpha=1;
     };
-    let lastDraw=0, lastTime=0, vt=0, speed=1;
-    const step=(now)=>{
-      if(stopped)return;
-      if(!reduced)raf=requestAnimationFrame(step);
-      if(now-lastDraw<15)return;                        // ~66fps cap; skips frames on 120Hz+
-      const dt=Math.min(now-(lastTime||now-16.7),100);   // clamp giant deltas (tab resume)
-      lastTime=now;lastDraw=now;
-      speed+=((1+(energyRef.current||0)*.5)-speed)*.04;  // ease toward 1.5x while the app is busy
-      vt+=dt*speed;
-      const time=vt;                                    // effects see a virtual clock that runs faster under load
-      const dtf=Math.min(dt/16.667,3)*speed;            // frame factor: 1.0 at 60fps
-      ctx.globalCompositeOperation="source-over";
-      par.x+=(par.tx-par.x)*Math.min(1,.06*dtf);
-      par.y+=(par.ty-par.y)*Math.min(1,.06*dtf);
+    const draw=(time,dtf)=>{
       const w=view.w, h=view.h;
       if(effect==="rain")drawRain(time,w,h,dtf);
       else if(effect==="flow")drawFlow(time,w,h,dtf);
@@ -430,18 +427,44 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       else if(effect==="microwave")drawMicrowave(time,w,h);
       else if(effect==="blueprint")drawBlueprint(time,w,h);
     };
+    // With motion reduced nothing animates: one picture is drawn. Several effects build up over frames
+    // (trails, drifting particles), so the picture is the result of two seconds of animation, not frame one.
+    const still=()=>{
+      ctx.globalCompositeOperation="source-over";
+      for(let frame=0;frame<120;frame++)draw(4000+frame*16.667,1);
+    };
+    let lastDraw=0, lastTime=0, vt=0, speed=1;
+    const step=(now)=>{
+      if(stopped)return;
+      if(!reduced)raf=requestAnimationFrame(step);
+      if(now-lastDraw<15)return;                        // ~66fps cap; skips frames on 120Hz+
+      const dt=Math.min(now-(lastTime||now-16.7),100);   // clamp giant deltas (tab resume)
+      lastTime=now;lastDraw=now;
+      speed+=((1+(energyRef.current||0)*.5)-speed)*.04;  // ease toward 1.5x while the app is busy
+      vt+=dt*speed;
+      const time=vt;                                    // effects see a virtual clock that runs faster under load
+      const dtf=Math.min(dt/16.667,3)*speed;            // frame factor: 1.0 at 60fps
+      ctx.globalCompositeOperation="source-over";
+      par.x+=(par.tx-par.x)*Math.min(1,.06*dtf);
+      par.y+=(par.ty-par.y)*Math.min(1,.06*dtf);
+      draw(time,dtf);
+    };
     const onVis=()=>{
       if(document.hidden)cancelAnimationFrame(raf);
       else if(!stopped&&!reduced){lastTime=0;lastDraw=0;raf=requestAnimationFrame(step);}
     };
     resize();
     window.addEventListener("resize",resize);
+    // Moving the window to a display with another pixel density changes devicePixelRatio without a resize.
+    const density=window.matchMedia?window.matchMedia(`(resolution: ${window.devicePixelRatio||1}dppx)`):null;
+    density?.addEventListener?.("change",resize);
     let ro=null;
     if(window.ResizeObserver){ro=new ResizeObserver(resize);ro.observe(canvas);}
     if(!reduced)window.addEventListener("pointermove",onPointer,{passive:true});
     document.addEventListener("visibilitychange",onVis);
-    step(performance.now());
+    if(!reduced)step(performance.now());
     return ()=>{
+      density?.removeEventListener?.("change",resize);
       stopped=true;cancelAnimationFrame(raf);
       window.removeEventListener("resize",resize);
       if(ro)ro.disconnect();

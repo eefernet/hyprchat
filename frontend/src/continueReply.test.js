@@ -83,3 +83,12 @@ test('a reply that stopped at the round limit offers Continue as a new turn', ()
   assert.equal(continueKind(reply({ round_limit: 40, delivery_status: 'interrupted' }), true), 'interrupted');
   assert.match(CONTINUE_WORK, /Continue/);
 });
+
+test('a chat that is not saved does not offer to continue mid-reply', () => {
+  const stopped = { role: 'assistant', content: 'Half a rep', metadata: { delivery_status: 'stopped' } };
+  assert.equal(continueKind(stopped, true), 'interrupted');
+  assert.equal(continueKind(stopped, true, true), '');
+  assert.equal(continueKind({ role: 'assistant', content: 'Cut', metadata: { truncated: true } }, true, true), '');
+  assert.equal(continueKind({ role: 'assistant', content: 'Ran out', metadata: { round_limit: true } }, true, true), 'rounds');
+});
+

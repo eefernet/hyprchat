@@ -8,6 +8,7 @@ import PanelHeader from '../components/PanelHeader.jsx';
 import { SkeletonCard } from '../components/Skeleton.jsx';
 import { isCloudModelName } from '../modelHelpers.js';
 import useIsMobile from '../useIsMobile.js';
+import {mergeDraft} from '../assistantDraft.js';
 
 const WEEKDAYS=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
 const CADENCES=["daily","weekly","monthly","cron"];
@@ -51,12 +52,13 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
   const [newCheckIn,setNewCheckIn]=useState({name:"Morning check-in",time:"08:30",prompt:""});
   const audioRef=useRef(null);
 
-  const load=useCallback(async()=>{
+  const loadedDraftRef=useRef(null);
+  const load=useCallback(async(keepEdits=false)=>{
     setErr("");
     try{
       const d=await apiJson("/api/assistant");
       setData(d);
-      setDraft({
+      const incoming={
         name:d.persona?.name||"",
         personality:d.persona?.personality||"",
         model:d.persona?.model||"",
@@ -67,7 +69,11 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
         codeagent:(d.persona?.tool_ids||[]).includes("codeagent"),
         allow_autonomous_email:!!d.profile?.allow_autonomous_email,
         quiet_hours:{enabled:false,start:"22:00",end:"07:00",urgent_override:true,...(d.profile?.quiet_hours||{})},
-      });
+      };
+      // Keep what the user is typing; an untouched form follows the server (assistantDraft.js).
+      const loaded=loadedDraftRef.current;
+      loadedDraftRef.current=incoming;
+      setDraft(current=>keepEdits?mergeDraft(current,loaded,incoming):incoming);
     }catch(e){setErr(String(e.message||e));}
   },[]);
   const loadBrief=useCallback(async()=>{
@@ -76,7 +82,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
   useEffect(()=>{
     load();loadBrief();
     fetch(`${API}/api/assistant/timezones`).then(r=>r.json()).then(d=>setTimezones(d.timezones||[])).catch(()=>{});
-    const onFocus=()=>{load();loadBrief();};
+    const onFocus=()=>{load(true);loadBrief();};
     window.addEventListener("focus",onFocus);
     return()=>window.removeEventListener("focus",onFocus);
   },[load,loadBrief]);
@@ -109,7 +115,7 @@ export default function AssistantPanel({t,btnS,cardS,inputS,confirmAction,models
     try{
       const r=await fetch(`${API}/api/tasks/${id}/run`,{method:"POST"});
       if(!r.ok)throw new Error(`HTTP ${r.status}`);
-      setTimeout(()=>{load();loadBrief();},4000);
+      setTimeout(()=>{load(true);loadBrief();},4000);
     }catch(e){setErr(String(e.message||e));}
   };
   const speakBrief=async()=>{

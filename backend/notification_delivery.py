@@ -1,4 +1,5 @@
 """Durable push attempts; never automatically repeat an uncertain send."""
+import time
 import asyncio
 from datetime import datetime, timedelta
 import smtplib
@@ -58,6 +59,9 @@ def classify(exc):
     return 'uncertain'
 
 
+PASS_SECONDS = 120
+
+
 async def deliver_due(notification_id=None):
     import notifications
     import quiet_hours
@@ -71,7 +75,12 @@ async def deliver_due(notification_id=None):
                 WHERE d.status IN ('queued','retry_wait','quiet_hours') AND d.next_attempt<=?'''
                 + (' AND d.notification_id=?' if notification_id is not None else '')+' ORDER BY d.id LIMIT 20',
                 (datetime.utcnow().isoformat(),notification_id) if notification_id is not None else (datetime.utcnow().isoformat(),))
+            started=time.monotonic()
             for row in rows:
+                # Twenty sends of up to 40 s each could outlast the scheduler's 300 s bound for this loop;
+                # being cancelled mid-send leaves a row "sending" until the next restart. The rest wait
+                # for the next pass.
+                if time.monotonic()-started>PASS_SECONDS: break
                 item=dict(row)
                 token=db.set_current_user_id(item['user_id'])
                 try:

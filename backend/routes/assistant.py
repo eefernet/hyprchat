@@ -151,6 +151,7 @@ async def update_assistant(req: AssistantUpdate):
             "end": str(req.quiet_hours.get("end") or "07:00")[:5],
             "urgent_override": bool(req.quiet_hours.get("urgent_override", True)),
         }
+    previous = await db.get_assistant_profile()
     await db.upsert_assistant_profile(
         timezone=req.timezone,
         enabled_gatherers=req.enabled_gatherers,
@@ -159,16 +160,20 @@ async def update_assistant(req: AssistantUpdate):
         quiet_hours=quiet,
     )
 
-    # Timezone change moves every check-in's wall-clock → recompute next_run
-    # for all of them, even the ones not mentioned in this PATCH. Disabled
-    # check-ins get the new timezone too, or they re-enable on stale walls.
-    if req.timezone is not None:
+    # A timezone CHANGE moves every check-in's wall clock: recompute next_run for all of them, also the
+    # disabled ones (or they re-enable on stale walls), and for ordinary tasks that follow the profile
+    # timezone (their own is empty). The panel sends the timezone with every save, so an unchanged one
+    # must not touch next_run: saving Quiet Hours used to push a due or deferred brief to tomorrow.
+    if req.timezone is not None and req.timezone != ((previous or {}).get("timezone") or ""):
         for task in await db.list_scheduled_tasks():
-            if task.get("task_type") != "check_in":
-                continue
-            nxt = scheduler.compute_next_run(
-                task["schedule_kind"], task["schedule_json"], req.timezone)
-            await db.update_scheduled_task(task["id"], {"timezone": req.timezone, "next_run": nxt})
+            if task.get("task_type") == "check_in":
+                nxt = scheduler.compute_next_run(
+                    task["schedule_kind"], task["schedule_json"], req.timezone)
+                await db.update_scheduled_task(task["id"], {"timezone": req.timezone, "next_run": nxt})
+            elif not task.get("timezone") and task["schedule_kind"] not in ("event", "webhook", "once"):
+                nxt = scheduler.compute_next_run(
+                    task["schedule_kind"], task["schedule_json"], req.timezone)
+                await db.update_scheduled_task(task["id"], {"next_run": nxt})
 
     profile = await db.get_assistant_profile() or profile
     tz = req.timezone or profile.get("timezone") or "UTC"

@@ -92,7 +92,7 @@ async def update_note(note_id: str, req: NoteUpdate):
         fields["due_at"] = pim.local_to_utc(req.due_local, tz)
     if req.remind_local is not None:
         fields["remind_at"] = pim.local_to_utc(req.remind_local, tz)
-        fields["reminded"] = False
+    fields = pim.rearm_note_reminder(await db.get_note(note_id), fields)
     await db.update_note(note_id, fields)
     if req.workspace_ids is not None: await workspace_service.set_note_workspaces(note_id,req.workspace_ids)
     return await get_note(note_id)

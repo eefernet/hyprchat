@@ -44,7 +44,7 @@ The data dump above is everything gathered for this check-in. YOU decide what ma
 - Flag anything that needs preparation or a decision.
 - If something warrants action you can take with your tools, take it (within your autonomy limits) and say what you did.
 - Your tools can also read emails in full (read_email), draft/queue replies, and pull anything time-sensitive from the web (research/fetch_url) when the dump isn't enough.
-Write a short, scannable brief."""
+Write a short, scannable brief. Write clock times as HH:MM (09:30, 14:00)."""
 
 # name -> async fn(user_id: str) -> str block ("" to skip)
 _GATHERERS: dict = {}
@@ -251,12 +251,17 @@ async def build_checkin_prompt(task: dict, base_prompt: str) -> str:
 
 async def _gather_tasks(user_id: str) -> str:
     tasks = await db.list_scheduled_tasks(user_id=user_id)
+    # next_run is stored in UTC; the rest of the brief is in the profile's timezone, so convert it
+    # (a New York user was told their 08:30 task "runs at 13:30").
+    import timeutil
+    profile = await db.get_assistant_profile(user_id=user_id)
+    zone = (profile or {}).get("timezone") or "UTC"
     lines = []
     for t in tasks:
         if not t["enabled"]:
             continue
         status = f" (last: {t['last_status']})" if t.get("last_status") else ""
-        nxt = f" next {t['next_run']}" if t.get("next_run") else ""
+        nxt = f" next {timeutil.utc_to_local(t['next_run'], zone).replace('T', ' ')}" if t.get("next_run") else ""
         lines.append(f"- [{t['schedule_kind']}] {t['title']}{nxt}{status}")
     return "\n".join(lines[:15])
 

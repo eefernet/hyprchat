@@ -386,7 +386,7 @@ def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
     assert "setResearchRunning(false);" in index
 
     # Rerun switches to the new id without overwriting an existing report row.
-    assert "setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>[d,...p.filter(x=>x.id!==d.id)])" in index
+    assert "setActiveResearchId(d.id);setActiveResearch(d);setResearchEvents(d.events_log||[]);setResearchReports(p=>putReport(p,d))" in index
 
     # Deleting the active report clears active state and stops live UI state.
     assert "setActiveResearchId(null);setActiveResearch(null);setResearchEvents([]);setResearchLiveMarkdown(\"\");setResearchRunning(false);" in index
@@ -394,3 +394,32 @@ def test_deep_research_panel_state_contracts_are_guarded_in_frontend():
     # Labels stay distinct: panel is durable Deep Research, chat tool is Agent Research.
     assert "Deep Research" in index
     assert "Agent Research" in index
+
+
+# ── 2026-11-17: report cards and warnings ──
+
+def test_report_card_summary_is_prose_not_the_method_heading():
+    report = ("# ZFS snapshots\n\n## Method\n\nCollected 59 source records using 12 searches and read 20 web pages.\n\n"
+              "> [!WARNING]\n> Some searches failed.\n\n## Key Findings\n\n- **ZFS** snapshots are [cheap](https://x.test) [S1, S2].\n- They are atomic.\n")
+    summary = research._report_summary(report)
+    assert summary == "ZFS snapshots are cheap. They are atomic."
+    assert "Method" not in summary and "#" not in summary and "Collected" not in summary
+    assert research._report_summary("# Title\nPlain _intro_ text.\n") == "Plain intro text."
+    assert research._report_summary("") == ""
+
+
+def test_search_warning_needs_a_search_problem_not_one_filtered_result():
+    import research_writer as writer
+    assert not writer.search_degraded([{"status": "ok", "discarded_results": 1, "retained_results": 9}])
+    assert not writer.search_degraded([])
+    assert writer.search_degraded([{"status": "partial", "retained_results": 9}])
+    assert writer.search_degraded([{"discarded_results": 5, "retained_results": 0}])
+    assert writer.search_degraded([{"discarded_results": 6, "retained_results": 4}])
+
+
+def test_a_report_cut_short_while_writing_says_so():
+    import research_writer as writer
+    note = writer.unfinished_note(["length", "length"])
+    assert note == "Unfinished generation: 2 sections reached the output length limit and may end early"
+    assert "search" not in note.lower()
+    assert "stopped early (error)" in writer.unfinished_note(["error", "length"])

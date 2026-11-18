@@ -2,7 +2,7 @@ import React,{useState,useEffect,useCallback,useRef} from 'react';
 
 import { API } from '../session.js';
 import { apiJson } from '../api.js';
-import { fmtLocalMinute, fmtUtcToLocal } from '../datetime.js';
+import { fmtAnyToLocal, fmtUtcToLocal } from '../datetime.js';
 import { IC } from '../components/icons.jsx';
 import PanelHeader from '../components/PanelHeader.jsx';
 import { EmptyState } from '../components/hyprChatWidgets.jsx';
@@ -109,7 +109,8 @@ export default function EmailPanel({t,btnS,cardS,inputS,confirmAction,notify}){
 
   const urgencyChip=u=>u==="urgent"?<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.bg,background:t.err,borderRadius:"var(--hc-radius-sm)",padding:"1px 5px"}}>URGENT</span>
     :u==="low"?<span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-sm)",padding:"1px 5px"}}>low</span>:null;
-  const fmtTs=fmtLocalMinute;
+  // A message's date carries the sender's own offset: show it in this browser's time, not the sender's wall clock.
+  const fmtTs=fmtAnyToLocal;
   const senderAvatar=addr=>{const key=emailOf(addr);const m=key.match(/[a-z0-9]/i);const c=colorFor(key,t);
     return <div style={{width:30,height:30,borderRadius:"50%",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"var(--hc-text-secondary)",fontWeight:600,color:c,background:`${c}2E`,border:`1px solid ${c}44`}}>{(m?m[0]:"?").toUpperCase()}</div>;};
 

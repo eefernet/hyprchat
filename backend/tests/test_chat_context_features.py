@@ -446,3 +446,30 @@ def test_forgetting_kept_tool_results_removes_them_for_this_chat_only(saved_chat
     assert again == {'removed': 0, 'freed': 0}
     lowered = reading_of(rows)
     assert lowered['used'] == 8600 and 'parts' not in lowered
+
+
+# ── 2026-11-17: the time line must not reach web search ──
+
+def test_search_reads_the_conversation_as_typed_not_the_annotated_model_list():
+    """The model's list has the time line, a skills hint and kept tool records on its user messages.
+    Search was handed that list and searched for "[Wednesday 18 November 2026, 3:19 AM] Briefly, …"."""
+    import quick_search
+    import search_agent
+
+    request = [
+        {"role": "user", "content": "What is ZFS?", "id": 1},
+        {"role": "assistant", "content": "A filesystem.", "id": 2},
+        {"role": "user", "content": "thanks", "id": 3},
+        {"role": "user", "content": [{"type": "image"}]},
+        {"role": "system", "content": "internal"},
+    ]
+    turns = quick_search.plain_turns(request)
+    assert turns == [{"role": "user", "content": "What is ZFS?"}, {"role": "assistant", "content": "A filesystem."},
+                     {"role": "user", "content": "thanks"}]
+    assert turns[0] is not request[0]                        # search may not write into the request
+    latest = search_agent._latest_user_message(turns)
+    assert latest == "thanks" and quick_search._should_skip(latest)[0]
+    # What the model's list holds for the same message is not skipped: that was the bug.
+    stamped = "[Wednesday 18 November 2026, 3:19 AM]\nthanks"
+    assert not quick_search._should_skip(stamped)[0]
+    assert quick_search.plain_turns(None) == []

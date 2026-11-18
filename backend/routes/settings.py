@@ -105,6 +105,13 @@ async def patch_image_settings(body: dict = Body(...)):
 
 @router.patch("/api/settings")
 async def update_app_settings(body: dict = Body(...)):
+    # One settings change at a time: this reads the file, awaits, and writes the whole file back, so two
+    # overlapping saves (or a hardware rescan finishing in between) could drop each other's change.
+    async with config.SETTINGS_LOCK:
+        return await _update_app_settings(body)
+
+
+async def _update_app_settings(body: dict):
     settings = load_settings()
     try:
         body = {**body, **context_policy.validate_patch(body, {**context_policy.runtime_settings(), **settings})}

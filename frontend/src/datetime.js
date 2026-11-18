@@ -26,3 +26,13 @@ export const parseUtcishMs = (value) => {
   const ms = Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : `${s}Z`);
   return Number.isFinite(ms) ? ms : 0;
 };
+
+// Any server timestamp (naive UTC, or ISO with an offset such as an email's Date header) → the browser's
+// local time as "YYYY-MM-DD HH:MM". Text that is not a time is returned as it is.
+export const fmtAnyToLocal = value => {
+  const ms = parseUtcishMs(value);
+  if (!ms) return value ? String(value) : '';
+  const d = new Date(ms), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+

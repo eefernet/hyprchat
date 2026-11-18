@@ -102,10 +102,11 @@ export default function CodeCard({code,lang='',fenceLabel='',filename='',blockKe
     <div id={bodyId} className="hc-code-scroll" tabIndex={0} aria-label="Code">
       <pre className="hc-code"><code>{visible.map((tokens,i)=>{
         const kind=diff?codeDiffKind(sourceLines[i]):'';
-        const marker=kind==='add'?'+':kind==='delete'?'−':kind==='hunk'?'@@':'';
+        // Diff lines already start with their own +, - or @@ (kept for copying); the row tint marks them.
+        // A separate marker column showed each sign a second time.
+
         return <span key={i} className={`hc-code-line${kind?` is-${kind}`:''}`}>
           <span className="hc-code-number" aria-hidden="true">{i+1}</span>
-          {diff&&<span className="hc-code-diff-marker" aria-hidden="true">{marker}</span>}
           <span className="hc-code-source">{tokens.map((token,j)=><span key={j} className={token.classes.join(' ')||undefined}>{token.text}</span>)}{i<visible.length-1?'\n':null}</span>
         </span>;
       })}</code></pre>

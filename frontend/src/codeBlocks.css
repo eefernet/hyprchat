@@ -14,6 +14,11 @@
 .hc-code .token.operator, .hc-code .token.entity, .hc-code .token.url,
 .hc-code .token.namespace { color: var(--code-operator); }
 .hc-code .token.variable { color: inherit; }
+/* Diff tokens had no rule and fell through to Prism's own colours, which are unreadable on several themes
+   (2.3:1 on Nord, 2.1:1 on Solarized Light). They use the same contrast-checked tokens as other code. */
+.hc-code .token.inserted, .hc-code .token.inserted-sign, .hc-code .token.inserted .token { color: var(--code-string); }
+.hc-code .token.deleted, .hc-code .token.deleted-sign, .hc-code .token.deleted .token { color: var(--code-deleted, var(--hc-danger)); }
+.hc-code .token.coord { color: var(--code-keyword); }
 
 .hc-code-card { margin:16px 0; overflow:hidden; min-width:0; border:1px solid var(--hc-line); border-radius:var(--hc-radius-card); background:var(--hc-sunken); color:var(--hc-text); box-shadow:inset 0 1px 0 var(--hc-edge-light); }
 .hc-code-header { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:9px 12px; background:var(--hc-elev-1); border-bottom:1px solid var(--hc-line-subtle); color:var(--hc-muted); font:var(--hc-text-secondary)/1.4 var(--hc-font-ui); }

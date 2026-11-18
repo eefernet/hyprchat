@@ -31,3 +31,29 @@ test('theme-derived code tokens meet 4.5:1 across all UI themes',()=>{
     }
   }
 });
+
+test('the warning amber and deleted diff lines are readable in every theme',async()=>{
+  const {degradedColor,codeThemeTokens,contrastRatio,UI_THEMES}=await import('./theme.js');
+  for(const [name,theme] of Object.entries(UI_THEMES)){
+    const amber=degradedColor(theme);
+    for(const surface of [theme.bg,theme.bgDeep,theme.surface])
+      assert.ok(contrastRatio(amber,surface)>=4.5,`${name}: warning text ${amber} on ${surface}`);
+    assert.equal(degradedColor(theme),amber);                       // cached per theme
+    assert.ok(contrastRatio(codeThemeTokens(theme)['--code-deleted'],theme.bgDeep)>=4.5,`${name}: deleted diff line`);
+  }
+  // The raw amber stays as it is on dark themes where it already reads well.
+  assert.equal(degradedColor(UI_THEMES.midnight).toLowerCase(),'#f0a030');
+});
+
+test('fixed badge colours become readable text on every theme',async()=>{
+  const {readableOn,contrastRatio,UI_THEMES}=await import('./theme.js');
+  for(const [name,theme] of Object.entries(UI_THEMES)){
+    for(const badge of ['#eab308','#2ecc71','#c792ea','#3498db','#ff6600','#888888']){
+      const text=readableOn(theme,badge);
+      for(const surface of [theme.bg,theme.bgDeep,theme.surface])
+        assert.ok(contrastRatio(text,surface)>=4.5,`${name}: ${badge} as ${text} on ${surface}`);
+    }
+  }
+  assert.equal(readableOn(UI_THEMES.nord,'var(--hc-accent)'),'var(--hc-accent)');
+  assert.equal(readableOn(UI_THEMES.nord,'#888'),'#888');
+});

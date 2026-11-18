@@ -611,7 +611,15 @@ async def _operate(job, kind, *, reserve_calls=0, **extra):
     deadline_exhausted = False
     while True:
         current = await store.get(job["id"])
-        if not current or current.get("cancel_requested"):
+        if not current:
+            # The job's row is gone: its chat was deleted while it ran. `cancel()` needs the row and would
+            # raise, leaving the worker running until its own deadline, so stop the worker directly.
+            try:
+                await _HTTP.post(worker_url(job) + "/cancel", timeout=15)
+            except Exception as error:
+                print(f"[DAEDALUS] could not stop the worker of deleted job {job['id']}: {error}")
+            raise InterruptedError("Job was deleted")
+        if current.get("cancel_requested"):
             await cancel(job["id"])
             raise InterruptedError("Cancellation requested")
         response = await _worker_request(job["id"], "GET", worker_url(job), timeout=30)

@@ -7,15 +7,17 @@ export default function DocumentActivity({runIds,events=[],live=false,t,onPrevie
   const [runs,setRuns]=useState({}),[error,setError]=useState('');
   const key=runIds.join('|');
   useEffect(()=>{
-    let closed=false,timer;
+    let closed=false,timer;const gone=new Set();
     const load=async()=>{
       const rows=await Promise.all(runIds.map(async id=>{
-        try{const r=await fetch(`${API}/api/runs/${encodeURIComponent(id)}`);if(!r.ok)throw new Error();return await r.json();}catch{return null;}
+        try{const r=await fetch(`${API}/api/runs/${encodeURIComponent(id)}`);if(r.status===404){gone.add(id);return null;}if(!r.ok)throw new Error();return await r.json();}catch{return null;}
       }));
       if(closed)return;
       setRuns(old=>({...old,...Object.fromEntries(rows.filter(Boolean).map(r=>[r.id,r]))}));
       setError(rows.some(r=>!r)?'Some document status is unavailable. Reopen this chat to retry.':'');
-      if(rows.some(r=>!r)||rows.some(r=>r&&['queued','pending','running','cancelling'].includes(r.status))||live)timer=setTimeout(load,2000);
+      // A run that no longer exists (a forked chat whose original was deleted) will not appear later: stop asking for it.
+      const missing=rows.some((r,i)=>!r&&!gone.has(runIds[i]));
+      if(missing||rows.some(r=>r&&['queued','pending','running','cancelling'].includes(r.status))||live)timer=setTimeout(load,2000);
     };
     if(runIds.length)load();
     return()=>{closed=true;clearTimeout(timer);};

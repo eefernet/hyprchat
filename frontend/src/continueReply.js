@@ -23,14 +23,17 @@ export function continueText(content) {
 
 // '' (nothing to continue), 'length' (hit the output limit), 'interrupted' (stopped or failed part-way)
 // or 'rounds' (used every tool round it had; the answer is whole, the work may not be).
-export function continueKind(message, isLast) {
+// `unsaved`: the chat is a Ghost or offline one. Carrying on mid-reply needs the reply's saved row, which
+// such a chat never has, so Continue always ended in "Message id not found". Continuing a tool run is a
+// new message and still works.
+export function continueKind(message, isLast, unsaved = false) {
   if (!isLast || !message || message.role !== 'assistant' || message.isS) return '';
   const body = continueText(message.content);
   if (!body.trim() || NO_RESPONSE.test(body)) return '';
   const meta = metadataOf(message);
   const status = message._activityStatus || meta.delivery_status || '';
-  if (['stopped', 'interrupted', 'failed'].includes(status)) return 'interrupted';
-  if (meta.truncated) return 'length';
+  if (['stopped', 'interrupted', 'failed'].includes(status)) return unsaved ? '' : 'interrupted';
+  if (meta.truncated) return unsaved ? '' : 'length';
   return roundLimit(meta) ? 'rounds' : '';
 }
 

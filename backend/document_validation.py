@@ -16,6 +16,9 @@ def array(items, minimum=0, maximum=20000):
 STYLE = obj({"bold": {"type": "boolean"}, "italic": {"type": "boolean"}, "size": N, "font": S,
              "color": S, "fill": S, "number_format": S, "align": S, "wrap": {"type": "boolean"}})
 ROWS = array(array(VALUE, 1), 1)
+# Worksheet rows need not match in length and [] is a blank row: a budget sheet has heading rows, spacer
+# rows and totals. (Word and slide tables keep ROWS: every row there needs cells.)
+SHEET_ROWS = array(array(VALUE, 0), 1)
 SERIES = array(obj({"name": S, "values": array(N, 1)}, ["name", "values"]), 1)
 BLOCK = obj({"type": {"type": "string", "enum": ["paragraph", "table", "image", "page_break"]},
              "text": S, "heading": {"type": "integer", "minimum": 0, "maximum": 9}, "style": S,
@@ -26,7 +29,7 @@ ELEMENT = obj({"type": {"type": "string", "enum": ["text", "table", "image", "ch
                "chart_type": {"type": "string", "enum": ["bar", "line", "pie"]},
                **{k: N for k in ("x", "y", "width", "height", "size")}})
 SLIDE = obj({"title": S, "notes": S, "bullets": array(S), "elements": array(ELEMENT)}, ["title"])
-SHEET = obj({"name": S, "rows": ROWS, "cells": {"type": "object", "additionalProperties": VALUE},
+SHEET = obj({"name": S, "rows": SHEET_ROWS, "cells": {"type": "object", "additionalProperties": VALUE},
              "formats": array(obj({"range": S, "style": STYLE}, ["range", "style"])),
              "column_widths": {"type": "object", "additionalProperties": N}, "freeze_panes": S,
              "tables": array(obj({"name": S, "range": S}, ["name", "range"])),
@@ -35,7 +38,7 @@ CONTENT = obj({"blocks": array(BLOCK, 1, 2000), "header": S, "footer": S,
                "slides": array(SLIDE, 1, 200), "sheets": array(SHEET, 1, 100)})
 EXAMPLES = {"docx": {"blocks": [{"text": "Report text"}, {"type": "table", "rows": [["Name", "Value"], ["A", "10"]]}]},
             "pptx": {"slides": [{"title": "Report", "bullets": ["Finding"]}]},
-            "xlsx": {"sheets": [{"name": "Data", "rows": [["Name", "Value"], ["A", 10]]}]}}
+            "xlsx": {"sheets": [{"name": "Data", "rows": [["Budget"], [], ["Name", "Value"], ["A", 10]]}]}}
 
 
 def markdown_content(text):
@@ -109,8 +112,9 @@ def validate(value, schema, path):
         if not math.isfinite(value) or value < schema.get("minimum", -math.inf) or value > schema.get("maximum", math.inf):
             raise ValueError(f"{path} is outside the allowed range")
     if actual == "array":
-        if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", 20000):
-            raise ValueError(f"{path} has an invalid number of items")
+        low, high = schema.get("minItems", 0), schema.get("maxItems", 20000)
+        if not low <= len(value) <= high:
+            raise ValueError(f"{path} has {len(value)} items; it needs {low} to {high}")
         for i, item in enumerate(value):
             validate(item, schema.get("items", {}), f"{path}[{i}]")
     if actual == "object":

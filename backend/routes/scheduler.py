@@ -174,6 +174,13 @@ async def update_task(task_id: str, req: TaskUpdate):
         _validate_task_fields(fields.get("task_type", task["task_type"]),
                               fields.get("schedule_kind", task["schedule_kind"]))
     kind = fields.get("schedule_kind", task["schedule_kind"])
+    # The panel sends the trigger with every save. Its progress ("7 of every 10 emails") is the server's:
+    # keep the stored counter unless the event or the interval itself changed (a rename used to reset it).
+    if isinstance(fields.get("event_trigger_json"), dict):
+        stored = task.get("event_trigger_json") or {}
+        incoming = fields["event_trigger_json"]
+        if incoming.get("event") == stored.get("event") and int(incoming.get("every") or 1) == int(stored.get("every") or 1):
+            fields["event_trigger_json"] = {**incoming, "counter": int(stored.get("counter") or 0)}
     # Recompute next_run whenever the schedule, tz, or enablement changes.
     if any(k in fields for k in ("schedule_kind", "schedule_json", "timezone", "event_trigger_json")) or fields.get("enabled"):
         fields["next_run"] = await _computed_next_run(
@@ -182,6 +189,9 @@ async def update_task(task_id: str, req: TaskUpdate):
             fields.get("event_trigger_json", task.get("event_trigger_json")))
     if kind == "webhook" and not task.get("webhook_token"):
         fields["webhook_token"] = scheduler.new_webhook_token()
+    elif kind != "webhook" and task.get("webhook_token"):
+        # The URL is hidden once a task is no longer a webhook task, so it must stop working too.
+        fields["webhook_token"] = ""
     updated = await db.update_scheduled_task(task_id, fields)
     return updated
 

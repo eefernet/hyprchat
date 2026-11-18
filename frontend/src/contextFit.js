@@ -34,11 +34,16 @@ export function attachmentChars(attachment) {
 // The draft against the room one message can ever have: the window minus what every request carries and
 // minus room for the reply. Null when it fits, when the window is not known (a cloud model), or when the
 // draft is small. `ratio` is the chat's measured tokens per estimated unit, when a reply has reported one.
+const encoder = typeof TextEncoder === 'undefined' ? null : new TextEncoder();
+const utf8Bytes = value => { const text = String(value || ''); return encoder ? encoder.encode(text).length : text.length; };
+
 export function draftFit({ text, attachments, window, fixed, ratio } = {}) {
   const size = number(window);
   const chars = String(text || '').length + (attachments || []).reduce((sum, item) => sum + attachmentChars(item), 0);
   if (!size || chars < SMALL_DRAFT) return null;
-  const units = chars / 3;
+  // The server sizes text as UTF-8 bytes / 3 (context_policy.estimate_tokens). Counting characters measured a
+  // Chinese or Cyrillic draft two to three times too small, so the warning stayed hidden while the message was cut.
+  const units = (utf8Bytes(text) + (attachments || []).reduce((sum, item) => sum + attachmentChars(item), 0)) / 3;
   const room = Math.max(0, size - (number(fixed) || TYPICAL_FIXED) - Math.min(REPLY_RESERVE, Math.floor(size * RESERVE_SHARE)));
   if (units * SURE <= room) return null;
   const rate = Number(ratio) >= 0.4 && Number(ratio) <= 1.2 ? Number(ratio) : TYPICAL;

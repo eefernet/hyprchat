@@ -300,7 +300,7 @@ sources AS (
  SELECT 'note',n.id,n.title,n.updated_at,'',CASE WHEN length(n.content)>0 THEN 'ready' ELSE 'empty' END
  FROM notes n JOIN workspace_notes l ON l.note_id=n.id JOIN owned w ON w.id=l.workspace_id AND w.user_id=n.user_id
  UNION ALL
- SELECT 'research',r.id,r.title,r.updated_at,'',CASE WHEN r.status IN ('done','completed','succeeded') AND length(r.report_markdown)>0 THEN 'ready' ELSE r.status END
+ SELECT 'research',r.id,r.title,r.updated_at,'',CASE WHEN r.status IN ('complete','done','completed','succeeded') AND length(r.report_markdown)>0 THEN 'ready' ELSE r.status END
  FROM research_reports r JOIN workspace_research_reports l ON l.report_id=r.id JOIN owned w ON w.id=l.workspace_id AND w.user_id=r.user_id
  UNION ALL
  SELECT 'artifact',a.id,COALESCE(NULLIF(a.title,''),a.filename),a.updated_at,COALESCE(a.conversation_id,''),CASE WHEN length(a.content_text)>0 THEN 'ready' ELSE 'unindexed' END
@@ -379,6 +379,17 @@ def artifact_revision(artifact):
     import hashlib
     # Include text as well as file identity: edits within one timestamp tick still invalidate.
     return hashlib.sha256(json.dumps({k:artifact.get(k) for k in ('updated_at','sha256','storage_path','url','filename','content_text')},sort_keys=True).encode()).hexdigest()
+
+
+async def document_store_id(ws_id) -> str:
+    """The id of the workspace's document store, or '' when it never had one (nothing is created)."""
+    conn=await db.get_db()
+    try:
+        rows=await conn.execute_fetchall('SELECT kb_id FROM workspace_document_stores WHERE workspace_id=?',(ws_id,))
+        return rows[0]['kb_id'] if rows else ''
+    except Exception:
+        return ''
+    finally: await conn.close()
 
 
 async def document_store(ws_id):
@@ -491,7 +502,9 @@ async def picker(ws_id, kind, query='', limit=30, offset=0):
     table,title=tables[kind]
     conn=await db.get_db()
     try:
-        rows=await conn.execute_fetchall(f'SELECT id,{title} title FROM {table} WHERE user_id=? AND instr(lower({title}),lower(?))>0 ORDER BY updated_at DESC,id LIMIT ? OFFSET ?',
+        # Another workspace's own document store is not something to link (workspace_document_stores).
+        internal=" AND id NOT IN (SELECT kb_id FROM workspace_document_stores)" if kind=='knowledge' else ''
+        rows=await conn.execute_fetchall(f'SELECT id,{title} title FROM {table} WHERE user_id=?{internal} AND instr(lower({title}),lower(?))>0 ORDER BY updated_at DESC,id LIMIT ? OFFSET ?',
                                          (db.current_user_id(),query,max(1,min(limit,100))+1,max(0,offset)))
         items=[{**dict(r),'linked':bool(await source(ws_id,kind,r['id']))} for r in rows[:limit]]
         return {'items':items,'has_more':len(rows)>limit}
