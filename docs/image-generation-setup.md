@@ -134,7 +134,7 @@ raw prompts, generated text, reasoning text and tool arguments.
 If the older root-owned helper is installed, retire it during deployment:
 
 ```bash
-sudo bash scripts/install-journal-scrub.sh
+sudo bash scripts/retire-journal-scrub.sh
 ```
 
 The script now disables and removes only the old HyprChat scrub units and their

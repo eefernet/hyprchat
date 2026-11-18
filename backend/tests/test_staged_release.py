@@ -113,3 +113,39 @@ def test_document_activation_failure_restores_previous_pointer(tmp_path,monkeypa
     assert not journal.exists()
     assert ('systemctl','start','hephaestus-api') in commands
     assert json.loads(next(root.glob('rollback-*/receipt.json')).read_text())['state']=='rolled_back'
+
+
+# ── Readiness URL default (2026-11-17) ──
+
+def test_the_readiness_url_comes_from_the_installs_env_file(tmp_path):
+    (tmp_path/'.env').write_text('# Server\nHOST=100.64.0.5\nPORT=8000\nPORT=8123\n')
+    assert release.url_from_env(tmp_path) == 'http://100.64.0.5:8123'      # last assignment wins, as with systemd
+
+
+@pytest.mark.parametrize('host,expected', [('0.0.0.0', 'http://127.0.0.1:8000'), ('::', 'http://127.0.0.1:8000'),
+                                           ('fd7a:115c::1', 'http://[fd7a:115c::1]:8000'), ('', 'http://127.0.0.1:8000')])
+def test_a_wildcard_or_ipv6_bind_is_turned_into_an_address_to_call(tmp_path, host, expected):
+    (tmp_path/'.env').write_text(f'HOST={host}\n')
+    assert release.url_from_env(tmp_path) == expected
+
+
+def test_without_an_env_file_the_url_is_the_local_default(tmp_path):
+    assert release.url_from_env(tmp_path/'missing') == 'http://127.0.0.1:8000'
+
+
+def test_hyprchat_url_still_wins_over_the_env_file(tmp_path, monkeypatch):
+    (tmp_path/'.env').write_text('HOST=10.0.0.9\n')
+    seen = {}
+    monkeypatch.setattr(release, 'activate', lambda rel, url, acceptance: seen.update(url=url))
+    monkeypatch.setenv('HYPRCHAT_URL', 'http://example.test:9000')
+    monkeypatch.setattr('sys.argv', ['staged_release.py', 'activate', '--root', str(tmp_path), '--release', 'r'])
+    release.main()
+    assert seen['url'] == 'http://example.test:9000'
+    monkeypatch.delenv('HYPRCHAT_URL')
+    release.main()
+    assert seen['url'] == 'http://10.0.0.9:8000'
+
+
+def test_the_acceptance_script_checks_the_public_health_route():
+    script = (Path(release.__file__).parent/'release_acceptance.sh').read_text()
+    assert '/api/health/live' in script and '/api/health"' not in script

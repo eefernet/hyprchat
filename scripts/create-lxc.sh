@@ -18,11 +18,11 @@ if [ -z "$CTID" ] || [ -z "$IP" ]; then
 fi
 GW=${3:-"${IP%.*}.1"}
 HOSTNAME="hyprchat"
-STORAGE="local-lvm"      # Change if your storage differs
-TEMPLATE="local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+# Change if your storage differs.
+STORAGE="local-lvm"
 MEMORY=2048
 SWAP=512
-DISK=8
+DISK=20
 CORES=2
 BRIDGE="vmbr0"
 NAMESERVER="1.1.1.1"
@@ -39,14 +39,17 @@ echo "║  Cores:    $CORES                            "
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
-# Check if template exists
-if ! pveam list local | grep -q "ubuntu-24.04"; then
+# Ubuntu 24.04 provides the Python 3.12 that HyprChat's dependency lock is built for.
+if ! pveam list local | grep -q "ubuntu-24.04-standard"; then
     echo "[!] Ubuntu 24.04 template not found. Downloading..."
-    pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+    pveam update > /dev/null
+    TEMPLATE_NAME=$(pveam available --section system | awk '/ubuntu-24.04-standard/ {print $2}' | sort -V | tail -1)
+    [ -n "$TEMPLATE_NAME" ] || { echo "[!] No Ubuntu 24.04 template is available from pveam." >&2; exit 1; }
+    pveam download local "$TEMPLATE_NAME"
 fi
 
 # Find the exact template name
-TEMPLATE=$(pveam list local | grep "ubuntu-24.04" | tail -1 | awk '{print $1}')
+TEMPLATE=$(pveam list local | grep "ubuntu-24.04-standard" | sort -V | tail -1 | awk '{print $1}')
 echo "[*] Using template: $TEMPLATE"
 
 # Check CTID not in use
@@ -83,18 +86,14 @@ for i in {1..30}; do
     sleep 1
 done
 
-echo "[4/5] Installing system packages inside LXC..."
+echo "[4/5] Updating packages inside the LXC..."
 pct exec $CTID -- bash -c "
-    apt update -qq
-    apt install -y -qq python3-pip curl wget > /dev/null 2>&1
-    echo 'Packages installed.'
+    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates > /dev/null
+    echo 'Packages updated.'
 "
 
-echo "[5/5] Creating project directory structure..."
-pct exec $CTID -- bash -c "
-    mkdir -p /opt/hyprchat/{backend,frontend/dist,scripts,data/{uploads/avatars,tools,knowledge_bases,chroma_db,comfy_workflows}}
-    mkdir -p /opt/hyprchat/data/sandbox/{outputs,workspace,venv}
-"
+echo "[5/5] Creating /opt/hyprchat..."
+pct exec $CTID -- mkdir -p /opt/hyprchat
 
 echo ""
 read -r -p "Create companion Hephaestus Docker VM now? [y/N] " CREATE_HEPHAESTUS
@@ -128,12 +127,14 @@ echo "  LXC $CTID created and ready!"
 echo ""
 echo "  Next steps:"
 echo ""
-echo "  1. Build the frontend, then copy the project files to the container."
-echo "     frontend/dist/ is build output (gitignored) — build it on your dev"
-echo "     machine BEFORE creating the tarball, or deploy.sh will abort:"
+echo "  1. On your dev machine, build the frontend and make a clean export."
+echo "     git archive leaves out .env, .deploy_config.json, data/ and anything"
+echo "     else that is not committed; frontend/dist/ is added after it:"
 echo ""
-echo "     ( cd frontend && npm install && npm run build )"
-echo "     tar czf hyprchat-project.tar.gz --exclude node_modules ."
+echo "     ( cd frontend && npm ci && npm run build )"
+echo "     git archive --format=tar -o hyprchat-project.tar HEAD"
+echo "     tar rf hyprchat-project.tar frontend/dist"
+echo "     gzip -f hyprchat-project.tar"
 echo ""
 echo "     # Upload tar to Proxmox host first"
 echo "     scp hyprchat-project.tar.gz root@<PROXMOX_IP>:/tmp/"
@@ -145,7 +146,8 @@ echo ""
 echo "  2. Run the deploy script inside the container:"
 echo "     pct exec $CTID -- bash /opt/hyprchat/scripts/deploy.sh"
 echo ""
-echo "  3. Access HyprChat at: http://${IP}:8000"
-echo "     API docs at:        http://${IP}:8000/docs"
+echo "  3. deploy.sh prints the address HyprChat answers on. It binds to"
+echo "     127.0.0.1 until you set HOST in /opt/hyprchat/.env (for example to"
+echo "     ${IP} or a Tailscale address) and restart it."
 echo ""
 echo "════════════════════════════════════════════════"
