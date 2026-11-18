@@ -1,7 +1,7 @@
 <details open>
-<summary>Alpha v18.3 — Nov 13, 2026</summary>
+<summary>Alpha v18.3 — Nov 18, 2026</summary>
 
-> HyprChat now learns from its own work.
+> HyprChat now learns from its own work with automated skills. Massive updates to chat rendering when it comes to tool calling, updated to settings. Compaction to chats has been added as well as a way for the user to view what is using context by clicking on the context meter. Updated preview panel when the model generates a webview or a document/MD file. Massive fixes to overall chat logic
 
 ## Skills
 
