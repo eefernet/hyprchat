@@ -1,0 +1,26 @@
+/* One chat in the left bar (ConvRow.jsx). Colours come from the theme tokens; the row's accent and
+   hover colour are passed in as --conv-accent / --conv-row-hover-bg. */
+.conv-item{margin-bottom:2px}
+.conv-row{display:flex;align-items:center;gap:0;position:relative;overflow:hidden;box-sizing:border-box;min-height:48px;padding:0 7px 0 12px;border:1px solid transparent;border-radius:var(--hc-radius);cursor:pointer;outline:none}
+.conv-row:focus-visible{border-color:var(--hc-accent-ring,var(--hc-accent));box-shadow:0 0 0 2px color-mix(in srgb,var(--hc-accent) 28%,transparent)}
+.conv-main{display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;white-space:nowrap;font-size:var(--hc-text-control)}
+.conv-main .conv-title-clip{min-width:0;flex:1;overflow:hidden;white-space:nowrap}
+.conv-mark{display:flex;flex-shrink:0}
+.conv-mark-box{align-items:center;justify-content:center;width:18px;height:18px}
+.conv-avatar{width:18px;height:18px;border-radius:var(--hc-radius);object-fit:cover;flex-shrink:0}
+.conv-menu{flex-shrink:0;margin-left:8px}
+/* A reply that finished while another chat was open: steady, so it reads differently from the pulsing "replying" dot. */
+.conv-unread{width:7px;height:7px;flex-shrink:0;border-radius:50%;background:var(--hc-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--hc-accent) 20%,transparent);animation:hc-indicator-in var(--hc-dur-2) var(--hc-ease-out)}
+.conv-draft{color:var(--hc-muted);opacity:.75}
+.conv-draft svg{width:12px;height:12px}
+.conv-queued{flex-shrink:0;min-width:16px;padding:0 5px;border-radius:999px;background:var(--hc-accent-tint,color-mix(in srgb,var(--hc-accent) 16%,transparent));color:var(--hc-accent);font-size:var(--hc-text-secondary);font-weight:700;line-height:16px;text-align:center}
+.conv-tags{display:flex;flex-wrap:wrap;gap:2px;padding:1px 8px 4px}
+.conv-tags-edit{padding:0;margin-top:3px}
+.conv-tag{display:inline-flex;align-items:center;gap:3px;min-height:0;padding:1px 5px;border:1px solid color-mix(in srgb,var(--conv-warm,var(--hc-accent)) 28%,transparent);border-radius:var(--hc-radius);background:color-mix(in srgb,var(--conv-warm,var(--hc-accent)) 12%,transparent);color:var(--conv-warm,var(--hc-accent));font:inherit;font-size:var(--hc-text-secondary);line-height:1.4;cursor:pointer}
+.conv-tag[aria-pressed="true"]{background:color-mix(in srgb,var(--conv-warm,var(--hc-accent)) 26%,transparent)}
+.conv-tag-static{cursor:default;padding:2px 6px}
+.conv-tag-remove{min-height:0;padding:0 1px;border:0;background:none;color:inherit;font:inherit;font-weight:700;line-height:1;opacity:.7;cursor:pointer}
+.conv-tag-remove:hover,.conv-tag-remove:focus-visible{opacity:1}
+.conv-edit{padding:4px 8px 6px;animation:fadeIn .15s}
+.conv-edit-row{display:flex;gap:4px}
+@media(prefers-reduced-motion:reduce){.conv-unread,.conv-edit{animation:none}}

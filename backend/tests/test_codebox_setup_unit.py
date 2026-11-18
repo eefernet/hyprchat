@@ -164,7 +164,10 @@ def test_concurrent_scripts_keep_distinct_content_and_clean_up(tmp_path, languag
         else:
             code = f"console.log(__filename); setTimeout(() => {{console.log({json.dumps(label)}); process.exit(7);}}, 50);"
         command = cb._script_command(code, interpreter, "py" if language == "python" else "js")
-        command = command.replace("cd /root", f"cd {shlex.quote(str(tmp_path))}", 1)
+        # The script starts in the chat's work folder on the sandbox (chat_workdir.py); here, in a temp folder.
+        import chat_workdir
+        assert command.startswith(chat_workdir.ENTER + " && ")
+        command = command.replace(chat_workdir.ENTER, f"cd {shlex.quote(str(tmp_path))}", 1)
         proc = await asyncio.create_subprocess_exec(
             "/bin/sh", "-c", command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await proc.communicate()

@@ -51,7 +51,7 @@ export function FileReadyCard({ data, versions = 1, t, onPreview, onOpenArtifact
         {versions > 1 && <span style={{ fontSize: 'var(--hc-text-secondary)', background: t.acc, color: t.bg, borderRadius: 'var(--hc-radius)', padding: '1px 5px', fontWeight: 700, marginLeft: 2 }}>v{versions}</span>}
         <span style={{ fontSize: 'var(--hc-text-secondary)', opacity: .6 }}>⬇</span>
       </a>
-      {onPreview && <button onClick={() => onPreview(d.filename, d.url)} title="Preview" style={{ padding: '7px 10px', background: `${t.acc}15`, border: `1px solid ${t.acc}40`, borderRadius: '0 10px 10px 0', borderLeft: 'none', color: t.acc, cursor: 'pointer', fontSize: 'var(--hc-text-control)', display: 'flex', alignItems: 'center' }}>👁</button>}
+      {onPreview && <button onClick={() => onPreview(d.filename, d.url, d.artifact_id)} title="Preview" aria-label={`Preview ${d.filename}`} style={{ padding: '7px 10px', background: `${t.acc}15`, border: `1px solid ${t.acc}40`, borderRadius: '0 10px 10px 0', borderLeft: 'none', color: t.acc, cursor: 'pointer', fontSize: 'var(--hc-text-control)', display: 'flex', alignItems: 'center' }}>👁</button>}
       {d.artifact_id && onOpenArtifact && <button onClick={() => onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{ padding: '7px 10px', background: `${t.pink}12`, border: `1px solid ${t.pink}35`, borderRadius: 'var(--hc-radius)', color: t.pink, cursor: 'pointer', fontSize: 'var(--hc-text-control)', fontFamily: 'inherit', fontWeight: 600, display: 'flex', alignItems: 'center' }}>Artifact</button>}
     </div>
   </div>;

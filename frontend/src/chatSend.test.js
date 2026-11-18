@@ -31,7 +31,7 @@ function setup(overrides = {}) {
     console, Date, Math, Blob, FormData, AbortController, setTimeout: noop,
     streaming: false, councilRunning: false, loadingConv: false,
     inp: 'Analyze this', attachments: [attachment()], actId: 'conv-1', currentUserId: 'user-1',
-    convs: [{id: 'conv-1', messages: []}], sendPrepRef: {current: null},
+    convs: [{id: 'conv-1', messages: []}], sendPrepRef: {current: null}, loadReqRef: {current: 0}, setLoadingConv: noop,
     chatCreationBusy:{current:false},chatNavigation:{current:'initial'},setWsPanel:noop,setWorkspaces:noop,setGhostMode:noop,
     persistProfileFirstMessage:async()=>null,
     ghostMode: false, isGhostConv: c => !!c?.ephemeral,
@@ -261,4 +261,60 @@ test('the first send of a new chat takes its draft with it', async () => {
     fetch: async () => ({ok: true, json: async () => ({id: 'conv-new', title: 'New Chat', messages: []})})});
   await send();
   assert.ok(calls.adopted.length >= 1, 'the draft was moved to the new chat');
+});
+
+// ── 2026-11-16 chat pass: deleting a chat ─────────────────────────────────────────────────────────
+import {afterDelete} from './chatList.js';
+function deleteSetup({answer = {ok: true, status: 200}, confirm = true, streamingCid = null} = {}) {
+  const calls = {loaded: [], notices: [], stopped: [], asked: [], requests: []};
+  const noop = () => {};
+  const context = {
+    console, Math, API: '', afterDelete,
+    convsRef: {current: [{id: 'a', title: 'First'}, {id: 'b', title: 'Second'}, {id: 'c', title: 'Third'}]},
+    actIdRef: {current: 'a'}, streamingCidRef: {current: streamingCid}, streamEndedRef: {current: new Map()}, deletedChatsRef: {current: new Set()},
+    isGhostConv: c => !!c?.ephemeral,
+    confirmAction: async opts => { calls.asked.push(opts); return confirm; },
+    stopStrandedStream: ids => { calls.stopped.push(ids); },
+    setConvs: fn => { context.convsRef.current = fn(context.convsRef.current); },
+    setActId: id => { context.actIdRef.current = id; },
+    loadConversation: id => { calls.loaded.push(id); context.actIdRef.current = id; },
+    setCouncilRunning: noop, setCouncilResponses: noop, setCouncilHostContent: noop, setConvTags: noop,
+    chatDrafts: {drop: noop}, messageQueue: {drop: noop},
+    notify: notice => calls.notices.push(notice),
+    fetch: async (url, init) => { calls.requests.push([url, init?.method]); if (answer instanceof Error) throw answer; return answer; },
+  };
+  vm.createContext(context);
+  return {context, calls, delChat: handler('delChat', context)};
+}
+
+test('deleting the open chat asks first, then loads the next chat instead of showing it empty', async () => {
+  const {context, calls, delChat} = deleteSetup();
+  await delChat('a');
+  assert.match(calls.asked[0].body, /First/);
+  assert.deepEqual(calls.loaded, ['b']);
+  assert.deepEqual(context.convsRef.current.map(c => c.id), ['b', 'c']);
+  assert.deepEqual(calls.requests, [['/api/conversations/a', 'DELETE']]);
+});
+
+test('answering No to the delete question changes nothing', async () => {
+  const {context, calls, delChat} = deleteSetup({confirm: false});
+  await delChat('a');
+  assert.deepEqual(context.convsRef.current.map(c => c.id), ['a', 'b', 'c']);
+  assert.deepEqual(calls.requests, []);
+  assert.deepEqual(calls.stopped, []);
+});
+
+test('deleting a chat that is still replying stops that reply and says so in the question', async () => {
+  const {calls, delChat} = deleteSetup({streamingCid: 'b'});
+  await delChat('b');
+  assert.match(calls.asked[0].body, /reply still being written/);
+  assert.deepEqual(calls.stopped.map(ids => Array.from(ids)), [['b']]);   // arrays made inside the vm context
+  assert.deepEqual(calls.loaded, []);   // another chat was open: it stays
+});
+
+test('a chat the server refuses to delete comes back in its place with a notice', async () => {
+  const {context, calls, delChat} = deleteSetup({answer: {ok: false, status: 500}});
+  await delChat('b');
+  assert.deepEqual(Array.from(context.convsRef.current, c => c.id), ['a', 'b', 'c']);
+  assert.equal(calls.notices[0].text, 'Chat not deleted');
 });

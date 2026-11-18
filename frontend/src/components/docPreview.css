@@ -1,0 +1,15 @@
+/* Documents, drawings and tables in the side pane (DocLivePreview.jsx). The header row is .hp-bar
+   from htmlPreview.css; this is the area under it. */
+.dv-stage{flex:1;min-height:0;overflow:auto;background:var(--hc-sunken)}
+.dv-page{max-width:74ch;margin:0 auto;padding:22px 22px 48px;color:var(--hc-text);font-size:var(--hc-text-reading);line-height:var(--hc-lh-reading,1.68)}
+.dv-page > div > :first-child{margin-top:0}
+.dv-source{margin:0;padding:16px 18px 40px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--hc-secondary);font-size:var(--hc-text-secondary);line-height:1.6}
+.dv-note{padding:28px 20px;text-align:center;color:var(--hc-muted);font-size:var(--hc-text-secondary)}
+.dv-drawing{display:flex;align-items:center;justify-content:center;min-height:100%;box-sizing:border-box;padding:20px}
+.dv-drawing img{max-width:100%;max-height:calc(100vh - 140px);background:#fff;border-radius:var(--hc-radius);box-shadow:var(--hc-shadow-1,0 1px 3px rgba(0,0,0,.25))}
+.dv-table-wrap{padding:0 0 28px}
+.dv-table{border-collapse:collapse;min-width:100%;font-size:var(--hc-text-secondary);color:var(--hc-text)}
+.dv-table th,.dv-table td{padding:6px 12px;border-bottom:1px solid var(--hc-line-subtle);text-align:left;vertical-align:top;white-space:pre-wrap;max-width:44ch;overflow-wrap:anywhere}
+.dv-table th{position:sticky;top:0;z-index:1;background:var(--hc-elev-1);color:var(--hc-secondary);font-weight:700;border-bottom:1px solid var(--hc-line)}
+.dv-table tbody tr:nth-child(even) td{background:color-mix(in srgb,var(--hc-text) 3%,transparent)}
+.dv-count{padding:10px 12px;color:var(--hc-muted);font-size:var(--hc-text-secondary)}

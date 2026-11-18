@@ -140,14 +140,12 @@ def _init_sandbox():
 
 def _sandbox_size_bytes() -> int:
     """Return total bytes used in the sandbox outputs directory."""
-    total = 0
+    # Subfolders included: delivered files sit in outputs/<month>/<chat>/ (output_paths.py).
     try:
-        for entry in os.scandir(config.SANDBOX_OUTPUTS_DIR):
-            if entry.is_file(follow_symlinks=False):
-                total += entry.stat().st_size
+        import output_paths
+        return output_paths.usage()[1]
     except Exception:
-        pass
-    return total
+        return 0
 
 # ============================================================
 # CLEANUP — delete old files from sandbox/outputs
@@ -380,6 +378,9 @@ async def lifespan(app: FastAPI):
     if "chat_max_rounds" in _settings:
         import chat_rounds
         config.MAX_AGENT_ROUNDS = chat_rounds.setting(_settings["chat_max_rounds"])
+    if "chat_max_loaded_models" in _settings:
+        import loaded_models
+        config.CHAT_MAX_LOADED_MODELS = loaded_models.setting(_settings["chat_max_loaded_models"])
     if "history_recall" in _settings:
         config.HISTORY_RECALL = "on" if str(_settings["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded history recall: {config.HISTORY_RECALL}")
@@ -2713,12 +2714,13 @@ async def get_image_job(job_id: str):
     if not outputs:
         return {"status": "running", "params": job.get("params", {})}
     # First completed poll: persist files + artifacts, cache so repeats are idempotent
-    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    import output_paths
     images = []
     params = job.get("params", {})
     for i, img in enumerate(outputs):
         filename = f"comfy_{job_id}_{i}.png"
-        filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+        # An earlier poll of this job may have stored it already (a month boundary would hide that copy).
+        filepath = output_paths.find(filename) or output_paths.place(output_paths.IMAGE_STUDIO, filename, keep_name=True).path
         try:
             if not os.path.exists(filepath):
                 data = await comfyui.fetch_image(img)

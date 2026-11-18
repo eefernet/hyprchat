@@ -12,6 +12,7 @@ import sys
 import time
 
 import config
+import chat_workdir
 import tool_calls
 
 
@@ -190,7 +191,7 @@ def _script_command(code: str, interpreter: str, suffix: str) -> str:
     """Each remote shell owns its script and removes it on exit, even on error."""
     b64 = base64.b64encode(code.encode()).decode()
     return (
-        "cd /root && _hc_script_dir=$(mktemp -d /tmp/hc-exec-XXXXXXXX) || exit 1; "
+        f"{chat_workdir.ENTER} && _hc_script_dir=$(mktemp -d /tmp/hc-exec-XXXXXXXX) || exit 1; "
         f'_hc_script="$_hc_script_dir/script.{suffix}"; '
         "trap 'rm -f -- \"$_hc_script\"; rmdir -- \"$_hc_script_dir\"' EXIT; "
         f"printf '%s' {shlex.quote(b64)} | base64 -d > \"$_hc_script\" && "
@@ -253,7 +254,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
             await ensure_data_stack(http)
             exec_cmd = _script_command(code, "/root/venv/bin/python3", "py")
         elif lang_lower in ("bash", "sh", "zsh"):
-            exec_cmd = f"cd /root && printf '%s' {shlex.quote(b64_code)} | base64 -d | bash"
+            exec_cmd = chat_workdir.in_work(f"printf '%s' {shlex.quote(b64_code)} | base64 -d | bash")
         elif lang_lower in ("javascript", "js", "node"):
             exec_cmd = _script_command(code, "node", "js")
         else:
@@ -330,7 +331,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
             elif "indexerror" in combined_err and "argv" in combined_err:
                 parts.append("\n---\n⚠️ sys.argv has no arguments in execute_code. To test scripts with arguments: 1) write_file to save the script, 2) run_shell to execute it with args (e.g., python3 /root/script.py arg1 arg2).")
             elif ("no such file" in combined_err or "not found" in combined_err) and "command" not in combined_err:
-                parts.append("\n---\n⚠️ File not found. Working directory is /root/. Use absolute paths (/root/filename) or save files with write_file first.")
+                parts.append("\n---\n⚠️ File not found. Working directory is /root/work/. Use a relative path for files you created there; files the user attached are under /root/chat_files/.")
             elif "modulenotfounderror" in combined_err or "no module named" in combined_err:
                 parts.append("\n---\n⚠️ Missing package. Install it first: run_shell(command='pip3 install <package>'), then retry.")
             else:
@@ -350,7 +351,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         await events.emit(conv_id, "tool_start", {"tool": name, "icon": "terminal", "status": f"$ {command[:70]}"})
         r = await http.post(
             f"{config.CODEBOX_URL}/command",
-            json={"command": command, "timeout": shell_timeout},
+            json={"command": chat_workdir.in_work(command), "timeout": shell_timeout},
             timeout=shell_timeout + 10,
         )
         if r.status_code != 200:
@@ -394,7 +395,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return result_text
 
     if name == "write_file":
-        path = args.get("path", "")
+        path = chat_workdir.resolve(args.get("path", ""), default="")
         content = args.get("content", "")
         await events.emit(conv_id, "tool_start", {"tool": "write_file", "icon": "code", "status": f"Writing: {path}"})
         b64 = base64.b64encode(content.encode()).decode()
@@ -408,7 +409,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return f"File written: {path} ({len(content)} bytes)" if ok else f"ERROR: Failed to write {path}: {result.get('stderr', '')[:200]}"
 
     if name == "read_file":
-        path = args.get("path", "/root")
+        path = chat_workdir.resolve(args.get("path"))
         await events.emit(conv_id, "tool_start", {"tool": "read_file", "icon": "code", "status": f"Reading: {path}"})
         r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"cat {shlex.quote(path)} 2>&1", "timeout": 10}, timeout=15)
         result = r.json()
@@ -417,7 +418,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return f"**{path}** ({len(content_out)} chars):\n```\n{content_out[:10000]}\n```"
 
     if name == "list_files":
-        path = args.get("path", "/root")
+        path = chat_workdir.resolve(args.get("path"))
         await events.emit(conv_id, "tool_start", {"tool": "list_files", "icon": "terminal", "status": f"ls {path}"})
         r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": f"ls -lahF {shlex.quote(path)} 2>&1", "timeout": 10}, timeout=15)
         result = r.json()
@@ -425,8 +426,8 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return f"```\n{result.get('stdout', '(empty)')}\n```"
 
     if name == "delete_file":
-        path = args.get("path", "")
-        if not path or path in ("/", "/root", "/etc", "/usr", "/bin", "/tmp"):
+        path = chat_workdir.resolve(args.get("path", ""), default="")
+        if not path or path in ("/", "/root", "/root/work", "/etc", "/usr", "/bin", "/tmp"):
             return f"ERROR: Refusing to delete protected path: {path}"
         await events.emit(conv_id, "tool_start", {"tool": "delete_file", "icon": "terminal", "status": f"Deleting: {path}"})
         # `--` breaks the codebox deny-list's "rm -rf /" substring match, which
@@ -446,7 +447,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         pattern = args.get("pattern", "")
         if not pattern:
             return "ERROR: pattern is required"
-        search_path = args.get("path", "/root")
+        search_path = chat_workdir.resolve(args.get("path"))
         file_pattern = args.get("file_pattern", "")
         await events.emit(conv_id, "tool_start", {"tool": "search_files", "icon": "search", "status": f"Searching: {pattern[:40]}"})
         cmd = "grep -rn"
@@ -461,8 +462,8 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return output if output else f"No matches found for '{pattern}' in {search_path}"
 
     if name == "diff_files":
-        path_a = args.get("path_a", "")
-        path_b = args.get("path_b", "")
+        path_a = chat_workdir.resolve(args.get("path_a", ""), default="")
+        path_b = chat_workdir.resolve(args.get("path_b", ""), default="")
         if not path_a or not path_b:
             return "ERROR: path_a and path_b are required"
         await events.emit(conv_id, "tool_start", {"tool": "diff_files", "icon": "terminal", "status": "Diffing files..."})
@@ -479,7 +480,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return f"ERROR: diff failed: {result.get('stderr', '')[:200]}"
 
     if name == "git_init":
-        path = args.get("path", "/root")
+        path = chat_workdir.resolve(args.get("path"))
         language = args.get("language", "python").lower()
         await events.emit(conv_id, "tool_start", {"tool": "git_init", "icon": "terminal", "status": f"Initializing git repo in {path}"})
         gitignore_map = {
@@ -507,7 +508,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return output[:3000] if output else ("Git repo initialized." if ok else f"ERROR: {result.get('stderr', '')[:200]}")
 
     if name == "git_diff":
-        path = args.get("path", "/root")
+        path = chat_workdir.resolve(args.get("path"))
         await events.emit(conv_id, "tool_start", {"tool": "git_diff", "icon": "terminal", "status": "Checking changes..."})
         cmd = f"cd {shlex.quote(path)} && git diff && git diff --cached && git status --short"
         r = await http.post(f"{config.CODEBOX_URL}/command", json={"command": cmd, "timeout": 10}, timeout=15)
@@ -518,7 +519,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
 
     if name == "git_commit":
         message = args.get("message", "Update")
-        path = args.get("path", "/root")
+        path = chat_workdir.resolve(args.get("path"))
         await events.emit(conv_id, "tool_start", {"tool": "git_commit", "icon": "terminal", "status": f"Committing: {message[:40]}"})
         cmd = (
             f"cd {shlex.quote(path)} && "
@@ -533,7 +534,7 @@ async def run_codebox_tool(name: str, args: dict, *, http, events, conv_id: str)
         return output[:3000] if output else ("Committed." if ok else f"ERROR: {result.get('stderr', '')[:200]}")
 
     if name == "lint_code":
-        path = args.get("path", "/root")
+        path = chat_workdir.resolve(args.get("path"))
         language = args.get("language", "").lower()
         await events.emit(conv_id, "tool_start", {"tool": "lint_code", "icon": "code", "status": "Detecting language..."})
 

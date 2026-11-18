@@ -13,6 +13,11 @@
 .hp-bar button:hover,.hp-bar button:focus-visible{background:var(--hc-hover);color:var(--hc-text)}
 .hp-bar button[aria-pressed="true"]{background:var(--hc-accent-tint);color:var(--hc-accent);border-color:var(--hc-accent-ring)}
 .hp-bar svg{width:14px;height:14px}
+/* Save: a labelled button, because it is the one control here that changes something. */
+.hp-bar button.hp-save.is-saved{color:var(--hc-ok);border-color:color-mix(in srgb,var(--hc-ok) 45%,transparent)}
+.hp-bar button.hp-save.is-failed{color:var(--hc-danger);border-color:color-mix(in srgb,var(--hc-danger) 45%,transparent)}
+.hp-bar button:disabled{opacity:.45;cursor:not-allowed}
+.hp-check{display:inline-flex;animation:hc-check-pop var(--hc-dur-2) var(--hc-ease-out)}
 /* The app is drawn with CSS zoom = the UI scale (main.jsx, .hc-app). The stage cancels it, so the framed
    page is laid out and drawn at its real size whatever the UI scale, and 768 / 390 are true widths. At UI
    scale 13 the owner's browser laid the page out at 13/14 of the frame and showed the frame's white
@@ -23,4 +28,12 @@
 @container (max-width:400px){
   .hp-tools{order:3;flex-basis:100%}
 }
-@media(prefers-reduced-motion:reduce){.hp-dot-live{animation:none}.hp-frame{transition:none}}
+@media(prefers-reduced-motion:reduce){.hp-dot-live,.hp-check{animation:none}.hp-frame{transition:none}}
+/* File previews (SidePane.jsx): text, archives and documents get a padded scrolling body; pages, PDFs
+   and images run edge to edge like the live preview. */
+.hp-file{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;padding:14px}
+.hp-file.is-edge{padding:0}
+.hp-file.is-edge > iframe{flex:1;min-height:0}
+.hp-kind{padding:2px 6px;border-radius:var(--hc-radius-sm);background:var(--hc-hover);color:var(--hc-muted);font-size:var(--hc-text-secondary)}
+.hp-link{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--hc-radius-sm);color:var(--hc-muted)}
+.hp-link:hover,.hp-link:focus-visible{background:var(--hc-hover);color:var(--hc-text)}

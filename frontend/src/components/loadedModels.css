@@ -1,0 +1,17 @@
+/* Settings → Model & Generation → "Models loaded at once" (LoadedModels.jsx). */
+.lm-root{min-width:0}
+.lm-label{font-size:var(--hc-text-secondary);color:var(--hc-secondary);font-weight:600;margin-bottom:6px}
+.lm-options{display:flex;flex-wrap:wrap;gap:5px}
+.lm-option{padding:6px 12px;border-radius:var(--hc-radius);border:1px solid var(--hc-line-subtle);background:var(--hc-sunken);color:var(--hc-secondary);font:inherit;font-size:var(--hc-text-control);cursor:pointer;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.lm-option[aria-pressed="true"]{border-color:var(--hc-accent-ring,var(--hc-accent));background:var(--hc-accent-tint);color:var(--hc-accent);font-weight:700}
+.lm-note{margin:4px 0 0;font-size:var(--hc-text-secondary);color:var(--hc-muted);line-height:1.5}
+.lm-loaded{margin-top:10px;border:1px solid var(--hc-line-subtle);border-radius:var(--hc-radius);padding:8px 10px}
+.lm-loaded-head{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;font-size:var(--hc-text-secondary);color:var(--hc-secondary);font-weight:600}
+.lm-refresh{padding:3px 10px;border-radius:var(--hc-radius-sm);border:1px solid var(--hc-line-subtle);background:transparent;color:var(--hc-accent);font:inherit;font-size:var(--hc-text-secondary);cursor:pointer}
+.lm-refresh:disabled{opacity:.6;cursor:default}
+.lm-list{list-style:none;margin:6px 0 0;padding:0;display:grid}
+.lm-row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;padding:6px 0;border-top:1px solid var(--hc-line-subtle);font-size:var(--hc-text-secondary)}
+.lm-name{color:var(--hc-text);overflow-wrap:anywhere;min-width:0}
+.lm-tag{font-style:normal;margin-left:8px;padding:1px 7px;border-radius:999px;background:var(--hc-hover);color:var(--hc-muted)}
+.lm-detail{color:var(--hc-muted)}
+.lm-spill{color:var(--hc-warm);font-weight:600}

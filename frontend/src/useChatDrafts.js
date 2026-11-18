@@ -81,5 +81,7 @@ export function useChatDrafts({ chatId, userId, ephemeral = false, storage = glo
   }, [userId]);
 
   const draft = draftOf(state.map, key);
-  return { key, text: draft.text, attachments: draft.attachments, ...api.current };
+  // For the left bar: does this chat hold something that was typed or attached and not sent?
+  const hasDraft = id => { const held = draftOf(state.map, draftKey(id)); return !!(String(held.text || '').trim() || (held.attachments || []).length); };
+  return { key, text: draft.text, attachments: draft.attachments, hasDraft, ...api.current };
 }

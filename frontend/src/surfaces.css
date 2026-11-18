@@ -67,7 +67,10 @@ button.hc-chip:hover:not(:disabled) { background: color-mix(in srgb, var(--chip-
 .msg-row.is-user .msg-avatar { display: none; }
 .msg-row.is-user .msg-toolbar { justify-content: flex-end; }
 .msg-toolbar { opacity: 0; transform: translateY(-2px); transition: opacity var(--hc-dur-2) var(--hc-ease-out), transform var(--hc-dur-2) var(--hc-ease-out); transition-delay: 60ms; }
-.msg-row:hover .msg-toolbar, .msg-row:focus-within .msg-toolbar { opacity: 1; transform: none; transition-delay: 0ms; }
+.msg-row:hover .msg-toolbar, .msg-row:focus-within .msg-toolbar, .msg-toolbar.is-pinned { opacity: 1; transform: none; transition-delay: 0ms; }
+/* The row a reply's caret sits in while it is written. Same height as the button row that takes its place. */
+.hc-reply-tail { display: flex; align-items: center; height: 28px; margin-top: 4px; }
+.hc-caret { width: 2px; height: 14px; margin-left: 1px; background: var(--hc-accent); animation: blink .8s step-end infinite; }
 @media (hover: none) { .msg-toolbar { opacity: 1; transform: none; } }
 
 /* Live run pill in the composer. */
@@ -89,14 +92,6 @@ button.hc-chip:hover:not(:disabled) { background: color-mix(in srgb, var(--chip-
 .conv-title-text { display: inline-block; white-space: nowrap; padding-right: 24px; will-change: transform; }
 @keyframes convTitleMarquee { 0%,12% { transform: translateX(0); } 88%,100% { transform: translateX(calc(-1 * var(--conv-title-marquee, 0px))); } }
 .conv-row[data-title-overflow="1"]:hover .conv-title-text, .conv-row[data-title-overflow="1"]:focus-within .conv-title-text { animation: convTitleMarquee 9s .35s linear infinite alternate; }
-.conv-actions { z-index: 2; }
-.conv-actions::before { content: ""; position: absolute; inset: -7px -6px -7px -4px; z-index: 0; pointer-events: none; background: linear-gradient(90deg, transparent 0%, var(--conv-action-bg) 18%, var(--conv-action-bg) 100%), linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--hc-bg-deep) 90%, transparent) 16%, color-mix(in srgb, var(--hc-bg-deep) 90%, transparent) 100%); -webkit-backdrop-filter: blur(7px) saturate(1.08); backdrop-filter: blur(7px) saturate(1.08); opacity: 0; transition: opacity var(--hc-dur-1) var(--hc-ease-out), background var(--hc-dur-1) var(--hc-ease-out); }
-.conv-row:hover .conv-actions::before, .conv-row:focus-within .conv-actions::before, .conv-actions.has-sticky-actions::before { opacity: .94; }
-.conv-act { position: relative; z-index: 1; opacity: 0; transform: translateX(2px); transition: opacity var(--hc-dur-1) var(--hc-ease-out), transform var(--hc-dur-1) var(--hc-ease-out), color var(--hc-dur-1) var(--hc-ease-out), background-color var(--hc-dur-1) var(--hc-ease-out); }
-.conv-act.on, .conv-row:hover .conv-act, .conv-row:focus-within .conv-act { opacity: 1; transform: none; }
-.conv-act:hover { background: color-mix(in srgb, var(--hc-surface-bright) 20%, transparent) !important; }
-.conv-del:hover { color: var(--hc-danger) !important; }
-@media (hover: none) { .conv-act { opacity: 1; transform: none; } .conv-row .conv-actions::before { opacity: .94; } }
 
 /* Download links. */
 a[download]:hover { background: color-mix(in srgb, var(--hc-ok) 16%, transparent) !important; border-color: color-mix(in srgb, var(--hc-ok) 40%, transparent) !important; transform: translateY(-1px); box-shadow: 0 3px 12px color-mix(in srgb, var(--hc-ok) 13%, transparent); }
@@ -164,3 +159,6 @@ select option { background: var(--hc-bg-deep); color: var(--hc-text); }
   .hc-hero-mark { width:52px; height:52px; border-radius:16px; }
 }
 @media (prefers-reduced-motion:reduce) { .hc-hero { animation:none; transition:none; } }
+/* Tool status under a reply. With nothing to show it used to leave 8px of empty space under every reply. */
+.hc-tool-status { padding: 4px 0; }
+.hc-tool-status:empty { display: none; }

@@ -104,10 +104,17 @@ export function chatActivity({events=[],savedEvents=[],live=false,content='',sta
       if(row.state!=='running')continue;
       row.state=stopped?'interrupted':failed?'interrupted':row.kind==='review'&&terminalStatus==='completed'?'complete':'unknown';
     }
-    setPhase(stopped?'stopped':failed?'failed':'complete',stopped?(terminalStatus==='stopped'?'Stopped':'Interrupted'):failed?'Failed':'Activity');
+    setPhase(stopped?'stopped':failed?'failed':'complete',stopped?(terminalStatus==='stopped'?'Stopped':'Interrupted'):failed?'Failed':doneLabel(entries));
   }
   const tools=entries.filter(e=>e.kind==='tool').length;
   return {phase,label,entries,tools,active:live&&!stopped&&!failed,visible:live||entries.length>0||stopped||failed};
+}
+
+// What a finished reply's pill says. It read "Activity" whatever had happened; the chips beside it carry the counts.
+export function doneLabel(entries){
+  const kinds=new Set((entries||[]).map(entry=>entry.kind));
+  if(kinds.has('tool')||kinds.has('review'))return kinds.has('reasoning')?'Thought and worked':'Worked on it';
+  return kinds.has('reasoning')?'Thought it through':'Activity';
 }
 
 export function activityText(event){return clean(event?.data?.status||event?.data?.label||event?.data?.error||'');}

@@ -3,7 +3,8 @@ import {codeLines,codeDiffKind} from '../syntaxHighlight.js';
 import {IC} from './icons.jsx';
 import '../codeBlocks.css';
 import {useWorkbench,openWorkbench,updateLivePreview,rebindLivePreview,shouldAutoOpen} from '../workbench.js';
-import {isHtmlFence,isFullHtmlDocument,previewTitle} from '../htmlPreview.js';
+import {isFullHtmlDocument,previewTitle} from '../htmlPreview.js';
+import {previewKindFor,docTitle,opensByItself} from '../docPreview.js';
 
 // One preference for all mounted cards, including memoized historical replies.
 const wrapListeners=new Set();
@@ -56,15 +57,22 @@ export default function CodeCard({code,lang='',fenceLabel='',filename='',blockKe
   const copyTimer=useRef(0),mounted=useRef(true),bodyId=useId();
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;clearTimeout(copyTimer.current);};},[]);
   const wrap=useSyncExternalStore(subscribeWrap,readWrap,()=>false);
-  // Live HTML preview: the workbench store owns the pane; this block only reports its code.
-  const previewable=isHtmlFence(fenceLabel||lang),previewKey=`${message?.identity||'standalone'}:${blockKey}`;
+  // Live preview: the workbench store owns the pane; this block only reports its code. A full HTML page
+  // and a Markdown document open by themselves once; a drawing (svg) and a table (csv) have the button.
+  const kind=previewKindFor(fenceLabel||lang,filename),previewable=!!kind,slot=kind==='html'?'html':'doc';
+  const previewKey=`${message?.identity||'standalone'}:${blockKey}`;
   const workbench=useWorkbench();
-  const previewing=previewable&&workbench.open&&workbench.kind==='html'&&workbench.html?.key===previewKey;
-  const fullDocument=previewable&&isFullHtmlDocument(code);
+  const previewing=previewable&&workbench.open&&workbench.kind===slot&&workbench[slot]?.key===previewKey;
+  const title=kind==='html'?previewTitle(filename,code):docTitle(kind,filename,code);
+  const opensAlone=kind==='html'?isFullHtmlDocument(code):opensByItself(kind,code,filename);
+  const shown=streaming=>kind==='html'
+    ?{kind:'html',html:{key:previewKey,code,title,streaming}}
+    :{kind:'doc',doc:{key:previewKey,format:kind,code,title,filename:filename||'',label:fenceLabel||lang,streaming}};
   useEffect(()=>{if(previewable)rebindLivePreview(previewKey,code);},[previewable,previewKey]);
-  useEffect(()=>{if(previewing)updateLivePreview(previewKey,code,{streaming:live,title:previewTitle(filename,code)});},[previewing,previewKey,code,live,filename]);
-  useEffect(()=>{if(previewable&&live&&fullDocument&&shouldAutoOpen(previewKey))openWorkbench({kind:'html',html:{key:previewKey,code,title:previewTitle(filename,code),streaming:true}});},[previewable,live,fullDocument,previewKey]);
-  const openPreview=()=>openWorkbench({kind:'html',html:{key:previewKey,code,title:previewTitle(filename,code),streaming:live}});
+  useEffect(()=>{if(previewing)updateLivePreview(previewKey,code,{streaming:live,title});},[previewing,previewKey,code,live,title]);
+  useEffect(()=>{if(previewable&&live&&opensAlone&&shouldAutoOpen(previewKey))openWorkbench(shown(true));},[previewable,live,opensAlone,previewKey]);
+  const openPreview=()=>openWorkbench(shown(live));
+  const previewTip={html:'Run this page in the side pane',markdown:'Read this document in the side pane',svg:'Show this drawing in the side pane',table:'Show this table in the side pane'}[kind];
   const sourceLines=useMemo(()=>String(code).split('\n'),[code]);
   const lines=useMemo(()=>codeLines(code,lang,window.Prism),[code,lang]);
   const long=lines.length>40,expanded=saved.expanded??!long;
@@ -81,11 +89,11 @@ export default function CodeCard({code,lang='',fenceLabel='',filename='',blockKe
   };
   return <section className={`hc-code-card${wrap?' is-wrapped':''}${lines.length<3?' is-short':''}`} aria-label={`${filename||lang||'Code'} code block`}>
     <div className="hc-code-header">
-      <span className="hc-code-language"><IC.Terminal/>{lang||'code'}</span>
+      <span className="hc-code-language"><IC.Terminal/>{fenceLabel||lang||'code'}</span>
       {filename&&<span className="hc-code-filename" title={filename}>{filename}</span>}
       <span className="hc-code-count">{lines.length} {lines.length===1?'line':'lines'}</span>
       <div className="hc-code-actions">
-        {previewable&&<button type="button" aria-pressed={previewing} onClick={openPreview} title="Run this page in the side pane"><IC.Play/><span>Preview</span></button>}
+        {previewable&&<button type="button" aria-pressed={previewing} onClick={openPreview} title={previewTip}><IC.Play/><span>Preview</span></button>}
         <button type="button" aria-pressed={wrap} onClick={toggleWrap} title="Wrap long lines">Wrap</button>
         <button type="button" onClick={copy} aria-label="Copy code">{copyState==='Copied'?<IC.Check/>:<IC.Copy/>}<span>{copyState||'Copy'}</span></button>
       </div>

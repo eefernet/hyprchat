@@ -23,6 +23,7 @@ import chat_turns
 import context_breakdown
 import context_policy
 import database as db
+import loaded_models
 import model_limits
 import model_providers
 import persona_images
@@ -1678,6 +1679,14 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
             "in ONE ```html code fence in your reply. The chat renders it live in a sandboxed preview pane beside "
             "the conversation, so the user sees the page as you write it. Do not write HTML to disk with "
             "`execute_code`, do not base64 it, and do not look for `write_file` — it is not available in ordinary chat.\n"
+            "- **Documents to keep**: when the user asks for a document as such (a README, a report, a spec, a plan to "
+            "save), put the whole document in ONE ````markdown fence with a file name after the language, for example "
+            "````markdown report.md. It opens in the preview pane, where the user can read, save and download it. "
+            "Open and close that fence with FOUR backticks so code blocks inside the document do not end it. An "
+            "ordinary answer is not a document: write it normally, without a fence. A standalone drawing goes in an "
+            "```svg fence and a table of data in a ```csv fence; both open in the same pane.\n"
+            "- **Files**: a file a script produced (data, an image, an archive) is delivered with `download_file`. "
+            "Scripts run in /root/work/; give a result made of several files its own subfolder there.\n"
             "- **Callouts**: start a blockquote with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, "
             "`> [!WARNING]`, or `> [!CAUTION]` to render a coloured admonition box. Subsequent `> ` lines are body. "
             "Use these for important caveats, tips, or warnings — don't over-use.\n"
@@ -2318,6 +2327,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
     # GPT chat used to be compacted by the small local model, and stopped as "full", at ~15K tokens.
     _compact_here = (not ephemeral and not _is_v2_persona and not _is_cloud_provider
                      and chat_context.has_ids(_history))
+    # The owner's limit on models loaded at once (loaded_models.py): unload the least recently used
+    # before this reply loads its own. Off by default, and it never fails or refuses a reply.
+    if not _is_cloud_provider and loaded_models.setting():
+        await loaded_models.make_room(http, _provider_model_name)
     _ctx_previous = None
     if not ephemeral:
         try:
@@ -3131,7 +3144,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                                     "bash": "sh", "sh": "sh", "typescript": "ts", "ts": "ts",
                                     "rust": "rs", "go": "go", "c": "c", "cpp": "cpp", "java": "java",
                                     "ruby": "rb", "php": "php"}
-                        filepath = f"/root/_rescued_{round_num}.{_ext_map.get(exec_lang, 'py')}"
+                        filepath = f"/root/work/_rescued_{round_num}.{_ext_map.get(exec_lang, 'py')}"
                         if exec_lang in ("python", "python3", "py"):
                             run_cmd = f"python3 {filepath}"
                         elif exec_lang in ("bash", "sh"):
@@ -3143,10 +3156,10 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         elif exec_lang == "go":
                             run_cmd = f"go run {filepath}"
                         elif exec_lang == "rust":
-                            run_cmd = f"rustc {filepath} -o /root/_rescued_{round_num} && /root/_rescued_{round_num}"
+                            run_cmd = f"rustc {filepath} -o /root/work/_rescued_{round_num} && /root/work/_rescued_{round_num}"
                         elif exec_lang in ("c", "cpp"):
                             compiler = "gcc" if exec_lang == "c" else "g++"
-                            run_cmd = f"{compiler} {filepath} -o /root/_rescued_{round_num} && /root/_rescued_{round_num}"
+                            run_cmd = f"{compiler} {filepath} -o /root/work/_rescued_{round_num} && /root/work/_rescued_{round_num}"
                         else:
                             run_cmd = f"python3 {filepath}"
                         tool_calls = [
@@ -3821,7 +3834,7 @@ async def _chat_stream_generate(req, http, events, custom_tool_map, custom_tool_
                         elif "SyntaxError" in tool_result:
                             messages.append({"role": "tool", "content": "HINT: Syntax error at the line shown. Fix the code with write_file and re-run."})
                         elif "PermissionError" in tool_result:
-                            messages.append({"role": "tool", "content": "HINT: Permission denied. Check the file path and permissions. Try using /root/ for output files."})
+                            messages.append({"role": "tool", "content": "HINT: Permission denied. Check the file path and permissions. Try a relative path: output files belong in the working directory, /root/work/."})
                 else:
                     _last_error_sig = None
                     _error_repeat_count = 0

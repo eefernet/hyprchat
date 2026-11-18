@@ -190,7 +190,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute source code directly in the sandbox. Pass complete source code with hardcoded test values. Working directory is /root/. Do NOT use input() or sys.argv — they will fail. For scripts needing arguments, use write_file + run_shell instead.",
+            "description": "Execute source code directly in the sandbox. Pass complete source code with hardcoded test values. Working directory is /root/work/ (files you create with a relative name land there; put a multi-file result in its own subfolder). Do NOT use input() or sys.argv — they will fail. For scripts needing arguments, use write_file + run_shell instead.",
             "parameters": {"type": "object", "properties": {
                 "description": {"type": "string", "description": "A few words saying what this run does, shown to the user. Example: Count the lines of Python"},
                 "code": {"type": "string", "description": "Complete source code to execute (must be self-contained with hardcoded test values)"},
@@ -202,7 +202,7 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "run_shell",
-            "description": "Run a shell command in /root/. Use for: pip install, running saved scripts with args (python3 /root/app.py arg1 arg2), git, make, npm, cargo build. Preferred way to test scripts that take arguments.",
+            "description": "Run a shell command in /root/work/. Use for: pip install, running saved scripts with args (python3 app.py arg1 arg2), git, make, npm, cargo build. Preferred way to test scripts that take arguments.",
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "Shell command to execute"},
             }, "required": ["command"]},
@@ -212,9 +212,9 @@ CODEAGENT_TOOLS = {
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write a file to the sandbox. Files persist between calls. Always use absolute paths starting with /root/.",
+            "description": "Write a file to the sandbox. Files persist between calls. A relative path is relative to /root/work/; put a project of several files in its own subfolder.",
             "parameters": {"type": "object", "properties": {
-                "path": {"type": "string", "description": "Absolute path, e.g. /root/app.py"},
+                "path": {"type": "string", "description": "Path, e.g. app.py or myproject/app.py (relative to /root/work/)"},
                 "content": {"type": "string", "description": "Complete file contents"},
             }, "required": ["path", "content"]},
         },
@@ -235,7 +235,7 @@ CODEAGENT_TOOLS = {
             "name": "list_files",
             "description": "List directory contents with sizes and permissions.",
             "parameters": {"type": "object", "properties": {
-                "path": {"type": "string", "description": "Directory path (default: /root)"},
+                "path": {"type": "string", "description": "Directory path (default: /root/work)"},
             }, "required": []},
         },
     },
@@ -265,7 +265,7 @@ CODEAGENT_TOOLS = {
             "name": "download_file",
             "description": "Download a file from the sandbox to the user's browser.",
             "parameters": {"type": "object", "properties": {
-                "path": {"type": "string", "description": "Absolute path on sandbox, e.g. /root/output.png"},
+                "path": {"type": "string", "description": "Path on the sandbox, e.g. output.png (relative to /root/work/) or an absolute path"},
             }, "required": ["path"]},
         },
     },
@@ -288,7 +288,7 @@ CODEAGENT_TOOLS = {
             "name": "download_project",
             "description": "Package a directory as .tar.gz and make it downloadable.",
             "parameters": {"type": "object", "properties": {
-                "directory": {"type": "string", "description": "Directory to package, e.g. /root/myproject"},
+                "directory": {"type": "string", "description": "Directory to package, e.g. myproject (relative to /root/work/) or an absolute path"},
             }, "required": ["directory"]},
         },
     },
@@ -1606,20 +1606,32 @@ async def _exec_tool_scoped(
             return f"**Content from {final_url}:**\n\n{text[:config.MAX_FETCH_CHARS]}"
 
         elif name == "download_file":
-            path = args.get("path", "")
+            import chat_workdir
+            import httpx
+            # A relative path is relative to the chat's work folder; /root/<name> is also looked for there,
+            # because that is where a script that wrote "<name>" put it (chat_workdir.py).
+            path = chat_workdir.resolve(args.get("path", ""), default="")
             await events.emit(conv_id, "tool_start", {"tool": "download_file", "icon": "code", "status": f"Preparing: {path}"})
-            qpath = shlex.quote(path)
-            if os.environ.get('HEPHAESTUS_TOKEN'):
-                from hephaestus_scope import download_bytes
-                data=await download_bytes(http,path,config.MAX_UPLOAD_SIZE_MB*1024*1024)
-                stdout=base64.b64encode(data).decode()+'|||SEPARATOR|||'+os.path.basename(path)
-            else:
-                r = await http.post(f"{config.CODEBOX_URL}/command", json={
-                    "command": f"base64 -w0 {qpath} 2>/dev/null && echo '|||SEPARATOR|||' && basename {qpath}",
-                    "timeout": 30
-                }, timeout=40)
-                result = r.json()
-                stdout = result.get("stdout", "")
+            stdout = ""
+            for candidate in [p for p in (path, chat_workdir.fallback(path)) if p]:
+                qpath = shlex.quote(candidate)
+                if os.environ.get('HEPHAESTUS_TOKEN'):
+                    from hephaestus_scope import download_bytes
+                    try:
+                        data=await download_bytes(http,candidate,config.MAX_UPLOAD_SIZE_MB*1024*1024)
+                    except httpx.HTTPStatusError:
+                        continue          # not there: try the next place
+                    stdout=base64.b64encode(data).decode()+'|||SEPARATOR|||'+os.path.basename(candidate)
+                else:
+                    r = await http.post(f"{config.CODEBOX_URL}/command", json={
+                        "command": f"base64 -w0 {qpath} 2>/dev/null && echo '|||SEPARATOR|||' && basename {qpath}",
+                        "timeout": 30
+                    }, timeout=40)
+                    result = r.json()
+                    stdout = result.get("stdout", "")
+                if "|||SEPARATOR|||" in stdout and stdout.split("|||SEPARATOR|||")[0].strip():
+                    path = candidate
+                    break
             if "|||SEPARATOR|||" in stdout:
                 parts = stdout.split("|||SEPARATOR|||")
                 b64_data = parts[0].strip()
@@ -1629,12 +1641,15 @@ async def _exec_tool_scoped(
                     await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code",
                         "status": f"File too large ({estimated_size // (1024*1024)}MB > {config.MAX_UPLOAD_SIZE_MB}MB limit)"})
                     return f"ERROR: File too large to download (exceeds {config.MAX_UPLOAD_SIZE_MB}MB limit)"
-                os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
-                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+                # The chat's own folder, never overwriting, with its own download address (output_paths.py):
+                # the bare name in one flat folder let another chat's file replace this one.
+                import output_paths
+                spot = output_paths.place(conv_id, filename)
+                filename, filepath = spot.filename, spot.path
                 with open(filepath, "wb") as f:
                     f.write(base64.b64decode(b64_data))
                 file_meta = _artifact_file_metadata(filepath)
-                download_url = f"/api/downloads/{filename}"
+                download_url = spot.url
                 await events.emit(conv_id, "tool_end", {"tool": "download_file", "icon": "code",
                     "status": f"{filename} ready",
                     "detail": json.dumps({"file": filename, "path": path, "download_url": download_url}),
@@ -1669,6 +1684,13 @@ async def _exec_tool_scoped(
                     )
                 except Exception as e:
                     print(f"[FileTrack] {e}")
+                if not artifact:
+                    # No saved row (a temporary chat): the address is then looked up by file name, so the
+                    # file takes the address as its name (artifact_files.resolve_download_path).
+                    try:
+                        os.replace(filepath, os.path.join(os.path.dirname(filepath), spot.url_name))
+                    except OSError as e:
+                        print(f"[FileTrack] rename for unrecorded download failed: {e}")
                 if artifact:
                     await _fire_artifact_created_event()
                 await events.emit(conv_id, "file_ready", {
@@ -1807,7 +1829,7 @@ async def _exec_tool_scoped(
                 })
                 comfyui.finish_job(prompt_id)
                 return "ERROR: ComfyUI finished but produced no output images."
-            os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+            import output_paths
             md_lines = []
             for gi_i, img in enumerate(images):
                 try:
@@ -1816,7 +1838,7 @@ async def _exec_tool_scoped(
                     print(f"[IMAGE] fetch failed: {e}")
                     continue
                 filename = f"comfy_{prompt_id[:8]}_{gi_i}.png"
-                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+                filepath = output_paths.place(conv_id, filename, keep_name=True).path
                 with open(filepath, "wb") as f:
                     f.write(img_bytes)
                 file_meta = _artifact_file_metadata(filepath)
@@ -1895,7 +1917,8 @@ async def _exec_tool_scoped(
             return "\n\n".join(md_lines)
 
         elif name == "download_project":
-            directory = args.get("directory", "/root")
+            import chat_workdir
+            directory = chat_workdir.resolve(args.get("directory"))
             _download_warning_lines = []
             await events.emit(conv_id, "tool_start", {"tool": "download_project", "icon": "code", "status": f"Packaging: {directory}"})
             dirname = directory.rstrip("/").split("/")[-1] or "project"
@@ -1950,24 +1973,16 @@ async def _exec_tool_scoped(
                     await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                         "status": f"Archive too large ({estimated_size // (1024*1024)}MB > {config.MAX_UPLOAD_SIZE_MB}MB limit)"})
                     return f"ERROR: Project archive too large (exceeds {config.MAX_UPLOAD_SIZE_MB}MB limit)"
-                os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
-                # Immutable per-artifact storage: each delivery gets a unique
-                # on-disk path so a later repackage never overwrites a prior
-                # artifact's bytes. We ALSO (re)write the friendly {tarname} copy
-                # as the "latest" file so back-compat /api/downloads/{tarname}
-                # markdown links in chat keep resolving to the newest package.
+                # Each delivery gets its own file in the chat's folder and its own download address
+                # (output_paths.py). Every delivery used to share /api/downloads/{tarname}, so an older
+                # chat's link served whichever archive was packaged last.
+                import output_paths
                 cf_id = f"cf-{uuid.uuid4().hex[:8]}"
-                unique_name = f"{dirname}-{cf_id[3:]}.tar.gz"
-                filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, unique_name)
+                spot = output_paths.place(conv_id, tarname)
+                filepath = spot.path
                 _decoded = base64.b64decode(b64_data)
                 with open(filepath, "wb") as f:
                     f.write(_decoded)
-                latest_path = os.path.join(config.SANDBOX_OUTPUTS_DIR, tarname)
-                try:
-                    with open(latest_path, "wb") as f:
-                        f.write(_decoded)
-                except Exception as _le:
-                    print(f"[download_project] latest-copy write failed: {_le}")
                 file_meta = _artifact_file_metadata(filepath)
                 # Staleness anchor: record the project's current git commit so a
                 # later edit cycle (which advances HEAD via _git_checkpoint) marks
@@ -1982,7 +1997,7 @@ async def _exec_tool_scoped(
                         _source_commit = (_gc.json().get("stdout", "") or "").strip().split("\n")[0][:40]
                 except Exception as _gce:
                     print(f"[download_project] source commit lookup failed: {_gce}")
-                download_url = f"/api/downloads/{tarname}"
+                download_url = spot.url
                 await events.emit(conv_id, "tool_end", {"tool": "download_project", "icon": "code",
                     "status": f"{tarname} ready",
                     "detail": json.dumps({

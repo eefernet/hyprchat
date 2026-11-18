@@ -1,4 +1,6 @@
 import HephaestusStorage from './HephaestusStorage.jsx';
+import LocalFilesCard from './LocalFilesCard.jsx';
+import {localFilesView} from '../storageSummary.js';
 import PanelHeader from './PanelHeader.jsx';
 import SelectionControl from './SelectionControl.jsx';
 import ActionMenu from './ActionMenu.jsx';
@@ -117,7 +119,7 @@ const ActivityDetail = ({ev,t,active=false})=>{
         {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-sm)",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail.args,null,2)}</pre>}
         {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{detail.result}</pre></>}
       </div>
-      :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail,null,2)}</pre>}
+      :<DetailLines detail={detail} t={t}/>}
   </div>;
 };
 
@@ -152,6 +154,20 @@ function ThinkingPreview({text}){
 
 import {ActivityLabel,PlayfulStatusContext} from './ActivityLabel.jsx';
 export {ActivityLabel,PlayfulStatusContext};
+
+// A tool detail nobody wrote a view for: one labelled line per field instead of the raw JSON object.
+function DetailLines({detail,t}){
+  if(!detail||typeof detail!=="object"||Array.isArray(detail))return <pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{typeof detail==="string"?detail:JSON.stringify(detail,null,2)}</pre>;
+  const words=key=>{const text=String(key).replace(/_/g," ");return text.charAt(0).toUpperCase()+text.slice(1);};
+  const show=value=>value==null?"":typeof value==="object"?JSON.stringify(value,null,2):String(value);
+  const rows=Object.entries(detail).filter(([,value])=>value!==""&&value!=null);
+  return <div style={{display:"grid",gap:3,fontSize:"var(--hc-text-secondary)"}}>
+    {rows.map(([key,value])=><div key={key} style={{display:"flex",gap:8,alignItems:"baseline"}}>
+      <span style={{color:t.mut,flexShrink:0,minWidth:84}}>{words(key)}</span>
+      <span style={{color:t.dim,whiteSpace:"pre-wrap",overflowWrap:"anywhere",minWidth:0}}>{show(value)}</span>
+    </div>)}
+  </div>;
+}
 
 export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t,messageKey=""}){
   const state=chatActivity({events,savedEvents,live,content,status});
@@ -1001,6 +1017,9 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   })}</>;
 
   const KbSourceCards = ()=>{
+    // In a chat message the reply's own "Sources" strip lists them (with the numbers the citations use):
+    // this card used to list the same sources a second time above it.
+    if(hideCards)return null;
     const latestKb = kbSourceEvts[kbSourceEvts.length-1];
     const sources = latestKb?.data?.sources||[];
     if(!sources.length)return null;
@@ -1097,7 +1116,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   };
 
 
-  return <div style={{padding:"4px 0"}}>
+  return <div className="hc-tool-status">
     {Panels}
     {showActivity&&<ChatActivity events={evts} savedEvents={savedEvts} live={!historical} content={msgContent} t={t}/>}
     <CodeAgentNoteCards/>
@@ -1634,12 +1653,6 @@ function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActi
   const [vmInfo,setVmInfo]=useState(null),[vmLoading,setVmLoading]=useState(false);
   const [loading,setLoading]=useState(false),[saving,setSaving]=useState(false);
   const [cleaning,setCleaning]=useState(false),[cleanResult,setCleanResult]=useState(null);
-  const fmtBytes=(bytes)=>{
-    if(bytes==null)return "—";
-    const units=["B","KiB","MiB","GiB","TiB"];
-    const i=bytes>0?Math.min(Math.floor(Math.log(bytes)/Math.log(1024)),units.length-1):0;
-    return `${i?(bytes/1024**i).toFixed(1):bytes} ${units[i]}`;
-  };
   const refreshLocal=useCallback(async(signal)=>{
     setLoading(true);setLocalError("");
     try{
@@ -1681,7 +1694,7 @@ function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActi
       if(result.error)throw new Error(result.error);
       setCleanResult(result);
       updateActivity?.(activityId,{status:"done",message:`Deleted ${result.deleted||0} temporary files`,pct:100});
-      notify?.({type:"success",text:"Local cleanup complete",detail:`Deleted ${result.deleted||0} temporary files.`});
+      notify?.({type:"success",text:"Cleanup complete",detail:`Removed ${result.deleted||0} temporary files.`});
       await refreshLocal();
     }catch(e){
       setCleanResult({error:e.message});
@@ -1690,46 +1703,16 @@ function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActi
     }finally{setCleaning(false);}
   };
   const intervals=[
-    {label:"1 week",days:7},{label:"2 weeks",days:14},{label:"1 month (default)",days:30},
+    {label:"1 week",days:7},{label:"2 weeks",days:14},{label:"1 month",days:30},
     {label:"3 months",days:90},{label:"6 months",days:180},{label:"1 year",days:365},{label:"Never",days:0},
   ];
-  const panel={border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"clamp(12px, 2vw, 22px)",minWidth:0};
-  const prose={color:t.mut,fontSize:"var(--hc-text-secondary)",lineHeight:1.55,margin:"8px 0 14px"};
-  const metrics={display:"flex",flexWrap:"wrap",gap:"8px 24px",fontSize:"var(--hc-text-secondary)",marginBottom:16};
-  const legacyCount=cleanupPreview?.reasons?.["unresolved legacy output"]||0;
-  return <div style={{display:"grid",gap:20}}>
-    <p style={{...prose,margin:0}}>HyprChat stores your files and history. Hephaestus runs your code in Docker containers.</p>
-    <section aria-labelledby="local-storage-title" style={panel}>
-      <h3 id="local-storage-title" style={{margin:0,fontSize:"var(--hc-text-control)",color:t.acc}}>HyprChat · Local files</h3>
-      <p style={prose}>The local “sandbox” is an output folder on the HyprChat server. It holds generated files and project downloads before they are saved or delivered. It is separate from the containers that run your projects.</p>
-      <div style={metrics} aria-live="polite">
-        <span>Output files: <strong>{cleanupPreview?.preserved??sbInfo?.sandbox_file_count??"—"}</strong></span>
-        <span>Output storage: <strong>{fmtBytes(cleanupPreview?.retained_bytes??sbInfo?.sandbox_size_bytes)}</strong></span>
-      </div>
-      <p style={prose}>Saved artifacts, uploads, knowledge bases, and chat history stay on HyprChat. They are not included in these output totals or removed by this cleanup.</p>
-      <div style={{...labelS,marginBottom:6}}>Local temporary-file retention</div>
-      <p style={{...prose,marginTop:0,marginBottom:8}}>Automatically remove released temporary files after:</p>
-      <div role="group" aria-label="Local temporary-file retention" style={{display:"flex",flexWrap:"wrap",gap:6}}>
-        {intervals.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)} disabled={saving||loading||!sbInfo} aria-pressed={cleanupDays===iv.days}
-          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:"var(--hc-text-control)"}}>{iv.label}</button>)}
-      </div>
-      <p style={prose}>{cleanupDays===0?"Automatic cleanup of local temporary files is off. Manual cleanup is still available.":"Only released temporary files are eligible. Files still in use or linked to saved work are kept."} This setting does not control VM cleanup.</p>
-      <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-        <button onClick={()=>refreshLocal()} disabled={loading||cleaning||saving} style={btnS(t.acc)}>{loading?"Refreshing…":"Refresh cleanup preview"}</button>
-        <button onClick={cleanNow} disabled={cleaning||loading||!cleanupPreview||!!localError||!cleanupPreview.reclaimable_files} style={btnS(t.warm)}>{cleaning?"Cleaning…":"Clean released temporary files"}</button>
-      </div>
-      {localError&&<p role="alert" style={{...prose,color:t.err}}>Local storage status could not be refreshed: {localError}</p>}
-      {cleanupPreview&&<div style={{...prose,marginBottom:0}} aria-live="polite">
-        <div>{fmtBytes(cleanupPreview.reclaimable_bytes)} can be reclaimed from {cleanupPreview.reclaimable_files} temporary files. {fmtBytes(Math.max(0,cleanupPreview.retained_bytes-cleanupPreview.reclaimable_bytes))} will be kept.</div>
-        {legacyCount>0&&<div style={{marginTop:8}}>{legacyCount} older output file{legacyCount===1?" is":"s are"} kept because their ownership could not be confirmed.</div>}
-      </div>}
-      {cleanResult&&<p role={cleanResult.error?"alert":"status"} style={{...prose,color:cleanResult.error?t.err:t.ok}}>{cleanResult.error||`Removed ${cleanResult.deleted||0} local temporary files; freed ${fmtBytes(cleanResult.freed_bytes)}.`}</p>}
-      <details style={{...prose,marginBottom:0}}>
-        <summary style={{cursor:"pointer",color:t.dim}}>Local storage details</summary>
-        <p style={{overflowWrap:"anywhere"}}>Output folder: <code>{sbInfo?.sandbox_outputs_dir||"Not loaded"}</code></p>
-        {Object.entries(cleanupPreview?.reasons||{}).filter(([reason])=>reason!=="unresolved legacy output").map(([reason,count])=><div key={reason}>{reason}: {count}</div>)}
-      </details>
-    </section>
+  // The numbers come from the server's folder summary (storageSummary.js): the cleanup preview's own
+  // counts cover the top level only, which is empty now that files live in month and chat folders.
+  const view=localFilesView(cleanupPreview,sbInfo);
+  const reasons=Object.entries(cleanupPreview?.reasons||{}).filter(([reason])=>reason!=="unresolved legacy output");
+  return <div style={{display:"grid",gap:16}}>
+    <LocalFilesCard view={view} intervals={intervals} days={cleanupDays} onDays={saveCleanupDays} onRefresh={()=>refreshLocal()} onClean={cleanNow}
+      loading={loading} saving={saving} cleaning={cleaning} error={localError} result={cleanResult} folder={sbInfo?.sandbox_outputs_dir} reasons={reasons} t={t} btnS={btnS}/>
     <HephaestusStorage info={vmInfo} loading={vmLoading} onRefresh={refreshVm} t={t} btnS={btnS} active={active}/>
   </div>;
 }

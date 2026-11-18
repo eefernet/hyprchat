@@ -172,6 +172,8 @@ WATCHED = {
     "backend/routes/chat_files.py": ("Chat File Routes", REMOTE_ROUTES,             True),
     "backend/routes/skills.py":     ("Skills Routes",    REMOTE_ROUTES,             True),
     "backend/routes/context_actions.py": ("Context Routes", REMOTE_ROUTES,          True),
+    "backend/routes/chat_saves.py":      ("Preview Save Route", REMOTE_ROUTES,      True),
+    "backend/routes/loaded_models.py":   ("Loaded Models Route", REMOTE_ROUTES,     True),
     "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
     "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
     "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
@@ -184,12 +186,15 @@ WATCHED = {
     "backend/context_breakdown.py": ("Context breakdown", REMOTE_BACKEND,           True),
     "backend/chat_tool_memory.py":  ("Chat tool memory", REMOTE_BACKEND,            True),
     "backend/model_limits.py":      ("Model limits",     REMOTE_BACKEND,            True),
+    "backend/loaded_models.py":     ("Loaded models",    REMOTE_BACKEND,            True),
     "backend/chat_payload.py":      ("Chat payload",     REMOTE_BACKEND,            True),
     "backend/chat_recovery.py":     ("Chat recovery",    REMOTE_BACKEND,            True),
     "backend/memory_selection.py":  ("Memory selection", REMOTE_BACKEND,            True),
     "backend/chat_overflow.py":     ("Chat overflow",    REMOTE_BACKEND,            True),
     "backend/chat_times.py":        ("Chat times",       REMOTE_BACKEND,            True),
     "backend/chat_compact_now.py":  ("Chat compact now", REMOTE_BACKEND,            True),
+    "backend/output_paths.py":      ("Output folders",   REMOTE_BACKEND,            True),
+    "backend/chat_workdir.py":      ("Chat work folder", REMOTE_BACKEND,            True),
     "backend/tool_calls.py":        ("Tool call ids",    REMOTE_BACKEND,            True),
     "backend/skills_learning.py":   ("Skill Learning",   REMOTE_BACKEND,            True),
     "backend/db/skill_store.py":    ("Skill Store",      REMOTE_DB,                 True),
@@ -296,6 +301,9 @@ WATCHED = {
 # labelled "Frontend (build)".
 FRONTEND_SRC_FILES = {
     "frontend/src/serviceLabels.js",
+    # Settings → Model & Generation → "Models loaded at once" (2026-11-16).
+    "frontend/src/loadedModels.js", "frontend/src/components/LoadedModels.jsx",
+    "frontend/src/components/loadedModels.css",
     "frontend/src/components/HephaestusStorage.jsx",
     # UI motion/surface refresh (2026-10): new modules plus files that were missing.
     "frontend/src/ui.css", "frontend/src/surfaces.css", "frontend/src/motion.css",
