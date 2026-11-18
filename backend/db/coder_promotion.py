@@ -333,8 +333,8 @@ async def accept(project_id, revision_id):
         if not path.is_file():
             raise ValueError("The archive for this revision is no longer on disk; it cannot be accepted")
         # Staged like every delivery; add_artifact publishes its own content-addressed durable copy.
-        accepted_path = Path(config.SANDBOX_OUTPUTS_DIR) / ("accepted-" + path.name.removeprefix("candidate-"))
-        accepted_path.parent.mkdir(parents=True, exist_ok=True)
+        import output_paths
+        accepted_path = Path(output_paths.place(job.get("conversation_id"), "accepted-" + path.name.removeprefix("candidate-"), keep_name=True).path)
         sha256 = await asyncio.to_thread(_strip_review, path, accepted_path)
     connection = await db.get_db()
     try:

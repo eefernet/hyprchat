@@ -1,4 +1,6 @@
 import HephaestusStorage from './HephaestusStorage.jsx';
+import LocalFilesCard from './LocalFilesCard.jsx';
+import {localFilesView} from '../storageSummary.js';
 import PanelHeader from './PanelHeader.jsx';
 import SelectionControl from './SelectionControl.jsx';
 import ActionMenu from './ActionMenu.jsx';
@@ -11,6 +13,7 @@ import usePresence from "../usePresence.js";
 import "./chatActivity.css";
 import {apiJson} from "../api.js";
 import {isDocumentEvent} from "../documentFiles.js";
+import {CodeOutputPill,FileReadyCard} from "./ToolOutputCards.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { API, proxiedImageUrl } from '../session.js';
@@ -116,7 +119,7 @@ const ActivityDetail = ({ev,t,active=false})=>{
         {detail.args&&<pre style={{margin:0,padding:6,background:`${t.surface}F5`,borderRadius:"var(--hc-radius-sm)",whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail.args,null,2)}</pre>}
         {detail.result&&<><div style={{color:t.ok,marginTop:4,fontWeight:600,fontSize:"var(--hc-text-secondary)"}}>📤 Result:</div><pre style={{margin:0,padding:6,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{detail.result}</pre></>}
       </div>
-      :<pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{JSON.stringify(detail,null,2)}</pre>}
+      :<DetailLines detail={detail} t={t}/>}
   </div>;
 };
 
@@ -151,6 +154,20 @@ function ThinkingPreview({text}){
 
 import {ActivityLabel,PlayfulStatusContext} from './ActivityLabel.jsx';
 export {ActivityLabel,PlayfulStatusContext};
+
+// A tool detail nobody wrote a view for: one labelled line per field instead of the raw JSON object.
+function DetailLines({detail,t}){
+  if(!detail||typeof detail!=="object"||Array.isArray(detail))return <pre style={{margin:0,whiteSpace:"pre-wrap",color:t.dim,fontSize:"var(--hc-text-secondary)"}}>{typeof detail==="string"?detail:JSON.stringify(detail,null,2)}</pre>;
+  const words=key=>{const text=String(key).replace(/_/g," ");return text.charAt(0).toUpperCase()+text.slice(1);};
+  const show=value=>value==null?"":typeof value==="object"?JSON.stringify(value,null,2):String(value);
+  const rows=Object.entries(detail).filter(([,value])=>value!==""&&value!=null);
+  return <div style={{display:"grid",gap:3,fontSize:"var(--hc-text-secondary)"}}>
+    {rows.map(([key,value])=><div key={key} style={{display:"flex",gap:8,alignItems:"baseline"}}>
+      <span style={{color:t.mut,flexShrink:0,minWidth:84}}>{words(key)}</span>
+      <span style={{color:t.dim,whiteSpace:"pre-wrap",overflowWrap:"anywhere",minWidth:0}}>{show(value)}</span>
+    </div>)}
+  </div>;
+}
 
 export function ChatActivity({events=[],savedEvents=[],live=false,content="",status="",autoExpand=false,t,messageKey=""}){
   const state=chatActivity({events,savedEvents,live,content,status});
@@ -944,7 +961,7 @@ function ResearchLiveStatus({t,font,events=[],metrics={},sources=[],researchRunn
 
 // Delivered files and sources stay below the answer. Specialized raw timelines
 // can opt into the same activity panel; normal chat mounts it once above text.
-const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],msgContent,showActivity=true})=>{
+const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],msgContent,showActivity=true,hideCards=false})=>{
   const [slExpanded,setSlExpanded]=useState(false);
   evts=evts.filter(e=>!isDocumentEvent(e));
   savedEvts=savedEvts.filter(e=>!isDocumentEvent(e));
@@ -976,56 +993,16 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
     {planText && <PlanPanel plan={planText} t={t} streaming={isStreaming} md={md}/>}
   </div> : null;
 
-  // Historical renders: the per-message block at msg.metadata.saved_events renders
-  // collapsible code output, so ToolStatus shouldn't render another copy here.
-  const CodeOutputCards = ()=>historical?null:<>{codeOutputEvts.map((e,i)=>{
-    const d=e.data||{};
-    return <div key={i} style={{marginTop:6,borderRadius:"var(--hc-radius)",overflow:"hidden",border:`1px solid ${d.success?t.ok:t.err}33`,background:t.bgDeep,fontSize:"var(--hc-text-secondary)"}}>
-      <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",background:`${d.success?t.ok:t.err}10`,borderBottom:`1px solid ${d.success?t.ok:t.err}22`}}>
-        <span>{d.success?"🎯":"❌"}</span>
-        <span style={{fontWeight:600,color:d.success?t.ok:t.err}}>{d.language} output</span>
-        <span style={{color:t.mut,marginLeft:"auto"}}>{d.exec_time?.toFixed?.(1)}s</span>
-      </div>
-      {d.stdout&&<>
-        <div style={{padding:"4px 10px 2px",fontSize:"var(--hc-text-secondary)",color:t.ok,fontWeight:600}}>stdout</div>
-        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.dim,maxHeight:200,overflowY:"auto",fontSize:"var(--hc-text-secondary)"}}>{d.stdout}</pre>
-      </>}
-      {d.stderr&&<>
-        <div style={{padding:"4px 10px 2px",fontSize:"var(--hc-text-secondary)",color:t.err,fontWeight:600}}>stderr</div>
-        <pre style={{margin:0,padding:"4px 10px 8px",whiteSpace:"pre-wrap",color:t.err,maxHeight:120,overflowY:"auto",fontSize:"var(--hc-text-secondary)"}}>{d.stderr}</pre>
-      </>}
-    </div>;
-  })}</>;
-
-  const _fileIcon=(fn)=>{
-    const ext=(fn||"").split(".").pop().toLowerCase();
-    const m={py:"🐍",python:"🐍",js:"📜",mjs:"📜",jsx:"⚛️",ts:"🔷",tsx:"🔷",java:"☕",jar:"☕",rs:"🦀",go:"🐹",c:"⚙️",cpp:"⚙️",h:"⚙️",cs:"🟣",rb:"💎",php:"🐘",swift:"🐦",kt:"🟠",lua:"🌙",r:"📊",sh:"🖥️",bash:"🖥️",zsh:"🖥️",html:"🌐",css:"🎨",scss:"🎨",json:"📋",yaml:"📋",yml:"📋",xml:"📋",toml:"📋",md:"📝",txt:"📄",csv:"📊",sql:"🗃️",dockerfile:"🐳",png:"🖼️",jpg:"🖼️",jpeg:"🖼️",gif:"🖼️",svg:"🖼️",pdf:"📕",zip:"📦",tar:"📦",gz:"📦"};
-    return m[ext]||"📁";
-  };
+  // Chat replies draw these cards themselves, in place (MessageBody + messageParts.js), and pass
+  // hideCards. The other timelines that use ToolStatus still list them together here.
+  const CodeOutputCards = ()=>hideCards||historical?null:<>{codeOutputEvts.filter(e=>e.data?.stdout||e.data?.stderr).map((e,i)=><CodeOutputPill key={i} data={e.data} t={t} defaultOpen/>)}</>;
   const FileReadyButtons = ()=>{
+    if(hideCards)return null;
     // Deduplicate by filename — keep latest URL, count updates
     const fileMap={};
     fileReadyEvts.forEach(e=>{const d=e.data||{};if(!d.filename)return;if(!fileMap[d.filename])fileMap[d.filename]={d,count:1};else{fileMap[d.filename].d=d;fileMap[d.filename].count++;}});
-    return <>{Object.values(fileMap).map(({d,count},i)=>{
-    const isImg=d.is_image||/\.(png|jpe?g|gif|svg|webp)$/i.test(d.filename);
-    // The backend now streams generated-image markdown inline at the point of
-    // generation, so the image already renders inside the message body. Skip the
-    // duplicate <img> here when the message content already references this URL;
-    // keep the download/preview/artifact buttons. Older messages (no inline
-    // markdown) and post-clear refinement paths fall back to rendering it here.
-    const inlineAlready=isImg&&d.url&&typeof msgContent==="string"&&msgContent.includes(d.url);
-    return <div key={i} style={{marginTop:5}}>
-      {isImg&&!inlineAlready&&<img src={`${API}${d.url}`} alt={d.filename} style={{maxWidth:"100%",maxHeight:380,borderRadius:"var(--hc-radius)",display:"block",margin:"6px 0",border:"1px solid var(--hc-line-subtle)",cursor:"pointer"}} onClick={()=>onPreview&&onPreview(d.filename,d.url)} onError={e=>e.target.style.display="none"}/>}
-      <div style={{display:"inline-flex",alignItems:"center",gap:4,marginTop:isImg?2:0}}>
-      <a href={d.artifact_id?`${API}/api/artifacts/${d.artifact_id}/download`:`${API}${d.url}`} download={d.filename}
-        style={{display:"inline-flex",alignItems:"center",gap:7,padding:"7px 14px",background:`${t.ok}15`,border:`1px solid ${t.ok}40`,borderRadius:"10px 0 0 10px",color:t.ok,textDecoration:"none",fontSize:"var(--hc-text-secondary)",fontWeight:700,cursor:"pointer"}}>
-        <span style={{fontSize:"var(--hc-text-reading)"}}>{_fileIcon(d.filename)}</span><span>{d.filename}</span>{count>1&&<span style={{fontSize:"var(--hc-text-secondary)",background:t.acc,color:t.bg,borderRadius:"var(--hc-radius)",padding:"1px 5px",fontWeight:700,marginLeft:2}}>v{count}</span>}<span style={{fontSize:"var(--hc-text-secondary)",opacity:.6}}>⬇</span>
-      </a>
-      {onPreview&&<button onClick={()=>onPreview(d.filename,d.url)} title="Preview" style={{padding:"7px 10px",background:`${t.acc}15`,border:`1px solid ${t.acc}40`,borderRadius:"0 10px 10px 0",borderLeft:"none",color:t.acc,cursor:"pointer",fontSize:"var(--hc-text-control)",display:"flex",alignItems:"center"}}>👁</button>}
-      {d.artifact_id&&onOpenArtifact&&<button onClick={()=>onOpenArtifact(d.artifact_id)} title="Open in Artifacts" style={{padding:"7px 10px",background:`${t.pink}12`,border:`1px solid ${t.pink}35`,borderRadius:"var(--hc-radius)",color:t.pink,cursor:"pointer",fontSize:"var(--hc-text-control)",fontFamily:"inherit",fontWeight:600,display:"flex",alignItems:"center"}}>Artifact</button>}
-      </div>
-    </div>;
-  })}</>;};
+    return <>{Object.values(fileMap).map(({d,count},i)=><FileReadyCard key={i} data={d} versions={count} t={t} onPreview={onPreview} onOpenArtifact={onOpenArtifact} messageText={msgContent}/>)}</>;
+  };
 
   const CodeAgentNoteCards = ()=><>{codeAgentNoteEvts.map((e,i)=>{
     const d=e.data||{};
@@ -1040,6 +1017,9 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   })}</>;
 
   const KbSourceCards = ()=>{
+    // In a chat message the reply's own "Sources" strip lists them (with the numbers the citations use):
+    // this card used to list the same sources a second time above it.
+    if(hideCards)return null;
     const latestKb = kbSourceEvts[kbSourceEvts.length-1];
     const sources = latestKb?.data?.sources||[];
     if(!sources.length)return null;
@@ -1136,7 +1116,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
   };
 
 
-  return <div style={{padding:"4px 0"}}>
+  return <div className="hc-tool-status">
     {Panels}
     {showActivity&&<ChatActivity events={evts} savedEvents={savedEvts} live={!historical} content={msgContent} t={t}/>}
     <CodeAgentNoteCards/>
@@ -1673,12 +1653,6 @@ function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActi
   const [vmInfo,setVmInfo]=useState(null),[vmLoading,setVmLoading]=useState(false);
   const [loading,setLoading]=useState(false),[saving,setSaving]=useState(false);
   const [cleaning,setCleaning]=useState(false),[cleanResult,setCleanResult]=useState(null);
-  const fmtBytes=(bytes)=>{
-    if(bytes==null)return "—";
-    const units=["B","KiB","MiB","GiB","TiB"];
-    const i=bytes>0?Math.min(Math.floor(Math.log(bytes)/Math.log(1024)),units.length-1):0;
-    return `${i?(bytes/1024**i).toFixed(1):bytes} ${units[i]}`;
-  };
   const refreshLocal=useCallback(async(signal)=>{
     setLoading(true);setLocalError("");
     try{
@@ -1720,7 +1694,7 @@ function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActi
       if(result.error)throw new Error(result.error);
       setCleanResult(result);
       updateActivity?.(activityId,{status:"done",message:`Deleted ${result.deleted||0} temporary files`,pct:100});
-      notify?.({type:"success",text:"Local cleanup complete",detail:`Deleted ${result.deleted||0} temporary files.`});
+      notify?.({type:"success",text:"Cleanup complete",detail:`Removed ${result.deleted||0} temporary files.`});
       await refreshLocal();
     }catch(e){
       setCleanResult({error:e.message});
@@ -1729,46 +1703,16 @@ function SandboxSection({active=true,t,btnS,labelS,notify,addActivity,updateActi
     }finally{setCleaning(false);}
   };
   const intervals=[
-    {label:"1 week",days:7},{label:"2 weeks",days:14},{label:"1 month (default)",days:30},
+    {label:"1 week",days:7},{label:"2 weeks",days:14},{label:"1 month",days:30},
     {label:"3 months",days:90},{label:"6 months",days:180},{label:"1 year",days:365},{label:"Never",days:0},
   ];
-  const panel={border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"clamp(12px, 2vw, 22px)",minWidth:0};
-  const prose={color:t.mut,fontSize:"var(--hc-text-secondary)",lineHeight:1.55,margin:"8px 0 14px"};
-  const metrics={display:"flex",flexWrap:"wrap",gap:"8px 24px",fontSize:"var(--hc-text-secondary)",marginBottom:16};
-  const legacyCount=cleanupPreview?.reasons?.["unresolved legacy output"]||0;
-  return <div style={{display:"grid",gap:20}}>
-    <p style={{...prose,margin:0}}>HyprChat stores your files and history. Hephaestus runs your code in Docker containers.</p>
-    <section aria-labelledby="local-storage-title" style={panel}>
-      <h3 id="local-storage-title" style={{margin:0,fontSize:"var(--hc-text-control)",color:t.acc}}>HyprChat · Local files</h3>
-      <p style={prose}>The local “sandbox” is an output folder on the HyprChat server. It holds generated files and project downloads before they are saved or delivered. It is separate from the containers that run your projects.</p>
-      <div style={metrics} aria-live="polite">
-        <span>Output files: <strong>{cleanupPreview?.preserved??sbInfo?.sandbox_file_count??"—"}</strong></span>
-        <span>Output storage: <strong>{fmtBytes(cleanupPreview?.retained_bytes??sbInfo?.sandbox_size_bytes)}</strong></span>
-      </div>
-      <p style={prose}>Saved artifacts, uploads, knowledge bases, and chat history stay on HyprChat. They are not included in these output totals or removed by this cleanup.</p>
-      <div style={{...labelS,marginBottom:6}}>Local temporary-file retention</div>
-      <p style={{...prose,marginTop:0,marginBottom:8}}>Automatically remove released temporary files after:</p>
-      <div role="group" aria-label="Local temporary-file retention" style={{display:"flex",flexWrap:"wrap",gap:6}}>
-        {intervals.map(iv=><button key={iv.days} onClick={()=>saveCleanupDays(iv.days)} disabled={saving||loading||!sbInfo} aria-pressed={cleanupDays===iv.days}
-          style={{...btnS(cleanupDays===iv.days?t.acc:t.mut),background:cleanupDays===iv.days?`${t.acc}22`:`${t.surface}55`,fontWeight:cleanupDays===iv.days?700:400,fontSize:"var(--hc-text-control)"}}>{iv.label}</button>)}
-      </div>
-      <p style={prose}>{cleanupDays===0?"Automatic cleanup of local temporary files is off. Manual cleanup is still available.":"Only released temporary files are eligible. Files still in use or linked to saved work are kept."} This setting does not control VM cleanup.</p>
-      <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-        <button onClick={()=>refreshLocal()} disabled={loading||cleaning||saving} style={btnS(t.acc)}>{loading?"Refreshing…":"Refresh cleanup preview"}</button>
-        <button onClick={cleanNow} disabled={cleaning||loading||!cleanupPreview||!!localError||!cleanupPreview.reclaimable_files} style={btnS(t.warm)}>{cleaning?"Cleaning…":"Clean released temporary files"}</button>
-      </div>
-      {localError&&<p role="alert" style={{...prose,color:t.err}}>Local storage status could not be refreshed: {localError}</p>}
-      {cleanupPreview&&<div style={{...prose,marginBottom:0}} aria-live="polite">
-        <div>{fmtBytes(cleanupPreview.reclaimable_bytes)} can be reclaimed from {cleanupPreview.reclaimable_files} temporary files. {fmtBytes(Math.max(0,cleanupPreview.retained_bytes-cleanupPreview.reclaimable_bytes))} will be kept.</div>
-        {legacyCount>0&&<div style={{marginTop:8}}>{legacyCount} older output file{legacyCount===1?" is":"s are"} kept because their ownership could not be confirmed.</div>}
-      </div>}
-      {cleanResult&&<p role={cleanResult.error?"alert":"status"} style={{...prose,color:cleanResult.error?t.err:t.ok}}>{cleanResult.error||`Removed ${cleanResult.deleted||0} local temporary files; freed ${fmtBytes(cleanResult.freed_bytes)}.`}</p>}
-      <details style={{...prose,marginBottom:0}}>
-        <summary style={{cursor:"pointer",color:t.dim}}>Local storage details</summary>
-        <p style={{overflowWrap:"anywhere"}}>Output folder: <code>{sbInfo?.sandbox_outputs_dir||"Not loaded"}</code></p>
-        {Object.entries(cleanupPreview?.reasons||{}).filter(([reason])=>reason!=="unresolved legacy output").map(([reason,count])=><div key={reason}>{reason}: {count}</div>)}
-      </details>
-    </section>
+  // The numbers come from the server's folder summary (storageSummary.js): the cleanup preview's own
+  // counts cover the top level only, which is empty now that files live in month and chat folders.
+  const view=localFilesView(cleanupPreview,sbInfo);
+  const reasons=Object.entries(cleanupPreview?.reasons||{}).filter(([reason])=>reason!=="unresolved legacy output");
+  return <div style={{display:"grid",gap:16}}>
+    <LocalFilesCard view={view} intervals={intervals} days={cleanupDays} onDays={saveCleanupDays} onRefresh={()=>refreshLocal()} onClean={cleanNow}
+      loading={loading} saving={saving} cleaning={cleaning} error={localError} result={cleanResult} folder={sbInfo?.sandbox_outputs_dir} reasons={reasons} t={t} btnS={btnS}/>
     <HephaestusStorage info={vmInfo} loading={vmLoading} onRefresh={refreshVm} t={t} btnS={btnS} active={active}/>
   </div>;
 }

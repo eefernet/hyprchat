@@ -198,6 +198,16 @@ WORKSPACE_MODEL = os.getenv("WORKSPACE_MODEL", "qwen3.5:4b")
 # "on" = summarize old turns via the Workspace Model when a chat approaches its
 # context window; "off" (default) = rely on client-side trimming only.
 CONTEXT_COMPACTION = os.getenv("CONTEXT_COMPACTION", "off")
+# How full a chat's context window gets before it is compacted: 85, 90, 95, 98 or 99 (Settings).
+# chat_context.compaction_limit() applies it and always keeps room for one reply. Separate from the
+# Daedalus "Compact at (%)" setting (context_compaction_threshold).
+CHAT_COMPACTION_PERCENT = os.getenv("CHAT_COMPACTION_PERCENT", "85")
+# Keep what a reply's tools returned for later turns of the chat (chat_tool_memory.py).
+CHAT_TOOL_MEMORY = "on" if os.getenv("CHAT_TOOL_MEMORY", "on").lower() in {"1", "true", "on", "yes"} else "off"
+# How many reply models HyprChat keeps loaded in Ollama at once (loaded_models.py). 0 = Ollama decides.
+CHAT_MAX_LOADED_MODELS = os.getenv("CHAT_MAX_LOADED_MODELS", "0")
+# Tell the model when each message was written (chat_times.py).
+CHAT_TIME_NOTES = "on" if os.getenv("CHAT_TIME_NOTES", "on").lower() in {"1", "true", "on", "yes"} else "off"
 # Chat-history recall: global kill-switch for indexing/searching past turns.
 # ANDs with the per-conversation memory toggle — turns are only ever indexed
 # from conversations where the user enabled memory.
@@ -278,7 +288,8 @@ DEFAULT_NUM_CTX = coerce_num_ctx(os.getenv("DEFAULT_NUM_CTX", str(CONTEXT_DEFAUL
 # synthesis). Defaults higher than DEFAULT_NUM_CTX because depth 3-5 evidence
 # contexts overflow a 16K window; evidence budgets scale down to fit this.
 RESEARCH_NUM_CTX = coerce_num_ctx(os.getenv("RESEARCH_NUM_CTX", str(CONTEXT_DEFAULTS["research_num_ctx"])))
-MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "12"))
+# Tool rounds a plain chat reply gets (Settings → "Tool rounds per reply"; chat_rounds.py). Was 12.
+MAX_AGENT_ROUNDS = int(os.getenv("MAX_AGENT_ROUNDS", "40"))
 MAX_AGENT_ROUNDS_CODER = int(os.getenv("MAX_AGENT_ROUNDS_CODER", "30"))
 DEFAULT_SYSTEM_PROMPT = """You are CodeAgent, an autonomous coding assistant with a sandboxed Linux environment (CodeBox).
 

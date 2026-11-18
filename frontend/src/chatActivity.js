@@ -1,4 +1,5 @@
 import {isDocumentEvent} from './documentFiles.js';
+import {callId as identity,withLegacyIds} from './toolCalls.js';
 
 export function activityDetail(event) {
   const value=event?.data?.detail;
@@ -7,9 +8,8 @@ export function activityDetail(event) {
 }
 
 const clean=value=>String(value||'').replace(/^[\p{Extended_Pictographic}\u200d\ufe0f\s]+/u,'').trim();
-const names={quick_search:'Searching',research:'Searching',deep_research:'Researching',fetch_url:'Reading page',execute_code:'Running code',run_shell:'Running command',read_file:'Reading file',write_file:'Writing file',list_files:'Listing files',generate_image:'Generating image',kb:'Searching knowledge',memory:'Reading memory',download_file:'Preparing file',download_project:'Preparing project',install_package:'Installing package'};
+const names={quick_search:'Searching',research:'Searching',deep_research:'Researching',fetch_url:'Reading page',execute_code:'Running code',compaction:'Summarizing earlier messages',run_shell:'Running command',read_file:'Reading file',write_file:'Writing file',list_files:'Listing files',generate_image:'Generating image',kb:'Searching knowledge',memory:'Reading memory',download_file:'Preparing file',download_project:'Preparing project',install_package:'Installing package',skill_view:'Loading skill',skill_manage:'Saving skill'};
 const toolLabel=tool=>names[tool]||String(tool||'Tool').replaceAll('_',' ').replace(/^./,s=>s.toUpperCase());
-const identity=data=>data.tool_call_id||data.call_id||data.operation_id||data.run_id||null;
 
 // Events are already ordered by arrival. Merge the saved prefix with the live
 // window without counting replayed events twice; never group by category, which
@@ -36,7 +36,9 @@ export function chatActivity({events=[],savedEvents=[],live=false,content='',sta
     if(state)row.state=state;
   };
   const setPhase=(next,text)=>{phase=next;label=text;};
-  for(const event of ordered){
+  // Replies saved before the server named each call: one run's several "start" events were counted as
+  // several tools (toolCalls.js).
+  for(const event of withLegacyIds(ordered)){
     const {type,data={}}=event,tool=data.tool;
     if(type==='thinking'){
       if(!thought||thought.state!=='running')thought=add('reasoning',event,{label:'Reasoning'});
@@ -75,6 +77,10 @@ export function chatActivity({events=[],savedEvents=[],live=false,content='',sta
       // invocations. A later terminal update can enrich an identified result.
       if(type==='tool_start'&&(!callId||!row))row=null;
       if(!row&&terminal&&callId)row=candidates.at(-1);
+      // A progress line whose call has already ended is not another call. Right after a reply the page
+      // holds its saved events plus the live ones, and progress lines (not saved) come after the saved
+      // "end": each used to add a second row, so four runs read "8 tools" until the next reload.
+      if(!row&&!terminal&&type!=='tool_start'&&candidates.length)continue;
       if(!row&&terminal&&kind==='review')row=candidates.at(-1);
       if(!row)row=add(kind,event,{tool,callId,label:kind==='review'?`Review ${data.round||1}${data.total?`/${data.total}`:''}`:toolLabel(tool)});
       update(row,event,terminal?(type==='tool_error'?'failed':data.outcome==='retained'?'retained':'complete'):'running');
@@ -98,10 +104,17 @@ export function chatActivity({events=[],savedEvents=[],live=false,content='',sta
       if(row.state!=='running')continue;
       row.state=stopped?'interrupted':failed?'interrupted':row.kind==='review'&&terminalStatus==='completed'?'complete':'unknown';
     }
-    setPhase(stopped?'stopped':failed?'failed':'complete',stopped?(terminalStatus==='stopped'?'Stopped':'Interrupted'):failed?'Failed':'Activity');
+    setPhase(stopped?'stopped':failed?'failed':'complete',stopped?(terminalStatus==='stopped'?'Stopped':'Interrupted'):failed?'Failed':doneLabel(entries));
   }
   const tools=entries.filter(e=>e.kind==='tool').length;
   return {phase,label,entries,tools,active:live&&!stopped&&!failed,visible:live||entries.length>0||stopped||failed};
+}
+
+// What a finished reply's pill says. It read "Activity" whatever had happened; the chips beside it carry the counts.
+export function doneLabel(entries){
+  const kinds=new Set((entries||[]).map(entry=>entry.kind));
+  if(kinds.has('tool')||kinds.has('review'))return kinds.has('reasoning')?'Thought and worked':'Worked on it';
+  return kinds.has('reasoning')?'Thought it through':'Activity';
 }
 
 export function activityText(event){return clean(event?.data?.status||event?.data?.label||event?.data?.error||'');}

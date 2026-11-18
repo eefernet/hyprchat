@@ -21,6 +21,7 @@ export const NAV_REGISTRY = [
   { id: "email", label: "Email", short: "Email", icon: "Mail" },
   { id: "artifacts", label: "Artifacts", short: "Artifacts", icon: "Package" },
   { id: "memory", label: "Memory", short: "Memory", icon: "Brain" },
+  { id: "skills", label: "Skills", short: "Skills", icon: "Star" },
   { id: "prompts", label: "Prompt Library", short: "Prompts", icon: "Zap" },
   { id: "kb", label: "Knowledge Bases", short: "KB", icon: "Database" },
   { id: "tools", label: "Tools", short: "Tools", icon: "Tool" },
@@ -34,7 +35,7 @@ const REGISTRY_MAP = Object.fromEntries(NAV_REGISTRY.map((i) => [i.id, i]));
 export const DEFAULT_NAV_LAYOUT = {
   v: NAV_LAYOUT_VERSION,
   bar: ["chat", "workspaces", "research", "council", "personas", "images"],
-  more: ["library", "assistant", "tasks", "jobs", "calendar", "notes", "email", "artifacts", "memory", "prompts", "kb", "tools", "models", "analytics"],
+  more: ["library", "assistant", "tasks", "jobs", "calendar", "notes", "email", "artifacts", "memory", "skills", "prompts", "kb", "tools", "models", "analytics"],
   hidden: [],
 };
 

@@ -9,6 +9,9 @@ from typing import Literal
 from fastapi import Request, APIRouter, Body, HTTPException, Query
 
 import image_settings
+import loaded_models
+import chat_context
+import chat_rounds
 import config
 import context_policy
 import database as db
@@ -43,7 +46,8 @@ async def get_app_settings():
     size = _sandbox_size_bytes()
     venv_exists = os.path.exists(os.path.join(config.SANDBOX_VENV_DIR, "bin", "python"))
     try:
-        file_count = sum(1 for e in os.scandir(config.SANDBOX_OUTPUTS_DIR) if e.is_file())
+        import output_paths
+        file_count = output_paths.usage()[0]   # subfolders included
     except Exception:
         file_count = 0
     return {
@@ -61,6 +65,11 @@ async def get_app_settings():
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
         "context_compaction": config.CONTEXT_COMPACTION,
+        "chat_compaction_percent": chat_context.compact_percent(),
+        "chat_max_rounds": chat_rounds.setting(),
+        "chat_max_loaded_models": loaded_models.setting(),
+        "chat_tool_memory": config.CHAT_TOOL_MEMORY,
+        "chat_time_notes": config.CHAT_TIME_NOTES,
         "history_recall": config.HISTORY_RECALL,
         "rag_reranker": config.RAG_RERANKER,
         "model_routing": config.MODEL_ROUTING,
@@ -116,7 +125,7 @@ async def update_app_settings(body: dict = Body(...)):
     allowed = {"document_tools_enabled", "file_cleanup_days", "ollama_url", "codebox_url", "searxng_url", "n8n_url",
                "comfyui_url", "stt_url", "tts_url", "tts_voice",
                "rag", "planning_model", "coder_model",
-               "workspace_model", "context_compaction", "history_recall", "rag_reranker", "model_routing",
+               "workspace_model", "context_compaction", "chat_compaction_percent", "chat_max_rounds", "chat_max_loaded_models", "chat_tool_memory", "chat_time_notes", "history_recall", "rag_reranker", "model_routing",
                "qa_model",
                "openhands_num_ctx",
                "openhands_disable_thinking",
@@ -232,6 +241,26 @@ async def update_app_settings(body: dict = Body(...)):
         config.CONTEXT_COMPACTION = "on" if str(body["context_compaction"]).lower() in {"1", "true", "on", "yes"} else "off"
         settings["context_compaction"] = config.CONTEXT_COMPACTION
         print(f"[Config] Updated context compaction: {config.CONTEXT_COMPACTION}")
+    if "chat_compaction_percent" in body:
+        config.CHAT_COMPACTION_PERCENT = chat_context.compact_percent(body["chat_compaction_percent"])
+        settings["chat_compaction_percent"] = config.CHAT_COMPACTION_PERCENT
+        print(f"[Config] Chats compact at {config.CHAT_COMPACTION_PERCENT}% of the context window")
+    if "chat_tool_memory" in body:
+        config.CHAT_TOOL_MEMORY = "on" if str(body["chat_tool_memory"]).lower() in {"1", "true", "on", "yes"} else "off"
+        settings["chat_tool_memory"] = config.CHAT_TOOL_MEMORY
+        print(f"[Config] Chats keep tool results across turns: {config.CHAT_TOOL_MEMORY}")
+    if "chat_time_notes" in body:
+        config.CHAT_TIME_NOTES = "on" if str(body["chat_time_notes"]).lower() in {"1", "true", "on", "yes"} else "off"
+        settings["chat_time_notes"] = config.CHAT_TIME_NOTES
+        print(f"[Config] Chats tell the model when messages were sent: {config.CHAT_TIME_NOTES}")
+    if "chat_max_rounds" in body:
+        config.MAX_AGENT_ROUNDS = chat_rounds.setting(body["chat_max_rounds"])
+        settings["chat_max_rounds"] = config.MAX_AGENT_ROUNDS
+        print(f"[Config] Chat replies get {config.MAX_AGENT_ROUNDS} tool rounds")
+    if "chat_max_loaded_models" in body:
+        config.CHAT_MAX_LOADED_MODELS = loaded_models.setting(body["chat_max_loaded_models"])
+        settings["chat_max_loaded_models"] = config.CHAT_MAX_LOADED_MODELS
+        print(f"[Config] Models loaded at once: {config.CHAT_MAX_LOADED_MODELS or 'Ollama decides'}")
     if "history_recall" in body:
         config.HISTORY_RECALL = "on" if str(body["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         settings["history_recall"] = config.HISTORY_RECALL
@@ -310,6 +339,11 @@ async def update_app_settings(body: dict = Body(...)):
         "current_coder_model": config.CODER_MODEL,
         "current_workspace_model": config.WORKSPACE_MODEL,
         "context_compaction": config.CONTEXT_COMPACTION,
+        "chat_compaction_percent": chat_context.compact_percent(),
+        "chat_max_rounds": chat_rounds.setting(),
+        "chat_max_loaded_models": loaded_models.setting(),
+        "chat_tool_memory": config.CHAT_TOOL_MEMORY,
+        "chat_time_notes": config.CHAT_TIME_NOTES,
 
         "current_qa_model":        config.QA_MODEL,
 
@@ -407,7 +441,15 @@ async def cleanup_preview(request: Request, target: Literal["local", "hephaestus
         from storage_diagnostics import execution_storage_status
         return await execution_storage_status(route_context().http, config.CODEBOX_URL, db.current_user_id())
     from durable_storage import cleanup_outputs
-    return await asyncio.to_thread(cleanup_outputs, dry_run=True)
+    preview = await asyncio.to_thread(cleanup_outputs, dry_run=True)
+    # The page's own numbers: every delivered file, by month and chat (the preview above only
+    # walks the top level and the temporary folder, which is all a cleanup may touch).
+    try:
+        import output_paths
+        preview["outputs"] = await asyncio.to_thread(output_paths.summary)
+    except Exception as error:
+        print(f"[Storage] output summary failed: {error}")
+    return preview
 
 @router.post("/api/settings/cleanup-codebox")
 async def cleanup_codebox():

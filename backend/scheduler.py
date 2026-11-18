@@ -308,6 +308,15 @@ async def _tick():
                 print(f"[SCHEDULER] retention sweep pruned {pruned}")
         except Exception as e:
             print(f"[SCHEDULER] retention sweep failed: {e}")
+        # Skill upkeep rides the same daily sweep: learned skills nobody uses go
+        # stale, then archived. It sets the user contextvar per owner itself.
+        try:
+            import skills_learning
+            retired = await asyncio.wait_for(skills_learning.curate_all(), SUBSYSTEM_TIMEOUT)
+            if retired:
+                print(f"[SCHEDULER] skill upkeep retired {sum(len(v) for v in retired.values())} skill(s)")
+        except Exception as e:
+            print(f"[SCHEDULER] skill upkeep failed: {e}")
 
 
 async def _handle_due_task(task: dict) -> None:

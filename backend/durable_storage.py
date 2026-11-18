@@ -70,7 +70,10 @@ def source_for(storage_path, url, filename):
         candidate = Path(root) / name
         if candidate.is_file() and not candidate.is_symlink():
             return candidate
-    return None
+    # Files delivered since 2026-11-16 sit one chat folder deep (output_paths.py).
+    import output_paths
+    nested = output_paths.find(name)
+    return Path(nested) if nested else None
 
 
 def retain(storage_path, url, filename, sha=""):

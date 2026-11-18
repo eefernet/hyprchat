@@ -1,5 +1,5 @@
-// Module-level store for the right-hand workbench pane: Daedalus job tabs or a
-// live HTML preview. A store rather than props on purpose: CodeCard renders deep
+// Module-level store for the right-hand workbench pane: Daedalus job tabs, a live HTML
+// preview, or a document / drawing / table from a reply (kind 'doc', docPreview.js). A store rather than props on purpose: CodeCard renders deep
 // inside the memoized markdown tree (MemoMD compares opts by reference), so what
 // it needs must not travel through md() opts. Same pattern as daedalusJobStore.
 import {useEffect,useRef,useSyncExternalStore} from 'react';
@@ -8,7 +8,7 @@ import {isWebApp} from './daedalusActivity.js';
 
 export const DEBOUNCE_MS=300;
 export const DAEDALUS_TABS=['Activity','Plan','Checks','Files','Preview'];
-const initial=()=>({open:false,kind:'',job:null,tab:'Activity',html:null,autoOpen:true});
+const initial=()=>({open:false,kind:'',job:null,tab:'Activity',html:null,doc:null,autoOpen:true});
 let state=initial();
 const listeners=new Set(),autoOpened=new Set();
 let opener=null,timer=0,queued=null;
@@ -19,19 +19,22 @@ const snapshot=()=>state;
 export function useWorkbench(){return useSyncExternalStore(subscribe,snapshot,snapshot);}
 export function workbenchState(){return state;}
 
-// kind 'daedalus' needs {job:{id,...}}; kind 'html' needs {html:{key,code,title,streaming}}.
-export function openWorkbench({kind,job=null,tab,html=null}={}){
-  if(kind!=='daedalus'&&kind!=='html')return;
+// kind 'daedalus' needs {job:{id,...}}; kind 'html' needs {html:{key,code,title,streaming}};
+// kind 'doc' needs {doc:{key,format,code,title,filename,streaming}} (format: markdown | svg | table).
+// The two live kinds share the update and rebind rules below; `live()` names the slot in use.
+const live=()=>(state.kind==='html'||state.kind==='doc')?state.kind:null;
+export function openWorkbench({kind,job=null,tab,html=null,doc=null}={}){
+  if(kind!=='daedalus'&&kind!=='html'&&kind!=='doc')return;
   if(!state.open&&typeof document!=='undefined')opener=document.activeElement;
   clearTimeout(timer);timer=0;queued=null;
   const sameJob=kind==='daedalus'&&state.kind==='daedalus'&&state.job?.id===job?.id;
-  emit({open:true,kind,job:kind==='daedalus'?job:null,html:kind==='html'?html:null,
-    tab:tab||(kind==='html'?'Preview':sameJob?state.tab:'Activity')});
+  emit({open:true,kind,job:kind==='daedalus'?job:null,html:kind==='html'?html:null,doc:kind==='doc'?doc:null,
+    tab:tab||(kind!=='daedalus'?'Preview':sameJob?state.tab:'Activity')});
 }
 export function closeWorkbench(){
   clearTimeout(timer);timer=0;queued=null;
   if(!state.open)return;
-  emit({open:false,kind:'',job:null,html:null});
+  emit({open:false,kind:'',job:null,html:null,doc:null});
   const target=opener;opener=null;
   if(target&&typeof target.focus==='function'&&(typeof document==='undefined'||document.contains(target)))target.focus();
 }
@@ -46,12 +49,14 @@ export function shouldAutoOpen(key){
 function flush(){
   clearTimeout(timer);timer=0;
   const next=queued;queued=null;
-  if(next&&state.open&&state.kind==='html'&&state.html?.key===next.key)emit({html:{...state.html,...next}});
+  const slot=live();
+  if(next&&state.open&&slot&&state[slot]?.key===next.key)emit({[slot]:{...state[slot],...next}});
 }
 // While a reply streams, the iframe is rewritten at most every DEBOUNCE_MS with the newest code.
 export function updateLivePreview(key,code,{streaming=false,title}={}){
-  if(!state.open||state.kind!=='html'||state.html?.key!==key)return;
-  const current=queued||state.html;
+  const slot=live();
+  if(!state.open||!slot||state[slot]?.key!==key)return;
+  const current=queued||state[slot];
   if(current.code===code&&current.streaming===streaming&&(title===undefined||current.title===title))return;
   queued={key,code,streaming,...(title!==undefined?{title}:{})};
   if(!streaming){flush();return;}
@@ -60,11 +65,12 @@ export function updateLivePreview(key,code,{streaming=false,title}={}){
 // A streaming message is remounted under its saved id once it finalizes; the same block keeps the pane.
 const blockOf=key=>String(key||'').slice(String(key||'').lastIndexOf(':')+1);
 export function rebindLivePreview(key,code){
-  if(!state.open||state.kind!=='html'||!state.html||state.html.key===key)return;
-  if(blockOf(state.html.key)!==blockOf(key))return;
-  if(state.html.code!==code&&!state.html.streaming&&!queued)return;
+  const slot=live(),shown=slot&&state[slot];
+  if(!state.open||!shown||shown.key===key)return;
+  if(blockOf(shown.key)!==blockOf(key))return;
+  if(shown.code!==code&&!shown.streaming&&!queued)return;
   clearTimeout(timer);timer=0;queued=null;
-  emit({html:{...state.html,key,code,streaming:false}});
+  emit({[slot]:{...shown,key,code,streaming:false}});
 }
 export function resetWorkbench(){clearTimeout(timer);timer=0;queued=null;opener=null;autoOpened.clear();state=initial();listeners.forEach(fn=>fn());}
 

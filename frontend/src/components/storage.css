@@ -1,0 +1,25 @@
+/* Settings → Storage & Cleanup. Two cards: files kept on HyprChat, and the sandbox VM. */
+.sto-card{border:1px solid var(--hc-line-subtle);border-radius:var(--hc-radius-card);padding:clamp(12px,2vw,20px);min-width:0;display:grid;gap:14px}
+.sto-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 16px}
+.sto-title{margin:0;font-size:var(--hc-text-control);color:var(--hc-accent)}
+.sto-sub{margin:2px 0 0;color:var(--hc-muted);font-size:var(--hc-text-secondary);line-height:1.5}
+.sto-figure{font-size:var(--hc-text-section,16px);font-weight:700;color:var(--hc-text);white-space:nowrap}
+.sto-figure small{font-size:var(--hc-text-secondary);font-weight:400;color:var(--hc-muted);margin-left:8px}
+.sto-chips{display:flex;flex-wrap:wrap;gap:6px}
+.sto-chip{padding:3px 9px;border-radius:999px;background:var(--hc-hover);color:var(--hc-secondary);font-size:var(--hc-text-secondary);white-space:nowrap}
+.sto-chip b{color:var(--hc-text);font-weight:700;margin-left:5px}
+.sto-rows{display:grid;gap:0;font-size:var(--hc-text-secondary);color:var(--hc-secondary)}
+.sto-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-top:1px solid var(--hc-line-subtle)}
+.sto-row span:last-child{color:var(--hc-muted);white-space:nowrap}
+.sto-label{font-size:var(--hc-text-secondary);font-weight:700;color:var(--hc-secondary);margin-bottom:6px}
+.sto-options,.sto-actions{display:flex;flex-wrap:wrap;gap:6px}
+.sto-actions{align-items:center;gap:8px 12px}
+.sto-note{color:var(--hc-muted);font-size:var(--hc-text-secondary);line-height:1.5;margin:0}
+.sto-note[data-tone="ok"]{color:var(--hc-ok)}
+.sto-note[data-tone="bad"]{color:var(--hc-danger)}
+.sto-details{color:var(--hc-muted);font-size:var(--hc-text-secondary);line-height:1.5}
+.sto-details summary{cursor:pointer;color:var(--hc-secondary)}
+.sto-details code{overflow-wrap:anywhere}
+.sto-bar{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--hc-hover)}
+.sto-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:var(--hc-text-secondary);color:var(--hc-secondary)}
+.sto-legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px}

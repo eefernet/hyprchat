@@ -1,0 +1,26 @@
+/* The list of code runs in a chat reply (CodeRunGroup.jsx). */
+.hc-runs{margin:8px 0;border:1px solid var(--hc-line);border-radius:var(--hc-radius-card);background:var(--hc-elev-1);overflow:hidden;}
+.hc-runs-head,.hc-run-row,.hc-runs-more{display:flex;align-items:center;gap:8px;width:100%;min-height:32px;padding:5px 12px;background:transparent;border:0;border-radius:0;color:var(--hc-text);font-family:inherit;text-align:left;}
+.hc-runs-head:hover,.hc-run-row:hover,.hc-runs-more:hover{background:var(--hc-hover);filter:none;}
+.hc-runs-head:active,.hc-run-row:active,.hc-runs-more:active{transform:none;}
+.hc-runs-head{font-weight:600;font-size:var(--hc-text-control);}
+/* The count is never cut short; on a narrow screen the summary gives way instead. */
+.hc-runs-head .hc-run-label{flex:0 0 auto;}
+.hc-runs-head .hc-run-meta{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;text-align:right;font-weight:400;}
+.hc-runs-list > * + *,.hc-runs-head + .hc-runs-list{border-top:1px solid var(--hc-line-subtle);}
+.hc-run-mark{flex:none;width:16px;text-align:center;font-size:var(--hc-text-secondary);font-weight:700;}
+.hc-run-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--hc-text-control);}
+.hc-run-meta{flex:none;color:var(--hc-muted);font-size:var(--hc-text-secondary);font-variant-numeric:tabular-nums;white-space:nowrap;}
+.hc-run-chevron{flex:none;color:var(--hc-muted);font-size:var(--hc-text-secondary);transition:transform var(--hc-dur-1) var(--hc-ease-out);}
+.hc-run-chevron[data-open="false"]{transform:rotate(-90deg);}
+.hc-run-error{margin:0;padding:0 12px 7px 36px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--hc-danger);font-family:var(--hc-font-code);font-size:var(--hc-text-secondary);}
+.hc-runs-more{color:var(--hc-secondary);font-size:var(--hc-text-secondary);}
+.hc-run-panel{display:grid;gap:6px;padding:2px 12px 10px 36px;}
+.hc-run-caption{color:var(--hc-muted);font-size:var(--hc-text-micro);}
+.hc-run-panel pre{margin:0;padding:8px 10px;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid var(--hc-line-subtle);border-radius:var(--hc-radius-sm);background:var(--hc-sunken);color:var(--hc-secondary);font-family:var(--hc-font-code);font-size:var(--hc-text-secondary);line-height:1.5;}
+.hc-run-panel pre[data-kind="error"]{color:var(--hc-danger);}
+@media (max-width:768px), (pointer:coarse){
+  .hc-runs-head,.hc-run-row,.hc-runs-more{min-height:40px;}
+  .hc-run-error,.hc-run-panel{padding-left:12px;}
+  .hc-run-lang{display:none;}
+}

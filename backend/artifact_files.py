@@ -72,7 +72,9 @@ def resolve_download_path(filename: str) -> tuple[str | None, str]:
             continue
         if os.path.exists(filepath):
             return filepath, safe_name
-    return None, safe_name
+    # Files delivered since 2026-11-16 sit one chat folder deep (output_paths.py).
+    import output_paths
+    return output_paths.find(safe_name), safe_name
 
 
 def normalize_archive_path(path: str) -> str:

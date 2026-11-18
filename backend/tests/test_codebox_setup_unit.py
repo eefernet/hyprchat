@@ -164,7 +164,10 @@ def test_concurrent_scripts_keep_distinct_content_and_clean_up(tmp_path, languag
         else:
             code = f"console.log(__filename); setTimeout(() => {{console.log({json.dumps(label)}); process.exit(7);}}, 50);"
         command = cb._script_command(code, interpreter, "py" if language == "python" else "js")
-        command = command.replace("cd /root", f"cd {shlex.quote(str(tmp_path))}", 1)
+        # The script starts in the chat's work folder on the sandbox (chat_workdir.py); here, in a temp folder.
+        import chat_workdir
+        assert command.startswith(chat_workdir.ENTER + " && ")
+        command = command.replace(chat_workdir.ENTER, f"cd {shlex.quote(str(tmp_path))}", 1)
         proc = await asyncio.create_subprocess_exec(
             "/bin/sh", "-c", command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await proc.communicate()
@@ -180,3 +183,30 @@ def test_concurrent_scripts_keep_distinct_content_and_clean_up(tmp_path, languag
 
     paths = asyncio.run(run())
     assert paths[0] != paths[1]
+
+
+def test_code_output_carries_description_and_code_and_is_sent_for_silent_runs():
+    # Seen live 2026-11-14: twelve cards that each said only "python output". The card now carries what
+    # the run was and its code, and a run that printed nothing still gets its line in the list.
+    class Events:
+        def __init__(self):
+            self.sent = []
+
+        async def emit(self, conv_id, kind, data):
+            self.sent.append((kind, data))
+
+    class Silent(Sandbox):
+        async def post(self, url, *, json, **kwargs):
+            response = await super().post(url, json=json, **kwargs)
+            if "VENV_OK" not in json["command"] and "DATA_STACK_OK" not in json["command"]:
+                response.payload = {"stdout": "", "stderr": "", "exit_code": 0, "execution_time": 0.4}
+            return response
+
+    events = Events()
+    asyncio.run(cb.run_codebox_tool(
+        "execute_code", {"code": "x = 1\n" * 900, "language": "python", "description": " Set  x\nagain "},
+        http=Silent(), events=events, conv_id="test"))
+    card = next(data for kind, data in events.sent if kind == "code_output")
+    assert card["description"] == "Set x again" and card["stdout"] == "" and card["success"] is True
+    assert len(card["code"]) == 2000 and card["code_truncated"] is True and card["exit_code"] == 0
+    assert card["exec_time"] == 0.4

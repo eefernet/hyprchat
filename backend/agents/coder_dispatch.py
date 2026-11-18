@@ -1,4 +1,5 @@
 """Application-side dispatch receipts; this module does not belong on the worker."""
+import json
 import re
 
 import database as db
@@ -29,12 +30,39 @@ _JOB_ID = re.compile(r'\bcw3-[0-9a-f]{24}\b')
 _STATUS = re.compile(r'\b(?:status|progress|finished|completed|running|queued|blocked|failed)\b|\bhow.+(?:going|doing)\b', re.I)
 
 
-def claims_start(content):
+# What an answer to a QUESTION must say before it counts as claiming work: that a job started, or that the
+# user's job is running now. A question cannot start a job, so "in progress" or "running in the background"
+# as plain words (an answer about spinners, CI or background tasks) and "I've added an example below" are
+# ordinary prose there. Found 2026-11-13: such answers were replaced by "No Daedalus job was started".
+_PROGRESS = r"(?:underway|in progress|running in (?:the )?background)"
+_JOB_CLAIM = re.compile(
+    r"\b(?:I(?:['’]ve| have)?|we(?:['’]ve| have)?|(?:the|your) (?:job|workflow|build|edit|update))"
+    r"\s+(?:is |has |have )?(?:started|launched|queued|dispatched|begun)\b"
+    r"|\b(?:I['’]m|I am)\s+(?:starting|building|implementing|updating)\b"
+    r"|\b(?:Daedalus job|Project question)\s+\S+\s+is saved with status\b"
+    r"|\byour\b[^.!?\n]{0,40}?\b(?:job|workflow|build|edit|update|change|feature|fix|request|project)\b"
+    r"[^.!?\n]{0,40}?\b" + _PROGRESS + r"\b"
+    r"|\b(?:the|this)\s+(?:Daedalus\s+)?(?:job|workflow|build)\b[^.!?\n]{0,30}?\b" + _PROGRESS + r"\b",
+    re.I,
+)
+_NEGATED = re.compile(r"\b(?:no|not|never|hasn't|haven't|isn't|didn't|couldn't)\b", re.I)
+# "While the build is in progress, the badge is yellow" describes a condition; it reports nothing.
+_CONDITION = re.compile(r"\b(?:while|when|whenever|if|until|once|whether|as long as)\b", re.I)
+
+
+def claims_start(content, about_job=False):
+    """True when a reply says work was started or done. ``about_job`` is for answers to questions: only
+    a claim about the job itself counts (see _JOB_CLAIM), and not inside a "while/when/if" clause."""
     text = re.sub(r'```.*?```|`[^`\n]*\s[^`\n]*`|"[^"\n]*"|“[^”\n]*”|(?<!\w)\x27[^\x27\n]+\x27', '', content, flags=re.S)
     text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('>'))
-    return any(_CLAIM.search(sentence) and not re.search(
-        r"\b(?:no|not|never|hasn't|haven't|isn't|didn't|couldn't)\b", sentence, re.I)
-        for sentence in re.split(r'[.!?\n]', text))
+    for sentence in re.split(r'[.!?\n]', text):
+        found = (_JOB_CLAIM if about_job else _CLAIM).search(sentence)
+        if not found or _NEGATED.search(sentence):
+            continue
+        if about_job and _CONDITION.search(sentence[:found.start()]):
+            continue
+        return True
+    return False
 
 
 def may_correct(request):
@@ -72,6 +100,37 @@ class DispatchGuard:
             raise ValueError('The saved workflow mode differs from this selected project; no additional job was dispatched.')
         return job
 
+    async def saved(self):
+        """(job, problem). ``problem`` is a sentence for the reply when this message already has a job
+        that does not fit the request as sent now (another project or "new project" picked on a retry).
+        The chat used to end with an empty reply there."""
+        try:
+            return await self.receipt(), ''
+        except ValueError as error:
+            return None, f'{error} Send it as a new message to use the project selected now.'
+
+    @staticmethod
+    def refusal(result):
+        """Why the job router started nothing, as a sentence for the reply. '' when it gave no reason.
+        The reply used to say only "the workflow tool did not produce a matching saved job"."""
+        text = str(result or '').strip()
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return ' '.join(text.split())[:400] if re.match(r'(?i)error\b', text) else ''
+        if data.get('request_started') is False and data.get('workflow_id') and data.get('state'):
+            return (f"An earlier job in this chat is still {data['state']} (`{data['workflow_id']}`). "
+                    'Wait for it to finish or stop it, then send this again.')
+        reason = data.get('error') or (data.get('message') if data.get('request_started') is False else '')
+        return ' '.join(str(reason or '').split())[:400]
+
+    @staticmethod
+    def not_started(reason=''):
+        return ('No new Daedalus job was started for this message. ' + (reason or
+                'The workflow tool did not produce a matching saved job. Check its result before retrying.'))
+
     @staticmethod
     def describe(job):
         kind = 'Project question' if job['mode'] == 'ask_uploaded_project' else 'Daedalus job'
@@ -79,9 +138,14 @@ class DispatchGuard:
                 'The progress card shows its current state. Completion and review are separate from starting the job.')
 
     async def review(self, content, *, can_retry):
-        if not claims_start(content):
+        # A question cannot start a job, so its answer is checked only for claims about the job itself.
+        # The broad check used to replace ordinary answers ("show an in-progress spinner like this…")
+        # with "No Daedalus job was started for this message" (found 2026-11-13).
+        if not claims_start(content, about_job=not may_correct(self.request)):
             return content, False
-        job = await self.receipt()
+        job, problem = await self.saved()
+        if problem:
+            return problem, False
         if job:
             return self.describe(job), False
         if not may_correct(self.request) and _STATUS.search(self.request):

@@ -103,8 +103,8 @@ async def store_file(data, filename, *, conversation_id, artifact_id=None, run_i
     from routes.chat_files import safe_filename
     filename = safe_filename(filename)
     aid = artifact_id or "art-" + uuid.uuid4().hex[:20]
-    storage = Path(config.SANDBOX_OUTPUTS_DIR) / ("hc-document-" + uuid.uuid4().hex + Path(filename).suffix.lower())
-    storage.parent.mkdir(parents=True, exist_ok=True)
+    import output_paths
+    storage = Path(output_paths.place(conversation_id, "hc-document-" + uuid.uuid4().hex + Path(filename).suffix.lower(), keep_name=True).path)
     temporary = storage.with_suffix(storage.suffix + ".tmp")
     await asyncio.to_thread(temporary.write_bytes, data)
     os.replace(temporary, storage)

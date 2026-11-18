@@ -1105,3 +1105,14 @@ def test_run_search_agent_kill_switch_suppresses_refine():
     assert out["skipped"] is False
     assert mock_refine.await_count == 0
     assert http.calls == []  # zero LLM calls end to end
+
+
+@pytest.mark.parametrize("message,skip", [
+    ("continue", True), ("Continue from where you stopped.", True), ("keep going", True),
+    ("please continue", True), ("ok, go on", True), ("carry on where you left off", True),
+    ("continue the review of the auth module", False), ("go on a hike near Denver this weekend", False),
+    ("proceed with the latest Fed rate decision", False),
+])
+def test_an_instruction_to_carry_on_is_not_searched(message, skip):
+    # Seen live 2026-11-14: each "continue" of a code review ran a web search about the earlier topic.
+    assert quick_search._should_skip(message)[0] is skip

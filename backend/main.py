@@ -140,14 +140,12 @@ def _init_sandbox():
 
 def _sandbox_size_bytes() -> int:
     """Return total bytes used in the sandbox outputs directory."""
-    total = 0
+    # Subfolders included: delivered files sit in outputs/<month>/<chat>/ (output_paths.py).
     try:
-        for entry in os.scandir(config.SANDBOX_OUTPUTS_DIR):
-            if entry.is_file(follow_symlinks=False):
-                total += entry.stat().st_size
+        import output_paths
+        return output_paths.usage()[1]
     except Exception:
-        pass
-    return total
+        return 0
 
 # ============================================================
 # CLEANUP — delete old files from sandbox/outputs
@@ -288,6 +286,13 @@ async def lifespan(app: FastAPI):
     except Exception as _re:
         print(f"[Startup] Stale-run reaper failed (non-fatal): {_re}")
     try:
+        import chat_recovery
+        _replies = await chat_recovery.sweep()
+        if _replies:
+            print(f"[Startup] Marked {_replies} unfinished chat repl{'y' if _replies == 1 else 'ies'} as interrupted")
+    except Exception as _re:
+        print(f"[Startup] Chat reply sweep failed (non-fatal): {_re}")
+    try:
         _task_reaped = await db.reap_stale_task_runs()
         if _task_reaped:
             print(f"[Startup] Reaped {_task_reaped} stale scheduled-task runs")
@@ -364,6 +369,18 @@ async def lifespan(app: FastAPI):
     if "context_compaction" in _settings:
         config.CONTEXT_COMPACTION = "on" if str(_settings["context_compaction"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded context compaction: {config.CONTEXT_COMPACTION}")
+    if "chat_compaction_percent" in _settings:
+        config.CHAT_COMPACTION_PERCENT = _settings["chat_compaction_percent"]
+    if "chat_tool_memory" in _settings:
+        config.CHAT_TOOL_MEMORY = "on" if str(_settings["chat_tool_memory"]).lower() in {"1", "true", "on", "yes"} else "off"
+    if "chat_time_notes" in _settings:
+        config.CHAT_TIME_NOTES = "on" if str(_settings["chat_time_notes"]).lower() in {"1", "true", "on", "yes"} else "off"
+    if "chat_max_rounds" in _settings:
+        import chat_rounds
+        config.MAX_AGENT_ROUNDS = chat_rounds.setting(_settings["chat_max_rounds"])
+    if "chat_max_loaded_models" in _settings:
+        import loaded_models
+        config.CHAT_MAX_LOADED_MODELS = loaded_models.setting(_settings["chat_max_loaded_models"])
     if "history_recall" in _settings:
         config.HISTORY_RECALL = "on" if str(_settings["history_recall"]).lower() in {"1", "true", "on", "yes"} else "off"
         print(f"[Config] Loaded history recall: {config.HISTORY_RECALL}")
@@ -648,6 +665,9 @@ class ChatRequest(BaseModel):
     # message; no new stub row is created and the frontend PATCHes the
     # concatenated result back onto the same row.
     continue_message_id: Optional[int] = None
+    # "new" = a message the user just sent (always saved); "retry" = regenerate of the last one
+    # (reuses the saved message). Absent for older clients. See chat_turns.is_retry.
+    turn: Optional[str] = None
 
 class ExecuteRequest(BaseModel):
     conversation_id: Optional[str] = None
@@ -2694,12 +2714,13 @@ async def get_image_job(job_id: str):
     if not outputs:
         return {"status": "running", "params": job.get("params", {})}
     # First completed poll: persist files + artifacts, cache so repeats are idempotent
-    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
+    import output_paths
     images = []
     params = job.get("params", {})
     for i, img in enumerate(outputs):
         filename = f"comfy_{job_id}_{i}.png"
-        filepath = os.path.join(config.SANDBOX_OUTPUTS_DIR, filename)
+        # An earlier poll of this job may have stored it already (a month boundary would hide that copy).
+        filepath = output_paths.find(filename) or output_paths.place(output_paths.IMAGE_STUDIO, filename, keep_name=True).path
         try:
             if not os.path.exists(filepath):
                 data = await comfyui.fetch_image(img)
@@ -4309,14 +4330,14 @@ async def generate_title(conv_id: str, body: dict = Body(default={})):
             "stream": False,
             "think": False,
             "options": {"num_ctx": context_policy.helper_context("title"), "temperature": 0.3}
-        }, timeout=30)
+        }, timeout=75)      # the helper model is often cold behind a large chat model: 30 s timed out live
         title = resp.json().get("message", {}).get("content", "").strip().strip('"\'')[:60]
         if title:
             await db.update_conversation(conv_id, title=title)
             return {"title": title}
         return {"title": ""}
     except Exception as e:
-        print(f"[AUTO-TITLE] Error: {e}")
+        print(f"[AUTO-TITLE] Error: {type(e).__name__}: {e}")     # a timeout has no message of its own
         return {"title": ""}
 
 # ============================================================

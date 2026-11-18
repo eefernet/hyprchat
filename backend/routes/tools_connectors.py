@@ -20,7 +20,9 @@ router = APIRouter()
 def _reserved_tool_names() -> frozenset:
     from tools import CODEAGENT_TOOLS  # call-time import: tools.py is heavy and imports routes' siblings
     from document_tools import DOCUMENT_TOOLS
-    return frozenset(CODEAGENT_TOOLS) | frozenset(DOCUMENT_TOOLS) | {"codeagent", "quick_search", "documents"}
+    from tooling.skill_tools import SKILL_TOOLS
+    return (frozenset(CODEAGENT_TOOLS) | frozenset(DOCUMENT_TOOLS) | frozenset(SKILL_TOOLS)
+            | {"codeagent", "quick_search", "documents"})
 
 
 class ToolCreate(BaseModel):

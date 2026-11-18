@@ -24,6 +24,17 @@ export default function DaedalusJobCard({workflow,t,font,md,onOpenArtifact,compa
   useDaedalusAutoOpen(job);
   const button=jobButtonStyle(t,font),vars=jobVars(t,font);
   const name=job.presentation?.project_name||job.project_name||'Daedalus project';
+  // A deleted job has nothing to stop, continue or open; a job still being fetched has no state to show yet.
+  // Both used to draw the full card from a made-up "queued" row, Stop button included.
+  if(connection==='gone'||job.state==='loading'){
+    if(compact)return null;
+    const gone=connection==='gone';
+    return <section className="dj-card" aria-label="Daedalus coding job" style={vars}>
+      <div className="dj-heading"><span className="dj-title"><strong>{gone&&job.state==='loading'?'Daedalus job':name}</strong>
+        <span role="status" aria-live="polite" className="dj-state"><span aria-hidden="true" className="dj-dot"/>{gone?'No longer available':'Loading…'}</span></span></div>
+      {gone&&<p className="dj-notice">This job was deleted, so its progress and files cannot be shown.</p>}
+    </section>;
+  }
   const status=jobStatusLabel(job),detail=job.presentation?.detail||'',loops=loopLabel(job);
   const label=detail?`${status} · ${detail}`:status;
   const connected=active&&connection==='connected'&&job.state!=='cancelling';

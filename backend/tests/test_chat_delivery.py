@@ -195,3 +195,152 @@ def test_error_reason_is_kept_on_the_persisted_row(capture):
     assert save.call_args.args[1]=='_[No response — llama-server returned invalid tool call arguments]_'
     drain(source(INIT,{'type':'error'}))
     assert save.call_args.args[1]=='_[No response; generation failed.]_'
+
+
+def test_the_context_reading_is_sent_saved_and_survives_a_tool_round(capture):
+    # Live 2026-11-13: the header pill fell after every reply (it counted thinking and tool results,
+    # which are not sent again) and dropped to 0 on reload (nothing was restored).
+    save, _ = capture
+    events = drain(source(
+        INIT,
+        {'type': 'context_info', 'round': 0, 'window': 32768, 'prompt_estimate': 6000, 'turn_only': 0, 'ratio': 0},
+        {'type': 'ctx_update', 'gen_tokens': 0, 'prompt_tokens': 6000, 'live': True},
+        {'type': 'token', 'content': 'Let me check. '},
+        {'type': 'ctx_update', 'gen_tokens': 900, 'prompt_tokens': 4000},
+        {'type': 'usage_round', 'round': 0, 'prompt_tokens': 4000, 'gen_tokens': 900},
+        {'type': 'context_info', 'round': 1, 'window': 32768, 'prompt_estimate': 12000},
+        {'type': 'token', 'content': 'Done: 6 rows.'},
+        {'type': 'ctx_update', 'gen_tokens': 60, 'prompt_tokens': 8200},
+        {'type': 'usage_round', 'round': 1, 'prompt_tokens': 8200, 'gen_tokens': 60},
+        DONE))
+    assert all(event['type'] != 'context_info' for event in events)
+    updates = [event for event in events if event['type'] == 'ctx_update']
+    assert updates[0]['measured'] is False and updates[0]['window'] == 32768
+    assert updates[1]['measured'] is True and updates[1]['working'] == 4900 - updates[1]['used']   # thinking so far
+    assert updates[2]['measured'] is True and updates[2]['working'] == 8260 - updates[2]['used']
+    reading = events[-1]['context']
+    assert reading == save.call_args.args[2]['context']
+    assert 4000 < reading['used'] < 4020                # the first prompt plus the two short sentences
+    assert reading['working_peak'] == 8260 - reading['used'] and reading['measured'] is True
+
+
+def test_a_reply_without_a_model_call_has_no_reading(capture):
+    save, _ = capture
+    events = drain(source(INIT, {'type': 'token', 'content': 'A saved receipt.'}, DONE))
+    assert 'context' not in events[-1] and 'context' not in save.call_args.args[2]
+
+
+ROUND = {'type': 'context_info', 'round': 0, 'window': 8192, 'prompt_estimate': 100}
+
+
+def test_clear_takes_back_only_the_current_rounds_text(capture):
+    # Found 2026-11-13: a text-style tool call cleared the whole reply, so the text of earlier rounds vanished.
+    save, _ = capture
+    events = drain(source(INIT, ROUND, {'type': 'token', 'content': 'First I looked at the file. '},
+                          {**ROUND, 'round': 1}, {'type': 'token', 'content': '<tool_call>{"name":"x"}</tool_call>'},
+                          {'type': 'clear'}, {**ROUND, 'round': 2}, {'type': 'token', 'content': 'It has 6 rows.'}, DONE))
+    assert save.call_args.args[1] == 'First I looked at the file. It has 6 rows.'
+    cleared = next(event for event in events if event['type'] == 'clear')
+    assert cleared == {'type': 'clear', 'keep': len('First I looked at the file. ')}
+
+
+def test_clear_in_continue_mode_keeps_the_original_half(capture):
+    # The same wipe erased the first half of a continued reply for good.
+    save, _ = capture
+    drain(source({**INIT, 'prior_content': 'The first half. '}, ROUND, {'type': 'token', 'content': 'thought\nleaked'},
+                 {'type': 'clear'}, {'type': 'token', 'content': 'The second half.'}, DONE))
+    assert save.call_args.args[1] == 'The first half. The second half.'
+
+
+def test_a_failure_that_replaces_the_reply_still_clears_everything(capture):
+    save, _ = capture
+    events = drain(source(INIT, ROUND, {'type': 'token', 'content': 'Working on the document. '},
+                          {'type': 'clear', 'all': True}, {'type': 'token', 'content': 'The document could not be saved.'}, DONE))
+    assert save.call_args.args[1] == 'The document could not be saved.'
+    assert next(event for event in events if event['type'] == 'clear')['keep'] == 0
+
+
+def test_a_reply_cut_off_by_a_disconnect_is_saved_even_when_cancelled_twice(monkeypatch):
+    # Found 2026-11-14: the web server cancels the request task again at every await once the browser has
+    # gone. The second cancellation landed on the final save, so stopped replies stayed "running" with
+    # no text (two such rows were on the live server).
+    saved = []
+
+    async def slow_save(message_id, content, metadata):
+        await asyncio.sleep(0.05)
+        saved.append((content, metadata['delivery_status']))
+
+    monkeypatch.setattr(db, 'save_chat_delivery', slow_save)
+
+    async def endless():
+        yield chat_delivery.sse(INIT)
+        yield chat_delivery.sse({'type': 'token', 'content': 'Half an answer'})
+        await asyncio.sleep(30)
+
+    async def scenario():
+        async def consume():
+            async for _ in chat_delivery.deliver(endless(), request()):
+                pass
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.15)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        task.cancel()                       # what the server's cancel scope does
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.2)
+
+    asyncio.run(scenario())
+    assert saved[-1] == ('Half an answer', 'interrupted')
+
+
+# ── Chat bug-fix pass, stage 4 (2026-11-15) ──────────────────────────────────────────────────────────────
+
+def test_an_unexpected_failure_reaches_the_browser_as_an_error(capture):
+    # A bug or a malformed request inside the chat loop used to just close the connection: the browser
+    # took that for a finished reply, and the saved row said "interrupted" with no reason.
+    save, _ = capture
+    events = drain(source(INIT, {'type': 'token', 'content': 'Half an answer'}, KeyError('role')))
+    assert events[-1]['type'] == 'error' and 'KeyError' in events[-1]['error'] and events[-1]['saved_note'] is True
+    assert save.call_args.args[1].startswith('Half an answer\n\n_[interrupted: KeyError')
+    assert save.call_args.args[2]['delivery_status'] == 'failed'
+    events = drain(source(INIT, ValueError('bad request')))
+    assert [e['type'] for e in events][-2:] == ['token', 'error']
+    assert save.call_args.args[1] == '_[No response — ValueError: bad request]_'
+
+
+def test_an_error_event_says_the_saved_reply_already_carries_the_reason(capture):
+    # The browser drew its own ⚠ block under the server's note: the same error twice.
+    events = drain(source(INIT, {'type': 'error', 'error': 'boom'}))
+    assert events[-2] == {'type': 'token', 'content': '_[No response — boom]_'}
+    assert events[-1]['saved_note'] is True
+    events = drain(source(INIT, {'type': 'token', 'content': 'partial'}, {'type': 'error', 'error': 'boom'}))
+    assert events[-1]['saved_note'] is True and [e['type'] for e in events].count('token') == 1
+
+
+def test_the_reply_records_who_wrote_it_and_whether_it_was_cut_off(capture):
+    # The header showed the chat's CURRENT model on every reply, and "cut off" lived only in the browser's
+    # copy of the metadata, where it came back after a successful Continue.
+    save, _ = capture
+    drain(source(INIT, {'type': 'model_routed', 'model': 'big:27b'}, {'type': 'token', 'content': 'x'},
+                 {**DONE, 'done_reason': 'length'}))
+    assert save.call_args.args[2]['model'] == 'big:27b' and save.call_args.args[2]['truncated'] is True
+    drain(source(INIT, {'type': 'token', 'content': 'x'}, {**DONE, 'model': 'other:4b'}))
+    assert save.call_args.args[2]['model'] == 'other:4b' and save.call_args.args[2]['truncated'] is False
+    drain(source(INIT, {'type': 'token', 'content': 'x'}, {'type': 'error', 'error': 'boom'}))
+    assert save.call_args.args[2]['model'] == 'local' and save.call_args.args[2]['truncated'] is False
+
+
+def test_the_browsers_final_patch_cannot_bring_back_the_cut_off_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, 'DATABASE_PATH', str(tmp_path / 'p.db'))
+    async def run():
+        await db.init_db()
+        await db.create_conversation('c', model='local')
+        mid = await db.add_message('c', 'assistant', 'whole answer', metadata={'in_progress': True})
+        await db.save_chat_delivery(mid, 'whole answer', {'in_progress': False, 'delivery_status': 'completed',
+                                                          'model': 'local', 'truncated': False})
+        await db.patch_message_presentation('c', mid, metadata={'truncated': True, 'model': 'someone-else', 'saved_events': []})
+        row = next(m for m in (await db.get_conversation('c'))['messages'] if m['id'] == mid)
+        assert row['metadata']['truncated'] is False and row['metadata']['model'] == 'local'
+        assert row['metadata']['saved_events'] == []
+    asyncio.run(run())

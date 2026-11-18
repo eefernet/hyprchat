@@ -274,6 +274,21 @@ def activate(release, url, acceptance):
         raise
 
 
+def url_from_env(root):
+    """The address the service answers on, from HOST and PORT in <root>/.env (last assignment wins)."""
+    values={}
+    try:
+        for line in (Path(root)/'.env').read_text().splitlines():
+            key,sep,value=line.partition('=')
+            if sep and key.strip() in ('HOST','PORT'):values[key.strip()]=value.strip()
+    except OSError:
+        pass
+    host=values.get('HOST') or '127.0.0.1'
+    if host in ('0.0.0.0','::','[::]'):host='127.0.0.1'
+    if ':' in host and not host.startswith('['):host=f'[{host}]'
+    return f"http://{host}:{values.get('PORT') or '8000'}"
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=['prepare','activate','recover'])
@@ -282,8 +297,10 @@ def main():
     p.add_argument('--release')
     p.add_argument('--service',default='hyprchat')
     p.add_argument('--acceptance',nargs='+',help='Executable and arguments; failure triggers rollback')
-    p.add_argument('--url',default=os.environ.get('HYPRCHAT_URL','http://127.0.0.1:8000'),help='Service URL for readiness checks (HYPRCHAT_URL)')
+    p.add_argument('--url',default=os.environ.get('HYPRCHAT_URL'),
+                   help='Service URL for readiness checks (default: HYPRCHAT_URL, else HOST and PORT from <root>/.env)')
     a=p.parse_args()
+    a.url=a.url or url_from_env(a.root)
     if a.action=='prepare':
         if not a.source:p.error('--source is required')
         print(prepare(a.root,a.source,a.service))

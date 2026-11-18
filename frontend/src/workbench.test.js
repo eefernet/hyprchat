@@ -48,3 +48,27 @@ test('a finalized message rebinds the same block under its saved id',()=>{
   rebindLivePreview('msg-10:/c2','<p>unrelated later message');
   assert.equal(workbenchState().html.key,'msg-9:/c2','a settled preview only follows identical code');
 });
+
+// ── 2026-11-16: documents, drawings and tables use the same pane ────────────────────────────────────
+test('a document preview opens, updates while the reply streams and follows its block to the saved message',async()=>{
+  const {openWorkbench,closeWorkbench,updateLivePreview,rebindLivePreview,workbenchState,resetWorkbench,DEBOUNCE_MS}=await import('./workbench.js');
+  resetWorkbench();
+  openWorkbench({kind:'doc',doc:{key:'live1:/c0',format:'markdown',code:'# A',title:'A',filename:'a.md',streaming:true}});
+  assert.equal(workbenchState().kind,'doc');assert.equal(workbenchState().tab,'Preview');assert.equal(workbenchState().html,null);
+  updateLivePreview('live1:/c0','# A\nmore',{streaming:true});
+  assert.equal(workbenchState().doc.code,'# A','a streaming update waits for the debounce');
+  await new Promise(resolve=>setTimeout(resolve,DEBOUNCE_MS+40));
+  assert.equal(workbenchState().doc.code,'# A\nmore');
+  assert.equal(workbenchState().doc.format,'markdown','fields the update does not carry are kept');
+  updateLivePreview('other:/c0','# B',{streaming:false});
+  assert.equal(workbenchState().doc.code,'# A\nmore','another block cannot write into the pane');
+  rebindLivePreview('msg42:/c0','# A\nmore');
+  assert.equal(workbenchState().doc.key,'msg42:/c0');assert.equal(workbenchState().doc.streaming,false);
+  // Opening a page replaces the document; closing clears both.
+  openWorkbench({kind:'html',html:{key:'k:/c1',code:'<html></html>',title:'P',streaming:false}});
+  assert.equal(workbenchState().doc,null);assert.equal(workbenchState().kind,'html');
+  closeWorkbench();
+  assert.equal(workbenchState().html,null);assert.equal(workbenchState().doc,null);
+  openWorkbench({kind:'spreadsheet'});
+  assert.equal(workbenchState().open,false,'an unknown kind opens nothing');
+});

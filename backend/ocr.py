@@ -39,8 +39,8 @@ def available() -> bool:
             _AVAILABLE = False
     if not _AVAILABLE and not _HINTED:
         _HINTED = True
-        print("[OCR] scanned-PDF OCR unavailable — pip install rapidocr-onnxruntime pypdfium2 "
-              "(--break-system-packages on the host)")
+        print("[OCR] scanned-PDF OCR unavailable — install the service's dependencies "
+              "(backend/requirements.lock.txt) into its own Python environment")
     return _AVAILABLE
 
 

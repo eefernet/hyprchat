@@ -720,8 +720,9 @@ async def _deliver(job, result, *, candidate=False):
         publication = hashlib.sha256(f"candidate:{job['id']}:{job['revision_id']}:{job['worker_operation']}".encode()).hexdigest()[:24]
         artifact_id = 'artifact-' + publication
         filename = f'candidate-{publication}-{filename}'
-    destination = Path(config.SANDBOX_OUTPUTS_DIR) / filename
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Same file name and address as before; the file now sits in its chat's folder (output_paths.py).
+    import output_paths
+    destination = Path(output_paths.place(job.get("conversation_id"), filename, keep_name=True).path)
     partial = destination.with_suffix(".part")
     digest = hashlib.sha256()
     try:

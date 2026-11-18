@@ -602,15 +602,18 @@ async def revise_artifact_ep(artifact_id: str, req: ArtifactReviseRequest):
     if not artifact:
         raise HTTPException(404, "Artifact not found")
     filepath, safe_name = artifact_path_for_row(artifact)
-    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
     filename = os.path.basename(req.filename or safe_name or artifact.get("filename") or f"{artifact_id}.txt")
     stem, ext = os.path.splitext(filename)
     if not ext:
         ext = ".txt"
     new_name = f"{stem}-revision-{uuid.uuid4().hex[:6]}{ext}"
-    dest = os.path.abspath(os.path.join(config.SANDBOX_OUTPUTS_DIR, new_name))
-    if not dest.startswith(os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep):
+    # Beside the file it revises: the chat's folder, or the library folder for a file with no chat.
+    import output_paths
+    try:
+        spot = output_paths.place(artifact.get("conversation_id") or output_paths.LIBRARY, new_name, keep_name=True)
+    except ValueError:
         raise HTTPException(400, "Invalid revision filename")
+    new_name, dest = spot.filename, spot.path
     if req.content is not None:
         with open(dest, "w", encoding="utf-8") as f:
             f.write(req.content)
@@ -706,14 +709,17 @@ async def bundle_artifacts_ep(req: ArtifactBundleRequest):
         if not filepath:
             raise HTTPException(404, f"Artifact file is missing: {artifact.get('filename') or artifact_id}")
         artifacts.append((artifact, filepath, safe_name or os.path.basename(filepath)))
-    os.makedirs(config.SANDBOX_OUTPUTS_DIR, exist_ok=True)
     raw_name = os.path.basename(req.filename or (req.title or f"artifact-bundle-{uuid.uuid4().hex[:6]}.zip"))
     if not raw_name.lower().endswith(".zip"):
         raw_name += ".zip"
     safe_bundle = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name)[:180] or f"artifact-bundle-{uuid.uuid4().hex[:6]}.zip"
-    dest = os.path.abspath(os.path.join(config.SANDBOX_OUTPUTS_DIR, safe_bundle))
-    if not dest.startswith(os.path.abspath(config.SANDBOX_OUTPUTS_DIR) + os.sep):
+    # The library folder, with its own address: a second bundle of the same name used to replace the first.
+    import output_paths
+    try:
+        bundle_spot = output_paths.place(output_paths.LIBRARY, safe_bundle)
+    except ValueError:
         raise HTTPException(400, "Invalid bundle filename")
+    dest = bundle_spot.path
     with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         used_names = set()
         for artifact, filepath, safe_name in artifacts:
@@ -736,7 +742,7 @@ async def bundle_artifacts_ep(req: ArtifactBundleRequest):
                     workspace_ids.append(ws_id)
     bundle = await db.add_artifact(
         filename=safe_bundle,
-        url=f"/api/downloads/{safe_bundle}",
+        url=bundle_spot.url,
         kind="archive",
         mime_type="application/zip",
         title=req.title or "Artifact bundle",

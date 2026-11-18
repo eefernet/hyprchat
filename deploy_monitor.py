@@ -5,6 +5,7 @@ Watches project files and deploys changes to remote servers.
 Saves server config after first setup so you never re-enter IPs.
 """
 
+import ast
 import hashlib
 import json
 import os
@@ -34,15 +35,21 @@ BG_B = "\033[44m"
 BG_C = "\033[46m"
 BG_M = "\033[45m"
 
-# ── Config file ──
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".deploy_config.json")
+# ── Paths ──
+# Every glob and file read is anchored on the script's own folder, so the
+# monitor behaves the same whatever directory it is started from. Watched
+# paths are stored as repo-relative strings ("backend/main.py").
+ROOT = Path(__file__).resolve().parent
+CONFIG_FILE = str(ROOT / ".deploy_config.json")
+
+
+def _abs(rel):
+    """Absolute local path of a repo-relative watched path."""
+    return str(ROOT / rel)
+
 
 # ── Remote paths ──
 REMOTE_BACKEND = "/opt/hyprchat/backend/"
-REMOTE_AGENTS = REMOTE_BACKEND + "agents/"
-REMOTE_DB = REMOTE_BACKEND + "db/"
-REMOTE_ROUTES = REMOTE_BACKEND + "routes/"
-REMOTE_TOOLING = REMOTE_BACKEND + "tooling/"
 REMOTE_FRONTEND = "/opt/hyprchat/frontend/dist/"
 REMOTE_HEPHAESTUS = "/srv/hephaestus/releases/"
 # The live HyprChat service runs from a staged release since 2026-10-20
@@ -50,322 +57,329 @@ REMOTE_HEPHAESTUS = "/srv/hephaestus/releases/"
 # unit drop-in zz-hyprchat-release.conf points WorkingDirectory/ExecStart at it).
 # Every REMOTE_* path above is written against the legacy root and is rebased
 # onto the active release root at deploy time (see _resolve_hyprchat_root).
-# Files copied to the legacy /opt/hyprchat/backend or /opt/hyprchat/frontend/dist
-# are never served while a release is active. /opt/hyprchat/data and
-# /opt/hyprchat/.env stay fixed (HYPRCHAT_DATA_DIR + EnvironmentFile).
+# /opt/hyprchat/data and /opt/hyprchat/.env stay fixed (HYPRCHAT_DATA_DIR +
+# EnvironmentFile).
 HYPRCHAT_ROOT = "/opt/hyprchat"
 HYPRCHAT_SERVICE = "hyprchat"
 _LIVE_ROOT = {"root": HYPRCHAT_ROOT, "release": False, "checked": False}
-DOCUMENT_WORKER_FILES = {"backend/document_worker.py", "backend/document_runtime.py", "backend/document-requirements.txt"}
-DOCUMENT_SHARED = {"backend/document_formats.py"}
 SEARXNG_PRIVACY_SCRIPT = "scripts/setup-searxng-privacy.sh"
+HEALTH_PATH = "/api/health/live"
+HEALTH_SECONDS = 30
 
-# Execution source is deployed only as a complete, tested Hephaestus release.
-WORKER_FILES = {str(p) for p in Path('backend').glob('coder_*.py') if p.stem not in {'coder_jobs','coder_presentation'}}
-WORKER_FILES.update(str(p) for p in Path('backend').glob('hephaestus_*.py'))
-WORKER_FILES.update({'backend/engine-runtime.lock.txt', 'backend/engine-requirements.lock.txt'})
-WORKER_SHARED = {'backend/context_policy.py'}
-
-# ── Watched files → (label, remote_dir, needs_restart) ──
-# needs_restart: whether deploying this file requires restarting hyprchat service
-WATCHED = {
-    **{path:("Document Worker", REMOTE_HEPHAESTUS, False) for path in DOCUMENT_WORKER_FILES},
-    **{path:("Coding Verification", REMOTE_BACKEND, True) for path in WORKER_SHARED},
-    "backend/context_policy.py": ("Context Policy", REMOTE_BACKEND, True),
-    "backend/coder_verification.py": ("Coding Verification", REMOTE_BACKEND, True),
-    "backend/coder_browser_schema.py": ("Browser Contract", REMOTE_BACKEND, True),
-    "backend/coder_failures.py": ("Coding Failures", REMOTE_BACKEND, True),
-    "backend/coding_search.py": ("Coding Search Context", REMOTE_BACKEND, True),
-    "backend/seed_kb/seed_coder_kb.py": ("Coder Docs Seeder", REMOTE_BACKEND + "seed_kb/", False),
-    "backend/seed_kb/coder_sources.py": ("Coder Docs Sources", REMOTE_BACKEND + "seed_kb/", False),
-    "backend/coder_jobs.py": ("Coding Controller", REMOTE_BACKEND, True),
-    "backend/coder_presentation.py": ("Coding Presentation", REMOTE_BACKEND, True),
-    "backend/coder_profiles.py": ("Execution Profiles", REMOTE_BACKEND, True),
-    "backend/coder_native_checks.py": ("Native Checks", REMOTE_BACKEND, True),
-    "backend/db/coder_jobs.py": ("Coding Job Store", REMOTE_DB, True),
-    "backend/db/coder_promotion.py": ("Coding Project Versions", REMOTE_DB, True),
-    "backend/db/coder_download_names.py": ("Coding Download Names", REMOTE_DB, True),
-    "backend/routes/coder_workflows.py": ("Coding Job API", REMOTE_ROUTES, True),
-    "backend/routes/coder_promotion.py": ("Coding Versions API", REMOTE_ROUTES, True),
-    **{path:("Coding Worker", REMOTE_HEPHAESTUS, False) for path in WORKER_FILES},
-    "frontend/src/components/DaedalusJobCard.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/DaedalusSettings.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/DaedalusRequestOptions.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/ComposerToolsMenu.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/composerTools.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/researchState.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/daedalusJobs.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/daedalusJobStore.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/daedalusJob.css": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/daedalusSettings.css": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/DaedalusPlanPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/daedalusPlan.css": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/NewVersionBar.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/daedalusProgress.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/versionCheck.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "backend/main.py":              ("Main Server",      REMOTE_BACKEND,            True),
-    "backend/config.py":            ("Config",           REMOTE_BACKEND,            True),
-    **{path:('Reliability services',REMOTE_BACKEND,True) for path in (
-        'backend/job_registry.py','backend/task_queue.py','backend/notification_delivery.py',
-        'backend/council_runtime.py','backend/indexing_jobs.py',
-        'backend/calendar_proposals.py','backend/calendar_resources.py','backend/library_search.py',
-        'backend/context_inspector.py','backend/research_checkpoints.py','backend/document_revisions.py',
-        'backend/mcp_runtime.py','backend/mcp_stdio_guard.py','backend/connector_http.py','backend/operations.py')},
-    'backend/routes/jobs.py': ('Jobs API',REMOTE_ROUTES,True),
-    "backend/database.py":          ("Database",         REMOTE_BACKEND,            True),
-    "backend/tools.py":             ("Tools",            REMOTE_BACKEND,            True),
-    "backend/artifact_files.py":    ("Artifact Files",   REMOTE_BACKEND,            True),
-    "backend/artifact_service.py":  ("Artifact Service", REMOTE_BACKEND,            True),
-    "backend/document_validation.py": ("Document Validation", REMOTE_BACKEND, True),
-    "backend/documents.py": ("Documents", REMOTE_BACKEND, True),
-    "backend/document_formats.py": ("Document Formats", REMOTE_BACKEND, True),
-    "backend/document_tools.py": ("Document Tools", REMOTE_BACKEND, True),
-    "backend/routes/documents.py": ("Document Routes", REMOTE_ROUTES, True),
-    "backend/research_config.py":   ("Research Config",  REMOTE_BACKEND,            True),
-    "backend/research_evidence.py": ("Research Evidence", REMOTE_BACKEND, True),
-    "backend/research_writer.py": ("Research Writer", REMOTE_BACKEND, True),
-    "backend/model_management.py":  ("Model Management", REMOTE_BACKEND,            True),
-    "backend/access_policy.py": ("Access Policy", REMOTE_BACKEND, True),
-    "backend/route_policy.json": ("Route Policy", REMOTE_BACKEND, True),
-    "backend/durable_storage.py": ("Durable Storage", REMOTE_BACKEND, True),
-    "backend/image_job_store.py": ("Image Job Store", REMOTE_BACKEND, True),
-    "backend/backup.py":            ("Backup Service",   REMOTE_BACKEND,            True),
-    "backend/db/__init__.py":       ("Database Package", REMOTE_DB,                 True),
-    "backend/db/schema.py":         ("Database Schema",  REMOTE_DB,                 True),
-    "backend/db/artifacts.py":      ("Artifact DB",      REMOTE_DB,                 True),
-    "backend/routes/__init__.py":   ("Routes Package",   REMOTE_ROUTES,             True),
-    "backend/routes/context.py":    ("Route Context",    REMOTE_ROUTES,             True),
-    "backend/routes/health.py":     ("Health Routes",    REMOTE_ROUTES,             True),
-    "backend/routes/settings.py":   ("Settings Routes",  REMOTE_ROUTES,             True),
-    "backend/routes/users.py":      ("User Routes",      REMOTE_ROUTES,             True),
-    "backend/routes/audio.py":      ("Audio Routes",     REMOTE_ROUTES,             True),
-    "backend/routes/artifacts.py":  ("Artifact Routes",  REMOTE_ROUTES,             True),
-    "backend/routes/catalog.py":    ("Catalog Routes",   REMOTE_ROUTES,             True),
-    "backend/routes/downloads.py":  ("Download Routes",  REMOTE_ROUTES,             True),
-    "backend/routes/model_providers.py": ("Provider Routes", REMOTE_ROUTES,          True),
-    "backend/routes/hf.py":         ("HF Routes",        REMOTE_ROUTES,             True),
-    "backend/routes/tools_connectors.py": ("Tools/Connector Routes", REMOTE_ROUTES,  True),
-    "backend/routes/model_configs.py": ("Model Config Routes", REMOTE_ROUTES,        True),
-    "backend/routes/ollama_models.py": ("Ollama Model Routes", REMOTE_ROUTES,        True),
-    "backend/routes/backup.py":     ("Backup Routes",    REMOTE_ROUTES,             True),
-    "backend/routes/scheduler.py":  ("Scheduler Routes", REMOTE_ROUTES,             True),
-    "backend/routes/notifications.py": ("Notification Routes", REMOTE_ROUTES,       True),
-    "backend/routes/assistant.py":  ("Assistant Routes", REMOTE_ROUTES,             True),
-    "backend/routes/notes.py":      ("Notes Routes",     REMOTE_ROUTES,             True),
-    "backend/routes/calendar.py":   ("Calendar Routes",  REMOTE_ROUTES,             True),
-    "backend/routes/email.py":      ("Email Routes",     REMOTE_ROUTES,             True),
-    "backend/routes/chat_files.py": ("Chat File Routes", REMOTE_ROUTES,             True),
-    "backend/tooling/__init__.py":  ("Tooling Package",  REMOTE_TOOLING,            True),
-    "backend/tooling/parser.py":    ("Tool Parser",      REMOTE_TOOLING,            True),
-    "backend/tooling/codebox_tools.py": ("Codebox Tools", REMOTE_TOOLING,            True),
-    "backend/connectors.py":        ("Connectors",       REMOTE_BACKEND,            True),
-    "backend/model_providers.py":   ("Model Providers",  REMOTE_BACKEND,            True),
-    "backend/provider_tools.py":    ("Provider Tools",   REMOTE_BACKEND,            True),
-    "backend/cancel_registry.py":   ("Cancel Registry",  REMOTE_BACKEND,            True),
-    "backend/rag.py":               ("RAG Pipeline",     REMOTE_BACKEND,            True),
-    "backend/reranker.py":          ("RAG Reranker",     REMOTE_BACKEND,            True),
-    "backend/ocr.py":               ("PDF OCR",          REMOTE_BACKEND,            True),
-    "backend/canvas_edit.py":       ("Canvas AI Edit",   REMOTE_BACKEND,            True),
-    "backend/scheduler.py":         ("Task Scheduler",   REMOTE_BACKEND,            True),
-    "backend/timeutil.py":          ("Time Utils",       REMOTE_BACKEND,            True),
-    "backend/notifications.py":     ("Notifications",    REMOTE_BACKEND,            True),
-    "backend/pim.py":               ("PIM (Notes/Calendar)", REMOTE_BACKEND,        True),
-    "backend/caldav_sync.py":       ("CalDAV Sync",      REMOTE_BACKEND,            True),
-    "backend/email_client.py":      ("Email Client",     REMOTE_BACKEND,            True),
-    "backend/email_triage.py":      ("Email Triage",     REMOTE_BACKEND,            True),
-    "backend/email_render.py":      ("Email HTML Render", REMOTE_BACKEND,           True),
-    "backend/weather.py":           ("Weather",          REMOTE_BACKEND,            True),
-    "backend/quiet_hours.py":       ("Quiet Hours",      REMOTE_BACKEND,            True),
-    "backend/comfyui.py":           ("ComfyUI Client",   REMOTE_BACKEND,            True),
-    "backend/image_prompt_enhancer.py": ("Image Prompt Enhancer", REMOTE_BACKEND,   True),
-    "backend/persona_images.py":    ("Persona Images",   REMOTE_BACKEND,            True),
-    "backend/voice.py":             ("Voice",            REMOTE_BACKEND,            True),
-    "backend/research.py":          ("Research",         REMOTE_BACKEND,            True),
-    "backend/leak_sources.py":      ("Leak Sources",     REMOTE_BACKEND,            True),
-    "backend/quick_search.py":      ("Quick Search",     REMOTE_BACKEND,            True),
-    "backend/search_runtime.py":    ("Search Runtime",   REMOTE_BACKEND,            True),
-    "backend/search_agent.py":      ("Search Agent",     REMOTE_BACKEND,            True),
-    "backend/storage_diagnostics.py": ("Storage Diagnostics", REMOTE_BACKEND,        True),
-    "backend/events.py":            ("Events",           REMOTE_BACKEND,            True),
-    "backend/council.py":           ("Council",          REMOTE_BACKEND,            True),
-    "backend/hf.py":                ("HuggingFace",      REMOTE_BACKEND,            True),
-    "backend/hf_compat.py":         ("HF Compat",        REMOTE_BACKEND,            True),
-    "backend/hyprfit.py":           ("HyprFit",          REMOTE_BACKEND,            True),
-    "backend/agents/chat.py":           ("Chat Agent",         REMOTE_AGENTS, True),
-    "backend/agents/personas.py":       ("Personas",           REMOTE_AGENTS, True),
-    "backend/agents/language_adapters.py":("Language Adapters", REMOTE_AGENTS, True),
-    "backend/agents/assistant.py":      ("Assistant Agent",    REMOTE_AGENTS, True),
-    "backend/agents/__init__.py":       ("Agents Init",        REMOTE_AGENTS, True),
-    "backend/requirements.lock.txt": ("Backend Lock", REMOTE_BACKEND, True),
-    "backend/requirements.txt":     ("Requirements",     REMOTE_BACKEND,            True),
-    "backend/hyprchat.service":     ("Systemd Service",  "/etc/systemd/system/",    True),
-    # Frontend has a Vite build step now. Watch the SOURCE — a change here runs
-    # `npm run build` locally and ships the whole dist/ (see FRONTEND_SRC_FILES
-    # and _build_and_deploy_frontend). The built dist/index.html is no longer
-    # hand-edited or watched directly.
-    "frontend/src/main.jsx":        ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/session.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/theme.js":        ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/modelHelpers.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/settingsSync.js": ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/daedalusTimeline.js": ("Frontend (build)", REMOTE_FRONTEND,       False),
-    "frontend/src/ModelPicker.jsx": ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/canvasEditorSetup.js": ("Frontend (build)", REMOTE_FRONTEND,      False),
-    "frontend/src/components/ArtifactCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/BackgroundCanvas.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/ChatHero.jsx": ("Frontend (build)", REMOTE_FRONTEND,   False),
-    "frontend/src/components/EmptyState.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/NavLayoutEditor.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/PanelChart.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/PanelHeader.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/Skeleton.jsx": ("Frontend (build)", REMOTE_FRONTEND,   False),
-    "frontend/src/components/artifactComponents.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/hyprChatWidgets.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/icons.jsx": ("Frontend (build)", REMOTE_FRONTEND,      False),
-    "frontend/src/components/identityColor.js": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/components/markdownBlocks.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/api.js":          ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/datetime.js":     ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/navItems.js":     ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/useIsMobile.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/panels/AnalyticsPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/panels/PromptLibraryPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/panels/TasksPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,     False),
-    "frontend/src/panels/AssistantPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/src/panels/NotesPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,     False),
-    "frontend/src/panels/CalendarPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,  False),
-    "frontend/src/panels/EmailPanel.jsx": ("Frontend (build)", REMOTE_FRONTEND,     False),
-    "frontend/src/vendor.js":       ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/prism-setup.js":  ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/src/prism-languages.js": ("Frontend (build)", REMOTE_FRONTEND,        False),
-    "frontend/src/syntaxHighlight.js": ("Frontend (build)", REMOTE_FRONTEND,        False),
-    "frontend/src/codeBlocks.css":  ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/index.html":          ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/vite.config.js":      ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/package.json":        ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/package-lock.json":   ("Frontend (build)", REMOTE_FRONTEND,           False),
-    # PWA static files (frontend/public/ → copied verbatim into dist/ by Vite)
-    "frontend/public/manifest.json": ("Frontend (build)", REMOTE_FRONTEND,          False),
-    "frontend/public/sw.js":        ("Frontend (build)", REMOTE_FRONTEND,           False),
-    "frontend/public/icons/icon-192.png": ("Frontend (build)", REMOTE_FRONTEND,     False),
-    "frontend/public/icons/icon-512.png": ("Frontend (build)", REMOTE_FRONTEND,     False),
-    "frontend/public/icons/icon-512-maskable.png": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "frontend/public/icons/apple-touch-icon.png": ("Frontend (build)", REMOTE_FRONTEND, False),
-    "CHANGELOG.md":                 ("Changelog",        "/opt/hyprchat/",          False),
-    "README.md":                    ("README",           "/opt/hyprchat/",          False),
+# ── Watch rules ──
+# backend/<these>/*.py are hot-patched and restart the service; seed_kb/ does not.
+BACKEND_RESTART_DIRS = ("agents", "routes", "db", "tooling")
+BACKEND_NO_RESTART_DIRS = ("seed_kb",)
+# The HyprChat backend's own dependency files: a change needs a staged release
+# (scripts/staged_release.py prepare/activate builds a new venv).
+DEPENDENCY_FILES = ("backend/requirements.txt", "backend/requirements.lock.txt")
+# Frontend build inputs outside frontend/src and frontend/public.
+FRONTEND_CONFIG_FILES = (
+    "frontend/index.html", "frontend/vite.config.js",
+    "frontend/package.json", "frontend/package-lock.json",
+)
+DOCS_FILES = ("CHANGELOG.md", "README.md")
+FRONTEND_LABEL = "Frontend (build)"
+# Explicit labels; every other file gets a label from its folder.
+LABELS = {
+    "backend/main.py": "Main Server",
+    "backend/config.py": "Config",
+    "backend/database.py": "Database",
+    "backend/tools.py": "Tools",
+    "backend/route_policy.json": "Route Policy",
+    "backend/requirements.txt": "Requirements",
+    "backend/requirements.lock.txt": "Backend Lock",
+    "backend/seed_kb/seed_coder_kb.py": "Coder Docs Seeder",
+    "backend/seed_kb/coder_sources.py": "Coder Docs Sources",
+    "CHANGELOG.md": "Changelog",
+    "README.md": "README",
 }
-
-# Frontend source files: a change to any of these triggers ONE `npm run build`
-# + full dist/ sync (not a per-file scp). Keep in sync with the WATCHED entries
-# labelled "Frontend (build)".
-FRONTEND_SRC_FILES = {
-    "frontend/src/serviceLabels.js",
-    "frontend/src/components/HephaestusStorage.jsx",
-    # UI motion/surface refresh (2026-10): new modules plus files that were missing.
-    "frontend/src/ui.css", "frontend/src/surfaces.css", "frontend/src/motion.css",
-    "frontend/src/elevation.js", "frontend/src/usePresence.js", "frontend/src/useNewKeys.js",
-    "frontend/src/chatActivityVisual.js", "frontend/src/chatActivity.js",
-    "frontend/src/components/chatActivity.css", "frontend/src/components/Switch.jsx",
-    "frontend/src/useFocusScope.js", "frontend/src/effort.js", "frontend/src/taskForm.js",
-    "frontend/src/workspaceNavigation.js",
-    "frontend/src/components/ActionMenu.jsx", "frontend/src/components/SelectionControl.jsx",
-    "frontend/src/components/ResponsiveDrawer.jsx", "frontend/src/components/workspaceComponents.jsx",
-    'frontend/src/panels/JobsPanel.jsx',
-    "frontend/src/components/DocumentActivity.jsx", "frontend/src/components/DocumentPreviewPanel.jsx", "frontend/src/daedalusTimeline.js", "frontend/src/documentFiles.js", "frontend/src/components/OfficePreview.jsx", "frontend/src/components/DocumentSettings.jsx",
-    "frontend/src/daedalusJobStore.js", "frontend/src/components/daedalusJob.css",
-    "frontend/src/components/daedalusSettings.css",
-    "frontend/src/components/DaedalusPlanPanel.jsx", "frontend/src/components/daedalusPlan.css",
-    "frontend/src/components/NewVersionBar.jsx", "frontend/src/daedalusProgress.js", "frontend/src/versionCheck.js",
-    "frontend/src/components/DaedalusRequestOptions.jsx",
-    "frontend/src/components/ComposerToolsMenu.jsx", "frontend/src/composerTools.js",
-    "frontend/src/components/DaedalusJobCard.jsx", "frontend/src/components/DaedalusSettings.jsx", "frontend/src/daedalusJobs.js",
-    "frontend/src/main.jsx",
-    "frontend/src/researchState.js",
-    "frontend/src/session.js",
-    "frontend/src/theme.js",
-    "frontend/src/modelHelpers.js",
-    "frontend/src/settingsSync.js",
-    "frontend/src/daedalusTimeline.js",
-    "frontend/src/ModelPicker.jsx",
-    "frontend/src/canvasEditorSetup.js",
-    "frontend/src/components/ArtifactCanvas.jsx",
-    "frontend/src/components/PanelBoundary.jsx",
-    "frontend/src/components/OperationsSummary.jsx",
-    "frontend/src/components/ResearchRecovery.jsx",
-    "frontend/src/components/DocumentRevisionReview.jsx",
-    "frontend/src/components/ContextInspector.jsx",
-    "frontend/src/panels/LibrarySearchPanel.jsx",
-    "frontend/src/components/BackgroundCanvas.jsx",
-    "frontend/src/components/ChatHero.jsx",
-    "frontend/src/components/CodeCard.jsx",
-    "frontend/src/components/EmptyState.jsx",
-    "frontend/src/components/NavLayoutEditor.jsx",
-    "frontend/src/components/PanelChart.jsx",
-    "frontend/src/components/PanelHeader.jsx",
-    "frontend/src/components/Skeleton.jsx",
-    "frontend/src/components/artifactComponents.jsx",
-    "frontend/src/components/hyprChatWidgets.jsx",
-    "frontend/src/components/icons.jsx",
-    "frontend/src/components/identityColor.js",
-    "frontend/src/components/markdownBlocks.jsx",
-    "frontend/src/api.js",
-    "frontend/src/datetime.js",
-    "frontend/src/navItems.js",
-    # Workspaces readability / nav-rail refresh (2026-10): JSX-free registries
-    # and the shared workspace row/pager/spinner primitives.
-    "frontend/src/navLayout.js",
-    "frontend/src/workspaceLabels.js",
-    "frontend/src/convGroups.js",
-    "frontend/src/documentTitle.js",
-    "frontend/src/hfCompat.js",
-    "frontend/src/components/workspaceRows.jsx",
-    "frontend/src/components/Pager.jsx",
-    "frontend/src/components/Spinner.jsx",
-    "frontend/src/components/StarterChips.jsx",
-    "frontend/src/components/WaitingQuote.jsx",
-    "frontend/src/components/ShortcutSheet.jsx",
-    "frontend/src/components/workspace.css",
-    "frontend/src/useIsMobile.js",
-    "frontend/src/panels/AnalyticsPanel.jsx",
-    "frontend/src/panels/PromptLibraryPanel.jsx",
-    "frontend/src/panels/TasksPanel.jsx",
-    "frontend/src/panels/AssistantPanel.jsx",
-    "frontend/src/panels/NotesPanel.jsx",
-    "frontend/src/panels/JobsPanel.jsx",
-    "frontend/src/panels/CalendarPanel.jsx",
-    "frontend/src/panels/EmailPanel.jsx",
-    "frontend/src/vendor.js",
-    "frontend/src/prism-setup.js",
-    "frontend/src/prism-languages.js",
-    "frontend/src/syntaxHighlight.js",
-    "frontend/src/codeBlocks.css",
-    "frontend/index.html",
-    "frontend/vite.config.js",
-    "frontend/package.json",
-    "frontend/package-lock.json",
-    "frontend/public/manifest.json",
-    "frontend/public/sw.js",
-    "frontend/public/icons/icon-192.png",
-    "frontend/public/icons/icon-512.png",
-    "frontend/public/icons/icon-512-maskable.png",
-    "frontend/public/icons/apple-touch-icon.png",
+FOLDER_LABELS = {
+    "agents": "Agents", "routes": "Routes", "db": "Database",
+    "tooling": "Tooling", "seed_kb": "Coder Docs",
 }
+VM_LABEL = "Hephaestus VM"
+RELEASE_LABEL = "Needs release"
 
-WATCHED.update({path: ("Frontend (build)", REMOTE_FRONTEND, False) for path in FRONTEND_SRC_FILES})
+
+def _rel_files(pattern):
+    """Repo-relative paths of the files matching a glob under ROOT."""
+    out = set()
+    for p in ROOT.glob(pattern):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        out.add(p.relative_to(ROOT).as_posix())
+    return out
+
+
+def _is_test_or_fixture(rel):
+    name = rel.rsplit("/", 1)[-1]
+    parts = rel.split("/")
+    return (".test." in name or ".spec." in name or ".fixtures." in name
+            or name.endswith(".fixtures.json")
+            or any(p in ("__tests__", "__fixtures__", "fixtures", "tests") for p in parts[:-1]))
+
+
+def frontend_files():
+    """Every frontend build input: src/**, public/** (no tests/fixtures) + config."""
+    files = set()
+    for base in ("frontend/src", "frontend/public"):
+        files |= {p for p in _rel_files(base + "/**/*") if not _is_test_or_fixture(p)}
+    files |= {p for p in FRONTEND_CONFIG_FILES if (ROOT / p).is_file()}
+    return files
+
+
+def worker_files():
+    """Execution source the Hephaestus VM receives only as a tested immutable release."""
+    files = {p for p in _rel_files("backend/coder_*.py")
+             if Path(p).stem not in {"coder_jobs", "coder_presentation"}}
+    files |= _rel_files("backend/hephaestus_*.py")
+    files |= _rel_files("backend/engine-*.txt")
+    return files
+
+
+def document_worker_files():
+    return ({p for p in ("backend/document_worker.py", "backend/document_runtime.py") if (ROOT / p).is_file()}
+            | _rel_files("backend/document-requirements*.txt"))
+
+
+WORKER_SHARED = {"backend/context_policy.py"}
+DOCUMENT_SHARED = {"backend/document_formats.py"}
+# Filled by refresh_watch(); module-level so callers and tests can read them.
+WORKER_FILES = set()
+DOCUMENT_WORKER_FILES = set()
+FRONTEND_SRC_FILES = set()
+WATCHED = {}
+
+
+def release_only_files():
+    """Files the monitor never hot-patches (they ship in a release)."""
+    return WORKER_FILES | WORKER_SHARED | DOCUMENT_WORKER_FILES | DOCUMENT_SHARED
+
+
+def backend_files():
+    """(path, remote_dir, restart) for every runtime backend file."""
+    out = {}
+    for p in _rel_files("backend/*.py") | _rel_files("backend/*.json"):
+        out[p] = (REMOTE_BACKEND, True)
+    for sub in BACKEND_RESTART_DIRS:
+        for p in _rel_files(f"backend/{sub}/*.py"):
+            out[p] = (f"{REMOTE_BACKEND}{sub}/", True)
+    for sub in BACKEND_NO_RESTART_DIRS:
+        for p in _rel_files(f"backend/{sub}/*.py"):
+            out[p] = (f"{REMOTE_BACKEND}{sub}/", False)
+    for p in DEPENDENCY_FILES:
+        if (ROOT / p).is_file():
+            out[p] = (REMOTE_BACKEND, True)
+    return out
+
+
+# ── Which release-only files the HyprChat backend itself imports ──
+# A static trace from backend/main.py over every import statement (also the
+# ones inside functions, and constant importlib.import_module/__import__
+# calls). Cached per file by mtime, so re-tracing on every scan is cheap.
+_IMPORT_CACHE = {}
+
+
+def _module_file(dotted):
+    """backend/<dotted>.py or backend/<dotted>/__init__.py, if it exists."""
+    if not dotted:
+        return None
+    base = ROOT / "backend" / Path(*dotted.split("."))
+    for cand in (base.with_suffix(".py"), base / "__init__.py"):
+        if cand.is_file():
+            return cand.relative_to(ROOT).as_posix()
+    return None
+
+
+def _file_imports(rel):
+    """Backend files one file imports (resolved, repo-relative)."""
+    path = ROOT / rel
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return set()
+    key = str(path)
+    hit = _IMPORT_CACHE.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, ValueError):
+        _IMPORT_CACHE[key] = (mtime, set())
+        return set()
+    # Package that relative imports resolve against.
+    pkg = Path(rel).parent.relative_to("backend").parts
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                parts = a.name.split(".")
+                names.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                anchor = pkg[:len(pkg) - (node.level - 1)] if node.level > 1 else pkg
+                base = ".".join([*anchor, *(node.module.split(".") if node.module else [])])
+            else:
+                base = node.module or ""
+            if base:
+                parts = base.split(".")
+                names.update(".".join(parts[:i]) for i in range(1, len(parts) + 1))
+            for a in node.names:
+                if a.name != "*":
+                    names.add(f"{base}.{a.name}" if base else a.name)
+        elif isinstance(node, ast.Call) and node.args:
+            fn = node.func
+            fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            arg = node.args[0]
+            if fname in ("import_module", "__import__") and isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                names.add(arg.value)
+    files = {f for f in (_module_file(n) for n in names) if f and f != rel}
+    _IMPORT_CACHE[key] = (mtime, files)
+    return files
+
+
+def backend_import_closure(entry="backend/main.py"):
+    """Every backend file reachable by import from the service entrypoint."""
+    seen, todo = set(), [entry]
+    while todo:
+        rel = todo.pop()
+        if rel in seen or not (ROOT / rel).is_file():
+            continue
+        seen.add(rel)
+        todo.extend(_file_imports(rel) - seen)
+    return seen
+
+
+def release_split():
+    """(vm_only, backend_imported) partition of the release-only files.
+
+    vm_only: the HyprChat backend never imports them; they live on the
+    Hephaestus VM only, so a batch just leaves them out.
+    backend_imported: the backend imports them too, so a change to one must
+    reach the HyprChat host in the same step as the code that uses it, which
+    only a staged release does: the batch's backend part is held.
+    """
+    rel_only = release_only_files()
+    used = backend_import_closure() & rel_only
+    return rel_only - used, used
+
+
+def _label(rel, rel_vm, rel_backend):
+    if rel in LABELS:
+        return LABELS[rel]
+    if rel in rel_vm:
+        return VM_LABEL
+    if rel in rel_backend:
+        return RELEASE_LABEL
+    if rel.startswith("frontend/"):
+        return FRONTEND_LABEL
+    parts = rel.split("/")
+    if parts[0] == "backend" and len(parts) == 3:
+        return FOLDER_LABELS.get(parts[1], parts[1].title())
+    if parts[0] == "backend":
+        return "Backend"
+    return rel
+
+
+def watch_list():
+    """Fresh {path: (label, remote_dir, needs_restart)} from the current tree."""
+    vm_only, used = release_split()
+    out = {}
+    for p, (remote, restart) in backend_files().items():
+        if p in vm_only:
+            remote, restart = REMOTE_HEPHAESTUS, False
+        out[p] = (_label(p, vm_only, used), remote, restart)
+    for p in vm_only:  # non-.py VM files (engine/document requirement locks)
+        out.setdefault(p, (VM_LABEL, REMOTE_HEPHAESTUS, False))
+    for p in FRONTEND_SRC_FILES:
+        out[p] = (FRONTEND_LABEL, REMOTE_FRONTEND, False)
+    for p in DOCS_FILES:
+        if (ROOT / p).is_file():
+            out[p] = (_label(p, vm_only, used), HYPRCHAT_ROOT + "/", False)
+    return dict(sorted(out.items()))
+
+
+def refresh_watch():
+    """Re-glob the tree. Updates the module-level sets/dict in place."""
+    new_worker = worker_files()
+    new_doc = document_worker_files()
+    new_fe = frontend_files()
+    WORKER_FILES.clear(); WORKER_FILES.update(new_worker)
+    DOCUMENT_WORKER_FILES.clear(); DOCUMENT_WORKER_FILES.update(new_doc)
+    FRONTEND_SRC_FILES.clear(); FRONTEND_SRC_FILES.update(new_fe)
+    fresh = watch_list()
+    WATCHED.clear(); WATCHED.update(fresh)
+    return WATCHED
+
+
+def is_dependency(rel):
+    return rel in DEPENDENCY_FILES
+
+
+def classify_batch(paths, holding=False):
+    """Split a batch of changed paths.
+
+    Returns {"deploy", "vm_only", "hold", "blockers"} (lists, input order):
+    - vm_only: Hephaestus-only files, left out (ship with the VM release);
+    - blockers: release-only files the backend imports + dependency files;
+    - hold: when there is a blocker (or an earlier hold is still open,
+      `holding`), the blockers and every other backend/ file of the batch;
+    - deploy: the rest (frontend, docs, and backend when nothing blocks).
+    """
+    vm_only, used = release_split()
+    out = {"deploy": [], "vm_only": [], "hold": [], "blockers": []}
+    blockers = [p for p in paths if p in used or is_dependency(p)]
+    hold_backend = bool(blockers) or holding
+    for p in paths:
+        if p in vm_only:
+            out["vm_only"].append(p)
+        elif p in blockers or (hold_backend and p.startswith("backend/")):
+            out["hold"].append(p)
+        else:
+            out["deploy"].append(p)
+    out["blockers"] = blockers
+    return out
+
+
+# Backend files waiting for a staged release: {path: digest at hold time}.
+# Not re-baselined, so they are still "changed" against what is live, but a
+# held file is not offered again until its content changes.
+HELD = {}
+
+
+def blocking_holds(held=None):
+    held = HELD if held is None else held
+    _vm, used = release_split()
+    return sorted(p for p in held if p in used or is_dependency(p))
+
+
+refresh_watch()
 
 CHECK_INTERVAL = 1
 
 
 def file_digest(path):
-    """SHA-256 of file contents; None if unreadable."""
+    """SHA-256 of a watched file's contents (repo-relative or absolute); None if unreadable."""
     try:
         h = hashlib.sha256()
-        with open(path, "rb") as f:
+        with open(_abs(path), "rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 h.update(chunk)
         return h.hexdigest()
     except OSError:
         return None
+
+
+def _exists(rel):
+    return os.path.exists(_abs(rel))
+
+
+def _mtime(rel):
+    try:
+        return os.path.getmtime(_abs(rel))
+    except OSError:
+        return 0
 
 # ── Terminal helpers ──
 
@@ -647,35 +661,6 @@ def _server_configured(server):
     return isinstance(server, dict) and bool(server.get("ip"))
 
 
-def _default_env_text(codebox_ip, searxng_ip=""):
-    """Minimal .env for a fresh HyprChat host. Existing .env files are kept."""
-    searxng_url = f"http://{searxng_ip}:8888" if searxng_ip else "http://127.0.0.1:8888"
-    return "\n".join([
-        "HOST=0.0.0.0",
-        "PORT=8000",
-        "DEBUG=false",
-        f"CODEBOX_URL=http://{codebox_ip}:8585",
-        f"DAEDALUS_ENGINE_URL=http://{codebox_ip}:8587",
-        f"SEARXNG_URL={searxng_url}",
-        "HYPRCHAT_OUTBOUND_PROXY=",
-        "COMFYUI_URL=",
-        "STT_URL=",
-        "TTS_URL=",
-        "TTS_VOICE=af_heart",
-        "DATABASE_PATH=/opt/hyprchat/data/hyprchat.db",
-        "UPLOAD_DIR=/opt/hyprchat/data/uploads",
-        "TOOLS_DIR=/opt/hyprchat/data/tools",
-        "KB_DIR=/opt/hyprchat/data/knowledge_bases",
-        "SANDBOX_DIR=/opt/hyprchat/data/sandbox",
-        "SETTINGS_PATH=/opt/hyprchat/data/settings.json",
-        "CONNECTOR_SECRETS_PATH=/opt/hyprchat/data/connector_secrets.json",
-        "QUICK_SEARCH_MODE=balanced",
-        "AIDER_ENABLED=true",
-        "AIDER_AUTO_TEST=true",
-        "",
-    ])
-
-
 def _resolve_hyprchat_root(hypr):
     """Return the directory the live hyprchat service runs from.
 
@@ -708,15 +693,49 @@ def _rebase(remote_dir, root):
 
 
 def _hyprchat_host_ready(hypr, root=HYPRCHAT_ROOT):
+    """An install the monitor may hot-patch: service user, tree, data, .env and
+    the venv interpreter the service runs (<root>/venv/bin/python). The monitor
+    never creates an install; scripts/deploy.sh does."""
     cmd = (
         "id -u hyprchat >/dev/null 2>&1 && "
         f"test -d {shlex.quote(root + '/backend')} && "
         f"test -d {shlex.quote(root + '/frontend/dist')} && "
         "test -d /opt/hyprchat/data && "
         "test -f /opt/hyprchat/.env && "
-        "python3 -m pip --version >/dev/null 2>&1"
+        f"test -x {shlex.quote(root + '/venv/bin/python')}"
     )
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=20)
+
+
+def _health_poll_cmd(seconds=None):
+    """Shell run on the HyprChat host: poll /api/health/live for `seconds`.
+
+    The address comes from /opt/hyprchat/.env (HOST/PORT, 0.0.0.0 → 127.0.0.1),
+    because the service may bind a single interface (e.g. a Tailscale IP)."""
+    seconds = HEALTH_SECONDS if seconds is None else int(seconds)
+    return (
+        "env=/opt/hyprchat/.env\n"
+        "val() { sed -n \"s/^$1=//p\" \"$env\" 2>/dev/null | tail -n 1 | sed 's/[[:space:]]#.*$//' | tr -d \"\\\"' \"; }\n"
+        "host=$(val HOST); port=$(val PORT)\n"
+        "case \"$host\" in ''|0.0.0.0|::) host=127.0.0.1;; esac\n"
+        "port=${port:-8000}\n"
+        f"url=\"http://$host:$port{HEALTH_PATH}\"\n"
+        f"end=$(( $(date +%s) + {seconds} ))\n"
+        "while [ \"$(date +%s)\" -lt \"$end\" ]; do\n"
+        "  if curl -fsS --max-time 3 \"$url\" >/dev/null 2>&1; then echo \"healthy $url\"; exit 0; fi\n"
+        "  sleep 1\n"
+        "done\n"
+        "echo \"no answer from $url after " + str(seconds) + " s\"\n"
+        "exit 1\n"
+    )
+
+
+def _wait_healthy(hypr, seconds=None):
+    """(ok, message) after polling the live endpoint on the host."""
+    seconds = HEALTH_SECONDS if seconds is None else seconds
+    ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
+                           _health_poll_cmd(seconds), timeout=seconds + 30, attempts=1)
+    return ok, (out or err or "").strip()
 
 
 def _hyprchat_data_permissions_cmd():
@@ -734,30 +753,6 @@ def _hyprchat_data_permissions_cmd():
 
 def _repair_hyprchat_data_permissions(hypr):
     return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], _hyprchat_data_permissions_cmd(), timeout=90)
-
-
-def _bootstrap_hyprchat_host(hypr, codebox_ip, searxng_ip=""):
-    env_text = shlex.quote(_default_env_text(codebox_ip, searxng_ip))
-    cmd = (
-        "set -u\n"
-        "if command -v apt-get >/dev/null 2>&1; then\n"
-        "  apt-get update -qq >/dev/null 2>&1 || true\n"
-        "  apt-get install -y -qq python3-pip python3-venv curl git sqlite3 >/dev/null 2>&1 || true\n"
-        "fi\n"
-        "if ! id -u hyprchat >/dev/null 2>&1; then\n"
-        "  useradd --system --home /opt/hyprchat --shell /usr/sbin/nologin hyprchat\n"
-        "fi\n"
-        "mkdir -p /opt/hyprchat/backend/agents /opt/hyprchat/frontend/dist "
-        "/opt/hyprchat/data/uploads/avatars /opt/hyprchat/data/tools "
-        "/opt/hyprchat/data/knowledge_bases /opt/hyprchat/data/chroma_db "
-        "/opt/hyprchat/data/comfy_workflows /opt/hyprchat/data/sandbox/outputs "
-        "/opt/hyprchat/data/sandbox/workspace /opt/hyprchat/data/sandbox/venv\n"
-        f"if [ ! -f /opt/hyprchat/.env ]; then printf %s {env_text} > /opt/hyprchat/.env; fi\n"
-        "chmod 640 /opt/hyprchat/.env 2>/dev/null || true\n"
-        "chown -R hyprchat:hyprchat /opt/hyprchat/data 2>/dev/null || chown -R hyprchat /opt/hyprchat/data\n"
-        "chmod -R u+rwX /opt/hyprchat/data 2>/dev/null || true\n"
-    )
-    return ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"], cmd, timeout=180)
 
 
 def _set_hyprchat_env(hypr, key, value):
@@ -788,12 +783,8 @@ def _restart_hyprchat(hypr):
     )
     if not ok:
         return False, out, err
-    time.sleep(3)
-    ok2, out2, err2 = ssh_cmd(
-        hypr["ip"], hypr["user"], hypr["pass"],
-        "systemctl is-active hyprchat 2>&1", timeout=20,
-    )
-    return ok2 and "active" in out2, out2, err2
+    healthy, msg = _wait_healthy(hypr)
+    return healthy, msg, ""
 
 
 def _run_first_time_searxng_setup(cfg):
@@ -804,7 +795,7 @@ def _run_first_time_searxng_setup(cfg):
         return
 
     hypr = cfg["hyprchat"]
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SEARXNG_PRIVACY_SCRIPT)
+    script_path = _abs(SEARXNG_PRIVACY_SCRIPT)
     if not os.path.exists(script_path):
         print(f"  {Y}!{RST} SearXNG privacy script missing: {SEARXNG_PRIVACY_SCRIPT}")
         return
@@ -872,8 +863,8 @@ def _run_first_time_searxng_setup(cfg):
 
 def _deploy_target(filepath, remote_dir, hypr, cb, root=HYPRCHAT_ROOT):
     """Resolve application hotfix paths; runtime files require a full release."""
-    if filepath in DOCUMENT_WORKER_FILES | DOCUMENT_SHARED | WORKER_FILES | WORKER_SHARED:
-        raise ValueError("Hephaestus runtime changes require a tested immutable release")
+    if filepath in release_only_files() or is_dependency(filepath):
+        raise ValueError(f"{filepath} ships only in a release, never as a hot patch")
     return hypr, _rebase(remote_dir, root)
 
 
@@ -902,7 +893,7 @@ def _build_and_deploy_frontend(target, root=HYPRCHAT_ROOT):
     are wiped first to avoid accumulation. The HyprChat host stays dumb — it just
     serves frontend/dist/ as static files; no Node is installed there.
     """
-    fe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+    fe = _abs("frontend")
     npm = shutil.which("npm")
     if not npm:
         return False, "npm not found on the dev machine — cannot build frontend"
@@ -959,60 +950,143 @@ def _cleanup_staged_tmp(entries):
             ssh_cmd(target["ip"], target["user"], target["pass"], rm_cmd, timeout=30)
 
 
-def deploy_changes(changed, cfg):
-    """Deploy changed files and restart service only if needed.
+PREV_SUFFIX = ".deploy-prev"
 
-    Backend files deploy in two phases: every file is staged to
-    `<final>.deploy-tmp` first, and only when the whole batch staged cleanly
-    does a per-host batched `mv -f` flip them live. A failed stage aborts the
-    batch (old files stay live, no restart, digests unrecorded so the next
-    scan retries everything). This replaces the old per-file scp-in-place,
-    where a mid-batch failure restarted the service on a half-updated tree.
+
+def _activate_cmd(entries):
+    """Keep the live copy as <final>.deploy-prev, then move the staged file in."""
+    steps = []
+    for e in entries:
+        final, tmp, prev = (shlex.quote(e["final"]), shlex.quote(e["tmp"]),
+                            shlex.quote(e["final"] + PREV_SUFFIX))
+        steps.append(f"{{ rm -f {prev}; if [ -e {final} ]; then cp -p {final} {prev}; fi; }} "
+                     f"&& mv -f {tmp} {final}")
+    return " && ".join(steps)
+
+
+def _restore_cmd(entries):
+    """Put each <final>.deploy-prev back; a file that was new is removed."""
+    steps = []
+    for e in entries:
+        final, prev, tmp = (shlex.quote(e["final"]), shlex.quote(e["final"] + PREV_SUFFIX),
+                            shlex.quote(e["tmp"]))
+        steps.append(f"if [ -e {prev} ]; then mv -f {prev} {final}; else rm -f {final}; fi; rm -f {tmp}")
+    return "; ".join(steps)
+
+
+def _by_host(entries):
+    out = {}
+    for e in entries:
+        out.setdefault(e["target"]["ip"], []).append(e)
+    return out.values()
+
+
+def _run_chunks(entries, make_cmd, timeout=60):
+    """Run make_cmd(chunk) per host in chunks of 40. Returns (ok, err)."""
+    for host_entries in _by_host(entries):
+        target = host_entries[0]["target"]
+        for i in range(0, len(host_entries), 40):
+            chunk = host_entries[i:i + 40]
+            ok, _out, err = ssh_cmd(target["ip"], target["user"], target["pass"],
+                                    make_cmd(chunk), timeout=timeout)
+            if not ok:
+                return False, err
+    return True, ""
+
+
+def _restore_previous(entries):
+    return _run_chunks(entries, _restore_cmd)
+
+
+def _discard_previous(entries):
+    return _run_chunks(entries, lambda chunk: "rm -f " + " ".join(
+        shlex.quote(e["final"] + PREV_SUFFIX) for e in chunk), timeout=30)
+
+
+def _restart_and_check(hypr):
+    """Restart the service and poll /api/health/live. Returns (ok, message)."""
+    ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
+                           "systemctl restart hyprchat 2>&1", timeout=150)
+    if not ok:
+        ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
+                "systemctl reset-failed hyprchat 2>/dev/null || true; systemctl start hyprchat 2>&1",
+                timeout=90)
+    healthy, msg = _wait_healthy(hypr)
+    if not ok and not healthy:
+        msg = f"restart failed: {(err or out)[:200]}; {msg}"
+    return healthy, msg
+
+
+def _print_split(plan):
+    """Explain the files of a batch that are not hot-patched."""
+    if plan["vm_only"]:
+        print(f"  {M}●{RST} Left out ({len(plan['vm_only'])}), Hephaestus VM only: "
+              f"{DIM}{', '.join(plan['vm_only'])}{RST}")
+        print(f"    {DIM}They ship with the Hephaestus release installer (docs/hephaestus.md).{RST}")
+    if plan["hold"]:
+        blockers = plan["blockers"] or blocking_holds()
+        print(f"  {Y}●{RST} Held ({len(plan['hold'])}), needs a staged release: "
+              f"{DIM}{', '.join(plan['hold'])}{RST}")
+        print(f"    {DIM}Blocked by {', '.join(blockers)}: the backend imports release-only files or "
+              f"its dependencies changed.{RST}")
+        print(f"    {DIM}Ship with scripts/staged_release.py prepare/activate, then press c. "
+              f"Frontend changes still deploy.{RST}")
+
+
+def deploy_changes(changed, cfg, plan=None):
+    """Deploy one batch of changed files; returns {path: digest actually sent}.
+
+    The batch is split first (classify_batch): Hephaestus-only files are left
+    out, and when a release-only file the backend imports or a dependency file
+    is in it, every backend file is held for a staged release; the rest
+    deploys. Backend files deploy in two phases: every file is staged to
+    `<final>.deploy-tmp`, and only when the whole batch staged cleanly does a
+    per-host batched `mv` flip them live, keeping each replaced file as
+    `<final>.deploy-prev`. After a restart /api/health/live is polled for
+    HEALTH_SECONDS; when it does not answer, the previous files are put back
+    and the service restarted again.
     """
     changed = list(changed)
-    dependency_changes = [path for path, _ in changed if path.endswith(("requirements.txt", "requirements.lock.txt"))]
-    if dependency_changes:
-        print("Dependency changes require scripts/staged_release.py prepare/activate; live pip installation is disabled.")
-        return {}
+    info_by_path = dict(changed)
+    if plan is None:
+        plan = classify_batch([p for p, _ in changed], holding=bool(blocking_holds()))
     hypr = cfg["hyprchat"]
-    sx = cfg.get("searxng") if _server_configured(cfg.get("searxng")) else None
-    needs_restart = False
-    needs_pip = False
-    results = []
+    cb = cfg.get("codebox") or {}
     pushed = {}  # filepath -> sha256 of the content actually sent
 
-    cb = cfg["codebox"]
-    if any(path in WORKER_FILES | WORKER_SHARED | DOCUMENT_WORKER_FILES | DOCUMENT_SHARED for path, _ in changed):
-        print("Hephaestus worker changes require a tested immutable runtime release; live worker file copies and pip installs are disabled.")
-        return {}
-    ensured_dirs = set()
+    print()
+    _print_split(plan)
+    todo = [(p, info_by_path[p]) for p in plan["deploy"] if p in info_by_path]
+    if not todo:
+        print()
+        print(f"  {DIM}Nothing in this batch can be hot-patched.{RST}")
+        input(f"\n  {DIM}Press Enter to continue...{RST}")
+        return pushed
 
     print()
-    print(f"  {Y}\u25b6{RST} Checking remote install prerequisites...")
+    print(f"  {Y}▶{RST} Checking the HyprChat install...")
     root = _resolve_hyprchat_root(hypr)
     if _LIVE_ROOT["release"]:
-        print(f"  {G}\u2713{RST} Live HyprChat release: {DIM}{root}{RST}")
+        print(f"  {G}✓{RST} Live HyprChat release: {DIM}{root}{RST}")
     else:
-        print(f"  {Y}!{RST} No staged release active; deploying to the legacy root {DIM}{root}{RST}")
-    hypr_ready, _out, hypr_err = _hyprchat_host_ready(hypr, root)
-    if not hypr_ready and _LIVE_ROOT["release"]:
-        # Never scaffold legacy dirs on a release host; the release tree is authoritative.
-        print(f"  {Y}!{RST} HyprChat release tree check failed: {(hypr_err or '')[:300]}")
-    elif not hypr_ready:
-        ok, out, err = _bootstrap_hyprchat_host(hypr, cb["ip"], sx["ip"] if sx else "")
-        if ok:
-            print(f"  {G}\u2713{RST} HyprChat host bootstrapped")
-        else:
-            print(f"  {Y}!{RST} HyprChat bootstrap warning: {(err or out or hypr_err)[:300]}")
-    else:
-        print(f"  {G}\u2713{RST} HyprChat host ready")
+        print(f"  {Y}!{RST} No staged release active; using the install at {DIM}{root}{RST}")
+    ready, _out, ready_err = _hyprchat_host_ready(hypr, root)
+    if not ready:
+        print(f"  {R}✗{RST} No working HyprChat install at {root} "
+              f"(service user, backend/, frontend/dist, data/, .env, venv/bin/python).")
+        if ready_err:
+            print(f"    {DIM}{ready_err[:300]}{RST}")
+        print(f"    {DIM}Install a server with scripts/deploy.sh; the monitor only updates an existing install.{RST}")
+        input(f"\n  {DIM}Press Enter to continue...{RST}")
+        return pushed
+    print(f"  {G}✓{RST} HyprChat install ready")
 
-    # Phase 1 — stage: copy every backend file to <final>.deploy-tmp. Nothing
-    # in the live tree changes until the whole batch has staged cleanly.
+    results = []       # (label, filepath, ok, err)
     frontend_built = False
     staged = []        # entries staged and awaiting activation
-    stage_failed = []  # (label, filepath, err, target)
-    for filepath, (label, remote_dir, restart_flag) in changed:
+    stage_failed = []  # (label, filepath, err)
+    ensured_dirs = set()
+    for filepath, (label, remote_dir, restart_flag) in todo:
         # Frontend source changes are handled by a single build + dist/ sync,
         # regardless of how many src files changed in this batch.
         if filepath in FRONTEND_SRC_FILES:
@@ -1021,255 +1095,316 @@ def deploy_changes(changed, cfg):
             frontend_built = True
             # Digest every changed src file BEFORE the build reads them, so all
             # batch members re-baseline (not just the one that triggered the build).
-            fe_digests = {fp2: file_digest(fp2) for fp2, _i in changed if fp2 in FRONTEND_SRC_FILES}
+            fe_digests = {fp2: file_digest(fp2) for fp2, _i in todo if fp2 in FRONTEND_SRC_FILES}
             ok, err = _build_and_deploy_frontend(hypr, root)
-            results.append(("Frontend (build)", filepath, ok, err, hypr))
+            results.append((FRONTEND_LABEL, f"{len(fe_digests)} frontend file(s)", ok, err))
             if ok:
-                for fp2, d2 in fe_digests.items():
-                    if d2 is not None:
-                        pushed[fp2] = d2
+                pushed.update({fp2: d2 for fp2, d2 in fe_digests.items() if d2 is not None})
             continue
 
         target, remote_dir = _deploy_target(filepath, remote_dir, hypr, cb, root)
-
         dir_key = (target["ip"], remote_dir)
         if dir_key not in ensured_dirs:
             dir_ok, dir_err = _ensure_remote_dir(target, remote_dir)
             ensured_dirs.add(dir_key)
             if not dir_ok:
-                stage_failed.append((label, filepath,
-                                     f"Could not create remote dir {remote_dir}: {dir_err}",
-                                     target))
+                stage_failed.append((label, filepath, f"Could not create remote dir {remote_dir}: {dir_err}"))
                 continue
 
         final = remote_dir.rstrip("/") + "/" + os.path.basename(filepath)
         tmp = final + ".deploy-tmp"
         digest = file_digest(filepath)
-        ok, err = scp(filepath, target["ip"], tmp, target["user"], target["pass"])
+        ok, err = scp(_abs(filepath), target["ip"], tmp, target["user"], target["pass"])
         if ok:
-            staged.append({
-                "filepath": filepath, "label": label, "target": target,
-                "tmp": tmp, "final": final, "digest": digest,
-                "restart_flag": restart_flag,
-            })
+            staged.append({"filepath": filepath, "label": label, "target": target,
+                           "tmp": tmp, "final": final, "digest": digest,
+                           "restart_flag": restart_flag})
         else:
-            stage_failed.append((label, filepath, err, target))
+            stage_failed.append((label, filepath, err))
 
+    activated = []
+    restart_msg = None
     if stage_failed:
         # Abort the whole backend batch: the live tree stays untouched,
-        # staged tmp files are removed, and no digests are recorded so
-        # every file retries on the next scan.
-        for label, filepath, err, target in stage_failed:
-            results.append((label, filepath, False, err, target))
-        for e in staged:
-            results.append((e["label"], e["filepath"], False,
-                            "staged ok but batch aborted — tmp removed, will retry",
-                            e["target"]))
+        # staged tmp files are removed, and no digests are recorded.
+        results += [(label, fp, False, err) for label, fp, err in stage_failed]
+        results += [(e["label"], e["filepath"], False, "staged ok but batch aborted, tmp removed")
+                    for e in staged]
         _cleanup_staged_tmp(staged)
-    else:
-        # Phase 2 — activate: flip staged files live with batched mv per host.
-        by_host = {}
-        for e in staged:
-            by_host.setdefault(e["target"]["ip"], []).append(e)
-        for host_entries in by_host.values():
-            target = host_entries[0]["target"]
-            for i in range(0, len(host_entries), 40):
-                chunk = host_entries[i:i + 40]
-                mv_cmd = " && ".join(
-                    f"mv -f {shlex.quote(e['tmp'])} {shlex.quote(e['final'])}"
-                    for e in chunk)
-                ok, _out, err = ssh_cmd(target["ip"], target["user"], target["pass"],
-                                        mv_cmd, timeout=60)
-                if ok:
-                    for e in chunk:
-                        results.append((e["label"], e["filepath"], True, "", e["target"]))
-                        if e["digest"] is not None:
-                            pushed[e["filepath"]] = e["digest"]
-                        if e["restart_flag"]:
-                            needs_restart = True
-                        if e["filepath"] == "backend/requirements.txt":
-                            needs_pip = True
-                else:
-                    for e in chunk:
-                        results.append((e["label"], e["filepath"], False,
-                                        f"activation failed: {err}", e["target"]))
-                    _cleanup_staged_tmp(chunk)
+    elif staged:
+        ok, err = _run_chunks(staged, _activate_cmd)
+        if not ok:
+            _restore_previous(staged)
+            results += [(e["label"], e["filepath"], False, f"activation failed, previous files restored: {err}")
+                        for e in staged]
+        else:
+            activated = staged
 
-    # Print results
-    print()
-    for label, filepath, ok, err, target in results:
-        icon = f"{G}\u2713{RST}" if ok else f"{R}\u2717{RST}"
-        server_tag = f"{M}hephaestus{RST}" if target is cb else f"{C}hyprchat{RST}"
-        print(f"  {icon}  {BLD}{label:18}{RST} {DIM}{filepath}{RST}  → {server_tag}")
-        if err:
-            print(f"       {R}{err}{RST}")
-
-    if stage_failed:
-        print()
-        print(f"  {bar('═', R)}")
-        print(f"  {BLD}{R}DEPLOY ABORTED{RST} — {len(stage_failed)} file(s) failed to stage.")
-        print(f"  {R}No live files were replaced and no service was restarted.{RST}")
-        print(f"  {R}The full batch will retry on the next scan.{RST}")
-        print(f"  {bar('═', R)}")
-        input(f"\n  {DIM}Press Enter to continue...{RST}")
-        return pushed
-
-
+    needs_restart = any(e["restart_flag"] for e in activated)
+    rolled_back = False
     if needs_restart:
         print()
-        print(f"  {Y}\u25b6{RST} Repairing HyprChat data permissions...")
+        print(f"  {Y}▶{RST} Repairing HyprChat data permissions...")
         ok_perm, _, err_perm = _repair_hyprchat_data_permissions(hypr)
-        if ok_perm:
-            print(f"  {G}\u2713{RST} Data directory writable for hyprchat")
-        else:
+        if not ok_perm:
             print(f"  {Y}!{RST} Data permission repair may have failed: {err_perm}")
-
-        print()
-        print(f"  {Y}\u25b6{RST} Restarting hyprchat service...")
-        ok, out, err = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-            "systemctl restart hyprchat 2>&1", timeout=150)
-        if ok:
-            # Bind to a specific interface (e.g. Tailscale IP) can take a few seconds.
-            time.sleep(3)
-            ok2, out2, _ = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-                "systemctl is-active hyprchat 2>&1")
-            if ok2 and "active" in out2:
-                print(f"  {G}\u2713{RST} Service running")
+        print(f"  {Y}▶{RST} Restarting hyprchat, waiting up to {HEALTH_SECONDS} s for {HEALTH_PATH}...")
+        healthy, restart_msg = _restart_and_check(hypr)
+        if not healthy:
+            rolled_back = True
+            print(f"  {R}✗{RST} Not healthy: {restart_msg}")
+            _show_journal(hypr, "hyprchat")
+            print(f"  {Y}▶{RST} Restoring the previous backend files...")
+            ok_restore, err_restore = _restore_previous(activated)
+            healthy2, msg2 = _restart_and_check(hypr)
+            if ok_restore and healthy2:
+                print(f"  {G}✓{RST} Previous files restored, service healthy again")
             else:
-                print(f"  {Y}!{RST} Service may not be active: {out2}")
+                print(f"  {R}✗{RST} Rollback incomplete: {(err_restore or msg2)[:300]}")
                 _show_journal(hypr, "hyprchat")
-        else:
-            print(f"  {R}\u2717{RST} Restart failed: {err}")
-            print(f"  {Y}\u25b6{RST} Attempting start fallback...")
-            ok_start, out_start, err_start = ssh_cmd(
-                hypr["ip"], hypr["user"], hypr["pass"],
-                "systemctl reset-failed hyprchat 2>/dev/null || true; systemctl start hyprchat 2>&1",
-                timeout=90,
-            )
-            time.sleep(3)
-            ok2, out2, _ = ssh_cmd(hypr["ip"], hypr["user"], hypr["pass"],
-                "systemctl is-active hyprchat 2>&1")
-            if ok_start and ok2 and "active" in out2:
-                print(f"  {G}\u2713{RST} Service running after start fallback")
-            else:
-                print(f"  {R}\u2717{RST} Start fallback failed: {(err_start or out_start or out2)[:300]}")
-                _show_journal(hypr, "hyprchat")
-
+            results += [(e["label"], e["filepath"], False, "rolled back: service not healthy")
+                        for e in activated]
+    if activated and not rolled_back:
+        _discard_previous(activated)
+        for e in activated:
+            results.append((e["label"], e["filepath"], True, ""))
+            if e["digest"] is not None:
+                pushed[e["filepath"]] = e["digest"]
 
     print()
-    print(f"  {bar('═', G)}")
-    now = datetime.now().strftime("%H:%M:%S")
-    print(f"  {BLD}{G}Deploy complete{RST} {DIM}at {now}{RST}")
-    print(f"  {bar('═', G)}")
+    for label, filepath, ok, err in results:
+        icon = f"{G}✓{RST}" if ok else f"{R}✗{RST}"
+        print(f"  {icon}  {BLD}{label:18}{RST} {DIM}{filepath}{RST}")
+        if err:
+            print(f"       {R}{err}{RST}")
+    if needs_restart and not rolled_back:
+        print(f"  {G}✓{RST} Service healthy {DIM}({restart_msg}){RST}")
+
+    print()
+    if stage_failed:
+        print(f"  {bar('═', R)}")
+        print(f"  {BLD}{R}DEPLOY ABORTED{RST}: {len(stage_failed)} file(s) failed to stage.")
+        print(f"  {R}No live files were replaced and no service was restarted.{RST}")
+        print(f"  {bar('═', R)}")
+    elif rolled_back:
+        print(f"  {bar('═', R)}")
+        print(f"  {BLD}{R}DEPLOY ROLLED BACK{RST}: the service did not answer {HEALTH_PATH}.")
+        print(f"  {bar('═', R)}")
+    else:
+        print(f"  {bar('═', G)}")
+        print(f"  {BLD}{G}Deploy complete{RST} {DIM}at {datetime.now().strftime('%H:%M:%S')}{RST}")
+        print(f"  {bar('═', G)}")
     input(f"\n  {DIM}Press Enter to continue...{RST}")
     return pushed
 
 
 # ── Main UI ──
 
+STATE_LOOK = {
+    "changed": (Y, "●", "modified"),
+    "deployed": (G, "✓", "deployed"),
+    "held": (Y, "○", "held: needs a staged release"),
+    "release-only": (M, "○", "Hephaestus release only"),
+    "failed": (R, "✗", "deploy failed"),
+}
+
+
 def draw_monitor(file_states, prev_times, cfg, last_event=""):
     """Draw the full monitor screen (clears terminal first)."""
     clear()
     w = min(cols(), 58)
     hypr = cfg["hyprchat"]
-    cb   = cfg["codebox"]
+    cb   = cfg.get("codebox") or {}
 
-    # Header
     print(box([
         f"{BLD}     HyprChat Deploy Monitor{RST}",
         f"{DIM}    Watching {len(WATCHED)} files for changes{RST}",
     ], C, w))
     print()
 
-    # Server info
     print(f"  {BLD}Servers{RST}")
     print(f"  {bar()}")
-    print(f"  {C}\u25cf{RST} {BLD}HyprChat{RST}  {G}{hypr['user']}@{hypr['ip']}{RST}")
+    print(f"  {C}●{RST} {BLD}HyprChat{RST}  {G}{hypr['user']}@{hypr['ip']}{RST}")
     if _LIVE_ROOT["checked"]:
-        kind = "staged release" if _LIVE_ROOT["release"] else "legacy root"
+        kind = "staged release" if _LIVE_ROOT["release"] else "no staged release"
         print(f"    {DIM}live {kind}: {_LIVE_ROOT['root']}{RST}")
-    print(f"  {M}\u25cf{RST} {BLD}Hephaestus{RST}   {G}{cb['user']}@{cb['ip']}{RST}")
+    if cb.get("ip"):
+        print(f"  {M}●{RST} {BLD}Hephaestus{RST}   {G}{cb.get('user', 'root')}@{cb['ip']}{RST}")
     sx = cfg.get("searxng")
     if _server_configured(sx):
-        print(f"  {Y}\u25cf{RST} {BLD}SearXNG{RST}   {G}{sx['user']}@{sx['ip']}{RST}")
+        print(f"  {Y}●{RST} {BLD}SearXNG{RST}   {G}{sx['user']}@{sx['ip']}{RST}")
     print(f"  {bar()}")
     print()
 
-    # File list
     print(f"  {BLD}Watched Files{RST}")
     print(f"  {bar()}")
-
-    for filepath, (label, remote_dir, _restart) in WATCHED.items():
-        mtime = prev_times.get(filepath, 0)
+    for filepath, (label, _remote_dir, _restart) in WATCHED.items():
         state = file_states.get(filepath, "idle")
-
-        if state == "changed":
-            icon = f"{Y}\u25cf{RST}"
-            suffix = f" {Y}modified{RST}"
-        elif state == "deployed":
-            icon = f"{G}\u2713{RST}"
-            suffix = f" {G}deployed{RST}"
-        elif not os.path.exists(filepath):
-            icon = f"{R}\u25cb{RST}"
-            suffix = f" {DIM}missing{RST}"
+        if state in STATE_LOOK:
+            color, mark, word = STATE_LOOK[state]
+            icon, suffix = f"{color}{mark}{RST}", f" {color}{word}{RST}"
+        elif not _exists(filepath):
+            icon, suffix = f"{R}○{RST}", f" {DIM}missing{RST}"
         else:
-            icon = f"{DIM}\u25cb{RST}"
-            suffix = ""
-
+            icon, suffix = f"{DIM}○{RST}", ""
         print(f"  {icon} {label:18} {DIM}{filepath}{RST}{suffix}")
-
     print(f"  {bar()}")
     print()
 
+    blockers = blocking_holds()
+    if HELD:
+        print(f"  {Y}Held for a staged release:{RST} {len(HELD)} backend file(s), "
+              f"blocked by {', '.join(blockers) or 'nothing'}")
+        print(f"  {DIM}Ship with scripts/staged_release.py, then press c.{RST}")
+        print()
     if last_event:
         print(f"  {last_event}")
         print()
 
     now = datetime.now().strftime("%H:%M:%S")
-    print(f"  {DIM}{now}  |  {BLD}p{RST}{DIM} push all  |  {BLD}r{RST}{DIM} reconfigure  |  {BLD}q{RST}{DIM} quit{RST}")
+    print(f"  {DIM}{now}  |  {BLD}p{RST}{DIM} push all  |  {BLD}c{RST}{DIM} clear held  |  "
+          f"{BLD}r{RST}{DIM} reconfigure  |  {BLD}q{RST}{DIM} quit{RST}")
 
 
 def push_all(cfg, file_states):
-    """Push ALL files to the server regardless of change detection."""
-    all_files = [(fp, info) for fp, info in WATCHED.items() if os.path.exists(fp)]
-    if not all_files:
+    """Push every hot-patchable file to the live staged release.
+
+    Only for a staged release: a server without one is installed with
+    scripts/deploy.sh and upgraded with scripts/staged_release.py. Release-only
+    and dependency files are never pushed; only files actually sent are marked
+    deployed. Returns {path: digest sent}.
+    """
+    refresh_watch()
+    root = _resolve_hyprchat_root(cfg["hyprchat"])
+    if not _LIVE_ROOT["release"]:
+        print()
+        print(f"  {Y}!{RST} No staged release is active on {cfg['hyprchat']['ip']} ({root}).")
+        print(f"    {DIM}Push all only updates a staged release. Install a new server with "
+              f"scripts/deploy.sh; upgrade with scripts/staged_release.py prepare/activate.{RST}")
+        input(f"\n  {DIM}Press Enter to continue...{RST}")
+        return {}
+
+    files = [(fp, info) for fp, info in WATCHED.items() if _exists(fp)]
+    skip = release_only_files() | set(DEPENDENCY_FILES)
+    sendable = [(fp, info) for fp, info in files if fp not in skip]
+    skipped = [fp for fp, _ in files if fp in skip]
+    if not sendable:
         print(f"  {R}No local files found to push.{RST}")
         input(f"\n  {DIM}Press Enter to continue...{RST}")
-        return
+        return {}
 
     clear()
     print()
     print(box([
         f"{BLD}{M}  Push All Files{RST}",
-        f"{DIM}  Uploading {len(all_files)} files to server{RST}",
+        f"{DIM}  Uploading {len(sendable)} files to {root}{RST}",
     ], M))
     print()
+    if skipped:
+        print(f"  {DIM}Not pushed ({len(skipped)} release-only or dependency files): they ship with "
+              f"scripts/staged_release.py or the Hephaestus release installer.{RST}")
 
-    pushed = deploy_changes(all_files, cfg)
-    for fp, *_ in all_files:
-        file_states[fp] = "deployed"
+    plan = {"deploy": [fp for fp, _ in sendable], "vm_only": [], "hold": [], "blockers": []}
+    pushed = deploy_changes(sendable, cfg, plan=plan) or {}
+    for fp, _ in sendable:
+        file_states[fp] = "deployed" if fp in pushed else "failed"
     return pushed
 
 
-def scan_for_changes(prev_times, baseline_hash, file_states, pending):
-    """mtime pre-filter + content-hash confirm. Appends genuinely changed files
-    to `pending` (deduped). Returns the list of newly added filepaths."""
+def scan_for_changes(prev_times, baseline_hash, file_states, pending, held=None):
+    """Re-glob the tree, then mtime pre-filter + content-hash confirm.
+
+    Appends genuinely changed files to `pending` (deduped) and returns the
+    list of newly added paths. A file that appeared since the last scan has
+    no baseline, so it counts as changed. While a hold for a staged release
+    is open, backend changes join the hold instead of prompting; once the
+    last blocker is gone (reverted, or cleared with c), the other held files
+    come back as pending changes.
+    """
+    held = HELD if held is None else held
+    refresh_watch()
+    vm_only, _used = release_split()
     new = []
-    for filepath, info in WATCHED.items():
-        if not os.path.exists(filepath):
+
+    def add(fp):
+        if not any(p == fp for p, _ in pending):
+            pending.append((fp, WATCHED[fp]))
+            new.append(fp)
+        file_states[fp] = "changed"
+
+    for filepath in list(WATCHED):
+        if not _exists(filepath):
             continue
-        mtime = os.path.getmtime(filepath)
+        mtime = _mtime(filepath)
         if mtime == prev_times.get(filepath, 0):
             continue
         prev_times[filepath] = mtime  # always advance the cheap filter
         digest = file_digest(filepath)
-        if digest is None or digest == baseline_hash.get(filepath):
-            continue  # touched, but content identical — suppress
-        if not any(fp == filepath for fp, _ in pending):
-            pending.append((filepath, info))
-            new.append(filepath)
-        file_states[filepath] = "changed"
+        if digest is None:
+            continue
+        if digest == baseline_hash.get(filepath):
+            if filepath in held:  # reverted to what is live
+                del held[filepath]
+            if file_states.get(filepath) in ("changed", "held"):
+                file_states[filepath] = "idle"
+            continue  # touched, but content identical
+        if held.get(filepath) == digest:
+            continue  # held and unchanged since: do not offer it again
+        if (blocking_holds(held) and filepath.startswith("backend/")
+                and filepath not in vm_only):
+            held[filepath] = digest
+            file_states[filepath] = "held"
+            continue
+        add(filepath)
+
+    if held and not blocking_holds(held):
+        for fp in sorted(held):
+            del held[fp]
+            if fp in WATCHED and file_digest(fp) != baseline_hash.get(fp):
+                add(fp)
+            else:
+                file_states[fp] = "idle"
     return new
+
+
+def apply_outcome(plan, pushed, prev_times, baseline_hash, file_states, held=None):
+    """Record what one deploy did, per file of the batch."""
+    held = HELD if held is None else held
+    for fp in plan["vm_only"]:
+        # Acknowledged: they ship with the Hephaestus release.
+        baseline_hash[fp] = file_digest(fp)
+        prev_times[fp] = _mtime(fp)
+        file_states[fp] = "release-only"
+    for fp in plan["hold"]:
+        # Not re-baselined: still different from what is live.
+        held[fp] = file_digest(fp)
+        prev_times[fp] = _mtime(fp)
+        file_states[fp] = "held"
+    for fp in plan["deploy"]:
+        if fp in pushed:
+            baseline_hash[fp] = pushed[fp]
+            cur = file_digest(fp)
+            if cur is not None and cur != pushed[fp]:
+                prev_times[fp] = 0  # edited while the deploy ran: detect again
+                file_states[fp] = "changed"
+            else:
+                prev_times[fp] = _mtime(fp)
+                file_states[fp] = "deployed"
+        else:
+            prev_times[fp] = 0  # failed: offered again on the next scan
+            file_states[fp] = "changed"
+
+
+def clear_held(prev_times, baseline_hash, file_states, held=None):
+    """The owner shipped a staged release: treat held files as live."""
+    held = HELD if held is None else held
+    count = len(held)
+    for fp in list(held):
+        baseline_hash[fp] = file_digest(fp)
+        prev_times[fp] = _mtime(fp)
+        file_states[fp] = "idle"
+        del held[fp]
+    return count
 
 
 def main():
@@ -1282,7 +1417,7 @@ def main():
         clear()
         print()
         hypr = cfg["hyprchat"]
-        cb   = cfg["codebox"]
+        cb   = cfg.get("codebox") or {}
         sx   = cfg.get("searxng")
         sx_lines = []
         if _server_configured(sx):
@@ -1291,7 +1426,7 @@ def main():
             f"{BLD}     HyprChat Deploy Monitor{RST}",
             "",
             f"  {C}HyprChat{RST}  {hypr['user']}@{hypr['ip']}",
-            f"  {M}Hephaestus{RST}   {cb['user']}@{cb['ip']}",
+            f"  {M}Hephaestus{RST}   {cb.get('user', 'root')}@{cb.get('ip', '-')}",
             *sx_lines,
             "",
             f"  {BLD}Enter{RST}  Start watching        ",
@@ -1303,26 +1438,27 @@ def main():
         if choice == "r":
             cfg = setup_servers()
         elif choice == "p":
-            file_states = {}
-            for filepath in WATCHED:
-                file_states[filepath] = "idle"
-            push_all(cfg, file_states)
+            push_all(cfg, {})
 
     # Initialize tracking
+    refresh_watch()
     prev_times    = {}
     baseline_hash = {}
     file_states   = {}
     for filepath in WATCHED:
-        exists = os.path.exists(filepath)
-        prev_times[filepath] = os.path.getmtime(filepath) if exists else 0
+        exists = _exists(filepath)
+        prev_times[filepath] = _mtime(filepath) if exists else 0
         baseline_hash[filepath] = file_digest(filepath) if exists else None
         file_states[filepath] = "idle"
 
     if first_setup:
-        choice = input(f"  {BLD}Run first-time full deploy now? {RST}[{G}Y{RST}/{R}n{RST}] > ").strip().lower()
+        choice = input(f"  {BLD}Push all files to the existing install now? {RST}[{G}Y{RST}/{R}n{RST}] > ").strip().lower()
         if choice in ("", "y", "yes"):
-            push_all(cfg, file_states)
-            _run_first_time_searxng_setup(cfg)
+            pushed = push_all(cfg, file_states)
+            if _LIVE_ROOT["release"]:
+                for fp, digest in pushed.items():
+                    baseline_hash[fp] = digest
+                _run_first_time_searxng_setup(cfg)
 
     if not _LIVE_ROOT["checked"]:
         _resolve_hyprchat_root(cfg["hyprchat"])
@@ -1340,55 +1476,61 @@ def main():
         tty.setcbreak(sys.stdin.fileno())
 
         while True:
-            # Non-blocking check for keyboard input
             if select.select([sys.stdin], [], [], 0)[0]:
                 key = sys.stdin.read(1).lower()
                 if key == "p":
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                     pushed = push_all(cfg, file_states) or {}
-                    last_event = f"{G}\u2713 Pushed all at {datetime.now().strftime('%H:%M:%S')}{RST}"
-                    # Re-baseline mtimes + content hashes so pushed files don't re-trigger
-                    for filepath in WATCHED:
-                        if os.path.exists(filepath):
-                            prev_times[filepath] = os.path.getmtime(filepath)
-                            baseline_hash[filepath] = pushed.get(filepath) or file_digest(filepath)
+                    # Re-baseline only the files that were actually sent.
+                    for filepath, digest in pushed.items():
+                        prev_times[filepath] = _mtime(filepath)
+                        baseline_hash[filepath] = digest
+                        HELD.pop(filepath, None)
+                    last_event = (f"{G}✓ Pushed {len(pushed)} file(s) at "
+                                  f"{datetime.now().strftime('%H:%M:%S')}{RST}")
                     tty.setcbreak(sys.stdin.fileno())
+                    draw_monitor(file_states, prev_times, cfg, last_event)
+                elif key == "c":
+                    n = clear_held(prev_times, baseline_hash, file_states)
+                    last_event = f"{G}✓ {n} held file(s) marked as released{RST}"
                     draw_monitor(file_states, prev_times, cfg, last_event)
                 elif key == "r":
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
                     cfg = setup_servers()
                     tty.setcbreak(sys.stdin.fileno())
-                    last_event = f"{G}\u2713 Config updated{RST}"
+                    last_event = f"{G}✓ Config updated{RST}"
                     draw_monitor(file_states, prev_times, cfg, last_event)
                 elif key == "q":
                     raise KeyboardInterrupt
 
             time.sleep(CHECK_INTERVAL)
 
-            # Check for changes (mtime pre-filter + content-hash confirm)
+            held_before = len(HELD)
             pending = []
             scan_for_changes(prev_times, baseline_hash, file_states, pending)
+            if len(HELD) != held_before and not pending:
+                last_event = f"{Y}○ {len(HELD)} backend file(s) held for a staged release{RST}"
+                draw_monitor(file_states, prev_times, cfg, last_event)
 
             if pending:
                 def show_pending_box():
-                    last = f"{Y}\u25b6 {len(pending)} file(s) changed{RST}"
+                    last = f"{Y}▶ {len(pending)} file(s) changed{RST}"
                     draw_monitor(file_states, prev_times, cfg, last)
                     print()
                     print(box([
                         f"{BLD}{Y}  Changes Detected{RST}",
                         "",
                     ] + [
-                        f"  {Y}\u2022{RST} {info[0]:18} {DIM}{fp}{RST}"
+                        f"  {Y}•{RST} {info[0]:18} {DIM}{fp}{RST}"
                         for fp, info in pending
                     ] + [
                         "",
-                        f"  {DIM}Still watching \u2014 new changes join this batch{RST}",
+                        f"  {DIM}Still watching — new changes join this batch{RST}",
                     ], Y))
                     print()
-                    print(f"  {BLD}Deploy?{RST} [{G}y{RST}{DIM}/Enter{RST} deploy \u00b7 {R}n{RST} skip]")
+                    print(f"  {BLD}Deploy?{RST} [{G}y{RST}{DIM}/Enter{RST} deploy · {R}n{RST} skip]")
                 show_pending_box()
 
-                # Single-key prompt that keeps scanning while it waits.
                 decision = None
                 while decision is None:
                     if select.select([sys.stdin], [], [], 0)[0]:
@@ -1404,28 +1546,15 @@ def main():
 
                 if decision:
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                    pushed = deploy_changes(pending, cfg) or {}
+                    plan = classify_batch([fp for fp, _ in pending], holding=bool(blocking_holds()))
+                    pushed = deploy_changes(pending, cfg, plan=plan) or {}
                     tty.setcbreak(sys.stdin.fileno())
-                    for fp, *_ in pending:
-                        if fp in pushed:
-                            baseline_hash[fp] = pushed[fp]
-                            cur = file_digest(fp) if os.path.exists(fp) else None
-                            if cur is not None and cur != pushed[fp]:
-                                # Edited while the deploy ran \u2014 force re-detection
-                                prev_times[fp] = 0
-                                file_states[fp] = "changed"
-                            else:
-                                prev_times[fp] = os.path.getmtime(fp) if os.path.exists(fp) else 0
-                                file_states[fp] = "deployed"
-                        else:
-                            # Push failed \u2014 leave it flagged so it re-prompts
-                            prev_times[fp] = 0
-                            file_states[fp] = "changed"
-                    last_event = f"{G}\u2713 Last deploy: {datetime.now().strftime('%H:%M:%S')}{RST}"
+                    apply_outcome(plan, pushed, prev_times, baseline_hash, file_states)
+                    last_event = f"{G}✓ Last deploy: {datetime.now().strftime('%H:%M:%S')}{RST}"
                 else:
                     for fp, *_ in pending:
                         # Declining acknowledges the current content
-                        baseline_hash[fp] = file_digest(fp) if os.path.exists(fp) else None
+                        baseline_hash[fp] = file_digest(fp)
                         file_states[fp] = "idle"
                     last_event = f"{DIM}Skipped deploy at {datetime.now().strftime('%H:%M:%S')}{RST}"
 

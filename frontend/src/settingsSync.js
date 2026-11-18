@@ -6,12 +6,12 @@ export function safeLocalStorageSet(key,value){
 // Rapid state churn (typing a prompt, toggling tags) collapses into one PUT.
 export function createPrefsSync({api,getContext=()=>({}),onError=()=>{}}){
   const timers=new Map(),controllers=new Set();
-  const put=async(key,value,context=getContext())=>{
+  const put=async(key,value,context=getContext(),{keepalive=false}={})=>{
     const controller=new AbortController();controllers.add(controller);
     try{
       if(context.userId!==getContext().userId||context.epoch!==getContext().epoch)return;
       const r=await fetch(`${api}/api/prefs/${encodeURIComponent(key)}`,{
-        method:"PUT",signal:controller.signal,
+        method:"PUT",signal:controller.signal,...(keepalive?{keepalive:true}:{}),
         headers:{"Content-Type":"application/json",...(context.userId?{"X-HyprChat-User":context.userId}:{}),...(context.session?{"X-HyprChat-Session":context.session}:{})},body:JSON.stringify(value),
       });
       if(!r.ok)throw new Error(`Preference save failed (HTTP ${r.status})`);
@@ -20,11 +20,17 @@ export function createPrefsSync({api,getContext=()=>({}),onError=()=>{}}){
   };
   const queue=(key,value,delay=1200)=>{
     const context=getContext();
-    clearTimeout(timers.get(key));
-    timers.set(key,setTimeout(()=>{timers.delete(key);put(key,value,context);},delay));
+    clearTimeout(timers.get(key)?.timer);
+    timers.set(key,{value,context,timer:setTimeout(()=>{timers.delete(key);put(key,value,context);},delay)});
   };
-  const cancel=()=>{for(const timer of timers.values())clearTimeout(timer);timers.clear();for(const c of controllers)c.abort();controllers.clear();};
-  return {put,queue,cancel};
+  // The page is going away: send what is still waiting now. A change made in the last second before
+  // closing the tab used to be lost, and the server's older value came back on the next visit.
+  const flush=()=>{
+    const waiting=[...timers.entries()];timers.clear();
+    return waiting.map(([key,{value,context,timer}])=>{clearTimeout(timer);return put(key,value,context,{keepalive:true});});
+  };
+  const cancel=()=>{for(const entry of timers.values())clearTimeout(entry.timer);timers.clear();for(const c of controllers)c.abort();controllers.clear();};
+  return {put,queue,flush,cancel,get waiting(){return timers.size;}};
 }
 
 export function createSettingsSync({api,settingsLoadedRef,seenSettingEffectRef,skipSettingPatchRef,flashSettingsPulse}){

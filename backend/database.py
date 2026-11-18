@@ -736,6 +736,8 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
         "mcp_servers", "openapi_connectors", "connector_tools",
     ):
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
+    for table in ("skill_revisions", "skill_files", "skill_conv_taint", "skills"):   # children first
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_prefs WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_profile WHERE id=?", (uid,))
     await conn.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
@@ -783,7 +785,7 @@ async def delete_all_users_and_data() -> dict:
             "conversation_files", "workspace_conversations", "workspace_research_reports",
             "research_sources", "research_events", "run_events", "workspace_memory_blocks",
             "artifact_tags", "artifact_workspaces", "artifact_events", "council_members",
-            "kb_chunks_fts",
+            "kb_chunks_fts", "skill_revisions", "skill_files", "skill_conv_taint", "skills",
         ):
             await db.execute(f"DELETE FROM {table}")
         for table in (
@@ -1133,6 +1135,10 @@ async def init_db():
         await migrate_calendar(db)
         from library_search import migrate as migrate_library
         await migrate_library(db)
+        from db.skill_store import migrate as migrate_skills
+        await migrate_skills(db)
+        from db.tool_memory import migrate as migrate_tool_memory
+        await migrate_tool_memory(db)
     finally:
         await db.close()
 
@@ -1512,7 +1518,7 @@ async def patch_message_presentation(conversation_id, message_id, *, content=Non
             metadata = {**previous, **metadata}
             if previous.get('server_persists'):
                 for key in ('server_persists','in_progress','delivery_status','review_history','effort',
-                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens',
+                            'usage_calls','elapsed_seconds','total_prompt_tokens','total_gen_tokens','context','model','truncated','round_limit','overflow',
                             'run_ids','run_roles','run_types','has_full_product_build'):
                     if key in previous:
                         metadata[key] = previous[key]
@@ -1614,6 +1620,13 @@ async def delete_message(message_id: int) -> bool:
     user_id = _scope_user()
     db = await get_db()
     try:
+        # A message inside the summarized part of its chat lives on in the summary. Drop the summary
+        # with it (as delete_messages_from does); the chat is summarized again when it next fills up.
+        await db.execute(
+            """UPDATE conversations SET summary='', summary_until_msg_id=0
+               WHERE user_id=? AND summary_until_msg_id >= ?
+                 AND id = (SELECT conversation_id FROM messages WHERE id = ?)""",
+            (user_id, message_id, message_id))
         cur = await db.execute(
             "DELETE FROM messages WHERE id = ? AND conversation_id IN (SELECT id FROM conversations WHERE user_id=?)",
             (message_id, user_id),
@@ -4236,33 +4249,18 @@ async def build_global_memory_context(*, query: str = "", max_chars: int = 4200)
     finally:
         await db.close()
 
+    # All of them in a fixed order when they fit, so the block is the same text every turn and Ollama's
+    # cache keeps covering the chat that follows it (memory_selection.py).
+    import memory_selection
     q_tokens = _content_tokens(query)
-    scored = []
-    for row in rows:
-        mem = _normalize_memory_row(row)
-        m_tokens = _content_tokens(mem.get("content") or "")
-        overlap = len(q_tokens & m_tokens)
-        score = (20 if mem.get("pinned") else 0) + int(mem.get("importance") or 3) * 4 + overlap * 6
-        scored.append((score, mem))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
     memory_ids = []
     grouped = {"semantic": [], "episodic": [], "procedural": []}
-    for _, mem in scored:
-        if remaining <= 500:
-            break
-        content = (mem.get("content") or "").strip()
-        if not content:
-            continue
-        prefix = "[pinned] " if mem.get("pinned") else ""
-        item = f"- {prefix}{content}"
-        if len(item) > remaining:
-            item = item[:remaining - 20] + "..."
+    for mem, item in memory_selection.choose(
+            [_normalize_memory_row(row) for row in rows], room=remaining - 500, cap=12,
+            overlap=lambda mem: len(q_tokens & _content_tokens(mem.get("content") or ""))):
         grouped.setdefault(mem.get("type") or "semantic", []).append(item)
         memory_ids.append(mem["id"])
         remaining -= len(item)
-        if len(memory_ids) >= 12:
-            break
 
     for typ, title in [("semantic", "Facts and Preferences"), ("episodic", "Past Events"), ("procedural", "Procedures")]:
         if grouped.get(typ):
@@ -4334,33 +4332,18 @@ async def build_workspace_memory_context(
     finally:
         await db.close()
 
+    # All of them in a fixed order when they fit, so the block is the same text every turn and Ollama's
+    # cache keeps covering the chat that follows it (memory_selection.py).
+    import memory_selection
     q_tokens = _content_tokens(query)
-    scored = []
-    for row in rows:
-        mem = _normalize_memory_row(row)
-        m_tokens = _content_tokens(mem.get("content") or "")
-        overlap = len(q_tokens & m_tokens)
-        score = (20 if mem.get("pinned") else 0) + int(mem.get("importance") or 3) * 4 + overlap * 6
-        scored.append((score, mem))
-    scored.sort(key=lambda item: item[0], reverse=True)
-
     memory_ids = []
     grouped = {"semantic": [], "episodic": [], "procedural": []}
-    for _, mem in scored:
-        if remaining <= 500:
-            break
-        content = (mem.get("content") or "").strip()
-        if not content:
-            continue
-        prefix = "[pinned] " if mem.get("pinned") else ""
-        item = f"- {prefix}{content}"
-        if len(item) > remaining:
-            item = item[:remaining - 20] + "..."
+    for mem, item in memory_selection.choose(
+            [_normalize_memory_row(row) for row in rows], room=remaining - 500, cap=10,
+            overlap=lambda mem: len(q_tokens & _content_tokens(mem.get("content") or ""))):
         grouped.setdefault(mem.get("type") or "semantic", []).append(item)
         memory_ids.append(mem["id"])
         remaining -= len(item)
-        if len(memory_ids) >= 10:
-            break
 
     for typ, title in [("semantic", "Facts and Preferences"), ("episodic", "Past Decisions and Events"), ("procedural", "Procedures")]:
         if grouped.get(typ):
@@ -4703,10 +4686,13 @@ async def fork_conversation(original_conv_id: str, fork_msg_id: int, new_conv_id
         )
         await db.execute("""
             INSERT INTO messages (conversation_id, role, content, metadata, created_at)
-            SELECT ?, role, content, metadata, created_at
+            SELECT ?, role, content, json_remove(COALESCE(NULLIF(metadata, ''), '{}'), '$.context'), created_at
             FROM messages WHERE conversation_id = ? AND id <= ?
             ORDER BY id ASC
         """, (new_conv_id, original_conv_id, fork_msg_id))
+        # The fork keeps what its replies' tools returned (chat_tool_memory.py).
+        from db.tool_memory import copy_for_fork
+        await copy_for_fork(db, original_conv_id, new_conv_id, fork_msg_id)
         await db.commit()
         return await get_conversation(new_conv_id)
     finally:

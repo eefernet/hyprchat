@@ -1,4 +1,56 @@
 <details open>
+<summary>Alpha v18.3 — Nov 18, 2026</summary>
+
+> HyprChat now learns from its own work with automated skills. Massive updates to chat rendering when it comes to tool calling, updated to settings. Compaction to chats has been added as well as a way for the user to view what is using context by clicking on the context meter. Updated preview panel when the model generates a webview or a document/MD file. Massive fixes to overall chat logic
+
+## Skills
+
+- **HyprChat saves what it works out** — after a multi-step task, a fixed error or your correction, it can save a skill: when to use it, the steps and the pitfalls. Later chats see a one-line list and load a skill when a task matches. A background reviewer decides what is worth keeping, and a skill is patched when you say a step is wrong; earlier versions can be compared and restored.
+- **Guardrails** — skills from scheduled runs, from chats that read email or connector data, or that trip a safety check wait for your approval. "Always ask me first" makes every skill wait.
+- **Skills panel** — write, edit, pin, archive and delete skills, review waiting ones with a before/after view, attach scripts that are copied into the sandbox, and import or export `SKILL.md` files. Unused learned skills are flagged, then archived; nothing is deleted automatically.
+- **Where it applies** — ordinary chats, Master Developer, the Assistant and scheduled tasks; not Daedalus jobs, Ghost chats or roleplay characters.
+
+## Chat
+
+- **Scrolling that behaves** — the view follows a reply while you are at the bottom, without jumps or text hidden behind the message box, and lets go as soon as you scroll up.
+- **Tool output where it happened** — code output and files sit under the part of the reply that produced them (collapsed; a failed run opens). Consecutive runs form one list with a summary header, a line per run saying what it did, and the newest five plus every failure. Continue keeps the first half's output, and the Activity badge counts calls correctly.
+- **Chats remember what their tools returned** — later turns get a trimmed record of earlier tool calls and results, so follow-ups and Continue build on what was found instead of starting over. Email, connector and chat-history results are never kept, nor anything in Ghost chats, coding jobs or scheduled runs. Turn it off in Settings → Model & Generation → "Keep Tool Results".
+- **Longer tool runs** — a reply may call the model 40 times (was 12); change it under "Tool rounds per reply". At the limit the reply still writes its answer and offers Continue, a model that goes quiet after its tools is asked once for the answer, and a bare "continue" no longer runs a web search.
+- **Type while it answers** — Enter queues your message and each one is sent when the reply before it finishes; click to edit, ✕ to remove. After Stop, an error, a limit, a coding job or a reply finished in another chat, the queue waits with **Send now**. After a reload, queued text comes back as a draft.
+- **Drafts stay with their chat** — each chat keeps its own text and attachments; the text survives a reload (not in Ghost chats).
+- **Small additions** — Rename and Generate title in the chat menu, Retry for a reply that ended before writing anything, and Copy on your own messages.
+- **Previews** — the HTML preview has one header row and shows the page edge to edge at its real size, which should also remove the white bar at other UI scales. Documents open beside the chat as they are written (Read / Source), SVG and CSV get a Preview, and a Markdown document with code blocks stays whole. Delivered files, Word, Excel and PowerPoint included, open by themselves, and every preview has **Save**, which keeps it as a file of that chat in Artifact Studio.
+- **The left bar shows what each chat is doing** — replying, an unread reply, an unsent draft or queued messages. Deleting a chat asks first and stops its reply, and chats, tags and search results work with Tab and Enter.
+- **Steadier messages** — message buttons no longer vanish while another chat replies, replies no longer shift when they finish, and wording is plainer ("Thought it through"; footer: Models, Sandbox, Search, Automation).
+
+## Chat fixes
+
+- **Replies are not lost** — sending the same text twice keeps both. Stop, a dropped connection or a server restart keeps what was written (saved every few seconds), marks the reply stopped and offers Continue; a reply cut by the output limit gets the same line. Tools a stopped reply started are cancelled.
+- **Each chat keeps to itself** — Stop and the message box act only on the chat that is replying. Opening another chat no longer takes over a running reply, and tool cards, edit boxes, menus and files still loading stay with their chat. A Ghost chat's reply stops when you leave it, files attached mid-reply stay, a rename during a reply is kept, and deleting the open chat loads the next one properly.
+- **Regenerate, Edit and Delete hit the right message** — they ask before removing later messages, are not offered on a greeting or on the message that started a job, and cannot start two replies on a double-click. They find the right saved message, so an earlier stopped reply can no longer be removed with everything after it. Deleted messages stay deleted, Undo does not duplicate, an edited message keeps its PDF, and failed saves tell you.
+- **Tool calls** — example code in an answer is no longer run, and models that write tool calls as text no longer wipe the reply so far.
+- **Errors** — shown exactly once, and refused requests show the server's message instead of JSON or a copy of the previous reply.
+- **Models** — models that accept only one system message (two Qwen3.8 builds) now work, and each reply shows the model that wrote it.
+- **Daedalus** — ordinary answers are no longer replaced by "No Daedalus job was started"; a job that did not start says why; one card per job; "Start a new project" and "Accepted version" reset after sending; a .zip dropped into a new chat uploads as a project. Smaller: "Answering" for project questions, replies to questions during a job stay visible, no false "Planning" cards in old chats, deleted jobs say so.
+- **Smaller fixes** — PDF text survives a reload; the message box unlocks after a reload during research; Enter does not send while composing Japanese, Chinese or Korean; titles are retried after a stopped first reply; message search shows the newest query; saves cannot land out of order; settings changed just before closing the tab are saved; sources are listed once; the regenerate menu closes on Escape; non-text files are refused; empty edits are not saved; a replaced reply's search cards are removed; Continue is refused for another chat's reply.
+
+## Context
+
+- **A context meter you can trust** — the pill shows what the chat holds, from the model's own counts, against the window the model really runs with. It no longer resets or falls after replies, follows a model or context change at once, settles after Stop or an error, counts tool work as it happens, and shows tokens per second. It is a number over a thin bar with a tick where compaction fires; thinking and tool results show as a lighter end.
+- **See what uses the context** — click the pill for a breakdown: instructions, tools, memory, skills, summary, messages, excerpts and this reply's tool calls, with free space and the compaction point; excerpts are no longer counted twice. A warning appears when the window is too small for HyprChat's own ~3,500 tokens.
+- **Compaction that works and shows** — earlier messages are summarized by the chat model and recent ones kept word for word, with nothing dropped unsummarized. A line marks the cut with the summary one click away, long tool runs shorten old results and summarize before giving up, a stored summary is always sent, the browser no longer trims messages itself, and compaction no longer runs when it would free almost nothing.
+- **Compaction controls** — "Compact when the chat reaches" 85, 90, 95, 98 or 99% (default 85; room for one reply is always kept; coding jobs keep their own setting), plus **Compact now**, **Read the summary** and **Forget kept tool results** in the breakdown.
+- **A model's own limit is respected** — a model with a smaller window than the setting (8,192 instead of 32,768) is planned with its real window, so it compacts in time; the Model Manager says so.
+- **A warning when a message does not fit** — Ollama silently cut oversized PDFs or pastes and the model answered from a fragment. The reply now says so with the size needed, and a line above the message box warns before you send.
+- **Choose how many models stay loaded** — "Models loaded at once" (Ollama decides, 1–8) unloads the least recently used model before a chat loads one more; helper models are not counted. It can lower the count, not raise it. The same place lists what is loaded, with size, context, unload time and a warning when a model is partly off the GPU.
+- **Memory no longer slows every message** — memories are sent in a fixed order, so the model stops re-reading the whole chat each turn (1.1–1.4 s down to 0.12 s on a 9,000-token chat).
+- **The model knows when it is running low and when you wrote** — it is told when three or fewer tool rounds are left or the window is nearly full, and each message carries its time ("3 days after the previous message"). Turn times off with "Message Times"; not used in Ghost or coding chats.
+- **Cloud models are left alone** — Claude and GPT chats are no longer judged, trimmed or summarized by the local context setting.
+- **Smaller fixes** — no pill in Council chats, the summary line follows the newest summary, and a reply is never sent without its question.
+
+</details>
+
+<details>
 <summary>Alpha v18.2.1 — Nov 12, 2026</summary>
 
 > Clearer coding results, safer follow-up edits, and a new home for running your projects.
@@ -33,6 +85,9 @@
 
 ## Housekeeping
 
+- **Files are organized by chat** — files a chat delivers are stored under `outputs/<month>/<chat>/` instead of one flat folder, and each delivery has its own download address. Before, a file with the same name from another chat replaced the earlier one and older download links served the newer file.
+- **Each chat has a work folder in the sandbox** — scripts and shell commands start in `/root/work` instead of the chat's `/root`, so files a model writes no longer land next to the interpreter and uploads.
+- **A simpler Storage & Cleanup page** — it now counts the files in their month and chat folders (it read 0 once they were sorted), shows them by month and by where they came from, and says the rest in a line or two: one Clean now button for temporary files, and one Clean up button for the sandbox VM with the breakdown tucked under "What is using the space".
 - **Dead code removed** — the legacy upload project indexer (`backend/agents/project_indexer.py`, nothing called it), four unreferenced evaluation helpers (`coder_fixtures`, `frozen_environment`, `inference_meter`, `preview_qa`), `scripts/prepare_engine_tokenizer.py` (the Hephaestus installer owns tokenizer pinning) and two unused frontend harnesses.
 - **Superseded doc removed** — `docs/reliability-upgrade.md` was a one-off October deployment record; `docs/daedalus-workflows.md` documents the staged-release flow.
 - **`.env.example` refreshed** — stale OpenHands/Aider/Fixer/Architect variables are gone, the engine worker port is `8587` like the code, and the variables the backend actually reads but nobody had documented are listed (`DAEDALUS_ENGINE_URL`, `HEPHAESTUS_*`, `HYPRCHAT_TRUSTED_WEB_PROXY`, `QUICK_SEARCH_TIMEOUT`/`RANKING`, `RAG_RETRIEVAL_DEADLINE_SECONDS`, `HYPRCHAT_DEPLOY_QUALIFICATION`).

@@ -6,15 +6,19 @@ import {MDWrap} from './hyprChatWidgets.jsx';
 import DocumentPreviewPanel from './DocumentPreviewPanel.jsx';
 import {useWorkbench,closeWorkbench} from '../workbench.js';
 import HtmlLivePreview from './HtmlLivePreview.jsx';
+import DocLivePreview,{Table} from './DocLivePreview.jsx';
+import PreviewBar from './PreviewBar.jsx';
+import {TEXT_PREVIEW_TYPES,prettyJson} from '../docPreview.js';
 import DaedalusWorkbench from './DaedalusWorkbench.jsx';
 
 const IMAGE_TYPES=["png","jpg","jpeg","gif","webp","svg"];
 export function readPreviewWidth(){try{return parseInt(localStorage.getItem("hc-preview-w")||"420");}catch{return 420;}}
 
 // The resizable right-hand pane beside the chat. One slot: the workbench store
-// (a Daedalus job or a live HTML preview) wins when open, else the file preview
-// main.jsx drives through previewFile. On mobile it is a full overlay dialog.
-export default function SidePane({previewFile,previewContent,previewError,previewArchive,onClosePreview,onRevision,t,font,md,codeFont,evts,isMobile,onOpenArtifact}){
+// (a Daedalus job, a live HTML preview, or a document / drawing / table from a reply) wins
+// when open, else the file preview main.jsx drives through previewFile. On mobile it is a
+// full overlay dialog. Every preview uses the same header row (PreviewBar.jsx).
+export default function SidePane({previewFile,previewContent,previewError,previewArchive,onClosePreview,onRevision,t,font,md,codeFont,evts,isMobile,onOpenArtifact,conversationId}){
   const workbench=useWorkbench();
   const [width,setWidth]=useState(readPreviewWidth);
   const open=workbench.open||!!previewFile;
@@ -36,21 +40,32 @@ export default function SidePane({previewFile,previewContent,previewError,previe
     {!isMobile&&<div onMouseDown={startDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
     {bench&&workbench.kind==='daedalus'
       ?<DaedalusWorkbench key={workbench.job?.id} job={workbench.job} tab={workbench.tab} t={t} font={font} md={md} onOpenArtifact={onOpenArtifact} onClose={close}/>
-      :<>
-        <div style={{padding:"9px 12px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:7,flexShrink:0,background:`${t.surface}F5`}}>
-          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{bench?workbench.html?.title||'Preview':previewFile.isExternal?(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})():previewFile.filename}</span>
-          {bench?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>live</span>
-            :<><span style={{fontSize:"var(--hc-text-secondary)",color:previewFile.isExternal?t.warm:t.mut,background:`${t.surface}`,padding:"2px 6px",borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
-            {previewFile.isExternal
-              ?<a href={previewFile.url} target="_blank" rel="noopener" style={{color:t.acc,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.acc}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>↗ open</a>
-              :<a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,fontSize:"var(--hc-text-secondary)",textDecoration:"none",padding:"2px 6px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius-sm)",flexShrink:0}}>⬇</a>}</>}
-          <button onClick={close} title="Close preview" aria-label="Close preview" style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-reading)",padding:"0 2px",flexShrink:0,lineHeight:1,display:"flex"}}><IC.X/></button>
-        </div>
-        <div style={{flex:1,overflowY:"auto",padding:14,display:"flex",flexDirection:"column"}}>
-          {bench?<HtmlLivePreview html={workbench.html} font={font}/>
-            :<FilePreviewBody previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onRevision={onRevision} t={t} font={font} md={md} codeFont={codeFont} evts={evts}/>}
-        </div>
-      </>}
+      :bench&&workbench.kind==='doc'
+      ?<DocLivePreview doc={workbench.doc} md={md} font={font} codeFont={codeFont} conversationId={conversationId} onClose={close} onOpenArtifact={onOpenArtifact}/>
+      :bench
+      // A chat HTML preview draws its own header and runs edge to edge (HtmlLivePreview.jsx).
+      ?<HtmlLivePreview html={workbench.html} font={font} conversationId={conversationId} onClose={close} onOpenArtifact={onOpenArtifact}/>
+      :<FilePreview previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onRevision={onRevision} t={t} font={font} md={md} codeFont={codeFont} evts={evts} onClose={close}/>}
+  </div>;
+}
+
+// A delivered file, a web source or an archive, under the same header row as the live previews.
+const EDGE_TYPES=["html","pdf"];
+function FilePreview({previewFile,previewContent,previewError,previewArchive,onRevision,t,font,md,codeFont,evts,onClose}){
+  const host=(()=>{try{return new URL(previewFile.url).hostname.replace("www.","");}catch{return previewFile.filename;}})();
+  const title=previewFile.isExternal?host:previewFile.filename;
+  const edge=!previewError&&!previewFile.artifactId&&EDGE_TYPES.includes(previewFile.type);
+  const status=previewFile.isExternal?`A web page from ${host}, shown through HyprChat. Scripts in it do not run.`:`A file from this chat (.${previewFile.type}).`;
+  return <div className="hp-root" style={{fontFamily:font}}>
+    <PreviewBar title={title} status={status} onClose={onClose}>
+      <span className="hp-kind">{previewFile.isExternal?"web":`.${previewFile.type}`}</span>
+      {previewFile.isExternal
+        ?<a className="hp-link" href={previewFile.url} target="_blank" rel="noopener" title="Open the page in a new tab" aria-label="Open the page in a new tab"><IC.External/></a>
+        :<a className="hp-link" href={userScopedUrl(previewFile.url)} download={previewFile.filename} title={`Download ${previewFile.filename}`} aria-label={`Download ${previewFile.filename}`}><IC.Download/></a>}
+    </PreviewBar>
+    <div className={edge?"hp-file is-edge":"hp-file"}>
+      <FilePreviewBody previewFile={previewFile} previewContent={previewContent} previewError={previewError} previewArchive={previewArchive} onRevision={onRevision} t={t} font={font} md={md} codeFont={codeFont} evts={evts}/>
+    </div>
   </div>;
 }
 
@@ -92,10 +107,18 @@ export function FilePreviewBody({previewFile,previewContent,previewError,preview
       })}
     </div>
   </div>;
-  if(previewFile.type==="html"&&previewContent)return <iframe sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%",height:"100%",border:"none",borderRadius:"var(--hc-radius)",background:"#fff",minHeight:400}} title={previewFile.filename}/>;
+  // The frame is drawn at real size whatever the UI scale (.hp-stage cancels the app's zoom; see htmlPreview.css).
+  if(previewFile.type==="html"&&previewContent)return <div className="hp-stage"><iframe className="hp-frame" sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%"}} title={previewFile.filename}/></div>;
+  if(["csv","tsv"].includes(previewFile.type)&&previewContent)return <Table code={previewContent} label={previewFile.type} filename={previewFile.filename}/>;
+  if(previewFile.type==="json"&&previewContent)return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:codeFont,lineHeight:1.6}}>{prettyJson(previewContent)}</pre>;
   if(["md","markdown","mdx"].includes(previewFile.type)&&previewContent)return <div style={{lineHeight:1.7,fontSize:"var(--hc-text-secondary)",color:t.dim}}><MDWrap>{md(previewContent)}</MDWrap></div>;
   if(previewContent)return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:codeFont,lineHeight:1.6}}>{previewContent}</pre>;
-  if(!image&&previewFile.type!=="archive")return <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>⏳</span>Loading...</div>;
+  // A type the pane does not fetch (it used to say "Loading..." for good): say so and offer the file.
+  if(!image&&previewFile.type!=="archive"&&!previewFile.isExternal&&!TEXT_PREVIEW_TYPES.includes(previewFile.type))return <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:10,textAlign:"center"}}>
+    <span>A .{previewFile.type} file has no preview here.</span>
+    <a href={userScopedUrl(previewFile.url)} download={previewFile.filename} style={{color:t.ok,textDecoration:"none",padding:"5px 10px",border:`1px solid ${t.ok}44`,borderRadius:"var(--hc-radius)"}}>Download {previewFile.filename}</a>
+  </div>;
+  if(!image&&previewFile.type!=="archive")return <div role="status" style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}>Loading…</div>;
   if(previewFile.type==="archive"&&!previewArchive&&!previewError)return <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:t.mut,fontSize:"var(--hc-text-secondary)",gap:6}}><span style={{fontSize:32}}>📦</span>Reading archive...</div>;
   return null;
 }

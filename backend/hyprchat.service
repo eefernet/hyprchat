@@ -1,6 +1,8 @@
 [Unit]
 Description=HyprChat AI Platform
-After=network.target
+# Start after the network is up (and Tailscale, when HOST is a Tailscale address).
+After=network-online.target tailscaled.service
+Wants=network-online.target
 
 [Service]
 Type=simple

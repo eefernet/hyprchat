@@ -35,7 +35,7 @@ function harness(server, window = new EventTarget()) {
         effects.push(() => { slots[k].cleanup?.(); slots[k].cleanup = fn(); }); } },
   });
   vm.runInContext(['versionsDiffer', 'useRequestOptions'].map(extract).join('\n'), context);
-  let props = {conversationId: 'conv-1', currentProjectId: '', refreshKey: undefined, jobIds: '', jobChanges: 0, onChange: p => payloads.push(p)};
+  let props = {conversationId: 'conv-1', currentProjectId: '', refreshKey: undefined, jobIds: '', jobChanges: 0, sentKey: 0, onChange: p => payloads.push(p)};
   let view;
   const render = () => { index = 0; effects = []; view = context.useRequestOptions(props); effects.forEach(run => run()); };
   // Re-render until state, effects, fetches and the coalescing timer have all settled.
@@ -124,6 +124,32 @@ test('a conversation or upload change still resets the choice; job changes only 
   assert.equal(view.target, '');
   assert.equal(view.source, 'working');
   assert.equal(view.visual, 'inherit');
+});
+
+test('"Start a new project" and "Accepted version" apply to one message, then reset', async () => {
+  // Left selected, the next follow-up started the project over or went back a version (owner's choice: reset).
+  const h = harness({list: [project('r1', 'r2')], active: 'cp-1'});
+  let view = await h.settle();
+  view.update('new', 'on', 'working');
+  view = await h.settle();
+  assert.equal(h.payloads.at(-1).daedalus_new_project, true);
+  view = await h.settle({sentKey: 1});
+  assert.equal(view.target, '');
+  assert.equal(h.payloads.at(-1).daedalus_new_project, false);
+  assert.equal(view.visual, 'on', 'the visual-review choice is kept');
+
+  view.update('cp-1', 'on', 'accepted');
+  view = await h.settle();
+  assert.equal(h.payloads.at(-1).daedalus_source_pointer, 'accepted');
+  view = await h.settle({sentKey: 2});
+  assert.equal(view.source, 'working');
+  assert.equal(view.target, 'cp-1', 'a project picked by name stays picked');
+  assert.equal(h.payloads.at(-1).daedalus_source_pointer, '');
+
+  // A send with nothing special selected changes nothing.
+  const count = h.payloads.length;
+  await h.settle({sentKey: 3});
+  assert.equal(h.payloads.length, count);
 });
 
 test('job signatures change on delivery and Accept but not on progress ticks', () => {
