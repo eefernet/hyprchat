@@ -1,0 +1,23 @@
+--- a/searx/network/network.py
++++ b/searx/network/network.py
+@@ -12,6 +12,7 @@
+ import asyncio
+ import ipaddress
+ from itertools import cycle
++from urllib.parse import urlsplit
+ 
+ from curl_cffi import CurlHttpVersion
+ from curl_cffi.requests.exceptions import (
+@@ -271,7 +272,11 @@
+             except:
+                 method = response.request.method if response.request else "?"
+                 url = response.request.url if response.request else response.url
+-                self._logger.warning(f"HTTP Request failed: {method} {url}")
++                # Paths, queries and credentials can identify a search. Keep
++                # the provider and HTTP status, never the requested URL.
++                self._logger.warning("HTTP Request failed: %s %s (HTTP %s)",
++                                     method, urlsplit(str(url)).hostname or "[unknown]",
++                                     response.status_code)
+                 raise
+         return response
+ 

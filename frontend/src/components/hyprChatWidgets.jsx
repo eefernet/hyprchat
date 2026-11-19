@@ -16,7 +16,7 @@ import {isDocumentEvent} from "../documentFiles.js";
 import {CodeOutputPill,FileReadyCard} from "./ToolOutputCards.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { API, proxiedImageUrl } from '../session.js';
+import { API, proxiedImageUrl, sourceFaviconUrl } from '../session.js';
 import { parseUtcishMs } from '../datetime.js';
 import useIsMobile from '../useIsMobile.js';
 import {
@@ -752,8 +752,7 @@ const _qsUrlKey = (url)=>{
   }catch{return String(url||"").trim().replace(/\/+$/,"").toLowerCase();}
 };
 const _qsFaviconUrl = (urlOrHost, size=32)=>{
-  const host=_qsHost(urlOrHost)||String(urlOrHost||"").replace(/^www\./,"");
-  return host?`https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=${size}`:"";
+  return sourceFaviconUrl(urlOrHost);
 };
 const _quickSearchPayloadFromEvents = (evts, fallbackResults=[])=>{
   const qs=(Array.isArray(evts)?evts:[]).filter(e=>e?.type==="search_results"&&e?.data?.source==="quick_search").pop()?.data;
@@ -1061,7 +1060,7 @@ const ToolStatus = ({evts,t,onPreview,onOpenArtifact,historical,md,savedEvts=[],
             onMouseEnter={e=>e.currentTarget.style.borderColor=`${t.acc}88`} onMouseLeave={e=>e.currentTarget.style.borderColor=`${t.brd}44`}>
             <div style={{width:"100%",height:88,background:hasThumbnail?(isYT?"#0a0a0a":"transparent"):`linear-gradient(135deg,${t.bgDeep}DD,${t.surface}AA,${t.acc}18)`,position:"relative",overflow:"hidden",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
               {hasThumbnail
-                ?<img src={r.thumbnail} style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
+                ?<img src={proxiedImageUrl(r.thumbnail)} referrerPolicy="no-referrer" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                 :<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
                   <img src={_qsFaviconUrl(hn,64)} style={{width:28,height:28,borderRadius:"var(--hc-radius-sm)",display:"block"}} alt="" onError={e=>{e.target.style.display="none";}}/>
                   <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.6,letterSpacing:.5}}>{hn}</span>

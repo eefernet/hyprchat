@@ -900,7 +900,7 @@ async def _ask_ollama_json(
             raw = m.group(0)
         return json.loads(raw)
     except Exception as e:
-        print(f"[SA]   JSON parse failed: {type(e).__name__}: {e!r} (raw[:200]={raw[:200]!r})")
+        print(f"[SA]   JSON parse failed: {type(e).__name__}")
         return None
 
 
@@ -1222,7 +1222,7 @@ async def _run_search_agent(
     print(
         f"[SA]   plan mode={mode_cfg.mode} round={rounds_used} "
         f"planner={planner_outcome} freshness={plan.freshness_mode} "
-        f"time_range={plan.time_range} q={queries!r} "
+        f"time_range={plan.time_range} query_count={len(queries)} "
         f"relevance={score:.2f} errors={search_errors}"
     )
 
@@ -1249,7 +1249,7 @@ async def _run_search_agent(
                 plan.queries = queries
                 top = await _select_top_results(http, ollama_url, raw, primary, plan)
                 score = relevance_score(clean_latest, queries, top, prior_tokens)
-                print(f"[SA]   literal fallback {literal!r} relevance={score:.2f}")
+                print(f"[SA]   literal fallback relevance={score:.2f}")
 
     # ── Optional LLM refinement when results still look off-topic ──
     # QUICK_SEARCH_PLANNER=deterministic is the kill switch for ALL planner-
@@ -1286,7 +1286,7 @@ async def _run_search_agent(
                 top = await _select_top_results(http, ollama_url, raw, primary, plan)
                 rounds_used = 2
                 score = relevance_score(clean_latest, queries, top, prior_tokens)
-                print(f"[SA]   round={rounds_used} refined={refined!r} relevance={score:.2f}")
+                print(f"[SA]   round={rounds_used} refined query relevance={score:.2f}")
 
     # ── Page-fetch + OG-image enrichment (parallel) ──
     page_text, _ = await asyncio.gather(

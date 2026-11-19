@@ -16,6 +16,7 @@ its environment; the web proxy allows only `ALLOWED_CLIENTS` (default
 | File | Installed path |
 |---|---|
 | `rotate-ovpn.sh`, `ovpn-up.sh`, `ovpn-down.sh` | `/usr/local/bin/` |
+| `vpn_candidates.py` | `/usr/local/lib/hyprchat/` |
 | `searxng-web-proxy.py` | `/usr/local/bin/` |
 | `searxng-vpn-killswitch.sh`, `searxng-vpn-watchdog.sh` | `/usr/local/sbin/` |
 | `protonvpn-rotate.service`, `searxng-vpn-watchdog.service`, `searxng-vpn-watchdog.timer` | `/etc/systemd/system/` |
@@ -60,6 +61,16 @@ The installed profile pool inspected on 2026-10-05 contains 111 US profiles.
 Rotation changes exit servers; it does not currently provide country diversity.
 Shared VPN addresses can still receive upstream blocks. Rotation is not a
 guarantee against CAPTCHAs or a reason to clear engine cooldowns.
+
+The maintained rotation script also requires `vpn_candidates.py`. Install the
+helper **before** the script. Failed TLS connections or failed tunnel egress
+put that entry address (including its profile aliases) on a 24-hour cooldown
+in `/var/lib/searxng-vpn/failed-entries.json`. Healthy candidates retain the
+existing shuffled daily-use order. If every entry is cooling, retry the oldest
+failures so recovery remains possible. Successful connections clear their
+cooldown. This bookkeeping never changes the kill switch, engine suspensions,
+credentials, countries or model settings. Rotation no longer looks up or logs
+the root user's non-VPN public address.
 
 Hourly root cron entry:
 
@@ -124,6 +135,39 @@ SEARXNG_SETTINGS_PATH=<staged-settings.yml> PYTHONPATH=<release>/src \
 Promote only after representative live searches and VPN outage checks pass.
 Disable uWSGI request logging (`disable-logging = true`) to avoid storing every
 search query in access logs. Engine errors may still contain request details.
+
+Two additional patches are prepared for the pinned October source:
+
+- `patches/brave-svelte-data.patch` replaces the older HTML fallback with the
+  data parser backported from upstream commit
+  `368baa340d87428a4a30077b2b0531032906b811`. It parses wrapped, plain and mixed
+  Svelte data without executing JavaScript and removes the obsolete
+  `Accept-Encoding` override, preserving curl_cffi's supported compression
+  defaults (the companion fix in upstream PR #6836). Apply it to a **clean** copy of
+  `d48c4b555421e824342c51d68482dd0898e54d0f`, without the old HTML patch.
+- `patches/search-log-privacy.patch` keeps the provider host and HTTP status in
+  network failure logs, omitting URL credentials, paths and search parameters.
+
+Run `test_brave_svelte.py` and `test_search_log_privacy.py` in that candidate's
+isolated environment; `test_brave_compat.py` applies only to the historical HTML
+fallback. Preserve effective engine selections and compare real general/news
+searches before promotion. A CAPTCHA/429 prevents live parser verification and
+must not be reported as a pass. The full November upstream upgrade additionally
+requires an operator contact URL for Wikipedia, Wikidata and OpenStreetMap;
+review that identity/privacy decision separately. Do not invent contact details
+or silently lose those engines. Patch availability does not mean activation;
+inspect the running service's paths and patch checksums.
+
+The 2026-11-19 deployment retained the production Brave implementation. The
+candidate passes its offline Svelte tests, but live results included relative
+`/go/v1/…` links that became malformed `http:///go/v1/…` URLs. Upstream
+[issue #6967](https://github.com/searxng/searxng/issues/6967) reports the same
+problem on newer builds. Brave's
+[URL-cloaking announcement](https://brave.com/blog/google-goto-anti-scraping/)
+describes encrypted destinations requiring a separate exchange. Result counts
+alone are therefore insufficient: acceptance must require usable destination
+URLs for both web and news. Do not reconstruct destinations from display
+breadcrumbs or send opaque redirects to clients as a privacy workaround.
 
 This private deployment connects directly to uWSGI without a reverse proxy.
 The pinned upstream still logs a missing `limiter.toml` warning at worker startup

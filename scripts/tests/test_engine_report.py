@@ -9,7 +9,7 @@ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 def report():
     import hashlib
     trials=[]
-    for case in module.CASES:
+    for case in module.roster('classic', 1)[0]:
         for rep in range(1,4):
             key = f"{case['id']}-{rep}"
             jobs = []
@@ -97,7 +97,7 @@ def test_reliability_requires_observed_interfaces_without_regrading_baseline():
     data=report()
     assert module.assess(data)['families']['core']['successes']==24
     data['freeze']={'cohort':'reliability'}
-    for trial, case in zip(data['trials'], [c for c in module.RELIABILITY for _ in range(3)]):
+    for trial, case in zip(data['trials'], [c for c in module.roster('reliability', 1)[0] for _ in range(3)]):
         trial.update(case=case['id'], key=f"{case['id']}-{trial['repeat']}")
     for trial in data['trials']:
         for job in trial['jobs']:
@@ -168,7 +168,7 @@ def test_user_workflow_requires_verbatim_messages_exact_download_and_parent():
     data.update(entrypoint='daedalus-composer', model='local', model_digest='f'*64)
     for trial in data['trials']:
         # This fixture has no bank version and represents a historical v1 report.
-        case = next(c for c in module.CASES_V1 if c['id']==trial['case'])
+        case = next(c for c in module.roster('classic', 1)[0] if c['id']==trial['case'])
         for i, job in enumerate(trial['jobs']):
             prompt = case['followup'] if i else case['task']
             job.update(original_user_request=prompt, conversation_id=trial['key'], project_id=trial['key'],
@@ -196,7 +196,7 @@ def test_user_workflow_requires_verbatim_messages_exact_download_and_parent():
 
 
 def test_false_ui_verification_requires_same_action_target_revision_and_archive():
-    case=next(c for c in module.DEVELOPMENT if c['id']=='dev-web')
+    case=next(c for c in module.roster('development', 2)[0] if c['id']=='dev-web')
     steps=case['steps']+case['followup_steps']
     index=next(i for i,s in enumerate(steps) if s.get('selector')=='#amount' and s.get('equals')=='')
     evidence={'revision_id':'abc','targets':[{'selector':'#amount'}]}

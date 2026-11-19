@@ -271,6 +271,8 @@ def _format_reindex_error(kb_name: str, error: Exception) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cleanup_task_ref, _health_task_ref
+    from web_privacy import install_private_access_logging
+    install_private_access_logging()
     # Staged backup restore must land BEFORE init_db so an older-schema backup
     # is migrated by the normal idempotent migrations right after.
     backup_svc.apply_pending_restore()

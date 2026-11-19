@@ -99,6 +99,30 @@ button { transition: background-color var(--hc-dur-1) var(--hc-ease-out), border
 @keyframes hc-sky-rise { from { opacity: 0; transform: rotate(-80deg); } 55% { opacity: 1; } to { opacity: 1; transform: rotate(0); } }
 @keyframes hc-sky-set { from { opacity: 1; transform: rotate(0); } to { opacity: 0; transform: rotate(80deg); } }
 
+/* Memory button. Turning it on: three sparks fly down into the brain, which gulps them with a squish.
+   Turning it off: the brain shakes its head and the sparks drift up and away. `is-played` is set by a
+   click in this chat, so a page load or opening another chat is still. */
+.hc-memory-toggle { position: relative; overflow: visible; gap: 6px; color: var(--hc-muted); transition: background var(--hc-dur-2) var(--hc-ease-out), color var(--hc-dur-2) var(--hc-ease-out); }
+.hc-memory-toggle.is-on { width: auto; color: var(--mem-c); background: color-mix(in srgb, var(--mem-c) 14%, transparent); }
+.hc-memory-toggle.is-on:has(.hc-memory-label) { padding: 0 10px 0 8px; }
+.hc-memory-toggle.is-on:hover:not(:disabled) { color: var(--mem-c); background: color-mix(in srgb, var(--mem-c) 24%, transparent); }
+.hc-memory-icon { position: relative; display: inline-flex; }
+.hc-memory-label { font-size: var(--hc-text-micro); font-weight: 600; }
+.hc-memory-sparks { position: absolute; inset: 0; pointer-events: none; }
+.hc-memory-sparks > i { position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: var(--mem-c); opacity: 0; }
+.hc-memory-sparks > i:nth-child(1) { --sx: -13px; --sy: -9px; }
+.hc-memory-sparks > i:nth-child(2) { --sx: 0px; --sy: -15px; animation-delay: 70ms; }
+.hc-memory-sparks > i:nth-child(3) { --sx: 13px; --sy: -9px; animation-delay: 140ms; }
+.hc-memory-toggle.is-played.is-on .hc-memory-sparks > i { animation-name: hc-memory-in; animation-duration: 440ms; animation-timing-function: cubic-bezier(.5, 0, .9, .5); animation-fill-mode: both; }
+.hc-memory-toggle.is-played.is-on .hc-memory-icon > svg { animation: hc-memory-gulp 560ms var(--hc-ease-spring) 380ms both; }
+.hc-memory-toggle.is-played.is-on .hc-memory-label { animation: hc-fade-in var(--hc-dur-3) var(--hc-ease-out) 120ms both; }
+.hc-memory-toggle.is-played:not(.is-on) .hc-memory-icon > svg { animation: hc-memory-shake 520ms var(--hc-ease-out) both; }
+.hc-memory-toggle.is-played:not(.is-on) .hc-memory-sparks > i { background: var(--hc-muted); animation-name: hc-memory-out; animation-duration: 620ms; animation-timing-function: var(--hc-ease-out); animation-fill-mode: both; }
+@keyframes hc-memory-in { 0% { opacity: 0; transform: translate(var(--sx), var(--sy)) scale(.3); } 30% { opacity: 1; transform: translate(var(--sx), var(--sy)) scale(1.1); } 85% { opacity: 1; } 100% { opacity: 0; transform: translate(0, 0) scale(.4); } }
+@keyframes hc-memory-gulp { 0% { transform: none; } 30% { transform: scale(1.28, 1.16); } 55% { transform: scale(.9, .96); } 78% { transform: scale(1.07); } 100% { transform: none; } }
+@keyframes hc-memory-shake { 0% { transform: none; } 18% { transform: rotate(-15deg) scale(.94); } 38% { transform: rotate(13deg) scale(.92); } 58% { transform: rotate(-9deg) scale(.95); } 78% { transform: rotate(5deg); } 100% { transform: none; } }
+@keyframes hc-memory-out { 0% { opacity: 0; transform: translate(0, 0) scale(.4); } 25% { opacity: .9; } 100% { opacity: 0; transform: translate(var(--sx), calc(var(--sy) - 7px)) scale(.9); } }
+
 /* Ghost mode button. Turning it on: the ghost pops up with a wobble and a ring puffs out, then it
    bobs gently for as long as the mode is on. Turning it off: it drifts up and away, then the plain
    icon settles back. `is-played` is set by the first click, so a page load is still. */

@@ -33,5 +33,6 @@ html[data-hc-mobile] .sr-seg-option { min-height: 38px; }
 /* In a page header on a phone the tray scrolls sideways instead of wrapping onto several rows. */
 @media (max-width: 700px) {
   .hc-panel-nav > .sr-seg { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .hc-panel-nav > .sr-seg > .sr-seg-option { flex-shrink: 0; }
   .hc-panel-nav > .sr-seg::-webkit-scrollbar { display: none; }
 }

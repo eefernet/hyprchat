@@ -23,10 +23,20 @@ export function SettingRows({children}) {
 
 // A few exclusive choices drawn as one tray. Options: {v, label, title}.
 export function Segmented({options, value, onChange, label, color}) {
+  const selected=Math.max(0,options.findIndex(option=>value===option.v));
+  const move=(event,index)=>{
+    const key=event.key;
+    if(!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End'].includes(key))return;
+    event.preventDefault();
+    const next=key==='Home'?0:key==='End'?options.length-1:
+      (index+(['ArrowLeft','ArrowUp'].includes(key)?-1:1)+options.length)%options.length;
+    onChange(options[next].v);
+    event.currentTarget.parentElement.children[next]?.focus();
+  };
   return <div className="sr-seg" role="radiogroup" aria-label={label} style={color ? {'--seg-c': color} : undefined}>
-    {options.map(option => {
+    {options.map((option,index) => {
       const active = value === option.v;
-      return <button key={String(option.v)} type="button" role="radio" aria-checked={active} title={option.title} className="sr-seg-option" onClick={() => onChange(option.v)}>{option.label}</button>;
+      return <button key={String(option.v)} type="button" role="radio" aria-checked={active} tabIndex={index===selected?0:-1} title={option.title} className="sr-seg-option" onClick={() => onChange(option.v)} onKeyDown={event=>move(event,index)}>{option.label}</button>;
     })}
   </div>;
 }

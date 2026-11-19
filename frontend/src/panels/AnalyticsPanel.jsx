@@ -19,6 +19,8 @@ export default function AnalyticsPanel({
   setAnalyticsGroup,
   loadAnalytics,
   analyticsData,
+  analyticsError,
+  analyticsLoading,
 }){
   const isMobile=useIsMobile();
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -30,8 +32,15 @@ export default function AnalyticsPanel({
               {[7,30,90,0].map(d=><button key={d} onClick={()=>setAnalyticsDays(d)} style={{...btnS(analyticsDays===d?t.acc:t.mut),padding:"5px 12px"}}>{d===0?"All":`${d}d`}</button>)}
               <div style={{flex:1}}/>
               {["day","model","persona"].map(g=><button key={g} onClick={()=>setAnalyticsGroup(g)} style={{...btnS(analyticsGroup===g?t.acc:t.mut),padding:"5px 12px",textTransform:"capitalize"}}>{g==="persona"?"profile":g}</button>)}
-              <button aria-label="Refresh" onClick={loadAnalytics} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
+              <button aria-label="Refresh" disabled={analyticsLoading} onClick={loadAnalytics} style={{...btnS(t.acc),padding:"5px 10px"}}><IC.Refresh/></button>
             </div>
+            {analyticsError&&<div role="alert" style={{...cardS,color:t.err}}>
+              <div style={{fontWeight:600}}>Statistics unavailable</div>
+              <div style={{margin:"8px 0"}}>{analyticsError}</div>
+              {analyticsData&&<div style={{color:t.mut,marginBottom:8}}>Showing the last successfully loaded statistics.</div>}
+              <button onClick={loadAnalytics} style={btnS(t.acc)}>Retry</button>
+            </div>}
+            {analyticsLoading&&<div role="status" style={{color:t.mut,marginBottom:12}}>Loading statistics…</div>}
             {analyticsData?(()=>{
               const summary=analyticsData.summary||{};
               const sumRows=rows=>(rows||[]).reduce((a,d)=>({
@@ -70,9 +79,10 @@ export default function AnalyticsPanel({
                 {((summary.ratings?.up||0)+(summary.ratings?.down||0))>0&&statCard("Feedback",`👍 ${summary.ratings.up} · 👎 ${summary.ratings.down}`,"thumbs on assistant replies",t.ok)}
               </div>
               {rows.length>0?(()=>{
-                const isDay=analyticsGroup==="day";
+                const group=analyticsData.group,days=analyticsData.days;
+                const isDay=group==="day";
                 const labels=rows.map(d=>d.date?d.date.slice(5):d.model||d.persona_name||"(none)");
-                const spanLabel=analyticsDays===0?"(all time)":`(${analyticsDays}d)`;
+                const spanLabel=days===0?"(all time)":`(${days}d)`;
                 const costRows=isDay?rows.filter(d=>(d.cost_usd||0)>0):[];
                 const topModels=allModels.slice(0,5);
                 const otherTokens=allModels.slice(5).reduce((a,d)=>a+(d.total_tokens||0),0);
@@ -80,7 +90,7 @@ export default function AnalyticsPanel({
                 const sliceColors=[t.acc,t.ok,t.warm,t.pink,t.f4];
                 return <>
                 <div style={{...cardS,padding:20}}>
-                  <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,marginBottom:12,color:t.mut}}>Tokens by {analyticsGroup==="persona"?"profile":analyticsGroup} {spanLabel}</div>
+                  <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,marginBottom:12,color:t.mut}}>Tokens by {group==="persona"?"profile":group} {spanLabel}</div>
                   <PanelChart t={t} font={font} type="bar" height={260}
                     data={{labels,datasets:isDay?[
                       {label:"Prompt",data:rows.map(d=>d.prompt_tokens||0),backgroundColor:`${t.warm}CC`,borderColor:t.bgDeep,borderWidth:1,borderRadius:"var(--hc-radius-sm)"},
@@ -138,7 +148,7 @@ export default function AnalyticsPanel({
                 </div>
               </div>}
             </>;
-            })():<>
+            })():!analyticsError&&<>
               <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
                 {Array.from({length:4},(_,i)=><SkeletonCard key={i} t={t} h={90} lines={1} style={{flex:"1 1 170px",minWidth:160}}/>)}
               </div>

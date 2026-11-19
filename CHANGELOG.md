@@ -1,248 +1,256 @@
 <details open>
-<summary>Alpha v18.3.1 — Nov 18, 2026</summary>
+<summary>Alpha v18.3.1 — Nov 19, 2026</summary>
 
-> Fixes for bugs found while taking the README screenshots, then a polishing round: workspaces in the chat list, a Models page in plain words, security fixes and a clean-up.
+> Chat and workspace polish, clearer model controls, refreshed themes and backgrounds, and security and reliability fixes.
 
 ## Bug fixes
 
-- **The welcome line can no longer stall the server** — one greeting is kept per user and part of the day, only one is written at a time, and the model call is short and stops when HyprChat gives up on it. A burst of page loads used to queue one unlimited model call each.
-- **Excel sheets with blank or uneven rows** — a budget sheet with a heading row, spacer rows and totals is accepted (`[]` is a blank row). The error for a wrong row now says how many items it had and how many are allowed.
-- **A delivered file shows once** — the reply's own download link is no longer drawn as a second card named after its address (`f8725496-name.docx`), and files made by the document tools are listed once.
-- **Web search uses what you typed** — the hidden message-time line, the skills hint and kept tool results no longer leak into search queries or the Sources row, and "thanks", "continue" and `/online` are recognised again.
-- **Deep Research** — a source count past its target shows the count with "target 48" beside its label instead of "59/48"; report cards show the real source count and a plain summary instead of "## Method…"; the search warning appears only when search itself fell short, and a report cut off while writing says so; the "Add to workspace" menu on cards is an icon instead of a clipped box.
-- **Knowledge-base file names from web pages** — HTML entities in the page title are decoded, so names no longer contain `nbsp`, `mdash` or `8212`.
-- **Workspace document stores are not listed as knowledge bases** — they no longer appear in the Knowledge Bases panel or in any knowledge-base picker.
-- **Library Search lists a chat once** — with its best-matching message and "+N more matches in this chat".
-- **Tables** — short cells such as times and dates stay on one line ("09:30" no longer breaks), and Assistant briefs write times as HH:MM.
-- **Tip callouts** — show an icon instead of the word "tip".
-- **HyprFit** — shows the curated catalog by default; "Hugging Face trending" is now a switch that is remembered.
-- **Daedalus** — when the coding model could not load because the GPU memory was in use, the job card says so and that Continue will work once the other model has unloaded.
-- **Calendar** — deleting one occurrence of a repeating event asks "this occurrence or the whole series" (it used to delete every occurrence, also on the synced calendar). An invitation from Outlook no longer breaks the calendar, and one unreadable event no longer stops reminders for everyone.
-- **Scheduled tasks and check-ins** — they run while HyprChat is open in a tab (they were put off for as long as any tab was open), saving the Assistant profile no longer pushes a due brief to tomorrow, and a weekly or monthly task no longer fires repeatedly on the night clocks go back. A webhook or event that arrives during a run gets its own run instead of being dropped. A webhook address stops working once its task is no longer a webhook task.
-- **Reminders** — a note reminds again only when its time actually changes (editing the title no longer re-fires it; moving the due date now re-arms it), and an event moved on the calendar server reminds again.
-- **Email** — adding an account no longer triggers automations and urgent alerts for old mail, message times are shown in your own time and sorted correctly, and the assistant may move mail to Trash only when both the account's delete switch and the master "act on email" switch are on.
-- **Knowledge bases** — uploading a file under an existing name replaces it (it used to leave two entries for one file), deleting a knowledge base or file asks first and reports a failure, and a failed "New KB" no longer shows a made-up entry. Deleting a workspace also removes the documents uploaded to it.
-- **Research** — a report interrupted by a restart no longer looks like it is still running, finished reports count as ready in workspaces, opening a report no longer moves it in the list, and research and councils can only read knowledge bases that are yours.
-- **Hugging Face downloads** — the exact file you picked is pulled again (a missing import had silently disabled that), and a download no longer says "ready" when the model name could not be created.
-- **Canvas** — an AI edit is applied where its text is now, or refused if that text changed, instead of overwriting whatever sits at the old position.
-- **Chat** — "Delete all chats" stops the reply or council that is running and removes the chats from history recall; deleting a council chat stops the council; only one council runs at a time; a message cannot be sent while a project archive is still uploading; replies with tool rounds are remembered in full for history recall and memory; Continue and Pin are no longer offered in chats that are not saved.
-- **Themes** — diff lines in code blocks, the warning colour and the model badges (quantization, capabilities) are readable on every theme; the two light themes were the worst. Diff lines no longer show their + or - twice, and nested list items render as list items.
-- **Backgrounds** — with "reduce motion" on, the background shows a still picture instead of going blank; small layout changes no longer restart the animation; moving the window to another display keeps it sharp.
-- **Smaller fixes** — settings saved at the same moment no longer overwrite each other, briefs give task times in your time zone, the "message too large" warning counts non-Latin text correctly, a renamed skill is not half-saved when the name is taken, and building a large bundle no longer stalls other requests.
+- **Welcome messages** — cached per user/time of day, serialized and time-limited; cancelled requests stop generation instead of queuing unlimited calls.
+- **Excel** — accepts blank (`[]`) and uneven rows, including headings, spacers and totals; invalid-row errors report actual and allowed lengths.
+- **Delivered files** — removed duplicate document cards and cards created from a reply's own download links.
+- **Web search** — excludes message times, skill hints and kept tool results from queries and Sources; restores recognition of “thanks”, “continue” and `/online`.
+- **Deep Research** — clearer over-target source counts, accurate card counts and summaries, warnings specific to search failures or truncated writing, and an unclipped workspace action.
+- **KB page titles** — decode HTML entities in imported filenames.
+- **Workspace document stores** — hidden from Knowledge Bases and all KB pickers.
+- **Library Search** — one result per chat, showing its best match and additional-match count.
+- **Tables** — keep short dates/times together; Assistant briefs use HH:MM.
+- **Tip callouts** — display an icon instead of “tip”.
+- **HyprFit** — defaults to the curated catalog; remembers the Hugging Face trending switch.
+- **Daedalus** — GPU-memory load failures explain that Continue can retry after another model unloads.
+- **Calendar** — recurring-event deletion distinguishes one occurrence from the series, including synced calendars; Outlook invitations and unreadable events no longer break the calendar or others' reminders.
+- **Scheduled tasks** — run with tabs open; Assistant saves preserve due briefs; weekly/monthly schedules avoid duplicate DST-fallback runs; events/webhooks arriving during execution get another run; obsolete webhook addresses stop working.
+- **Reminders** — re-arm when note due times or remote calendar times change, not when only a note's title changes.
+- **Email** — new accounts don't trigger automations or urgent alerts for old mail; dates use local time and sort correctly; Trash requires both account deletion permission and the master email-action switch.
+- **Knowledge bases** — same-name uploads replace existing files; deletes require confirmation and report errors; failed creation leaves no phantom KB. Workspace deletion removes its uploaded documents.
+- **Research** — interrupted reports stop appearing active; completed reports count as workspace-ready; opening reports preserves order; research and councils respect KB ownership.
+- **Hugging Face downloads** — restored exact-file pulls and prevented “ready” when model-name creation fails.
+- **Canvas** — AI edits locate the current target text or refuse changed text instead of overwriting stale positions.
+- **Chat** — Delete all stops replies/councils and clears history recall; council-chat deletion stops its council; councils run singly; project uploads block sending; history/memory retain complete tool-round replies; unsaved chats hide Continue and Pin.
+- **Themes** — readable diff lines, warnings and model badges across themes; removed duplicate diff signs and fixed nested lists.
+- **Backgrounds** — reduced motion shows a still image; minor layout changes don't restart effects; display changes retain sharpness.
+- **Other fixes** — concurrent settings saves, brief timezones, non-Latin draft-size counts, atomic skill renames and non-blocking large-bundle creation.
 
 ## Interface refresh
 
-- **Sans text by default** — menus, settings and chat text use Figtree unless you picked a font yourself; code stays monospace. "Match code font" in Settings → Appearance brings the old look back.
-- **Chat list** — rows are tighter and show when the chat was last used ("12m", "Tue", "3 Nov"); the time gives way to the "…" button when you point at a row. Search and New chat share one row at the top, and your profile sits at the bottom next to one status line ("All services up" or what is down) that opens the connection monitor.
-- **Chat header in one row** — the chat's title is in the header, and system prompt, memory, export and import moved into one "…" menu. On a phone the workspace choice and the light/dark switch are in that menu too.
-- **Ghost mode button** — always in the chat header beside the light/dark switch. It turns pink and says "Ghost" while the mode is on; the ghost pops up when you switch it on and drifts away when you switch it off.
-- **Sunrise and moonrise** — the light/dark switch sets the sun or moon to one side while the other rises from the horizon.
-- **Reading column** — 800 pixels by default (your own choice in Settings is kept). Code, tables, charts and diagrams use up to 96 pixels more on each side when the window has room.
-- **Composer** — the text sits on its own line with attach, Tools, effort and Send underneath.
-- **Search sources in one line** — "4 sources", the first sites and "Show all"; the search query is shown when you open it.
-- **Settings in rows** — Model & Generation and Appearance show each setting's name and explanation on the left and its control on the right, with switches instead of "Enabled / Disabled" checkboxes.
-- **Themes** — pick from preview cards grouped Dark and Light; a click applies at once and "Undo" takes you back.
-- **Backgrounds** — a gallery of still thumbnails grouped Calm, Technical and Space, and a Strength slider from Subtle to Strong. The dot grid is easier to see at Normal; Subtle is what it used to be.
-- **Northern Lights** — a new background next to Aurora Lines: curtains of green, teal and violet light that fold and shimmer, in their real colours on every theme.
-- **Four Christmas backgrounds** — Snowfall (flakes at three depths over a low snow bank), Christmas Lights (strings of bulbs that twinkle, chase and fade by colour), Silent Night (pines, a bright star and light snow) and Holiday Glow (soft drifting discs of red, gold and green). They are in a new Christmas group in Settings → Appearance.
-- **Pixel Rain rebuilt** — drops fall in aligned columns at three depths, each with a glowing head, a tail that fades out and a small splash at the bottom.
-- **Dot Grid is alive** — a band of light crosses the grid every few seconds, dots near your pointer brighten, and now and then a ripple spreads. It stays a still grid with reduced motion.
-- **Other backgrounds improved** — Blackbox Terminal is columns of falling glyphs with a bright head; Synapse Rain's droplets have tails; Cosmic Microwave twinkles and drifts; Quantum Foam flashes where a dot lands.
-- **Background fixes** — Blueprint Ghosts did not move at all: its drawings are now traced in, fade and reappear elsewhere. Monastery Candlelight flickered with random noise: it is now a steady flame glow with rising embers. Quantum Foam ran faster on fast screens.
-- **Service Monitor is its own panel** — "Open monitor" in Settings → Connections, or the status line at the bottom of the chat list, opens the monitor in place of Settings with the services side by side. The arrow at the top left goes back to Settings and the X closes it. It loads fresh data every time it opens and says so when the history could not be loaded.
-- **One page header everywhere** — Research, Council, Agents, Image Studio, Artifacts, Memory, Knowledge Bases, Tools, Models and Jobs share the same title bar with at most one highlighted action.
-- **Tools page** — three tabs (Your tools, Connectors, Built-in); the connector forms open from "Add connector" instead of always filling the page.
+- **Fonts** — Figtree is the default for interface/chat text unless customized; code stays monospace. Appearance → Match code font restores the previous style.
+- **Chat list** — tighter rows with relative activity times, hover actions, combined Search/New chat controls, and a bottom profile/service-status row opening the monitor.
+- **Chat header** — one row with title and a menu for system prompt, memory, export/import; phones also place workspace and theme controls there.
+- **Ghost mode** — always accessible in the header, with pink active styling and enter/leave animation.
+- **Memory** — its own header button beside Ghost instead of an item under Chat options; accent-coloured and named while on, with a short animation when switched (sparks drop into the brain; turning it off, it shakes them away). Unavailable in Ghost mode.
+- **Theme switch** — animated sunrise/moonrise transition.
+- **Reading width** — 800px by default, preserving custom choices; code, tables, charts and diagrams can extend 96px per side.
+- **Composer** — text above attach, Tools, effort and Send controls.
+- **Sources** — compact count/site row with Show all; opening it reveals the query.
+- **Settings** — Model & Generation and Appearance use labeled rows with explanations and switches.
+- **Theme gallery** — Dark/Light preview cards apply immediately, with Undo.
+- **Background gallery** — Calm/Technical/Space groups and a Subtle–Strong slider; Normal strengthens Dot Grid, while Subtle retains its old intensity.
+- **Northern Lights** — green, teal and violet animated curtains retain natural colors across themes.
+- **Christmas backgrounds** — Snowfall (layered flakes/snowbank), Christmas Lights (twinkling/chasing bulbs), Silent Night (pines/star/snow) and Holiday Glow (red/gold/green discs), grouped under Christmas.
+- **Pixel Rain** — three-depth columns with glowing heads, fading trails and splashes.
+- **Dot Grid** — moving light bands, pointer highlights and occasional ripples; static under reduced motion.
+- **Other effects** — falling Blackbox Terminal glyphs, Synapse Rain trails, Cosmic Microwave drift/twinkle and Quantum Foam impact flashes.
+- **Effect repairs** — Blueprint Ghosts now animates; Monastery Candlelight uses steady glow/embers; Quantum Foam timing no longer depends on refresh rate.
+- **Service Monitor** — dedicated panel from Connections or sidebar status, side-by-side services, Back/Close controls, fresh data on open and explicit history-load errors.
+- **Shared headers** — consistent title bars with at most one primary action across Research, Council, Agents, Images, Artifacts, Memory, KB, Tools, Models and Jobs.
+- **Tools** — Your tools, Connectors and Built-in tabs; connector forms open through Add connector.
 
 ## Workspaces in the chat list
 
-- **Chats are grouped under their workspace** — the chat list has a Workspaces block between Pinned and the date groups. Each workspace is a row that opens and closes (it stays as you left it), with its five newest chats underneath, "Show N more" for the rest, and a "+" that starts a new chat in it. A workspace chat is listed there and no longer in Today / Yesterday; pinned chats stay in Pinned.
-- **Move a chat from its menu** — the "…" menu of a chat lists your workspaces; tick one to put the chat in it, untick to take it out.
-- **Older chats can be reached** — the list used to stop at the 50 newest for good. "Show older chats" at the end loads more.
-- **The list stays right without a reload** — adding or removing a chat, renaming or deleting a workspace and deleting a chat update the rows at once, and a chat you send a message in moves to the top of its group.
-- **Pinning or renaming a chat no longer counts as activity** — it used to jump to Today after a reload. A forked chat stays in the workspace of its original.
-- **One name** — the nav rail says Workspaces, like the page it opens (it said Projects).
+- **Workspace groups** — remembered expansion, five recent chats, Show more and New chat controls; placed between Pinned and date groups, without duplicate workspace chats. Pins remain in Pinned.
+- **Move chats** — check/uncheck workspaces from each chat's menu.
+- **Older chats** — pagination removes the previous 50-chat limit.
+- **Live updates** — chat/workspace creation, removal, renaming and deletion update immediately; new messages move chats to the top of their group.
+- **Activity order** — pinning/renaming no longer changes recency; forks retain workspace membership.
+- **Naming** — the nav rail now says Workspaces instead of Projects.
 
 ## Models page
 
-- **Tabs named for what you want to do** — Installed, Recommended for this server, Browse Hugging Face (they were Ollama, Hugging Face, HyprFit).
-- **Every model once** — a model installed from Hugging Face is one row with a "Hugging Face" mark, not a second entry on another tab with different controls. The download and the name you gave it are shown as one model.
-- **What a model can do, as Ollama reports it** — "Uses tools", "Shows its thinking", "Reads images" come from the model itself. They used to be guessed from the name by three different rules, which called every Llama 3 a tool user and missed image support on others. The model picker uses the same answer.
-- **Plain words** — size as "27.3 billion parameters · 17.7 GB on disk", the compression explained ("Q4_K_M: 4-bit, the usual balance of quality and size"), "How much it remembers (context window)" with the model's own limit, and a short list of the words used on the page. Creativity settings and the tool-calling fix are folded away under Response style and Advanced.
-- **Recommendations you can read** — each card says "Needs 6.6 GB of your 24 GB · about 120 tokens a second · 32K context" with a bar, and has one Install button (it used to fill a text box on another tab). The hardware numbers that only change these estimates are under Advanced, each with a line saying what it does.
-- **Hugging Face** — a failed search says so instead of looking empty, a failed file list no longer breaks the page, compatibility notes are written out instead of hidden in hover text, "only models Ollama can run" searches again when ticked, and Retry on a failed download really retries.
-- **Tool-calling fix** — one entry, offered only for a model Ollama says cannot use tools, and it asks before rewriting the model.
-- **Defaults** — the default creativity and word-choice settings are saved with your profile (they were kept in the browser only), and a deleted model's own settings go with it.
-- **Four more interface fonts** — Figtree, Hanken Grotesk, Instrument Sans and DM Sans in Settings → Appearance.
+- **Tabs** — Installed, Recommended for this server and Browse Hugging Face replace Ollama/Hugging Face/HyprFit labels.
+- **Unified entries** — installed Hugging Face models appear once, with their source and chosen name.
+- **Capabilities** — tool use, thinking and vision come from Ollama's model metadata; the model picker shares the same results.
+- **Plain labels** — parameter/disk sizes, quantization explanations, actual context limits and a glossary; Response style and Advanced contain less common controls.
+- **Recommendations** — readable memory/speed/context estimates, usage bars and direct Install; hardware-estimate inputs move to Advanced with explanations.
+- **Hugging Face** — explicit search errors, resilient file lists, visible compatibility notes, immediate compatibility-filter searches and working download retries.
+- **Tool-calling fix** — one confirmed rewrite action, offered only when Ollama reports no tool support.
+- **Defaults** — creativity/word-choice settings sync with profiles; deleting a model also removes its overrides.
+- **Fonts** — added Figtree, Hanken Grotesk, Instrument Sans and DM Sans.
 
 ## Security and profiles
 
-- **Other websites cannot send commands to HyprChat** — a page open in your browser could post to the server, and with a Main profile that has no password that included "delete everything" and staging a restore. Requests that change something are now refused when they come from another site. "Delete other users" and "Fresh install" also check the typed phrase on the server.
-- **Images from the web cannot run script** — a picture shown through HyprChat's image proxy, or a profile picture, is served so that it cannot act as you if its address is opened directly.
-- **Connectors** — only the Main profile can add a connector that runs a command on the server, uses the server's own secrets, or reaches private addresses. Other profiles can still add ordinary web connectors with their own key.
-- **Deleting a profile deletes all of it** — its scheduled tasks (which kept running), mail and calendar passwords, API keys, notes, notifications and calendar are removed, and so are its files. "Fresh install" no longer leaves these behind for the next Main profile.
-- **Switching profile** — a preference changed in the last second is saved first, a typed but unsaved API key does not stay in its box for the next profile, and the bell and statistics start empty. Creating a profile from Settings no longer signs Main out into it.
-- **The notification token** — is no longer returned to the browser, and can be removed.
+- **Cross-site protection** — reject state-changing requests from other websites, including passwordless Main sessions; destructive user deletion/Fresh install phrases are checked server-side.
+- **Image safety** — proxied images and profile pictures cannot execute script as the user when opened directly.
+- **Connector permissions** — server commands, server secrets and private-address access require Main; other profiles retain ordinary web connectors with their own keys.
+- **Profile deletion** — removes tasks, mail/calendar credentials, API keys, notes, notifications, calendars and files; Fresh install clears the same remnants.
+- **Profile switching** — flushes pending preferences, clears unsaved API keys and notification/statistics state; creating a profile in Settings keeps Main signed in.
+- **Notification tokens** — no longer exposed to the browser; removal supported.
 
 ## More fixes
 
-- **Image Studio** — a job ComfyUI forgot (after a restart) ends with a message instead of saying "queued" for ever; "Delete all images" says what it could not remove.
-- **Settings** — the context size is saved when you leave the box, not on every keystroke, and the box can be cleared; changing the embedding model says that knowledge bases need Reindex All; a setting only Main may change says so; restoring a backup says what it switches off.
-- **Statistics** — "Today" counts today only (it included yesterday).
-- **Councils, agents, connectors** — deleting asks first and a refused delete or save is reported; debate rounds changed with the keyboard are saved; a failed picture upload keeps the old picture.
-- **Memory** — an empty memory cannot be saved, and a failed save is no longer shown as "Memory added".
-- **Voice** — the stop button stays while a reply is being written, and opening Settings keeps what you said.
-- **Keyboard shortcuts** — do nothing behind an open dialog or the sign-in screen.
+- **Image Studio** — forgotten ComfyUI jobs fail explicitly; bulk deletion reports individual failures.
+- **Settings** — context edits save on blur and allow clearing; embedding-model changes explain Reindex All; admin-only controls and restore-disabled features are labeled.
+- **Statistics** — Today no longer includes yesterday.
+- **Councils, agents and connectors** — confirm deletions, report failed saves/deletes, save keyboard-adjusted debate rounds and retain pictures after failed uploads.
+- **Memory** — reject empty entries and report failed saves accurately.
+- **Voice** — Stop remains available during generation; opening Settings preserves dictated text.
+- **Shortcuts** — inactive behind dialogs or sign-in.
+
+## Polish follow-up — Nov 19
+
+- **Statistics** — validate responses, show errors/Retry, retain prior data on failure and reject stale requests after query/profile changes.
+- **Backgrounds** — respond immediately to reduced-motion changes; hidden tabs and unmount stop animation work.
+- **Profiles and controls** — agent/persona cards, editors and model pickers fit narrow/large-text layouts; segmented filters scroll without shrinking and support Arrow/Home/End keys.
+- **Artifact details** — mobile dialogs contain focus, make covered content inert, restore focus on close and switch correctly to desktop panes.
+- **Coverage** — updated Daedalus, qualification and custom-tool tests; included background-effect tests in the default suite and added Analytics, lifecycle and browser regressions. Immediate-startup WebKit reload diagnostics remain documented; physical-device and true 200% zoom checks remain unverified.
 
 ## Housekeeping
 
-- Removed code nothing used: a clean-up route for the retired sandbox, the placeholder left by the first Coder Bot, three evaluation scripts whose runner was gone, and one renamed script.
+- Removed the retired sandbox cleanup route, original Coder Bot placeholder, three orphaned evaluation scripts and a renamed script.
 
 </details>
 
 <details>
 <summary>Alpha v18.3 — Nov 18, 2026</summary>
 
-> HyprChat now learns from its own work with automated skills. Massive updates to chat rendering when it comes to tool calling, updated to settings. Compaction to chats has been added as well as a way for the user to view what is using context by clicking on the context meter. Updated preview panel when the model generates a webview or a document/MD file. Massive fixes to overall chat logic
+> Learned skills, steadier chat/tool rendering, context controls and live document previews.
 
 ## Skills
 
-- **HyprChat saves what it works out** — after a multi-step task, a fixed error or your correction, it can save a skill: when to use it, the steps and the pitfalls. Later chats see a one-line list and load a skill when a task matches. A background reviewer decides what is worth keeping, and a skill is patched when you say a step is wrong; earlier versions can be compared and restored.
-- **Guardrails** — skills from scheduled runs, from chats that read email or connector data, or that trip a safety check wait for your approval. "Always ask me first" makes every skill wait.
-- **Skills panel** — write, edit, pin, archive and delete skills, review waiting ones with a before/after view, attach scripts that are copied into the sandbox, and import or export `SKILL.md` files. Unused learned skills are flagged, then archived; nothing is deleted automatically.
-- **Where it applies** — ordinary chats, Master Developer, the Assistant and scheduled tasks; not Daedalus jobs, Ghost chats or roleplay characters.
+- **Learning** — multi-step tasks, fixes and corrections can become reusable procedures. A background reviewer selects skills; chats see a short index and load matches. Corrections update skills, with version comparison/restore.
+- **Approval** — skills from scheduled runs, email/connector chats or safety-flagged work need review; Always ask me first applies to all skills.
+- **Skills panel** — create, edit, pin, archive/delete, review diffs, attach sandbox scripts and import/export `SKILL.md`. Unused learned skills are flagged, then archived, never auto-deleted.
+- **Scope** — ordinary chat, Master Developer, Assistant and scheduled tasks; excludes Daedalus, Ghost and roleplay.
 
 ## Chat
 
-- **Scrolling that behaves** — the view follows a reply while you are at the bottom, without jumps or text hidden behind the message box, and lets go as soon as you scroll up.
-- **Tool output where it happened** — code output and files sit under the part of the reply that produced them (collapsed; a failed run opens). Consecutive runs form one list with a summary header, a line per run saying what it did, and the newest five plus every failure. Continue keeps the first half's output, and the Activity badge counts calls correctly.
-- **Chats remember what their tools returned** — later turns get a trimmed record of earlier tool calls and results, so follow-ups and Continue build on what was found instead of starting over. Email, connector and chat-history results are never kept, nor anything in Ghost chats, coding jobs or scheduled runs. Turn it off in Settings → Model & Generation → "Keep Tool Results".
-- **Longer tool runs** — a reply may call the model 40 times (was 12); change it under "Tool rounds per reply". At the limit the reply still writes its answer and offers Continue, a model that goes quiet after its tools is asked once for the answer, and a bare "continue" no longer runs a web search.
-- **Type while it answers** — Enter queues your message and each one is sent when the reply before it finishes; click to edit, ✕ to remove. After Stop, an error, a limit, a coding job or a reply finished in another chat, the queue waits with **Send now**. After a reload, queued text comes back as a draft.
-- **Drafts stay with their chat** — each chat keeps its own text and attachments; the text survives a reload (not in Ghost chats).
-- **Small additions** — Rename and Generate title in the chat menu, Retry for a reply that ended before writing anything, and Copy on your own messages.
-- **Previews** — the HTML preview has one header row and shows the page edge to edge at its real size, which should also remove the white bar at other UI scales. Documents open beside the chat as they are written (Read / Source), SVG and CSV get a Preview, and a Markdown document with code blocks stays whole. Delivered files, Word, Excel and PowerPoint included, open by themselves, and every preview has **Save**, which keeps it as a file of that chat in Artifact Studio.
-- **The left bar shows what each chat is doing** — replying, an unread reply, an unsent draft or queued messages. Deleting a chat asks first and stops its reply, and chats, tags and search results work with Tab and Enter.
-- **Steadier messages** — message buttons no longer vanish while another chat replies, replies no longer shift when they finish, and wording is plainer ("Thought it through"; footer: Models, Sandbox, Search, Automation).
+- **Scrolling** — follows replies only at the bottom; scrolling up releases follow mode, without jumps or composer overlap.
+- **Tool output** — inline collapsed output/files, auto-expanded failures and grouped consecutive runs with summaries, action labels, the newest five and all failures. Continue retains earlier output; Activity counts calls correctly.
+- **Tool memory** — trimmed results support follow-ups/Continue. Excludes email, connectors, history recall, Ghost, coding jobs and scheduled runs. Disable through Model & Generation → Keep Tool Results.
+- **Tool rounds** — default raised from 12 to 40, configurable per reply; the limit still allows a final answer/Continue, with one recovery prompt for models silent after tools. Bare “continue” no longer searches the web.
+- **Queued messages** — Enter queues during generation; edit/remove before sending. Stop, errors, limits, coding jobs or completion in another chat pause the queue with Send now. Reload restores queued text as drafts.
+- **Per-chat drafts** — text and attachments stay with their chat; text survives reload except in Ghost mode.
+- **Message actions** — Rename/Generate title, Retry when no answer was written, and Copy for user messages.
+- **Previews** — edge-to-edge HTML with one header; streamed documents with Read/Source, SVG/CSV previews and intact nested code fences. Delivered files, including Office documents, open automatically; Save keeps previews in that chat's Artifact Studio.
+- **Sidebar states** — replying, unread, draft and queue indicators; confirmed deletion stops replies; chats, tags and search results support Tab/Enter.
+- **Stable rendering** — message actions stay visible while other chats reply, completed replies don't shift, and activity/footer wording is clearer.
 
 ## Chat fixes
 
-- **Replies are not lost** — sending the same text twice keeps both. Stop, a dropped connection or a server restart keeps what was written (saved every few seconds), marks the reply stopped and offers Continue; a reply cut by the output limit gets the same line. Tools a stopped reply started are cancelled.
-- **Each chat keeps to itself** — Stop and the message box act only on the chat that is replying. Opening another chat no longer takes over a running reply, and tool cards, edit boxes, menus and files still loading stay with their chat. A Ghost chat's reply stops when you leave it, files attached mid-reply stay, a rename during a reply is kept, and deleting the open chat loads the next one properly.
-- **Regenerate, Edit and Delete hit the right message** — they ask before removing later messages, are not offered on a greeting or on the message that started a job, and cannot start two replies on a double-click. They find the right saved message, so an earlier stopped reply can no longer be removed with everything after it. Deleted messages stay deleted, Undo does not duplicate, an edited message keeps its PDF, and failed saves tell you.
-- **Tool calls** — example code in an answer is no longer run, and models that write tool calls as text no longer wipe the reply so far.
-- **Errors** — shown exactly once, and refused requests show the server's message instead of JSON or a copy of the previous reply.
-- **Models** — models that accept only one system message (two Qwen3.8 builds) now work, and each reply shows the model that wrote it.
-- **Daedalus** — ordinary answers are no longer replaced by "No Daedalus job was started"; a job that did not start says why; one card per job; "Start a new project" and "Accepted version" reset after sending; a .zip dropped into a new chat uploads as a project. Smaller: "Answering" for project questions, replies to questions during a job stay visible, no false "Planning" cards in old chats, deleted jobs say so.
-- **Smaller fixes** — PDF text survives a reload; the message box unlocks after a reload during research; Enter does not send while composing Japanese, Chinese or Korean; titles are retried after a stopped first reply; message search shows the newest query; saves cannot land out of order; settings changed just before closing the tab are saved; sources are listed once; the regenerate menu closes on Escape; non-text files are refused; empty edits are not saved; a replaced reply's search cards are removed; Continue is refused for another chat's reply.
+- **Recovery** — duplicate user text stays distinct. Stop, disconnects, restarts and output limits retain periodically saved partial replies with status/Continue; stopping also cancels tools.
+- **Conversation ownership** — streams, Stop/composer actions, tool cards, edits, menus and loading files stay with their chat. Leaving Ghost stops its reply; mid-reply attachments and renames survive; deleting the open chat selects the next correctly.
+- **Regenerate/Edit/Delete** — confirm removal of later messages, exclude greetings/job starters and block duplicate dispatch. Correct saved-message matching, durable deletion, non-duplicating Undo, retained edited PDFs and explicit save errors.
+- **Tool parsing** — example code is not executed; text-format calls preserve prior reply text.
+- **Errors** — shown once with the server's message, without raw JSON or stale replies.
+- **Models** — supports strict single-system-message templates, including two Qwen3.8 builds; replies identify their actual model.
+- **Daedalus** — preserves ordinary answers, explains failed job starts, shows one card per job, resets project/version choices after sending and accepts ZIP projects in new chats. Clearer Answering/deleted-job states, persistent question replies and no false historical Planning cards.
+- **Other fixes** — PDF reloads, research composer unlock, IME-safe Enter, title retries, latest-query search, ordered saves, close-tab preference flush, unique sources, Escape dismissal, non-text/empty-edit rejection, stale search-card removal and cross-chat Continue refusal.
 
 ## Context
 
-- **A context meter you can trust** — the pill shows what the chat holds, from the model's own counts, against the window the model really runs with. It no longer resets or falls after replies, follows a model or context change at once, settles after Stop or an error, counts tool work as it happens, and shows tokens per second. It is a number over a thin bar with a tick where compaction fires; thinking and tool results show as a lighter end.
-- **See what uses the context** — click the pill for a breakdown: instructions, tools, memory, skills, summary, messages, excerpts and this reply's tool calls, with free space and the compaction point; excerpts are no longer counted twice. A warning appears when the window is too small for HyprChat's own ~3,500 tokens.
-- **Compaction that works and shows** — earlier messages are summarized by the chat model and recent ones kept word for word, with nothing dropped unsummarized. A line marks the cut with the summary one click away, long tool runs shorten old results and summarize before giving up, a stored summary is always sent, the browser no longer trims messages itself, and compaction no longer runs when it would free almost nothing.
-- **Compaction controls** — "Compact when the chat reaches" 85, 90, 95, 98 or 99% (default 85; room for one reply is always kept; coding jobs keep their own setting), plus **Compact now**, **Read the summary** and **Forget kept tool results** in the breakdown.
-- **A model's own limit is respected** — a model with a smaller window than the setting (8,192 instead of 32,768) is planned with its real window, so it compacts in time; the Model Manager says so.
-- **A warning when a message does not fit** — Ollama silently cut oversized PDFs or pastes and the model answered from a fragment. The reply now says so with the size needed, and a line above the message box warns before you send.
-- **Choose how many models stay loaded** — "Models loaded at once" (Ollama decides, 1–8) unloads the least recently used model before a chat loads one more; helper models are not counted. It can lower the count, not raise it. The same place lists what is loaded, with size, context, unload time and a warning when a model is partly off the GPU.
-- **Memory no longer slows every message** — memories are sent in a fixed order, so the model stops re-reading the whole chat each turn (1.1–1.4 s down to 0.12 s on a 9,000-token chat).
-- **The model knows when it is running low and when you wrote** — it is told when three or fewer tool rounds are left or the window is nearly full, and each message carries its time ("3 days after the previous message"). Turn times off with "Message Times"; not used in Ghost or coding chats.
-- **Cloud models are left alone** — Claude and GPT chats are no longer judged, trimmed or summarized by the local context setting.
-- **Smaller fixes** — no pill in Council chats, the summary line follows the newest summary, and a reply is never sent without its question.
+- **Accurate meter** — model-reported counts and actual runtime window, stable after completion/Stop/errors and immediate model/context updates. Includes live tool usage, tokens/sec, compaction marker and lighter thinking/tool segments.
+- **Breakdown** — instructions, tools, memory, skills, summary, messages, excerpts, current tool calls, free space and compaction point; no double-counted excerpts. Warns below HyprChat's roughly 3,500-token overhead.
+- **Compaction** — chat-model summaries preserve older content and recent turns verbatim; visible summary boundary, long-tool-result reduction, guaranteed summary replay and no browser-side trimming or negligible-benefit compaction.
+- **Controls** — thresholds of 85/90/95/98/99% (default 85), always reserving a reply; coding jobs keep separate policy. Added Compact now, Read the summary and Forget kept tool results.
+- **Model limits** — plan/compact against the model's real window when smaller than Settings; Model Manager explains the limit.
+- **Oversized messages** — draft warnings and explicit needed-size notices when Ollama truncates PDFs/pastes.
+- **Loaded models** — Ollama default or 1–8; unload least-recently-used chat models, excluding helpers. Can lower, not raise, Ollama's limit. Shows loaded sizes, contexts, expiry and partial GPU offload.
+- **Memory caching** — stable memory ordering avoids rereading context; measured 9,000-token chat overhead fell from 1.1–1.4s to 0.12s.
+- **Budget/time notes** — warn the model near context exhaustion or with ≤3 rounds left; messages include timestamps/elapsed time. Message Times disables timestamps; Ghost/coding chats omit them.
+- **Cloud models** — local context settings no longer judge, trim or summarize Claude/GPT chats.
+- **Other fixes** — no Council context pill, current summary markers and no answer request without its question.
 
 </details>
 
 <details>
 <summary>Alpha v18.2.1 — Nov 12, 2026</summary>
 
-> Clearer coding results, safer follow-up edits, and a new home for running your projects.
+> Clearer coding evidence, safer follow-ups, persistent applications and live previews.
 
 ## Daedalus
 
-- **Clearer build results** — see which checks passed, what still needs review, and what Daedalus couldn't verify.
-- **Accept the version you want** — mark a build as accepted while keeping later edits separate. Accepted projects stay available to download.
-- **Easier follow-up edits** — continue from the latest build, even before accepting it, or choose your accepted version as the starting point.
-- **Safer changes** — protect tests that already pass and check that requests to add tests actually produce new ones. Improved recovery prevents empty projects from being offered for acceptance.
-- **Simpler Daedalus settings** — one coding engine handles planning, building and repairs on Hephaestus. Choose a chat model and a coding model; older job history remains readable.
-- **More reliable builds** — improved Java packaging, coding performance, and Stop/Continue recovery, with clearer job cards and fewer confusing status messages.
+- **Build results** — distinguish passed checks, review needs and unverified requirements.
+- **Acceptance** — accept a specific revision while keeping later edits separate; accepted downloads remain available.
+- **Follow-ups** — edit the latest build before acceptance or start from the accepted version.
+- **Verification** — protect passing tests, verify requested test additions and prevent empty recovered projects from being offered for acceptance.
+- **Settings** — one Hephaestus coding engine handles planning/building/repair; separate chat/coding models, with historical jobs still readable.
+- **Reliability** — improved Java packaging, coding performance, Stop/Continue recovery and job-status clarity.
 
 ## Hephaestus & Application Previews
 
-- **Codebox retired; Hephaestus added** — code execution, coding agents, document generation, and application previews now run in isolated Docker containers for more consistent environments.
-- **Keep applications running** — keep supported previews running, stop or restart them, and view their logs. Saved application data survives restarts; temporary previews close after 15 minutes.
-- **Consistent service names** — Hephaestus now appears in Service Monitor and project actions, with existing uptime history preserved.
+- **Hephaestus replaces Codebox** — isolated Docker execution for code, agents, documents and application previews.
+- **Applications** — keep supported previews running, stop/restart and inspect logs; saved data survives restarts, temporary previews expire after 15 minutes.
+- **Service labels** — Hephaestus naming in Monitor/project actions preserves uptime history.
 
-## UI and other fun stuff
+## Interface
 
-- **A clearer interface** — refined sidebar, headings, theme previews, and shared surfaces, while keeping the familiar composer and existing animated backgrounds.
-- **More useful code blocks** — filenames, line numbers, remembered wrapping, complete-source copying, and clearer diffs. Long blocks collapse when reopening a chat; newly generated code stays expanded.
-- **Playful activity words** — rotating words for thinking, writing, searching, and other generic live states. Specific actions and errors remain precise; turn the feature off in Appearance.
-- **Visual fixes** — composer focus feedback, Send/Stop shape changes, interface-font persistence, and consistent update notices.
-- **Compact Daedalus cards** — the inline job card now shows one live line ("Writing public/app.js", "Running npm test", "Thinking"), a stage bar with per-stage times, the three newest actions and folded plan, checks and files. Finished jobs get a one-sentence verdict plus the failing check instead of a wall of lists.
-- **Daedalus strip stays in its chat** — the job strip above the composer no longer carries the previous chat's job into a new chat; job rows are scoped to the open conversation and cleared the moment you switch.
-- **HTML replies go to the preview, not the sandbox** — ordinary chat now tells the model to put a web page in one html fence (rendered live in the side pane) instead of writing it to disk through `execute_code` or a `write_file` that plain chat does not have. A turn whose tool rounds have filled the context window stops with a readable "Context window full" message, a cut-off tool call is explained with the token count, and the reason is kept on the message after a reload.
-- **Workbench pane** — a resizable side pane beside the chat with Activity, Plan, Checks, Files and Preview tabs replaces the job details drawer. It opens on its own when a running job turns out to be a web app (turn that off under Settings → Previews).
-- **Live HTML preview** — HTML code blocks get a Preview button that runs the page in a sandboxed frame beside the chat, updating as the reply streams. Full pages open automatically; switch between fill, tablet and phone widths, allow or block CDN libraries, and download the file.
-
+- **Visual refresh** — refined sidebar, headings, theme previews and shared surfaces; familiar composer/backgrounds retained.
+- **Code blocks** — filenames, line numbers, remembered wrap, full-source copying and clearer diffs; long reopened blocks collapse, newly generated code stays expanded.
+- **Activity wording** — optional rotating generic status words; precise actions/errors retained. Disable in Appearance.
+- **Visual fixes** — composer focus, Send/Stop transitions, interface-font persistence and consistent update notices.
+- **Compact job cards** — one live action, timed stage bar, three recent actions and folded plan/checks/files; finished jobs show a verdict and failing check.
+- **Job ownership** — the composer job strip clears immediately on conversation switch.
+- **HTML replies/context limits** — ordinary chat produces previewable HTML fences rather than unsupported file-tool calls; full context and truncated tool calls explain their token limits and retain reasons after reload.
+- **Workbench** — resizable Activity/Plan/Checks/Files/Preview pane replaces the drawer; web jobs auto-open it unless disabled in Previews settings.
+- **HTML preview** — streaming sandboxed side pane, automatic full-page opening, fill/tablet/phone widths, CDN controls and downloads.
 
 ## Housekeeping
 
-- **Files are organized by chat** — files a chat delivers are stored under `outputs/<month>/<chat>/` instead of one flat folder, and each delivery has its own download address. Before, a file with the same name from another chat replaced the earlier one and older download links served the newer file.
-- **Each chat has a work folder in the sandbox** — scripts and shell commands start in `/root/work` instead of the chat's `/root`, so files a model writes no longer land next to the interpreter and uploads.
-- **A simpler Storage & Cleanup page** — it now counts the files in their month and chat folders (it read 0 once they were sorted), shows them by month and by where they came from, and says the rest in a line or two: one Clean now button for temporary files, and one Clean up button for the sandbox VM with the breakdown tucked under "What is using the space".
-- **Dead code removed** — the legacy upload project indexer (`backend/agents/project_indexer.py`, nothing called it), four unreferenced evaluation helpers (`coder_fixtures`, `frozen_environment`, `inference_meter`, `preview_qa`), `scripts/prepare_engine_tokenizer.py` (the Hephaestus installer owns tokenizer pinning) and two unused frontend harnesses.
-- **Superseded doc removed** — `docs/reliability-upgrade.md` was a one-off October deployment record; `docs/daedalus-workflows.md` documents the staged-release flow.
-- **`.env.example` refreshed** — stale OpenHands/Aider/Fixer/Architect variables are gone, the engine worker port is `8587` like the code, and the variables the backend actually reads but nobody had documented are listed (`DAEDALUS_ENGINE_URL`, `HEPHAESTUS_*`, `HYPRCHAT_TRUSTED_WEB_PROXY`, `QUICK_SEARCH_TIMEOUT`/`RANKING`, `RAG_RETRIEVAL_DEADLINE_SECONDS`, `HYPRCHAT_DEPLOY_QUALIFICATION`).
+- **Output storage** — unique delivery addresses under `outputs/<month>/<chat>/` prevent same-name files from replacing earlier downloads.
+- **Chat work folders** — scripts/shells start in `/root/work`, away from interpreters and uploads.
+- **Storage & Cleanup** — correct nested-output counts, month/source breakdowns and simpler temporary-file/VM cleanup controls.
+- **Dead code** — removed the unused project indexer, `coder_fixtures`, `frozen_environment`, `inference_meter`, `preview_qa`, tokenizer-preparation script and two frontend harnesses; installer retains tokenizer ownership.
+- **Documentation** — removed the superseded reliability-upgrade record; staged releases are documented in the Daedalus guide.
+- **Environment example** — removed retired OpenHands/Aider/Fixer/Architect variables, corrected worker port to `8587`, and documented `DAEDALUS_ENGINE_URL`, `HEPHAESTUS_*`, `HYPRCHAT_TRUSTED_WEB_PROXY`, `QUICK_SEARCH_TIMEOUT`/`RANKING`, `RAG_RETRIEVAL_DEADLINE_SECONDS` and `HYPRCHAT_DEPLOY_QUALIFICATION`.
 
 </details>
 
 <details>
 <summary>Alpha v18.2 — Oct 26, 2026</summary>
 
-> Workspace project hubs, effort controls that match your model, safer answer reviews, and clearer cleanup and save behavior.
+> Workspace hubs, model-aware effort, safer answer reviews and interface polish.
 
 ## Workspaces
 
-- **Project chats** — start chats from workspace headers and cards. New chat stays in your current workspace, with a separate New general chat option and a workspace shortcut in chat.
-- **Workspace defaults** — set instructions and optional model, persona and tool defaults for new chats. Instructions apply independently of workspace memory.
-- **Sources** — chats automatically find relevant passages from linked content and uploaded documents, with citations back to the originals. Pin or exclude sources, track indexing and retry failures; knowledge snapshots remain available.
-- **Project overview** — find pinned content, recent chats, open todos, active jobs and items needing attention. A searchable content picker links existing work without moving it.
-- **Simpler workspace navigation** — Overview, Chats, Sources, Notes, Activity and Settings group related views, with a section picker on mobile, consistent controls and one Add existing content dialog.
-- **Search without losing your place** — search inside a workspace, open a result and return with your query, filters and position intact. Returning to the previous section preserves unsaved drafts.
-- **Workspaces on the nav rail** — Projects sits beside Chat for everyone (rearrange or hide it in Appearance → Navigation Bar); the sidebar shortcut is gone. The workspace pages share one content width with aligned edges, show new-chat defaults and topics as chips, list chats, reports and sources as compact rows with status chips, switches and page counters, and give every empty card a next step.
+- **Project chats** — launch from headers/cards; New chat inherits the workspace, with New general chat and an in-chat workspace shortcut.
+- **Defaults** — workspace instructions plus optional model/persona/tool choices; instructions work independently of memory.
+- **Sources** — cited retrieval from linked/uploaded content, pin/exclude controls, indexing status/retries and retained knowledge snapshots.
+- **Overview** — pinned content, recent chats, todos, jobs and review items; searchable linking without moving existing content.
+- **Navigation** — Overview, Chats, Sources, Notes, Activity and Settings; mobile section picker, consistent controls and one Add existing dialog.
+- **Search** — returning from results preserves query, filters and scroll position; section changes preserve drafts.
+- **Nav rail/layout** — Projects beside Chat, configurable in Appearance; removed the sidebar shortcut. Aligned content widths, default/topic chips, compact status rows, switches, pagination and actionable empty states.
 
 ## Chat & Reasoning
 
-- **Activity pills** — one expandable pill tracks thinking, tools and reviews, with phase emojis, a smooth live thinking preview and cleaner details on desktop and mobile.
-- **Model-aware effort** — Blurt, Ponder, Forge and Galaxy Brain select native reasoning levels when the model supports them. The menu shows the actual levels and model default. Models with boolean-only thinking, no thinking levels or unknown capabilities keep the existing zero-to-three self-review passes.
-- **Safer self-review** — the completed answer stays visible until a replacement finishes. Failed, interrupted, empty or truncated reviews retain the previous answer; review passes can use only read-only verification tools.
-- **Review history** — inspect earlier answers and restore a completed version from Response Context. It also shows effective effort and token usage for each model call.
-- **Reliable delivery** — the server saves completed responses before reporting completion. Review history survives metadata updates, and cloud tool calls preserve provider reasoning state between rounds.
+- **Activity pill** — expandable thinking/tool/review phases with emojis, live thinking preview and responsive details.
+- **Effort** — Blurt/Ponder/Forge/Galaxy Brain map to supported native reasoning levels and show model defaults; boolean-only, unsupported or unknown models retain 0–3 review passes.
+- **Self-review** — completed answers remain until a replacement succeeds; failed/interrupted/empty/truncated reviews preserve them and use only read-only verification tools.
+- **Response Context** — inspect/restore completed review versions and view effective effort and per-call token usage.
+- **Delivery** — save before completion, retain review metadata and preserve cloud reasoning state between tool rounds.
 
 ## Interface
 
-- **Motion** — menus, popovers, dialogs, drawers and toasts pop in from their anchor and fade out when closed; tabs and panes crossfade; new messages animate in while loaded history does not. Everything honours Reduce Motion.
-- **Sleeker surfaces** — tonal elevation with soft, theme-aware shadows replaces most one-pixel boxes, with one radius scale and lighter type weights across Settings, navigation, the composer, the Tools popover and the model picker. Light themes get light scrims and shadows.
-- **Activity pill** — redesigned with crisp icons, a live progress line, icon and label transitions, colour that morphs between Thinking, Searching, Running code, Writing and Reviewing, an animated details drawer and summary chips when the answer completes.
-- **Chat layout** — assistant replies read directly on the canvas, your messages sit right-aligned in a tinted bubble, and message actions are icon buttons with tooltips.
-- **Interface font** — Appearance gains an optional proportional interface font (Inter, Geist or System); code keeps your monospace choice.
-- **Headers that stay put** — Settings, the service monitor, Add existing content, Response context and Document revisions keep their title and close button fixed while the content scrolls.
-- **Icons everywhere** — Settings tabs, the theme toggle, the Pinned header, workspace rows, close, refresh and leave actions use crisp SVG icons instead of emoji and text glyphs; Workspaces, Artifacts and Email each get their own.
-- **Sidebar groups** — chats are grouped into Today, Yesterday, Previous 7 days and Older; the chat that is generating shows a pulsing dot, workspace chats carry a folder marker, and New Chat uses the accent colour.
-- **Empty and loading states** — one empty-state style with a real next step (new todo, new task, check mail, clear filters), shared dots and spinners, and skeletons while workspace data loads.
-- **Small delights** — starter chips on the empty chat, the browser tab shows the chat title and a dot while generating, Send morphs into Stop, a loading quote appears on long waits, the background runs livelier while streaming, and pressing `?` (Shift + /) opens a keyboard-shortcut sheet.
-- **Hugging Face pulls the file you picked** — the Model Manager pulls by exact filename, so fused-MTP, noMTP and draft quants of the same size class no longer collapse into one `:Q4_K_M` tag; the download bar shows what Hugging Face will actually serve (model plus the bundled projector) and the compatibility check now judges your selection against the architectures this Ollama already runs instead of flagging every file in a repo that ships an mmproj. Draft heads are flagged and need "Download anyway".
-- **Startup no longer trips on ownerless notes** — the library-search backfill skips rows whose profile was deleted instead of aborting with a foreign-key error (the service was crash-looping on restart with six such notes).
-- **Clearer reading** — stronger content surfaces, consistent controls and larger labels across panels and themes. Your selected monospace font applies throughout the interface, chat and code.
-- **Familiar chat controls** — restored the original toolbar with separate memory and Ghost mode icons, theme, export and import controls. The composer keeps its subtle outer focus styling without an inner highlighted box.
-- **Room to work** — conversation lists collapse outside Chat and restore on return. Research adapts to available width with report-list and evidence drawers; exports and secondary actions use labeled menus.
-- **Mobile & keyboard** — responsive toolbars, larger touch targets, visible focus, and improved dialog dismissal and focus restoration. Calendar proposals sit below the header.
+- **Motion** — anchored menu/dialog/drawer/toast transitions, crossfading panes and animated new messages; loaded history stays still and Reduce Motion is respected.
+- **Surfaces** — theme-aware elevation/shadows, consistent radii and lighter type across Settings/navigation/composer/tools/model picker; light scrims for light themes.
+- **Activity styling** — crisp icons, progress line, phase/color transitions, animated details and completion chips.
+- **Messages** — canvas-based assistant replies, right-aligned tinted user bubbles and tooltip-equipped action icons.
+- **Fonts** — optional Inter, Geist or System interface font; code retains monospace.
+- **Sticky headers** — Settings, Monitor, Add existing, Response Context and Document revisions keep titles/Close visible while scrolling.
+- **Icons** — SVGs replace text/emoji controls across Settings, theme, pins, workspaces and common actions; distinct Workspace/Artifact/Email icons.
+- **Sidebar** — date groups, generating dots, workspace markers and accent-colored New Chat.
+- **Empty/loading states** — consistent actionable placeholders, dots/spinners and workspace skeletons.
+- **Details** — starter chips, chat-title/activity browser tabs, Send/Stop morphing, long-wait quotes, livelier streaming backgrounds and `?` shortcut help.
+- **Hugging Face** — exact-filename pulls distinguish fused-MTP/noMTP/draft quants; progress includes bundled projectors. Compatibility checks selected files against installed architectures; draft heads require Download anyway.
+- **Startup** — library-search backfill skips deleted-profile notes instead of failing foreign-key checks and crash-looping.
+- **Readability** — stronger surfaces, consistent controls/larger labels and selected monospace font support across interface/chat/code.
+- **Chat controls** — restored separate memory/Ghost/theme/export/import controls and subtle outer composer focus.
+- **Workspace width** — conversation lists collapse outside Chat and restore on return; Research uses responsive report/evidence drawers and labeled secondary-action menus.
+- **Mobile/keyboard** — responsive toolbars, touch targets, visible focus, improved dismissal/focus restoration and calendar proposals below the header.
 
 ## Settings & Reliability
 
-- **Profile saves** — failed agent/persona creation, edits and deletion show errors instead of appearing successful. Effort and thinking preferences sync with the signed-in profile.
-- **Cleanup preview** — see reclaimable temporary files and retained storage before cleanup. Saved references, active or interrupted staging files, changed files and unresolved legacy outputs remain protected.
-- **Logging** — removed raw chat/reasoning and tool-argument debug output. Image deletion no longer wipes system journals; the old journal-scrub helper can be retired.
-- **Development environment** — local backend tests now use Python 3.12 and the pinned test dependency lock to match production.
+- **Profiles** — explicit agent/persona CRUD failures; profile-synced effort/thinking preferences.
+- **Cleanup preview** — distinguish reclaimable/retained files; protect saved references, active/interrupted staging, changed files and unresolved legacy outputs.
+- **Logging** — removed raw chat/reasoning/tool-argument debug logs and image-deletion journal wiping; retired the journal-scrub helper.
+- **Development** — Python 3.12 and the pinned test lock align local backend testing with production.
 
 </details>
 
@@ -287,179 +295,171 @@
 <details>
 <summary>Alpha v18.1 — Sept 30, 2026</summary>
 
-> More reliable Daedalus builds, stronger research and calendar sync, and a smoother mobile interface.
+> More reliable Daedalus verification, research, calendar sync and mobile layouts.
 
 ## Daedalus
 
-- **Persistent jobs** — opt-in background workflows support checkpoints, restart recovery, Stop/Continue, repository inspection and revision-specific downloads. Experimental workflows remain disabled by default; legacy workflows remain available.
-- **Evidence-gated builds and repairs** — separate policy 7 toggles enable new projects and uploaded-project edits. Jobs are checked with executed tests, an independent audit and a review, then delivered as downloadable **Ready for review** candidates, or **Build incomplete** when the result does not run. No evidence-gated job is marked **Complete** in this release: that needs trusted proof for each requirement, which generated tests cannot supply, and no such checks are registered yet.
-- **Sandboxed execution** — in persistent jobs, builders, audits and project commands run inside a bubblewrap sandbox with private process and network namespaces, read-only toolchains and a restricted dependency proxy; model calls pass through a supervised bridge. The legacy builder and Aider use the same sandbox. Codebox now needs `bubblewrap`, without which a job stops with an environment error rather than running unisolated, and `strace`, which audits of compiled-language projects use to confirm the built program really ran.
-- **Build and repair reliability** — the builder compiles and runs projects while working, targets failing files during repairs, and avoids repeated file-reading and excessive context summaries. It reserves calls for audit/review and returns a candidate when the build allowance runs out.
-- **Stronger verification** — protected files, requested interfaces, documentation and test evidence receive stricter checks. Removing failing tests or printing success cannot substitute for executed assertions. Browser checks catch startup errors, form submissions the server rejects and submit handlers that throw; a form that silently sends nothing is only noted, so generated apps still need hands-on review.
-- **Language support** — verification now recognizes Java, C/C++, C#, Go and Rust test runners alongside Python and Node. A server whose start command appears only in the README (uvicorn or node) is launched for checks.
-- **Requested-behavior probes** — Daedalus now runs the invalid-input and missing-file cases a request describes (“exits with code 2”), checks a requested command's output against its own fixture instead of the exit code alone, and verifies that the accessible labels and buttons a request names exist on the delivered page.
-- **Smarter repairs** — browser-journey failures now point the repair at the page script and server, replacing a scaffold's placeholder test is no longer treated as a regression, a rolled-back repair gets another round while budget remains, and documentation inside a package directory is recognized.
-- **Longer builder sessions** — context calibration no longer under-counts dense code, so compaction runs before the window fills.
-- **New-build delivery** — verified starting skeletons for static web, Express/SQLite, React/Vite + FastAPI/SQLite and .NET/xUnit builds; the literal requested command, .NET test projects and the requested browser workflows (edit, drag, delete, persistence, literal text) are probed before any audit; repairs receive an ordered evidence packet (foundation first), the focused repair retry no longer overflows the builder input budget (it used to fail silently as "no source changes"), and job cards show the verification phase.
-- **Recovery** — fixed stalled tests, editor truncation, large-file edits, invalid audit replies and environment/toolchain handling. Follow-up edits retain uploaded test commands; saved candidates survive chat Stop, and jobs can resume after call limits or failed downloads. A job stopped because the builder prompt no longer fits explains how to continue, and low call limits no longer reserve more verification calls than the job has.
-- **Follow-up requests** — for a project whose earlier evidence-gated job was accepted, a follow-up that changes or conflicts with those requirements is reconciled explicitly: the job card lists requirement changes, asks a scope question when the intent is unclear, and Continue accepts your clarification. A project that only has a **Ready for review** candidate cannot take a follow-up edit yet; use Continue on its existing job.
-- **Visual review** — optional AI visual review now covers evidence-gated jobs, with screenshots of the running app at the configured viewports; switching it on at Continue re-runs the checks.
-- **Progress and settings** — job cards stay visible throughout a run and show outcomes, file progress, check failures, call usage and review reasons. Shared context settings provide stage overrides, helper limits and compaction controls.
-- **Redesigned Daedalus settings** — grouped sections with switches and plain descriptions, a live readout of the working input each model call gets, per-stage overrides in one table, and a save bar that stays in view while there are unsaved changes.
-- **Larger builder context by default** — the Daedalus context window now defaults to 65,536 tokens (was 32,768): the agent builder's fixed prompt overhead left web-app repairs almost no working room in a 32K window.
+- **Persistent jobs** — opt-in checkpoints, restart recovery, Stop/Continue, repository inspection and revision downloads. Experimental workflows remain off by default; legacy paths remain available.
+- **Policy 7** — separate new-build/uploaded-edit toggles; executed tests, independent audit and review produce Ready for review or Build incomplete. **No evidence-gated job is Complete**: trusted per-requirement checks are not yet registered, and generated tests cannot replace them.
+- **Isolation** — persistent builders/audits/commands and legacy Builder/Aider use bubblewrap with private process/network namespaces, read-only toolchains, restricted dependency proxy and supervised model bridge. Missing `bubblewrap` blocks execution; compiled-project audits require `strace`.
+- **Build/repair** — compile/run during work, target failing files, reduce repeated reads/compaction, reserve audit/review calls and return candidates at budget exhaustion.
+- **Verification** — stricter protected-file/interface/docs/test checks reject deleted assertions and printed success. Browser checks catch startup errors, rejected submissions and throwing handlers; silent non-submission is advisory, so manual review remains necessary.
+- **Languages** — Java, C/C++, C#, Go and Rust runners join Python/Node; README-only uvicorn/node launch commands are recognized.
+- **Behavior probes** — requested invalid-input/missing-file exit codes, command output against independent fixtures and named accessible page controls.
+- **Repairs** — browser failures target scripts/server; scaffold-test replacement avoids false regressions; rolled-back repairs may retry within budget; nested package docs recognized.
+- **Context calibration** — counts dense code correctly so compaction precedes exhaustion.
+- **New-build foundations** — verified static-web, Express/SQLite, React/Vite + FastAPI/SQLite and .NET/xUnit skeletons. Probe literal commands, .NET tests and requested edit/drag/delete/persistence/text flows before audit; ordered repair evidence, bounded retry prompts and visible verification phases.
+- **Recovery** — fixed stalled tests, truncated/large edits, malformed audits and toolchain errors. Follow-ups retain uploaded test commands; Stop preserves candidates; call-limit/download failures resume; oversized prompts explain Continue, and small budgets reserve affordable verification calls.
+- **Follow-up scope** — accepted projects reconcile changed/conflicting requirements, list differences and request clarification through Continue. Ready for review candidates cannot yet take new follow-ups; continue the existing job.
+- **Visual review** — optional AI review of running-app screenshots at configured viewports; enabling it at Continue reruns checks.
+- **Progress/context settings** — persistent cards show outcomes, files, failures, calls and review reasons; shared policy supports stage/helper limits and compaction overrides.
+- **Settings layout** — grouped switches/descriptions, effective input-budget readout, stage-override table and sticky unsaved-changes bar.
+- **Default context** — increased 32,768 → 65,536 tokens to leave repair room after builder overhead.
 
 ## Coding & Search
 
-- **Master Developer and Coder Docs** — conversational coding help includes refreshed SwiftUI references; incremental documentation updates preserve working references, code indentation and version notes.
-- **Code answers** — added Swift highlighting, clearer language labels and improved light/dark colors. Quick Search better recognizes pasted code, API names and coding follow-ups.
-- **Web search** — chat, research tools and councils share ranked results, relevant excerpts, bounded timeouts, partial results and clearer errors. SearXNG recovery fixes preserve VPN egress protection.
+- **Master Developer/Coder Docs** — refreshed SwiftUI references; incremental updates preserve working references, indentation and version notes.
+- **Code answers** — Swift highlighting, clearer labels/colors and better search detection of code, API names and follow-ups.
+- **Shared web search** — ranked results/excerpts, bounded timeouts, partial results and clearer errors across chat/research/councils; SearXNG recovery retains VPN egress protection.
 
 ## Research
 
-- **Investigative Dossier** — added direct and search-backed leak, FOIA, government and court sources, including DOJ, CourtListener, Archive.org and WikiLeaks, through the guarded fetcher.
-- **Citations and reliability** — source indexes retain every cited document in citation order. Bounded concurrency, shared fallback limits, depth-aware deadlines and cancellation cleanup improve report reliability.
+- **Investigative Dossier** — guarded direct/search access to leaks, FOIA, government/court sources, including DOJ, CourtListener, Archive.org and WikiLeaks.
+- **Reliability** — complete citation-ordered source indexes, bounded concurrency/fallbacks, depth-aware deadlines and cancellation cleanup.
 
 ## Calendar & Assistant
 
-- **CalDAV sync** — recurring events survive round trips; normalized sync markers prevent repeated pulls and false conflicts. Invalid timestamps are logged instead of silently triggering repeated full syncs.
-- **Clearer feedback** — failed task, note, calendar and email changes show errors; failed autonomous-email toggle changes revert to server values. Loading placeholders prevent empty-state flashes.
+- **CalDAV** — recurrence round trips, normalized sync markers, fewer redundant pulls/false conflicts and explicit invalid-timestamp logs.
+- **Feedback** — task/note/calendar/email failures surface; failed autonomous-email toggles revert; loading placeholders avoid empty-state flashes.
 
 ## Mobile & Interface
 
-- **iPhone home-screen app** — fixed the bottom white strip on load and keyboard-related layout shifts. New-chat composers stay at the bottom, above the keyboard when typing, with a compact greeting and corrected safe-area spacing.
-- **Responsive layouts** — improved landscape, large-text and assistant-panel layouts, including Calendar's mobile day view. Menus, Settings and sign-in forms, date fields, Analytics and artifact-editor controls fit narrow screens; attachment chips scroll without displacing the composer.
-- **Model picker** — supports keyboard navigation, stays within the visible viewport, flips above low controls and closes when scrolling or resizing.
-- **Everyday reliability** — message, artifact and report timestamps display correctly in local time. Deleted runs stop polling, temporary network failures preserve image jobs, and outdated tabs offer a one-click reload.
+- **iPhone PWA** — removed bottom white strip and keyboard layout shifts; bottom-anchored new-chat composer, compact greeting and corrected safe areas.
+- **Responsive UI** — landscape/large text/Assistant layouts, mobile Calendar day view, narrow menus/Settings/sign-in/date/Analytics/artifact controls and scrolling attachment chips.
+- **Model picker** — keyboard support, viewport bounds, upward opening near the bottom and scroll/resize dismissal.
+- **Reliability** — local timestamps, stopped polling for deleted runs, retained image jobs during network errors and one-click outdated-tab reload.
 
 </details>
 
 <details>
 <summary>Alpha v18.0 — Sept 15, 2026</summary>
 
-> HyprChat becomes a personal assistant: scheduled agent tasks, a proactive Assistant with check-in briefs, an assistant dashboard, weather-aware briefings, event automations ("when X happens → do Y"), quiet hours, notifications, notes & todos, a calendar with CalDAV sync, and full email integration — plus a phone-friendly mobile layout, a customizable nav rail, and refreshed panels throughout.
+> Personal Assistant, scheduling, event automation, notifications, calendar/email integration and mobile navigation.
 
 ## Assistant & Automation
-- **Personal Assistant** — every user gets an assistant persona with a pinned conversation and scheduled **check-in briefs** that pull your open tasks, notifications, calendar, notes, and email into one prioritized update.
-- **Scheduled tasks** — run any prompt once, daily, weekly, monthly, or on a cron schedule, or trigger from events and webhooks. Tasks run through the normal chat agent (tools included) and deliver to a conversation and/or a notification. Create them in the Tasks panel with natural-language drafting, or just ask in chat ("remind me every morning at 8 to stretch").
-- **Notifications** — in-app bell with unseen badge and browser toasts, plus optional ntfy push and self-email fanout.
-- **Assistant dashboard** — the Assistant panel shows the latest brief inline (with a read-aloud button), per-check-in Run Now, cadence beyond daily (weekly / monthly / cron), editable focus prompts, and last-run status.
-- **Weather-aware briefings** — set a location and briefs open with current conditions + a today/tomorrow forecast (Open-Meteo, keyless). A new `get_weather` chat tool rides the CodeAgent suite.
-- **Event automations** — "when an urgent email arrives → draft a reply and notify me": event-triggered tasks are creatable from the Tasks panel and by the assistant itself (`manage_tasks`), with a post-triage `urgent_email_received` event alongside email/research/artifact events.
-- **Quiet hours** — pause ntfy/email pushes during a nightly window (assistant timezone, overnight spans handled); urgent email can pierce it, and the in-app bell always lands.
-- **Autonomous email master switch** — one assistant-wide server-side gate ANDed with each account's own allow-send toggle; off means replies are saved as drafts.
+
+- **Assistant** — per-user persona/pinned chat with scheduled briefs combining tasks, notifications, calendar, notes and email.
+- **Tasks** — once/daily/weekly/monthly/cron schedules plus events/webhooks; normal chat tools and chat/notification delivery. Create through natural-language drafting in Tasks or chat.
+- **Notifications** — in-app bell/unseen count, browser toasts and optional ntfy/self-email delivery.
+- **Dashboard** — latest brief/read-aloud, per-check-in Run Now, weekly/monthly/cron cadence, focus prompts and run status.
+- **Weather** — configured-location conditions and today/tomorrow forecasts through keyless Open-Meteo; `get_weather` joins CodeAgent tools.
+- **Event automation** — Tasks and `manage_tasks` can react to email/research/artifacts, including post-triage `urgent_email_received`.
+- **Quiet hours** — timezone-aware overnight suppression of ntfy/email; optional urgent-email bypass, with in-app notifications retained.
+- **Email master switch** — server-side Assistant permission combines with account send permission; disabled sending produces drafts.
 
 ## Calendar, Notes & Email
-- **Calendar** panel with month/week/day views, event reminders, and two-way **CalDAV sync** (Nextcloud, iCloud, etc.) — remote wins on conflict, and all-day/floating times are handled in your timezone.
-- **Notes & todos** with reminders. Notes, events, and tasks are all manageable from chat via new tools.
-- **Email** — connect IMAP/SMTP accounts. A background poller triages new mail with a local model: urgency tags, one-line summaries, tentative calendar events extracted from invitations, and urgent-mail notifications. Bodies are never stored — only headers and snippets.
-- **HTML emails render properly** — the reader shows the real formatted message (newsletters, receipts) in a locked sandboxed frame: scripts and event handlers are stripped server-side, no same-origin or script access, links open in a new tab, and inline attached images are embedded. A "view plain text" toggle keeps the old text view.
-- **Safe by default** — chat tools can list, read, reply, archive, and delete, but sending and deleting are per-account server-side toggles that default OFF (the assistant drafts or asks instead). Deletes only ever move to Trash (refused if the server has none), replies thread properly, and a mailbox reset purges the local cache so stale IDs can't touch the wrong message.
+
+- **Calendar** — month/week/day views, reminders and two-way CalDAV (including Nextcloud/iCloud); remote conflict resolution and timezone-aware all-day/floating events.
+- **Notes/todos** — reminders plus chat tools for notes, events and tasks.
+- **Email** — IMAP/SMTP, local-model background triage, urgency/summaries, tentative invitation events and urgent alerts. Stores headers/snippets, never bodies.
+- **HTML reader** — sanitized sandboxed HTML, embedded inline images, new-tab links and plain-text toggle; scripts, event handlers and same-origin access blocked.
+- **Permissions** — list/read/reply/archive/delete tools; send/delete default off per account. Threaded replies, Trash-only deletion (refused without Trash), and cache purge on mailbox reset prevent stale-ID actions.
 
 ## Mobile
-- Full phone layout: the nav rail and sidebar become slide-in drawers behind a hamburger button, Settings / Research / Model Manager / Artifacts reflow to single columns, and iOS input-zoom and keyboard-viewport quirks are handled.
 
-## UI
-- **Customizable nav rail** — Settings → Appearance → Navigation Bar: drag (or use the arrow buttons) to reorder panels and choose what sits on the bar, behind the ··· More menu, or hidden entirely. Syncs to your profile across devices. Every panel also has its own unique icon now.
-- Desktop email gets a two-pane list + reader; Analytics gains token bars, a cost line, and a model-share doughnut; panels load with skeleton shimmer; consecutive chat messages group under one avatar with a hover toolbar and timestamps; Canvas AI edits show a side-by-side diff before applying.
-- **Sleeker empty-chat hero** — gradient wordmark, floating logo with a slow orbital accent ring, and a staggered fade-in cascade (honors reduced motion). The hero now greets you by name with a time-of-day line ("Good evening, Ethan"), and the daily AI tagline got a personality transplant: it knows your name and the prompt now aims for unhinged-but-charming instead of tame. Cached per user + time of day; always a local model.
+- Phone drawers for navigation/sidebar, single-column Settings/Research/Models/Artifacts and fixes for iOS input zoom and keyboard viewports.
+
+## Interface
+
+- **Navigation** — profile-synced ordering/visibility through drag or arrows in Appearance; main rail, More or hidden placement, with unique panel icons.
+- Two-pane desktop email; Analytics token bars/cost line/model-share chart; loading skeletons; grouped chat avatars/hover actions/timestamps; side-by-side Canvas AI-edit diffs.
+- **Empty chat** — gradient wordmark, orbital logo, staggered reduced-motion-aware entrance and personalized time-of-day greeting; more playful local-model taglines cached by user/time of day.
 
 ## Reliability
-- Manual prompts in the pinned Assistant chat now inherit the Assistant profile's tools, so email listing, reading, and deletion no longer disappear when the conversation was seeded with an empty tool list.
-- The whole suite shipped through a ~35-finding audit: IMAP socket timeouts and bounded scheduler subsystems (a hung mail server can't stall scheduled tasks), cancelled or timed-out runs stop their model generation, rescheduled events remind again, webhook payloads are fenced and rate-limited, and old notifications/task runs are pruned daily.
-- A follow-up assistant investigation fixed 17 more bugs, the big ones being: **check-ins actually have tools now** (tool resolution falls through task → conversation → persona, so the CodeAgent suite — email, research, fetch, weather — reaches every scheduled run; they previously ran with an empty tool list), and **deleting the pinned Assistant chat no longer bricks check-ins** (deletion clears stale references, re-seeding repoints every check-in, and dispatch re-resolves the live conversation at run time).
-- Also from that pass: failed briefs no longer report “succeeded” (stream errors fail the run with the real error), the notification contains the actual brief instead of a debug string (and check-in notifications no longer echo back into the next brief), the panel's model picker works (an explicitly chosen cloud model is honored with a spend warning; inherited fallbacks stay local-only), briefs are stamped in your profile timezone, email→calendar extraction anchors “tomorrow” to your local day, next-run times display in browser-local time, check-ins can't be silently retyped in the Tasks panel, gatherers all register at startup, due-date-only todos fire reminders, saving the profile no longer wipes persona tools, and the dead `research_completed` / `artifact_created` events actually fire.
-- 63 new offline unit tests cover the scheduler, email, cancellation, headless tool/model resolution, failure honesty, timezone stamping, self-healing re-seed, quiet-hours window math, and weather formatting.
+
+- Pinned Assistant chats inherit profile tools even when seeded with empty tool lists.
+- Roughly 35-finding audit: bounded IMAP/scheduler operations, generation cancellation on stop/timeout, re-armed moved-event reminders, fenced/rate-limited webhooks and daily notification/run retention.
+- Seventeen follow-up fixes include task → conversation → persona tool resolution and self-healing check-ins after pinned-chat deletion: clear stale references, reconnect seeded chats and resolve the live chat at dispatch.
+- Brief failures report errors; notifications contain actual briefs without feeding themselves back. Explicit cloud models are honored with spend warnings, inherited fallbacks stay local. Fixed brief/profile timezones, relative email dates, local next-run display, accidental task retyping, startup gatherers, date-only reminders, retained persona tools and missing research/artifact events.
+- **63 offline tests** cover scheduling, email, cancellation, headless tools/models, accurate failures, timezones, re-seeding, quiet hours and weather.
 
 </details>
 
 <details>
 <summary>Alpha v17.4.0 — July 9, 2026</summary>
 
-> Fifteen new features: a generic OpenAI-compatible provider, native cloud tool
-> calling, cloud cost + tokens/sec analytics, continue-truncated responses,
-> message ratings, an Artifact Canvas editor with AI edits, URL→KB ingestion,
-> smart KB reranking, scanned-PDF OCR, slash commands with prompt variables,
-> context auto-compaction, memory-gated chat-history recall, smart model
-> routing, full backup/restore, and PWA install + HTTPS via Tailscale Serve.
+> Cloud tools/cost tracking, richer chat, artifact editing, smarter retrieval, backups and installable PWA support.
 
 ## Cloud Models
-- New **Custom (OpenAI-compatible)** provider: point HyprChat at any `/chat/completions` endpoint (OpenRouter, Groq, Mistral, vLLM, llama.cpp, LiteLLM) with a base URL, optional key, and display name. Models appear as `custom:<model>` with full streaming, thinking, vision, and usage support.
-- **Native tool calling for OpenAI and Claude models.** Tools-enabled chats now send real JSON tool definitions (OpenAI Responses function calling / Anthropic tool_use) instead of the text-parsing fallback — dramatically more reliable multi-step tool use with cloud models. Models that reject tools automatically fall back to the old text format mid-stream; the Custom provider keeps the text fallback.
-- Estimated **cloud spend ($)** now shows in Statistics — per-model cost column plus today/30-day/all-time totals, computed from a built-in price table (local models are never costed).
+
+- **Custom provider** — any OpenAI-compatible `/chat/completions` endpoint, including OpenRouter/Groq/Mistral/vLLM/llama.cpp/LiteLLM; optional key/name, `custom:<model>` IDs and streaming/thinking/vision/usage support.
+- **Native tools** — OpenAI Responses function calls and Anthropic `tool_use`; rejecting models fall back to text tools mid-stream. Custom providers retain text fallback.
+- **Cost estimates** — per-model and today/30-day/all-time cloud spend from built-in prices; local models excluded.
 
 ## Chat
-- **Tokens/sec** now displays live in the header and persists in a per-message stats footer (`N tok · X tok/s`), using Ollama's real eval timings.
-- Responses cut off by the output-token limit show a **▶ continue** button that resumes the same message in place — no repetition, same DB row.
-- **👍/👎 ratings** on assistant replies, persisted per message and totaled in Statistics.
-- **Slash commands**: type `/` in the composer to search and insert Prompt Library prompts, with `{{variable}}` placeholders filled via an inline form. The Prompt Library "Use" button and quick-menu picker share the same variable flow.
-- **Auto-compact long chats** (Settings → Model & Generation, off by default): when a conversation nears its context window, older turns are summarized by the Workspace Model into a rolling summary so long chats never lose their beginning. Original messages are untouched.
-- **Smart model routing**: enable in Settings → Model & Generation to get an 🧭 Auto model entry. Each message is classified locally (chat/code/reasoning, plus a deterministic long-context check) and routed to the model you configured per category; the footer shows which model answered.
 
-## Memory
-- **Chat-history recall**, gated by the existing per-conversation memory toggle: turns from memory-enabled chats are indexed into ChromaDB, a `search_history` tool lets the model answer "what did we decide about X?" across conversations, and the Memory panel gains a Search Past Conversations box (semantic + keyword). Edits re-index; deletes clean up.
+- Live/persisted tokens-per-second from Ollama evaluation timings.
+- Continue resumes output-limited replies in the same message/database row without repetition.
+- Persistent thumbs-up/down ratings and Statistics totals.
+- `/` searches Prompt Library; inline forms fill `{{variables}}` across composer, Use and quick-menu flows.
+- **Auto-compaction** — opt-in rolling Workspace Model summaries near context limits, preserving original messages.
+- **Smart routing** — opt-in Auto model; local chat/code/reasoning classification plus deterministic long-context checks, category-specific models and actual-model footer.
 
-## Artifacts
-- **Canvas editor**: text, markdown, code, JSON, and HTML artifacts get a full-screen ✏️ Edit view (CodeMirror, syntax-highlighted, lazy-loaded). Select any text and describe a change — **AI Edit** proposes a rewrite with a before/after diff you can apply or reject. Saving always creates a new revision; originals are never overwritten.
+## Memory & Artifacts
+
+- Memory-enabled chats index into Chroma for `search_history`; semantic/keyword history search in Memory, with edit reindexing and deletion cleanup.
+- **Canvas** — lazy CodeMirror editor for text/Markdown/code/JSON/HTML; selected-text AI edits show accept/reject diffs, and saves create new revisions without overwriting originals.
 
 ## Knowledge Bases
-- **Add URL**: paste a web page or PDF URL into a KB card — fetched SSRF-safely, extracted with trafilatura, stored as markdown with source provenance (🌐 link on the file row), and indexed like an upload. Re-adding the same URL updates in place.
-- **Smart KB Reranking** (Settings → Model & Generation, off by default): retrieval candidates are re-scored for relevance by the Workspace Analysis Model in a single quick pass before answering — sharper citations for ~1-2s per KB question. Any error falls back to normal ranking.
-- **Scanned-PDF OCR**: PDFs with no text layer (scans, faxes, photographed docs) are now OCR'd automatically during KB upload and chat PDF extraction (RapidOCR, CPU-only, up to 50 pages). Requires `pip install rapidocr-onnxruntime pypdfium2` on the server; silently skipped otherwise.
 
-## Operations
-- **Backup & Restore** (Settings → Danger Zone): one-click download of a full data backup (consistent SQLite copy with provider keys and connector secrets scrubbed, uploads, knowledge bases, settings; ChromaDB excluded as derived). Restores stage safely and apply on the next service restart, keeping the previous database as a `.pre-restore` copy.
+- **Add URL** — SSRF-safe web/PDF ingestion, trafilatura extraction, Markdown storage/provenance and indexing; repeated URLs update in place.
+- **Reranking** — opt-in Workspace Analysis Model relevance pass, roughly 1–2s overhead; errors retain normal ranking.
+- **OCR** — CPU RapidOCR for scanned KB/chat PDFs, up to 50 pages; requires `rapidocr-onnxruntime pypdfium2`, otherwise skipped.
 
-## Mobile & Access
-- **PWA install support**: HyprChat now ships a web app manifest, icons, and a network-first service worker — installable to the home screen / dock when served over HTTPS. The service worker never touches API traffic; it only keeps the app shell loadable.
-- **HTTPS via Tailscale Serve**: `tailscale serve` on the HyprChat LXC proxies `https://hyprchat.<tailnet>.ts.net` to the backend with an automatic valid certificate — this unlocks the microphone without browser flags and PWA installation. One-time tailnet enablement required in the Tailscale admin console.
+## Backup & Access
+
+- **Backup/Restore** — consistent SQLite plus uploads/KB/settings, scrubbing provider keys/connector secrets and excluding derived Chroma. Restore stages for the next restart and keeps a `.pre-restore` database.
+- **PWA** — manifest/icons and network-first app-shell service worker, excluding API traffic; install requires HTTPS.
+- **Tailscale HTTPS** — Serve proxies `https://hyprchat.<tailnet>.ts.net` with automatic certificates, enabling microphone/PWA use; one-time tailnet admin enablement required.
 
 </details>
 
 <details>
 <summary>Alpha v17.3.2 — July 5, 2026</summary>
 
-> Combined polish release for persona photos, image generation, Quick Search,
-> Deep Research, Settings, animated backgrounds, and export reliability.
+> Persona/image, search, Settings, background and export polish.
 
-## Persona Chat Photos
-- Persona photo prompts now use the model's validated scene-aware wording when safe, with deterministic composition as fallback.
-- "Keep your look" photo requests reuse the prior image seed for character continuity.
-- Adult routing now ignores adult words that only came from the persona appearance, and selfie rescue only fires on explicit photo-of-you requests.
+## Persona Photos & Images
 
-## Image Generation
-- Chat images now get default quality/negative prompts, plus optional LLM auto-enhancement for non-persona prompts.
-- Image Studio adds LoRAs, seed lock/randomize, more SDXL aspect ratios, slider-based steps/CFG, and backend-driven sampler lists.
-- Sparse image API calls fall back to checkpoint presets, restarted jobs avoid duplicate artifacts, and chat images open in preview.
+- Scene-aware model photo wording is validated, with deterministic fallback; Keep your look reuses the previous seed.
+- Adult routing ignores appearance-only wording; selfie rescue requires an explicit photo-of-you request.
+- Chat quality/negative defaults and optional LLM enhancement for non-persona prompts.
+- Studio adds LoRAs, seed lock/randomize, more SDXL ratios, steps/CFG sliders and backend sampler lists.
+- Sparse API calls inherit checkpoint presets; restarted jobs avoid duplicate artifacts; chat images open in preview.
 
-## Quick Search
-- Balanced/quality search now runs a small-LLM query planner alongside deterministic search, with speed mode still deterministic.
-- Category detection is less trigger-happy for ambiguous words, sports questions route better, and weak results trigger raw-query/refinement recovery.
-- Embedding rerank is on by default, follow-up/freshness handling is cleaner, and completed page fetches are kept even when one source times out.
+## Search & Research
 
-## Deep Research
-- Starting a new report now opens a dedicated full-page composer — a large topic box up top with report, model, context, and sources settings organized into cards below — instead of cramming the form into the sidebar.
-- The panel opens on the Reports view when reports exist and switches to the running report automatically after Start.
-- Export and rerun actions now appear only while viewing reports.
+- Balanced/quality Quick Search adds a small-model planner alongside deterministic search; speed remains deterministic.
+- Better ambiguous-category, sports, follow-up and freshness handling; weak results trigger raw-query/refinement recovery.
+- Embedding rerank defaults on; completed page fetches survive another source timing out.
+- Full-page research composer with topic and report/model/context/source cards; existing reports open by default and Start selects the running report. Export/rerun actions appear only in report view.
 
-## Settings
-- Every settings tab now uses one titled-card design system with consistent headings, cards, and spacing.
-- The densest tabs — Daedalus, Model & Generation, and Connections — are regrouped into logical cards (Models / Repair Engines / Build Limits, Generation Defaults, Service Status / Cloud Models / Endpoints).
-- Repeated model-picker, toggle, slider, and chip-row markup was collapsed into shared helpers.
+## Settings & Interface
 
-## Animated Backgrounds
-- All canvas effects gained glow sprites, depth layers, and a subtle pointer parallax that makes the background drift toward the cursor.
-- Flagship effects were rewritten as showpieces: Neural Constellation fires signal pulses along its edges, Star Drift adds parallax depth planes and occasional shooting stars, Aurora Lines became layered gradient curtains, Soft Flow leaves comet trails colored by the flow field, and Circuit Drift sends glowing data packets along its traces.
-- New performance guardrails: animations cap near 60fps, pause entirely when the tab is hidden, and stay speed-consistent across refresh rates. Reduced-motion still renders a static frame.
+- Consistent titled cards/spacing across Settings; reorganized Daedalus, generation and connection controls using shared model/toggle/slider/chip helpers.
+- Unified Daedalus header/phase-stepper/detail card with summarized output.
+- Uniform sidebar row/avatar sizing, persona/council icons and accent bars; only the active chat is highlighted.
 
-## UI
-- Daedalus workflow messages now render as one unified progress card — a header plus phase stepper rail with a single detail panel for the selected phase — replacing the old stacked per-phase cards, with noisy step output trimmed to readable summaries.
-- Conversation sidebar rows now share one consistent cell style: uniform height and avatar size for every chat, with persona/council identity shown by the icon and a colored accent bar, and only the active chat highlighted.
+## Backgrounds
 
-## Bug fixes
-- PDF and Print exports of research reports no longer slice source entries or headings across page boundaries, and overly long source snippets are clamped so a single source always fits on one page.
+- Canvas glow sprites, depth and subtle pointer parallax.
+- Neural Constellation signal pulses, Star Drift depth/shooting stars, Aurora gradient curtains, Soft Flow comet trails and Circuit Drift data packets.
+- Near-60fps cap, hidden-tab pause, refresh-independent speed and static reduced-motion rendering.
 
-## Internal
-- Deduplicated `research.py`: one shared HTML-cleaning helper and one shared batched-search helper replace copy-pasted logic across the research pipelines, with no behavior change.
+## Fixes & Cleanup
+
+- Research PDF/Print keeps headings/sources together and clamps long snippets to one page.
+- Shared research HTML-cleaning/batched-search helpers remove duplication without behavior changes.
 
 </details>
 
@@ -468,53 +468,49 @@
 <details>
 <summary>Alpha v17.3.1 — July 3, 2026</summary>
 
-> UI readability and reliability polish for Quick Search, Daedalus, Council
-> sessions, and release notes.
+> Clearer search, Daedalus and council interfaces, plus repair and refactor hardening.
 
-## Quick Search
-- Search results now scan cleaner, with calmer cards, clearer titles, and less repeated metadata.
-- Ambiguous searches use recent chat and memory context, avoid unnecessary news recency, and rank context-matching sources higher.
+## Search & Daedalus UI
 
-## Daedalus UI Rendering
-- Workflow output now renders as summarized project status cards instead of raw tool-heavy transcripts.
-- State labels and phase chips make plan, build, review, fix, acceptance, and package progress easier to follow.
-- Artifacts, downloads, build details, and raw events remain available without crowding the main message.
+- Calmer source cards, clearer titles, source numbers below favicons and less duplicate metadata/citation listing.
+- Ambiguous queries use chat/memory context, avoid needless news filters and prioritize matching sources.
+- Summarized workflow cards with plan/build/review/fix/accept/package states; artifacts, downloads, details and raw events remain accessible.
 
-## Daedalus Builder, Model and Repair Hardening
-- Thinking-capable coder models now build with bounded reasoning, avoid extra think-tool loops, and share one OpenHands agent setup across build paths.
-- Tool-calling probes now verify multiline arguments live, recover from dropped file content, and fall back to prompt-based tools when needed.
-- Architect manifests now carry advisory interfaces, required tests, README, and `.gitignore` into Builder without adding hard gates.
-- Builder rounds and continue passes scale with planned files, require a real finish signal, and keep incomplete builds out of review/delivery.
-- OpenHands builds now honor streaming `reasoning_effort`, cap runaway completions, and apply sampler options consistently.
-- Aider is the default repair editor for existing, uploaded, and Builder-created projects; Fixer remains the fallback, and no-op repairs no longer force review loops.
-- Repair and review coverage now includes research-gated retry caps, nested projects, C#/.NET, Makefile-only C, cleaner Node/Rust smoke checks, and tidier delivered archives.
+## Builder & Repairs
 
-## Council of AI
-- Council setup now has cleaner presets, host settings, member cards, and analytics presentation.
-- Council members can link to personas through `model_config_id`, using the latest persona model, prompt, and name at runtime.
-- Council chats now show address panels, round sections, peer ballots, moderator verdicts, and richer round metadata.
+- Shared OpenHands setup, bounded reasoning and fewer redundant thinking loops.
+- Live multiline-argument probes recover lost file content and fall back to text tools.
+- Architect carries advisory interfaces/tests/README/`.gitignore` without new hard gates.
+- File-scaled rounds/continuations require a real finish signal; incomplete builds stay out of review/delivery.
+- Streaming reasoning effort, bounded completions and consistent samplers.
+- Aider-first repairs for existing/uploaded/generated projects; Fixer fallback and no-op repair-loop prevention.
+- Expanded research-gated retry, nested-project, C#/.NET, Makefile-C and Node/Rust smoke coverage; cleaner archives.
 
-## UI
-- Changelog releases now render as collapsible version cards, with the latest release expanded.
-- Quick Search source cards now show source numbers under favicons and avoid duplicate citation lists.
+## Councils & Release Notes
 
-## Bug fixes
-- Knowledge-base name and description edits now autosave and persist across server restarts.
-- `generate_image` fenced blocks now become tool calls, and local actor names are no longer searched when they are only part of the conversation wording.
-- Restored Daedalus to the intended two-turn Architect → Builder flow, removed stale single-turn handoff cues, and kept truncated builds incomplete.
-- Fresh OpenHands builds now use task-derived workspaces unless an existing project directory is truly being resumed.
-- Blocked Daedalus summaries and repair gates now recommend valid next actions and support research-backed retries before hand-fix release.
-- Fixer symbol-mismatch handling now uses real class method references and drops unresolved edits instead of rewriting call sites incorrectly.
-- Daedalus message rendering now detects more output shapes, preserves run ids, and shows workflow/run cards for non-full-build actions.
-- Live endpoint tests now skip cleanly when no HyprChat server is reachable, and connector tests mock the async URL-safety checks introduced by the refactor.
-- Node/Rust smoke checks and non-required advisory verification now avoid false review failures.
-- Acceptance now requires fresh review after source/test/manifest edits from `aider.fix`; docs-only fixes may return directly to Acceptance.
-- Daedalus persona guidance now matches Aider-first repair routing, with Fixer described as fallback only.
+- Refined presets, host/member controls and analytics.
+- Members link through `model_config_id` to current persona models/prompts/names.
+- Address panels, round sections, ballots, moderator verdicts and richer metadata.
+- Collapsible changelog release cards, newest expanded.
 
-## Refactor follow-up
-- Backend route, artifact, database schema, research-config, workflow-gate, parser, model-management, and Codebox tool helpers were split into focused modules while keeping the public API behavior stable.
-- Frontend model picker, markdown blocks, artifact widgets, HyprChat widgets, Daedalus timeline helpers, theme/session/settings helpers, and panels were extracted from `main.jsx` without changing the Vite app architecture.
-- Deploy monitor and README deploy notes now include the extracted backend and frontend modules so homelab deploys ship the refactored source tree.
+## Fixes
+
+- KB name/description autosaves survive restart.
+- Fenced `generate_image` invokes the tool; incidental local actor names no longer trigger search.
+- Restored two-turn Architect → Builder handoff; removed stale single-turn cues and retained incomplete status for truncation.
+- Fresh builds use task-specific workspaces unless explicitly resuming.
+- Blocked states offer valid actions and research-backed retries before manual release.
+- Fixer uses actual class-method references and discards unresolved symbol edits.
+- More workflow-output shapes retain run IDs and cards for non-build actions.
+- Unreachable live endpoints skip cleanly; connector tests mock asynchronous URL safety.
+- Node/Rust and advisory checks avoid false review failures.
+- Aider source/test/manifest edits require fresh review; docs-only repairs may return to Acceptance. Persona guidance matches Aider-first routing.
+
+## Refactor
+
+- Extracted backend routes, artifacts, schema, research config, gates, parsers, models and Codebox helpers without API changes.
+- Extracted frontend picker, Markdown/artifact/widgets, Daedalus timeline, theme/session/settings and panels while retaining React/Vite architecture.
+- Deploy monitor and README include the extracted modules.
 
 </details>
 
@@ -808,87 +804,61 @@
 <details>
 <summary>Alpha v17.1 — June 3, 2026</summary>
 
-## UI Overhaul Update
-### Developer Note 
-> Complete refresh and update to the overall feel of hyprchat with a new take on personas. Next update will feature hotfixes and changes to deep research. UI changes are subject to undergo more changes till I feel they look right. This is not final for UI but a step into the right direction. For bugs, please raise an issue through the GitHub issue tracker [here](https://github.com/eefernet/hyprchat/issues).
-### Visual Direction & App Shell
-- This UI refresh was heavily inspired by Pewdiepies [Odysseus](https://pewdiepie-archdaemon.github.io/odysseus/) local AI webview. So I stole his ideas.
-- Added a flatter, modern Hyprland-inspired visual direction while preserving the existing HyprChat terminal/cyberpunk feel.
-- Added HyprFlat-style theme polish, tighter glass panels, cleaner borders, flatter controls, and refreshed chat/settings surfaces.
-- Updated the site favicon to the HyprChat logo mark.
-- Added selectable animated background effects in Settings next to the theme selector, including Pixel Rain, Soft Flow, Aurora Lines, Star Drift, Circuit Drift, and Odysseus-style flow variants.
-- Tuned the background effects so they fill the whole viewport, are more visible where needed, and avoid dense rain, oversized bars, or overly aggressive glitching.
+> Interface and persona refresh; design remains iterative, with Deep Research fixes planned next. Report bugs through [GitHub Issues](https://github.com/eefernet/hyprchat/issues).
 
-### Documentation & Screenshots
-- Reworked the README screenshots from a bare image dump into a top collapsible gallery plus contextual feature screenshots placed next to the sections they explain.
-- Added README coverage for the new Agents and Personas profile manager, Knowledge Bases, Model Manager, Activity Monitor, Council, Council Settings, Settings, and main chat screenshots.
-- Added rich-rendering README examples for KaTeX/LaTeX notation, Mermaid diagrams, charts, and callouts.
-- Updated README feature copy to match the Agents/Personas split, including Persona card import, per-profile KBs, rating controls, thinking-mode overrides, and first-message behavior.
+## App Shell
 
-### Startup & Empty Chat
-- Updated the startup/loading screen so it uses the selected theme and selected animated background instead of the old standalone loading look.
-- Updated the first-chat empty state with the HyprChat logo, centered product greeting, generated daily message copy, and a taller first-message composer that settles back to the normal bottom composer after sending.
-- Page loads and refreshes now open to the new empty chat surface instead of restoring the most recent conversation; the real chat row is created when the first message is sent.
-- New Chat now opens the empty chat surface immediately; the composer keeps the smooth float up/down behavior, lands closer to the greeting, and delays textarea focus with `preventScroll` so the browser does not nudge it upward at the end.
-- Empty-chat daily greeting messages now use a more playful prompt and stronger fallback lines, with a cache version bump so browsers refresh stale generic copy.
+- Inspired by PewDiePie's [Odysseus](https://pewdiepie-archdaemon.github.io/odysseus/), with a flatter Hyprland direction retaining HyprChat's terminal/cyberpunk identity.
+- HyprFlat polish, tighter glass/borders, flatter controls and refreshed chat/Settings surfaces; HyprChat logo favicon.
+- Selectable Pixel Rain, Soft Flow, Aurora Lines, Star Drift, Circuit Drift and Odysseus-style backgrounds; full-viewport effects with clearer visibility and restrained rain/bars/glitches.
 
-### Chat & Composer
-- Moved the streaming/loading sweep from the top of the page to an animated trace around the composer.
-- Raised the composer control layer so Prompt Library and effort menus render above chat/chart content, and nudged the empty-chat composer closer to the greeting.
-- Reworked the composer controls so Attachments, Prompt Library, and Daedalus activation live under a single `+` quick-actions menu, with the effort selector moved next to Send.
-- Empty-chat effort selection and Daedalus activation now work before the first message; pending choices are applied when the real conversation is created.
-- Added inline PDF extraction failure feedback with retry/remove actions.
-- Quick Search failures now surface as a compact warning chip instead of silently clearing results or spinning indefinitely.
-- Expanded chat Quick Search from a 6-source helper to a broader fast search that can return up to 35 source cards when enough useful results are available.
-- Increased Quick Search SearXNG retrieval to pull larger candidate pools, with broader/current/news/comparison searches requesting more results before ranking and dedupe.
-- Updated Quick Search ranking to run domain diversity and embedding dedupe over the larger pool, then backfill from remaining candidates so dedupe does not unnecessarily shrink the final source list.
-- Kept Quick Search context compact by injecting title, URL, domain, and snippets for up to 35 sources while fetching full page excerpts only for the top few results.
+## Documentation
 
-### Sidebar, Search & Chat Utilities
-- Cleaned up sidebar search: title filtering and full-message search now live behind a single rail search action above Chat.
-- Reworked export/import controls into a single export menu with Markdown/JSON choices and corrected import/export icon usage.
-- Import/export failures now show visible in-app feedback instead of failing silently or only logging to the console.
+- README uses a collapsible gallery plus contextual screenshots for Agents/Personas, KB, Models, Activity, Council/settings, general Settings and chat.
+- Added math/Mermaid/chart/callout examples and updated profile documentation for card imports, KBs, ratings, thinking overrides and greetings.
 
-### Settings
-- Reworked Settings into a centered modal overlay with left-side section navigation and a scrollable right-side editor instead of replacing the chat surface.
-- Moved Changelog into Settings as a bottom-pinned sidebar section that renders in the right editor pane with inline refresh.
-- Reworked **Connections** into a vertically stacked endpoint editor with service status chips, always-visible Ollama/Codebox/N8N/SearXNG URL fields, and `/api/settings` persistence.
-- Added consistent save feedback for Connections, RAG settings, Loading Quotes, appearance preferences, and model parameter settings.
-- Rebuilt **Loading Quotes** as a scrollable editor with readable full quote rows, attribution display, inline edit/save/cancel/remove controls, restore defaults, and add-new-quote controls.
-- Added 30 default loading quotes from real philosophers, religious texts, mystics, and scientists, with cleanup for previously saved placeholder HyprChat-authored defaults.
+## Startup & Empty Chat
 
-### Personas & Daedalus
-- Renamed Coder Bot v2 to **Daedalus** throughout the UI and updated related model/context labels.
-- Added persona descriptions to the Personas screen and persona editor.
-- Restore-defaults actions now use themed in-app confirmation and visible success/error feedback.
+- Loading uses the selected theme/background; empty chat adds the logo, centered greeting, generated daily copy and a taller composer that settles after sending.
+- Loads/refreshes and New Chat open an unsaved empty surface; the first message creates the conversation.
+- Smoother composer positioning/floating and delayed `preventScroll` focus avoid browser jumps.
+- Playful daily-greeting prompts/fallbacks and a cache-version refresh replace stale generic copy.
 
-### Agents & Personas Split
-- Split model configs into **Agents** for task/workflow-driven assistants and **Personas** for roleplay, voice, and character-style profiles.
-- Added profile-type metadata via `parameters.profile_type` while keeping the existing `model_configs` table and compatibility API field names.
-- Added compact top-of-page guidance explaining the difference between Agents and Personas, plus separate create/edit flows for each profile type.
-- Added **Kayla — Gen Z Bestie** as a fully populated example Persona so users can see how description, personality, scenario, first message, example dialogue, lore, tags, rating, and sampling fields are meant to be filled.
-- Replaced the old Based Bot seed with **Tyler — Based Gamer Bro**, a fully populated 18-year-old gamer-bro Persona with description, personality, scenario, first message, example dialogue, lore, tags, rating, and advanced prompt filled in.
-- Added a Persona age rating to a fixed emoji-labeled dropdown (`G`, `PG`, `PG-13`, `R`, `NC-17`, `Unrated`) with visible descriptors and model-facing content-boundary guidance during chat.
-- Added a per-Persona Thinking Mode control (`Auto`, `On`, `Off`) that can override the global thinking setting for Persona chats.
-- Enabled Knowledge Base attachment controls for Personas, including Persona card KB badges and chat-time KB retrieval when a Persona is active.
-- Fixed empty-chat Persona state handling so leaving a Persona/Agent detaches the active profile instead of spawning a new chat with the same profile.
-- Persona `first_message` appears as the first assistant message in fresh Persona chats and is included in the chat context.
-- Added Persona import for Chub, SillyTavern, and TavernAI character cards, including PNG `chara` metadata cards, JSON card files, Chub-style packed definition splitting, tags, alternate greetings, character-book lore, and first-message mapping.
-- Added a built-in Daedalus avatar so the coding agent has a fitting image in the Agents page, chat header, sidebar, and assistant message bubbles.
+## Chat & Search
 
-### Models, Knowledge Bases & Activity
-- Reworked the top-right Downloads tray into a shared **Activity** tray for model pulls/downloads, KB uploads/indexing, project archive uploads, RAG reindex/purge jobs, cleanup jobs, and tool-template patching.
-- Model deletion, tool-calling enablement, and tool-template patching now use themed in-app confirmations/toasts instead of browser alerts.
-- Knowledge Base uploads now show both inline upload/indexing progress and Activity tray status.
-- RAG reindex and purge flows now use themed confirmation dialogs, Activity progress rows, and visible success/error feedback.
+- Composer-edge streaming trace replaces the page-top sweep; controls/menus stack above charts/chat.
+- One `+` menu groups attachments, Prompt Library and Daedalus; effort sits beside Send. Pending effort/Daedalus choices apply to the first message.
+- PDF extraction failures offer Retry/Remove; search failures show a warning instead of silent clearing or endless loading.
+- Quick Search grows from six to **up to 35 sources**, using larger candidate pools for broad/current/news/comparison queries, domain diversity, embedding dedupe and backfill. Context keeps compact metadata/snippets and fetches only top-page excerpts.
+- One rail Search action combines title/message search; export menu offers Markdown/JSON with corrected import/export icons and visible failure feedback.
 
-### Feedback & Confirmations
-- Added shared toast feedback variants for success, error, warning, and info messages, with optional action buttons.
-- Replaced normal browser `alert()` / `confirm()` flows with themed in-app dialogs and toasts across destructive actions, restore-defaults actions, model management, RAG maintenance, tool-template patching, import/export, and cleanup workflows.
-- User-triggered failures that previously only wrote to the developer console now surface visible toasts or inline card errors while keeping console logging for debugging.
+## Settings
 
-### Bug Fixes
-- Fixed Acceptance falsely reporting long source files as truncated or syntactically incomplete when its static source excerpt ended mid-statement. Acceptance now reads much larger source excerpts, marks any remaining excerpt truncation explicitly, and treats the clean Reviewer build/lint result as authoritative for syntax status.
+- Centered modal with left navigation/right scrolling editor; Changelog is a bottom-pinned section with Refresh.
+- Connections stacks status chips and visible Ollama/Codebox/N8N/SearXNG endpoints, persisted through `/api/settings`.
+- Consistent save feedback for connections, RAG, quotes, appearance and model parameters.
+- Loading Quotes supports full text/attribution, edit/save/cancel/remove, restore and add; 30 sourced defaults replace old placeholder quotes.
+
+## Agents & Personas
+
+- Renamed Coder Bot v2 to **Daedalus**, with updated model/context labels and a built-in avatar across cards, headers, sidebar and replies.
+- Added persona descriptions/editor fields and themed restore-default confirmations/results.
+- Split task/workflow **Agents** from character/voice/roleplay **Personas**, with explanatory guidance and separate create/edit flows. `parameters.profile_type` retains the existing `model_configs` table/API compatibility.
+- Added fully populated **Kayla — Gen Z Bestie** and **Tyler — Based Gamer Bro** (replacing Based Bot), demonstrating description, personality, scenario, greeting, dialogue, lore, tags, ratings and sampling/advanced prompts; Tyler is 18.
+- Rating dropdown: G, PG, PG-13, R, NC-17 and Unrated, with emojis/descriptions and model-facing boundaries.
+- Per-persona Auto/On/Off thinking overrides; KB attachments, badges and chat retrieval.
+- Leaving a profile in empty chat detaches it; fresh persona chats include `first_message` visibly and in context.
+- Chub/SillyTavern/TavernAI imports support PNG `chara`, JSON, packed definitions, tags, alternate greetings, character-book lore and first-message mapping.
+
+## Activity & Feedback
+
+- Downloads becomes **Activity** for model downloads, KB upload/indexing, project archives, RAG reindex/purge, cleanup and template patching; KB uploads also show inline progress.
+- Themed confirmations/toasts replace browser dialogs for model deletion/tool support, RAG, destructive actions, defaults, import/export and cleanup.
+- Shared success/error/warning/info toasts support actions; user-triggered failures appear in UI while retaining diagnostic console logs.
+
+## Fixes
+
+- Acceptance no longer mistakes clipped long-file excerpts for broken source: larger reads, explicit excerpt-truncation markers and authoritative clean Reviewer build/lint syntax evidence.
 
 </details>
 
@@ -954,55 +924,38 @@
 <details>
 <summary>Alpha v17.0.1 — May 26, 2026</summary>
 
-### Coder Bot v2 — workflow gate hardening
+## Coder Bot v2 Hardening
 
-Ten edge cases in the v2 gate, profile detection, and persona prompt that together swung the same prompt between a clean 16-round bug fix and a 24-round rebuild loop. All fixed.
+- **Fixer gate** — requires the latest Reviewer to report issues/errors; fabricated IDs cannot waste repair cycles. “Nothing to fix” is skipped and does not count toward the three-cycle cap.
+- **No tests** — pytest exit 5 is treated as benign for scaffolds, avoiding missing-test configuration loops.
+- **Budget exhaustion** — releases download/read/list tools and recommends packaging when the fix cap is reached.
+- **Anti-rebuild** — blocks repeated same-project `generate_code` in one turn; edited uploads without Builder history use the feature profile. SQLite/ISO timestamp normalization makes turn matching reliable.
+- **Project paths** — explicitly distinguishes on-disk directories from display names.
+- **Small/runtime edits** — use read/write for small changes or compile-clean runtime bugs; reserve Builder for genuinely new ≥3-file work or major refactors. Persona guidance matches these rules.
+- **Re-seeding** — updates Coder Bot v2 in place, preserving profile IDs and conversation links.
+- **Settings** — empty Planning/Coder overrides survive restart and retain inheritance semantics.
+- **Uploads** — limit increases 50 → 250MB, configurable by environment and shared by PDF/frontend guards.
 
-#### Gate / Reviewer / Fixer
-- **Phantom `run_fixer` blocked** — `tools.py` gate refuses `run_fixer` unless the latest run is a reviewer with `status="issues"`/`"error"`. Stops cycle-cap burn from hallucinated `reviewer_run_id`s.
-- **"Nothing to fix" is `skipped`, not `succeeded`** — `agents/fixer.py:249`. The 3-cycle cap counts only real attempts now.
-- **`pytest` exit 5 ("no tests collected") treated as benign** — `agents/reviewer.py:43,47` append `|| echo '(no tests)'`. Greenfield scaffolds stop infinite-looping on a missing `pytest.ini`.
-- **Cycle cap delivers gracefully** — PENDING_FIX gate releases `download_project`, `download_file`, `read_file`, `list_files` once the cap fires, with the cap message suggesting `download_project` as the ship path.
-- **Anti-rebuild guard** — `tools.py` blocks a second `generate_code` against the same project in the same turn (detected via `runs.started_at >= latest_user_message.created_at`). Pushes the model toward `read_file` + `write_file` for refinement.
-- **Profile auto-detect for edited uploads** — `tools.py` fallback sets `_builder_profile = "feature"` when an active project has no prior builder run, so `write_file`-edited uploads aren't clobbered by a scaffold rebuild.
-- **`_parse_ts_loose()`** — new helper unifies SQLite `CURRENT_TIMESTAMP` (space, no µs) and Python `isoformat()` (T, with µs) for cross-table "is this run from the current turn?" comparisons.
+## OpenHands Reasoning
 
-#### ACTIVE PROJECT block
-- **Path-explicit injection** — `agents/chat.py` emits `**ON-DISK PATH (use this for ALL tool calls): /root/projects/{project_id}**` and relabels the human name `display name (NOT a directory)`. Stops `mkdir -p /root/projects/{display-name}` mistakes.
-- **`write_file` is the default** — small edits, refactors, 1–5 line pastes all route to `read_file` → `write_file`. `generate_code` reserved for genuinely new 3+ files or major refactors.
-- **Runtime-bug branch** — runtime crashes that compile fine (font errors, bad preview state) skip `run_review` and go straight to `read_file` → `write_file`, since the reviewer can't see them. Persona prompt updated to match.
+- Low/Medium/High effort selector; Medium becomes the local Ollama default instead of SDK High.
+- Lower effort reduces expensive reasoning rounds and VRAM-swapping delays; tested CRUD/UI quality showed no regression.
+- `OPENHANDS_REASONING_EFFORT` flows through settings, payload and worker to the SDK; older SDKs warn and ignore unsupported effort arguments.
 
-#### Persona + seeding
-- **Coder Bot v2 prompt** — runtime-bug branch added; new top-level **ANTI-REBUILD RULE** explaining the gate.
-- **`seed_coder_bot_v2()` updates in-place** — `agents/personas.py` no longer deletes-and-recreates on re-seed, preserving `mc_id` so existing conversations keep their persona link.
+## Quick Search
 
-#### Settings & uploads
-- **Empty-string settings respected on restart** — `main.py:183` switched to `"key" in _settings` membership checks. Planning Model = "(use chat model)" now survives restarts instead of reverting to the env default. Same fix for `coder_model`.
-- **Upload limit 50 MB → 250 MB** — `config.MAX_UPLOAD_SIZE_MB` (env-overridable). Fits a typical PyQt5 + venv. `main.py:1641` PDF route and `frontend/dist/index.html:2589` attach guard now route through the constant.
+Search improvements draw on Perplexica, Khoj and Open WebUI.
 
-### OpenHands — Reasoning Effort
-- **New "Reasoning Effort" dropdown** in the OpenHands settings tile: **Low** / **Medium** (new default for local Ollama) / **High** (SDK default).
-- **Why it matters** — the SDK defaults `reasoning_effort=high` + `extended_thinking_budget=200000`. On a 30B model with `num_ctx=16384` that's 30+ s per tool round; with chat ↔ builder VRAM thrashing, a 3-file scaffold ran 5 min wall-clock. Medium/Low cuts that with no quality regression on CRUD/UI tasks.
-- **Plumbing** — `OPENHANDS_REASONING_EFFORT` in `config.py` → settings handlers in `main.py` → `oh_payload` in `tools.py` → `RunRequest.reasoning_effort` in `openhands_worker.py` → `_LLM(reasoning_effort=…)` with a `TypeError` fallback for older SDKs (logs a warning, no-op).
-
-### Quick Search — best-of synthesis
-
-Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Open WebUI (70k★) into `backend/search_agent.py` + `backend/quick_search.py`.
-
-- **`standalone_query` in triage** (Perplexica) — triage now returns a context-independent rephrasing of the latest message alongside `queries[]`. Used as the canonical query for ranking, embedding, and the carousel — kills pronoun/anaphora bugs at the source.
-- **Embedding rerank + dedup** (Perplexica) — batched `nomic-embed-text` call scores snippets vs `standalone_query`; drops sim < 0.45, dedups pairs > 0.85. Catches synonym/paraphrase mismatches and the SearXNG-mirror dup case. Falls back to heuristic order on any embed failure.
-- **Trafilatura page extraction** — replaces the regex strip with `trafilatura.extract()` on top-N pages. JS-heavy and paywall-prelude pages now produce usable content. Falls back inline (same fetched HTML, no double round-trip) if trafilatura is unavailable.
-- **Per-conversation subquery dedup** (Khoj) — drops queries already searched earlier in the same conversation; preserves at least one query if all are dupes.
-- **Follow-up relevance fix** — `relevance_score` now folds prior-turn tokens into the user-token set when the message is a follow-up. Refine actually fires for "any updates?" instead of returning 1.0 every time.
-- **News freshness** — when triage's category is `news` and the user message has a recency cue (`today`/`latest`/`current year`), SearXNG gets `time_range=month`. Cache key becomes `(query, time_range)`.
-- **Triage category used for ranking** — was being computed and discarded; now drives `_apply_domain_bias` directly. Regex `_classify_query` becomes the triage-failure fallback only.
-- **SSRF guard** (Open WebUI) — `_url_safe()` resolves hostnames before fetch; rejects private/loopback/link-local IPs. Defends against malicious search results redirecting to internal services.
-- **Bounded LRU cache** — `_CACHE` capped at 512 entries with LRU eviction. Prevents long-running-process leak.
-- **Concurrency semaphore** — `_FETCH_SEMA(6)` around page-fetch + OG-image-fetch. Smooths bursts on the SearXNG LXC and ProtonVPN exit.
-- **Search-failure note** — when quick search throws, a system note ("web search was unavailable, don't guess") is appended to the user turn so the model doesn't hallucinate current events.
-- **Pre-existing `_search_searxng` bug** — any SearXNG result with a thumbnail was being marked `type="image"` and filtered out by the chat ranker. News results almost always carry an `og:image`; this was silently dropping ~60% of news results before they reached embedding rerank. Narrowed to URL-extension-only.
-- **Removed** — `_fetch_page` import in `quick_search.py` (replaced by `_fetch_clean_page`); stale `_rewrite_query` references in docstrings.
-- **New dep** — `trafilatura>=1.10.0` in `requirements.txt`.
+- **Standalone queries** — context-independent triage wording drives ranking, embeddings and carousel labels.
+- **Embedding rank/dedupe** — batched `nomic-embed-text`; drop relevance below 0.45 and duplicate similarity above 0.85, with heuristic fallback on errors.
+- **Extraction** — trafilatura on top pages, with same-HTML fallback and no duplicate fetch; added `trafilatura>=1.10.0`.
+- **Conversation dedupe** — skip previously searched subqueries while retaining at least one; follow-up relevance includes prior-turn tokens so refinement can trigger.
+- **Freshness** — news with recency cues uses `time_range=month`; cache keys include the range.
+- **Categories** — triage drives domain bias, with regex classification only on failure.
+- **Safe/bounded fetching** — DNS checks reject private/loopback/link-local targets; 512-entry LRU and six concurrent page/OG fetches bound resource use.
+- **Failure guidance** — tell the model search is unavailable and not to guess current facts.
+- **News recovery** — thumbnails no longer classify ordinary articles as images; image detection uses URL extensions, restoring results previously filtered out.
+- **Cleanup** — removed obsolete page-fetch import and query-rewrite references.
 
 </details>
 
@@ -1011,192 +964,116 @@ Pulled the highest-ROI patterns from Perplexica (24k★), Khoj (18k★), and Ope
 <details>
 <summary>Alpha v17 — May 7, 2026</summary>
 
-### Coder Bot v2 — Multi-Agent Rebuild
+> Coder Bot v2 introduces a deterministic multi-agent pipeline for new projects, uploaded-project work and code generation. Deprecated v1 remains available while v2 is tested.
 
-Introducing a completely rebuilt from the ground up replacement for Coderbot. For right now, coderbot v1 will still be present in builds until v2 is more battle tested. Coderbot v1 is deprecated and will be removed in a later release. Coderbot v2 is faster, more effecient and more accurate. Its more feature packed than coderbot v1 would ever dream to be. Coderbot v2 is intended to be used for full projects or investigating existing user uploaded projects or generating any code.
+## Coder Bot v2
 
-The v1 Coder Bot was a single chat agent that did everything: planning, building, reviewing, fixing, packaging — all crammed into one round-by-round loop. It worked, but every step depended on the model "remembering" prompt rules, and a single misstep (manual `write_file` instead of `generate_code`, refusing to call `run_review`, ignoring the fix-loop cap) sent the whole thing into a 28-round death spiral. v2 is a **deterministic multi-agent pipeline**: each role is a stateless run with a structured envelope, and a server-side gate enforces the workflow instead of trusting the model to obey.
+Structured, stateless agent runs replace prompt-only orchestration. SQLite `runs` records retain result envelopes through disconnects; `/api/runs/{id}` restores the UI timeline.
 
-#### Agent roster
-
-| Role | File | Responsibility | Model |
-|---|---|---|---|
-| **Architect** | `backend/agents/architect.py` | Single-shot structured plan (JSON manifest, build/test cmds, deps, success criteria) | `PLANNING_MODEL` |
-| **Builder** | `backend/openhands_worker.py` | OpenHands SDK on Codebox; profile-aware (scaffold/continue/feature/bugfix) | `CODER_MODEL` |
-| **Reviewer** | `backend/agents/reviewer.py` | Read-only — runs build + test + lint, returns structured issues with file:line | `PLANNING_MODEL` |
-| **Fixer** | `backend/agents/fixer.py` | Stateless scoped edits driven by a Reviewer envelope; marker-format output | `CODER_MODEL` |
-| **ProjectQA** | `backend/agents/project_qa.py` | Read-only Q&A over an existing project; greps + reads + cites file:line | chat/persona model |
-| **Indexer** | `backend/agents/project_indexer.py` | One-shot at upload time; walks tree, detects build system, indexes ChromaDB | `nomic-embed-text` |
-
-Every agent invocation is a row in the `runs` table with a structured `result_envelope`, persisted to SQLite and exposed via `/api/runs/{id}`. Browser disconnects can't lose work; the UI rebuilds the timeline on reload.
-
-#### Phase 1 — Reviewer
-
-- **Stateless build/test/lint runner** that replaces the v1 antipattern of "orchestrator reads files and rewrites them across 28 chat rounds." Detects project markers, runs the real build commands inside Codebox, parses output, asks the planning model for a structured issue list with severity / file:line / `suggested_fix_scope`. Read-only by contract.
-- **Project marker auto-detection** — checked in this order so monorepos hit the right one:
-
-| Marker | Build system | Build cmd | Test cmd |
-|---|---|---|---|
-| `pom.xml` | maven | `mvn -q -DskipTests compile` | `mvn -q test` |
-| `build.gradle(.kts)` | gradle | `./gradlew build -q -x test` | `./gradlew test -q` |
-| `Cargo.toml` | cargo | `cargo build --quiet` | `cargo test --quiet` |
-| `go.mod` | go | `go build ./...` | `go test ./...` |
-| `package.json` | npm | `npm install && npm run build` | `npm test` |
-| `pyproject.toml` / `requirements.txt` | pip | `pip install -e .` | `pytest -q` |
-| `CMakeLists.txt` | cmake | `cmake -B build && cmake --build build` | `ctest --output-on-failure` |
-| `Makefile` | make | `make` | `make test` |
-
-- **Plain-source fallback** — when no formal build file exists, walks the tree and picks the dominant language (`*.java`, `*.py`, `*.rs`, `*.go`, `*.js`, `*.ts`, `*.c`, `*.cpp`). Java fallback excludes `*Test.java` / `./test` / `./tests` so a missing JUnit classpath doesn't fail the whole compile.
-- **Hard fail on `(none)` marker** — if the Reviewer can't identify a project at the given path, returns `status="error"` instead of trivially "clean." A reviewer that silently passes a missing project is worse than no reviewer.
-- **`run_review` tool** — the chat agent invokes it after each build/edit. Tool result includes the `reviewer_run_id` so the Fixer can pick up where it left off.
-
-#### Phase 2 — Fixer
-
-- **Stateless minimal-edit applier.** Loads a Reviewer envelope from the run store, reads each issue's fix-scope files, asks the coder LLM for targeted edits, writes via Codebox. Validates that the model only touches files in scope. Does NOT re-run the build — that's the Reviewer's job. Clean separation: Reviewer verifies, Fixer edits, neither does the other's job.
-- **Marker-delimited output format** — replaced JSON with `### EDIT: <path>` + ` ```lang ` fenced full-file replacements. JSON-with-code routinely breaks because models don't escape newlines/quotes inside string values; markers don't need escaping. Robust across every language we tested.
-- **Path normalization** — relative paths from reviewer output (`./tests/Foo.java`, `com/pong/Bar.java`) get resolved to absolute paths under `project_dir`. Defensive against models that copy paths verbatim from compiler error messages.
-- **Validate-and-fallback shim** — if the model passes a fabricated `reviewer_run_id` that doesn't exist in the runs table, the dispatch falls back to the most recent reviewer for the conv instead of erroring out.
-- **Hard 3-cycle cap, server-enforced** — `tools.py` exec_tool gate refuses a 4th `run_fixer` call if 3 succeeded fixer runs already exist on the conv. Forces the model to stop and ask the user instead of looping forever. Includes the latest reviewer's summary + first 3 issues in the gate message so the model has specifics to relay.
-
-#### Phase 3 — Architect (structured planning)
-
-- **Replaces v1's prose `plan_project`** with a single LLM call to `PLANNING_MODEL` that produces a JSON object the Builder/Reviewer/Overseer all consume directly:
-
-```
-project_id, language, build_system, build_cmd, test_cmd, lint_cmd,
-manifest [{path, purpose, estimated_loc}],
-tests_required, external_deps, risk_notes, success_criteria
-```
-
-- **Validate + retry once on parse failure** — if the model emits invalid JSON or misses required keys, the parse error is fed back into the prompt for one retry. Fail loudly on second miss; no regex hacks.
-- **Manifest injection into Builder context** — when `generate_code` runs and a recent successful Architect envelope exists, the manifest + build/test commands + success criteria + deps + risk notes get prepended to the OpenHands task prompt. Builder follows the structured plan instead of re-deriving it from prose.
-- **Rich plan visualization** — `format_plan_for_chat()` renders the JSON as styled markdown: file tree drawn with box-drawing characters in a code fence, deps as build-system-specific snippets (XML for Maven, `npm install` for npm, TOML for Cargo, `pip install` for Python, Groovy for Gradle), success criteria as a checkbox list, tests as a markdown table.
-- **Architecture Plan panel restored** — Architect's `tool_end` event includes `detail.plan` with the rendered markdown, so the frontend's `PlanPanel` component renders the styled "Architecture Plan" panel above the agent run cards (📐 icon, copy button, expand/collapse).
-
-#### Phase 4 — ProjectQA + Project Indexer
-
-- **`ProjectQA` agent** for "how does X work?", "walk me through Y", "show me Z" questions. Steps: list_files → keyword extraction → grep across the tree → read snippets → ask LLM to compose grounded answer with `file:line` citations.
-- **Filename-targeted reads** — extracts file mentions from the question (`ScoreTracker.java`, `Ball.rs`, even `score tracker.java` with a stopword-filtered space split → `scoretracker.java`), fuzzy-matches against the project tree, reads the full file (up to 30KB) so the model can do a line-by-line breakdown.
-- **Change-request detection** — flags questions that look like change requests (`add X`, `fix Y`, `refactor Z`) so the chat agent can route to `generate_code` instead of more `ask_project` calls.
-- **Path validation shim** — if the model fabricates a `project_dir` that doesn't exist on Codebox, the dispatch falls back to the auto-resolved path from the latest builder run. Same pattern as the `run_fixer` shim.
-- **`ask_project` tool** with `❓ Investigating project` icon. Uses chat/persona model so the answer voice matches the assistant the user is actually talking to (was hardcoded to `DEFAULT_MODEL` before; now respects `conv_model`).
-- **`Project Indexer` agent** — runs once at upload time. Walks the uploaded project tree, detects build system from markers, reads up to 100 source files (excludes node_modules, .git, target, build, dist, __pycache__, venv), pushes contents into ChromaDB's `code_memory` collection via the existing `rag.index_generated_code` pipeline. Future `ask_project` / `generate_code` calls have semantic retrieval over the uploaded code.
-- **`/upload-chunk` endpoint added to codebox-api** — accepts raw bytes via multipart instead of base64-in-shell-command. Bypasses two pre-existing pitfalls of the chunked upload path: (1) Linux `MAX_ARG_STRLEN` (~128KB per argv string) when chunks exceeded ~130KB, and (2) the `mkfs` substring in codebox's deny-list which any random base64 chunk could trigger. Uploads now use 1MB raw chunks instead of 100KB base64 chunks — ~10× faster, no false positives.
-
-#### Phase 5 — Builder profiles
-
-- **Single `generate_code` tool, four profile prompts** based on conversation state:
-
-| Profile | Trigger | Builder behavior |
+| Role | Responsibility | Model |
 |---|---|---|
-| `scaffold` | No active project (fresh build) | "Create ALL files from scratch" + git init |
-| `continue` | Last builder ran `partial`/`stuck` | "Resume — these files in `manifest_missing` aren't written yet, do NOT rewrite existing files" |
-| `feature` | Last builder `succeeded`, user asks for change | "EXISTING WORKING project at `/root/projects/X`, here's the tree + relevant files, edit minimally, do NOT regenerate working code" |
-| `bugfix` | Internal — used by run_fixer | n/a (Fixer doesn't go through OpenHands) |
+| Architect | JSON plan, file manifest, commands, dependencies and success criteria | `PLANNING_MODEL` |
+| Builder | OpenHands on Codebox; scaffold/continue/feature profiles | `CODER_MODEL` |
+| Reviewer | Read-only build/test/lint with scoped file:line issues | `PLANNING_MODEL` |
+| Fixer | Minimal edits from Reviewer evidence | `CODER_MODEL` |
+| ProjectQA | Read-only, cited project answers | Chat/persona model |
+| Indexer | Upload-time build detection and Chroma code indexing | `nomic-embed-text` |
 
-- **Profile detection from runs table** (authoritative; bypasses stale `coding_projects` rows) — walks newest-first, finds most recent builder with status in `(succeeded, partial, stuck)`, pulls `project_dir` + `project_id` from its envelope. Skips cancelled/failed/running entries that would otherwise mask the real prior build.
-- **Feature-profile context prep** — when the profile is `feature`, the dispatch packages the existing file tree (60 paths) + 1-3 inlined files mentioned in the user's task into the OpenHands `context` field. Builder reads what already exists out of its prompt and edits surgically instead of walking the tree itself.
-- **Run cards distinguish profiles** — `Run · builder.scaffold` / `Run · builder.continue` / `Run · builder.feature` show in the UI with role-specific icons. Frontend `RunCard` renders the right label per profile.
+### Reviewer
 
-#### Phase 6 — Frontend UX polish
+- Detects markers, executes real Codebox build/test/lint commands and asks the planning model for severity, file:line and suggested fix scope.
+- Checks build markers in order: Maven (`pom.xml`), Gradle, Cargo, Go, npm, Python (`pyproject.toml`/`requirements.txt`), CMake, Make; uses each system's install/compile/build and test commands.
+- Without manifests, detects dominant Java/Python/Rust/Go/JS/TS/C/C++ sources; Java compilation excludes test directories/classes lacking JUnit setup.
+- Unidentifiable/missing projects return errors, never clean results. `run_review` returns the run ID used by Fixer.
 
-- **Role-specific run-card icons + labels** — every agent type is visually distinct in the timeline:
+### Fixer
 
-| Role | Icon | Label |
-|---|---|---|
-| `architect` | 📐 | Designing plan |
-| `builder.scaffold` | 🏗 | Building project |
-| `builder.continue` | 🔄 | Resuming build |
-| `builder.feature` | ✨ | Adding feature |
-| `builder.bugfix` | 🩹 | Bug fix build |
-| `reviewer` | 🔍 | Reviewing |
-| `fixer` | 🛠 | Fixing issues |
-| `qa` | ❓ | Investigating |
-| `indexer` | 📚 | Indexing project |
+- Reads only issue-scoped files and applies bounded coder-model edits; Reviewer remains responsible for rebuilding/verifying.
+- Marker-delimited `### EDIT: <path>` fenced replacements avoid JSON code-escaping failures.
+- Normalizes relative/compiler-reported paths under the project root; fabricated reviewer IDs fall back to the latest conversation review.
+- Server-enforced three-successful-fix cap blocks a fourth attempt and returns the latest summary/first three issues for the user.
 
-- **Auto-expand cards that need attention** — `failed` runs and reviewers with `status=issues`/`error` default to expanded so the user sees the problem immediately. Other cards stay collapsed (default).
-- **Step row icons** — OpenHands action names (`file_create`, `file_edit`, `terminal`, `glob`, `finish`, etc.), Reviewer phases (`detect`, `build`, `test`, `lint`, `read_files`, `analyze`), Architect phases (`planning`, `manifest`, `criterion`, `risk`), Fixer phases (`writing`, `calling`), Indexer phases, QA phases — all get small leading emoji so the timeline reads as a build log instead of a wall of words.
-- **QA answer rendered inside the run card** — for `qa` role cards, `env.answer` renders as styled markdown (full code blocks + file:line citations) inside the expanded card body, with a "📂 examined: ..." footer listing inspected files and a "⚡ Flagged as change request" pill when the QA detected one.
-- **Plan panel survives long runs** — live event stream is a 200-event sliding window, so on long multi-cycle builds the early `tool_end plan_project` event used to roll off and the Architecture Plan panel would disappear. Fixed by passing `savedEvts={msg.metadata?.saved_events}` to `ToolStatus`; the panel now reads from the merged pool, falling back to the persistent message metadata when the live window has aged out.
-- **Brain → compass icon swap** — `🧠 Planning architecture` is now `📐 Architect designing plan` everywhere (live pill, run card, PlanPanel header). The `🧠` was carryover from the v1 prose `plan_project`; the `📐` ruler reads as architect/blueprint.
+### Architect
 
-#### Workflow gate — deterministic over persuasion
+- `plan_project` returns structured project/language/build-system metadata, build/test/lint commands, `{path,purpose,estimated_loc}` manifest, required tests, dependencies, risks and success criteria.
+- Invalid/missing fields get one parse-error-guided retry, then an explicit failure.
+- Successful plans feed Builder directly, including commands, criteria, dependencies and risks.
+- Plans render file trees, build-system-specific dependency snippets, criteria checklists and test tables. The restored Architecture Plan panel supports copy and expand/collapse through `detail.plan` events.
 
-A four-state gate in `tools.py:exec_tool` enforces the v2 workflow without trusting the model's prompt compliance. Fires only for v2 personas (detected via `model_config.name` containing `"v2"`); v1 personas pass through unchanged.
+### Project Q&A and uploads
 
-| State | Trigger | Allowed | Blocked |
-|---|---|---|---|
-| **PENDING REVIEW** | Last run is `succeeded`/`partial`/`stuck` builder OR `succeeded`/`failed` fixer with no reviewer after | `run_review` only | everything else (incl. read_file, write_file, generate_code) |
-| **PENDING FIX** | Last reviewer has `status=issues` or `error` | `run_fixer` (or `run_review` to re-check) | everything else |
-| **Q&A TERMINAL** | Last `qa` run succeeded, `looks_like_change_request=False` | `ask_project` (for follow-up questions) | everything else — model must respond with text |
-| **CYCLE LIMIT** | ≥3 succeeded `fixer` runs on this conv | nothing for `run_fixer` | `run_fixer` itself; instructs model to summarize and ask user |
+- `ask_project` combines tree inspection, keyword grep and source reads into grounded file:line answers using the chat/persona model.
+- Fuzzy filename matching handles spaced names and reads targeted files up to 30KB; change-like questions are flagged for coding.
+- Invalid model-supplied project paths fall back to the latest Builder path.
+- Upload indexing detects build systems and indexes up to 100 source files into Chroma `code_memory`, excluding dependencies/build/cache folders; later QA/build calls can retrieve them.
+- Raw multipart `/upload-chunk` replaces base64 shell chunks: 1MB instead of 100KB, avoiding Linux argument limits and false command-denylist matches, with roughly 10× upload throughput.
 
-Each gate state's tool result tells the model exactly what to call next, with the relevant `run_id` / `project_dir` / fix-scope info embedded so it doesn't have to guess.
+### Builder profiles
 
-#### Other v2 hardening
+| Profile | Behavior |
+|---|---|
+| `scaffold` | New project: create all files and initialize Git. |
+| `continue` | Partial/stuck run: write missing manifest files without rewriting existing work. |
+| `feature` | Successful existing project: make minimal requested edits. |
+| `bugfix` | Internal Fixer path, outside OpenHands. |
 
-- **QA short-circuit** — when `ask_project` succeeds with a non-change-request answer, the chat agent bypasses the next LLM round entirely and streams the QA envelope's `answer` field verbatim as the assistant message. Avoids the model paraphrasing the grounded answer and losing code blocks. The QA card and the chat-side message now show identical content.
-- **Stop button cancels OpenHands** — frontend abort propagates through chat stream cancellation → `POST /cancel/{run_id}` to OpenHands worker → `_RunCancelled` raised in the event callback → `conversation.pause()` + `close()` to terminate the SDK + child bash session. Worker registers active runs in a thread-safe `_ACTIVE_RUNS` dict keyed by `run_id`. Idempotent — calling cancel on a finished run returns `{"status": "not_found"}` rather than 404.
-- **SSE → /run fallback no longer resurrects dead runs** — when the SSE stream from OpenHands drops mid-run, the dispatch used to fall back to the non-streaming `/run` endpoint, which spawned a *second* concurrent run on the same task. Fixed: fallback only fires for connect-time failures (no first event received). Mid-run drops signal cancel to the worker instead.
-- **Active project injection v2-aware** — `chat.py`'s `ACTIVE PROJECT` system message used to say "use read_file → write_file/generate_code" (v1 antipattern). For v2 personas it now says "questions → `ask_project`, change requests → `generate_code(project_id=...)`, bug reports → `run_review` first, do NOT auto-package."
-- **Loop-tool exemption** — `run_review` / `run_fixer` / `ask_project` are designed to be called multiple times back-to-back with identical args. Chat-loop's near-duplicate detector now treats them as `_LOOP_TOOLS` and exempts them from both exact and near-duplicate checks. Workflow correctness is enforced by the gate, not the dedupe logic.
-- **MAX_ROUNDS fallback message** — when the chat agent's round budget runs out without producing final user-facing text, a synthesized markdown summary is streamed: builder runs created, last reviewer status, any flagged issues with file:line refs, and a "ran out of budget" line. Replaces the previous blank-message ghost-out.
-- **Model routing verified** — Architect uses `PLANNING_MODEL`, Builder/Fixer use `CODER_MODEL`, Reviewer uses `PLANNING_MODEL`, ProjectQA uses chat/persona model. Each falls back through `PLANNING_MODEL → DEFAULT_MODEL → CODER_MODEL` if its primary is empty.
+- Profile selection uses the latest succeeded/partial/stuck Builder envelope, ignoring failed/cancelled/running entries and stale project rows.
+- Feature prompts include up to 60 tree paths and 1–3 task-relevant files.
+- Cards distinguish scaffold/continue/feature runs.
 
-#### Verification (10/10 passing)
+### Interface
 
-| # | Test | Result |
-|---|---|---|
-| 1a | Java pong fresh build | ✅ mvn compile + test exit 0 |
-| 1b | Python Flask API fresh build | ✅ 3.1m, 4/4 pytest pass, no fixer cycle |
-| 1c | Rust CLI fresh build | ✅ cargo build + test exit 0, fixer-loop-once-then-clean |
-| 2 | Disconnect resilience | ✅ RunCard rebuilds via `/api/runs/{id}` on reload |
-| 3 | Hostile context growth | ✅ "the Java pong from earlier?" → correctly says "not in this code" |
-| 4 | Failed-tests recovery | ✅ reviewer→fixer→reviewer cycles converge to clean |
-| 5 | VRAM headroom | ✅ 41.94 GB / 48 GB during build (devstral + qwen3-coder both hot) |
-| 6 | Token tracking | ✅ `token_usage` table populates per run |
-| 7 | Project Q&A with citations | ✅ "walk me through Ball.java" with file:line refs |
-| 8 | Cross-language port (Python → Go) | ✅ 5.4m, 4/4 Go tests pass on first try, no fixer cycle |
-| 9 | Settings fallback (all empty) | ✅ persona's pinned model used everywhere |
-| 10 | Settings specialization | ✅ Architect/Reviewer → planning, Builder/Fixer → coder, QA → chat |
+- Role/profile icons and labels distinguish Designing, Building, Resuming, Adding feature, Bug fix, Reviewing, Fixing, Investigating and Indexing; action/phase rows also carry icons.
+- Failed runs and issue/error reviews auto-expand; other cards start collapsed.
+- QA cards render Markdown/code/citations, examined-file lists and change-request flags.
+- Architecture plans survive the 200-event live window by using saved message events. Architect labels replace the old brain/planning wording with the drafting icon.
 
-### Coder Bot v2 — Independent Critic Pass
-- **Independent critic on `generate_code` output** — When `CRITIC_ENABLED` is on, the post-build flow runs a second reviewer pass using a different model (`CRITIC_MODEL` falling back to `PLANNING_MODEL` / `DEFAULT_MODEL`) so it can't rationalize its own mistakes. Catches runtime bugs that pass syntax / compile checks but break behavior. Live "🔍 Reviewing code with…" pill while it runs.
+### Workflow gates and reliability
 
-### Quick Search Overhaul
-- **New shared module `backend/quick_search.py`** — Both the chat-injection path (`agents/chat.py`) and the standalone `/api/quick-search` endpoint (`main.py`) now flow through one helper, so quality fixes apply to both. Replaced ~150 lines of duplicated SearXNG-call boilerplate.
-- **Skip-gate: only skip when search is unambiguously useless** — Empty queries, pure greetings (`hi`, `thanks`, `ok`), pure arithmetic with no letters (`2+2`, `15 * 200 = ?`), and "rewrite/translate/summarize **this/that/the following/it**" (operate-on-attached-text only) are skipped. **Programming questions, math questions involving research, and queries with code blocks now all go through to search** — the previous gate's `fix|refactor|format` regex would have silently bailed on "fix this Rust borrow error" or "what's the largest prime under 10^18", forcing the model to hallucinate. The asymmetry is on purpose: a useless search costs ~2s, a wrong skip costs a wrong answer.
-- **Conversation-aware query rewriting** — Before searching, the latest user message is rewritten by the `WORKSPACE_MODEL` (small/fast — `qwen3.5:4b` by default) using the last 2–3 turns. "what about for v18?" after a React 19 question becomes "React v18", not the literal pronoun-soup. Output is sanitized (strips `<think>` blocks, rejects suspicious prefixes / URLs), 8s timeout, falls back to the raw message on any failure.
-- **Result filtering, ranking, and dedup** — YouTube / image results dropped from the *model* context (they pollute fact-check answers) but kept for the frontend carousel. Remaining web results re-ranked via `_rank_urls()` (Wikipedia / arxiv / .gov / .edu / Reuters / BBC bonuses, badpaths penalties), capped to 2 per registrable domain so SEO farms can't crowd out diverse sources, top 6 retained.
-- **Selective page fetch** — For the top 3 ranked results, if the snippet is < 120 chars or looks like a navigation menu, the page is fetched in parallel via `_fetch_page` (4-second total budget across all three, 1500 chars per page) and the cleaned excerpt is injected instead of the snippet. Catches the common case where SearXNG returns just the page title and the actual answer lives on the page.
-- **Date injection** — Search-context block now opens with `=== WEB SEARCH (today: YYYY-MM-DD) ===` so questions like "is X still CEO?" / "latest version of Y" / "did Z happen yet?" can answer with current grounding instead of "as of my training data."
-- **Rewritten injection prompt — no more forced confidence** — The old prompt told the model `"Do NOT say you lack real-time data... summarize as if you know it"`, which actively encouraged confabulation when results didn't contain the answer. Replaced with `"If the results don't contain the answer, say so plainly — don't guess. Cite the URLs you actually used."`
-- **Explicit `safesearch=0`** — Both call sites now pass `safesearch="0"` explicitly via a new optional param on `_search_searxng`, so behavior doesn't depend on the SearXNG instance default. Filtering stays at 0 by user direction.
-- **10-minute TTL cache** — Module-level `_CACHE` keyed by rewritten query saves SearXNG round-trips and page fetches when the user asks several follow-ups about the same topic.
-- **SearXNG fallback already wired** — The shared helper now uses `_search_searxng` from `research.py`, which falls back to a Google-results scrape when SearXNG is down or returns nothing. Quick search no longer goes blank if the SearXNG container hiccups.
+- **v2-only gates** — detected through persona names containing `v2`; v1 behavior remains unchanged. Unreviewed succeeded/partial/stuck builds or succeeded/failed fixes allow only Review; reviews with issues/errors allow Fix or re-review; completed non-change QA allows follow-up QA; three successful fixes block further Fixer calls. Responses include IDs, paths, scope and next actions.
+- **QA delivery** — successful non-change answers stream verbatim without another paraphrasing model round.
+- **Stop** — propagates to the worker, pauses/closes the SDK and child shell, and handles repeated/finished cancellation safely.
+- **SSE fallback** — non-streaming retry occurs only before the first event; mid-run disconnects cancel rather than duplicate execution.
+- **Active-project routing** — questions → QA, changes → Builder, bug reports → Review; no automatic packaging.
+- **Repeated tools** — Review/Fix/QA bypass duplicate-call detection because workflow gates govern their valid repetition.
+- **Round exhaustion** — emits a final summary of builds, review status, file:line issues and exhausted budget instead of a blank reply.
+- **Models** — role routing follows the table; empty primaries use the configured planning/default/coder fallback chain.
 
-### Inline Search Images
-- **Hero-image embedding in chat responses** — When Quick Search runs and a result has a thumbnail / OG image, the helper offers the top 2–3 image URLs to the model with explicit permission to embed `![alt](url)` near the top of the answer "for a thing, place, person, product, or news event." Explicitly told to skip for code / math / conceptual / numeric answers. The frontend's existing `inlineParse` (`frontend/dist/index.html:2796`) already rendered `![]()` markdown as `<img>` with max-width 100% / max-height 380px / rounded corners / `onError` hide — no chat-renderer changes were needed.
-- **New `/api/img-proxy?u=...` endpoint** — Every image URL the model embeds is wrapped in our backend proxy. The proxy fetches the remote image server-side with a domain-matched `Referer` (bypasses most hotlink blocks on news sites), caps at 5MB, returns with a 24-hour cache header. Three wins at once: (1) **privacy** — the user's IP, referrer, and cookies never reach NYT / Reuters / etc.; (2) **hotlink protection** — domain-matched Referer satisfies most blocks; (3) **mixed-content** — http images on https pages now load without browser warnings.
-- **Privacy attrs on the inline image render** — `referrerPolicy="no-referrer"` (belt-and-suspenders for the rare case the model embeds a non-proxied URL) and `loading="lazy"` (off-screen images don't block render) added to the `<img>` element at `frontend/dist/index.html:2796`.
-- **The Quick Search Results carousel above each response is unchanged** — that UI is for "here are sources / related links," and the new inline image is for "this is what the thing looks like." Two distinct jobs, both supported.
+### Verification
 
-### Coding Agent Reliability
-- **`num_ctx` is now authoritative for OpenHands** — Ollama caches model options on first load and silently ignores subsequent `num_ctx` requests, so even after the user changed their setting, OpenHands kept running at the modfile default. New `_ensure_loaded()` in `openhands_worker.py` checks `/api/ps` for the current loaded context, evicts (best-effort) if it doesn't match, and preloads the model with an empty prompt + the user's `num_ctx` so the cached options bind correctly. Logged as `[OH-Worker] {model} loaded at num_ctx=X, evicting to reload at Y`.
-- **`generate_code` mandate, not suggestion** — `personas.py` rewritten: the file-count gate is no longer advisory wording. Plan with **3 or more source files**, OR the task is a complete app / API / CLI / web app / game / library, → the very next tool call MUST be `generate_code`. Repeated `write_file` calls when `generate_code` is available is now explicitly framed as a BUG. Bookkeeping language ("the user is paying for the autonomous agent — use it") removes ambiguity for models that hedged.
-- **Stream-disconnect resilience** — The assistant-message stub is created at stream start (Phase 0.6 in `chat.py`) and snapshotted at every agent-round boundary, tagged with any `run_ids` created during the stream. If the client disconnects mid-stream, the most recent snapshot is what the user sees on reload — no lost work, no orphaned runs. The `message_id` is sent down to the frontend so completion `PATCH`es the existing row instead of `POST`ing a duplicate.
-- **`research()` tool surface expanded** — Coder personas now reach for `research()` before guessing at unfamiliar APIs (`personas.py` rule 6 made explicit and reordered up the list).
+- Java Pong passed Maven compile/tests; Python Flask passed 4/4 tests in 3.1 minutes without repair; Rust CLI passed build/tests after one repair.
+- Verified reload/disconnect recovery, rejection of unrelated historical project context, failed-test repair convergence, per-run token records and cited `Ball.java` Q&A.
+- Python → Go port passed 4/4 tests first try in 5.4 minutes without repair; measured 41.94/48GB VRAM with Devstral and Qwen3-Coder loaded.
+- Verified empty-setting persona fallback and specialized planning/coding/chat role routing.
 
-### Front-End Polish
-- **Pill rendering improvements** — Real-time status pills for tool execution show clearer state transitions, fewer flicker-then-vanish glitches, and a more consistent icon vocabulary across `generate_code` / `run_review` / `run_fixer` / quick search.
-- **Bash code-block rendering fix** — Triple-backtick `bash` fences no longer break out of the code block on shell metacharacters (specifically `$`, backticks inside `$()`, and unescaped `&` in heredocs). Snippets with realistic shell pipelines now render cleanly instead of bleeding into surrounding prose.
+### Independent critic
 
-### Bug Fixes
-- Fixed Quick Search skip-gate over-aggressively bailing on programming and math questions — the original `fix|refactor|format` intent regex and the "code block present → skip" rule have been removed. Programming questions, math questions involving research, and queries with code blocks all go through to search now.
-- Fixed missing `safesearch` param on `_search_searxng` — added an optional `safesearch` argument so callers can preserve explicit `safesearch=0` instead of relying on the SearXNG instance default.
-- Fixed Reviewer / Fixer scope-validation edge case where issues with no `suggested_fix_scope` field caused the Fixer to error out instead of skipping the issue cleanly.
-- Fixed Bash render error where `$VAR` and command-substitution `$(cmd)` inside a `bash` code fence prematurely terminated rendering.
-- Fixed `num_ctx` from user settings being silently ignored by OpenHands runs after the first model load — now evict-and-reload guarantees the runtime context matches the requested value.
+- Optional `CRITIC_ENABLED` second review uses `CRITIC_MODEL` (fallback: planning/default), checking runtime behavior beyond syntax/compilation with a live review indicator.
+
+## Quick Search
+
+- Shared `quick_search.py` serves chat injection and `/api/quick-search`, removing duplicated SearXNG handling.
+- Skip only empty/greeting/pure-arithmetic or supplied-text rewrite/translate/summarize requests. Programming, research-oriented math and code-block questions remain searchable.
+- Rewrite from the last 2–3 turns using `WORKSPACE_MODEL` (default `qwen3.5:4b`); sanitize thinking/URLs/prefixes, bound to 8 seconds and fall back to raw input.
+- Keep video/image results in the carousel but exclude them from model context. Rank web results with trusted-domain bonuses/path penalties, at most two per domain and six overall.
+- Fetch the top three short/navigation-like snippets in parallel: four-second total budget, 1,500-character excerpts.
+- Include today's date; require citations to used URLs and explicit uncertainty when results lack an answer.
+- Explicit `safesearch=0`, ten-minute rewritten-query cache and Google-result fallback when SearXNG fails or returns nothing.
+
+## Inline Search Images
+
+- Offer 2–3 thumbnail/OG images for relevant thing/place/person/product/news answers; exclude code/math/conceptual/numeric answers. Existing inline rendering keeps bounded dimensions, rounded corners and broken-image hiding; source carousel remains separate.
+- `/api/img-proxy?u=...` fetches server-side with domain-matched Referer, 5MB cap and 24-hour caching, hiding browser IP/referrer/cookies and avoiding hotlink/mixed-content failures.
+- Inline images use `no-referrer` and lazy loading, including non-proxied links.
+
+## Coding Reliability & UI
+
+- **Context** — OpenHands checks loaded `num_ctx`, evicts mismatches and preloads the requested context so cached Ollama options cannot override Settings.
+- **Builder routing** — plans with ≥3 source files or complete apps/APIs/CLIs/games/libraries require `generate_code`; unfamiliar APIs prompt research first.
+- **Stream persistence** — create the assistant row at stream start, snapshot at round boundaries with run IDs, and PATCH that row on completion to avoid lost or duplicate replies after disconnects.
+- **Status pills** — clearer transitions/icons and fewer flicker/disappearance glitches across coding/review/fix/search.
+- **Bash rendering** — shell variables, substitutions, backticks, ampersands and heredocs no longer break fences.
+- **Fixer validation** — issues without `suggested_fix_scope` are skipped instead of crashing.
 
 </details>
 
@@ -1205,30 +1082,31 @@ Each gate state's tool result tells the model exactly what to call next, with th
 <details>
 <summary>Alpha v16.2 — April 22, 2026</summary>
 
-### Rich Rendering Polish
-- **GitHub-style callouts** — `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]` render as coloured admonition boxes (blue / green / warm / orange / red) with icon and label header. Subsequent `> ` lines are collected as body. Models pick these up from the updated backend RENDERING system message and use them for caveats, tips, and warnings without prompting.
-- **Keyboard key caps** — `<kbd>Ctrl</kbd>+<kbd>K</kbd>` renders as raised key caps with gradient bg, thick bottom border, and monospace face. Makes shortcut-heavy how-to answers legible at a glance.
-- **Inline color swatches** — Hex codes (`#rrggbb`, `#rrggbbaa`), `rgb(…)`, `rgba(…)`, `hsl(…)`, `hsla(…)` in chat text auto-render with a small clickable colour chip next to the code. No special syntax — plain mentions get upgraded. Great for design/CSS chats.
-- **Inline charts** — New ` ```chart ` code fence parses JSON via Chart.js. Supported types: `bar`, `line`, `pie`, `doughnut`, `scatter`, `radar`, `polarArea`. Simple form: `{"type":"bar","labels":[...],"data":[...]}`; multi-series via `"datasets":[...]`. Dataset colors auto-pick from the active theme palette (`acc`/`ok`/`warm`/`err`/derived tints). Grid, ticks, title, and tooltip all theme-synced. Source toggle + copy button matching `MermaidBlock`. Pairs Chart.js 4.4.4 UMD (~80 KB) loaded from jsDelivr.
-- **Table renderer rewrite** — Pipe tables now group contiguous rows into one real `<table>` with proper `<thead>` styling (uppercase, accent-colored, surface background) and `<tbody>` row separators. The divider row (`|:---:|---:|---|`) is parsed for `left` / `center` / `right` alignment per column and applied to both header and body cells. Cells now wrap (`wordBreak: break-word`) instead of the previous `whiteSpace: nowrap` + ellipsis that silently truncated real model output. Horizontal scroll container for tables wider than the bubble.
-- **Shared `_consumed` set across line rendering** — Refactored the inner `seg.split("\n").map(...)` in `md()` to pull `_lines` and a `_consumed` Set out into segment scope. Callout and table handlers use this to mark multi-line blocks so subsequent lines skip rendering, cleanly replacing the old per-line attribution lookahead pattern.
-- **`ChartBlock` component** — Mirrors `MermaidBlock`: canvas element inside a bordered container with header pill (`◈ chart`), source toggle, copy button, and red error banner plus raw JSON on parse/render failure. Chart instance destroyed + rebuilt on code or theme change (reuses `mermaidEpoch` as the theme-change signal). Circular chart types get per-slice palette colors; axis charts get translucent fills.
-- **Backend RENDERING hint extended** — `chat.py` system message now documents callouts, `<kbd>`, colors, and chart fences alongside the existing mermaid/math guidance so models reach for them unprompted.
-- **No-more-matplotlib steer** — RENDERING hint's "do not generate with tools" rule now explicitly forbids using `execute_code` / `generate_code` / `write_file` + matplotlib / seaborn / plotly / `pandas.plot` to save a chart image when a ```chart fence would render the same data. Code tools are reserved for *computing* values; visualisation of values already in hand goes through the fence.
-- **Deep Researcher persona — Presenting Findings section** — The seed preset (`mc-preset-deepresearch`) gained a dedicated "Presenting Findings — Use Rich Rendering" section that routes quantitative data to ```chart fences, source-conflict caveats to `[!NOTE]`, material-conclusion changes to `[!IMPORTANT]`, deprecations / security issues to `[!WARNING]` / `[!CAUTION]`, actionable advice to `[!TIP]`, multi-attribute comparisons to aligned tables, and keys/commands to `<kbd>`/inline code. Explicit "chart fence > Python matplotlib" rule for research data.
-- **Preset seeder now upserts** — `seed_deep_researcher` previously only inserted on first boot, so existing installs never saw prompt updates. It now UPDATEs the `system_prompt` + `tool_ids` + `updated_at` columns when the preset row already exists, preserving the user's model choice / KB assignments / parameters. Version-bump prompt and tool-list updates land automatically on next server start.
-- **RENDERING hint restructured — compute-then-chart pattern** — The earlier "do NOT call execute_code to produce a chart" clause was over-broad and risked suppressing `execute_code` for legitimate math. The hint is now split into three explicit sub-sections: **Visualisation** (fence-only, prohibits `write_file`/matplotlib `savefig` but never names `execute_code` in a prohibition), **Computation** (explicitly endorses `execute_code` for arithmetic / aggregation / CAGR / variance / weighted-average work — "the prohibition above is purely about saving image files, not about running code"), and a dedicated **compute-then-chart pattern** section showing the two-step flow: run `execute_code` to compute, print JSON to stdout, then emit a ```chart fence with the computed values. LLM mental math is unreliable past trivial cases; the sandbox is trusted.
-- **Deep Researcher gains `execute_code`** — `tool_ids` updated from `["deep_research"]` to `["deep_research", "execute_code"]` on both fresh seeds and existing-install upserts. The persona's prompt added a new `## Computation` section mandating `execute_code` for CAGR/CMGR, weighted averages, variance, percentage shares, date/unit conversion, and any aggregation on research results — with an explicit "a chart with wrong numbers is worse than no chart" rule. Existing `## Skip the Tool When` section replaced with a clearer `## Tool Selection — Which One, When` table routing pure math to `execute_code`, substantive questions to `deep_research`, and trivial lookups to neither.
-- **Research-loop guardrails** — Observed in practice: on a test prompt about 2025 EV sales, the model chained 6 `deep_research` calls across 20+ minutes looking for "exact full-year numbers" that weren't yet audited/published, never reaching the `execute_code` + chart step. `DEEP_RESEARCHER_PROMPT` gained an `## Avoiding Research Loops — CRITICAL` section enforcing (1) a hard **2-call same-topic cap** — once two calls on the same underlying topic both return approximate/similar data, synthesis happens, no third call — and (2) a **recency realism** rule treating "projected" / "estimated" / "preliminary" / "YTD" figures as the answer rather than an invitation to re-search. Uncertainty flows into `> [!NOTE]` / `> [!CAUTION]` callouts rather than another tool round. Prevents runaway context growth and minute-per-round wall-clock costs on questions whose "exact" answer doesn't publicly exist yet.
+## Rich Rendering
 
-### Effort Level — Iterative Self-Review
-- **Scalable response quality** — After the initial answer is finished, the model re-examines its own response and produces a refined version. Runs 0–3 additional review passes. Each pass can call tools (`research`, `fetch_url`, etc.) to verify claims before refining.
-- **4 creative levels** — 💭 **Blurt** (raw, no review) / 🧠 **Ponder** (1 pass) / 🔥 **Forge** (2 passes) / 🌌 **Galaxy Brain** (3 passes).
-- **Global default + per-chat override** — Settings has a "Default Effort Level" chip row. Each chat gets a compact emoji chip next to the input that lets the user override for just that conversation (new chats inherit the global default).
-- **Replace-with-final UX** — During refinement, the streamed answer is wiped and re-streamed each round; only the polished final version stays in the bubble. Live pill shows "✨ Refining answer (1/3)..." during each pass. Finished messages carry an `✨ Refined N×` badge next to the timestamp.
-- **Mechanism** — New `effort_rounds` field on `ChatRequest`. `chat_stream_generate` re-enters the main agent loop after the "no more tool calls" exit, appending a critique prompt that asks the model to check for factual errors, logical gaps, missing context, or unclear phrasing. The existing `MAX_AGENT_ROUNDS` cap still governs total rounds so review can't runaway.
-- **New SSE event** — `refinement_start` `{round, total}` signals each review pass to the frontend. The `done` payload now carries `refinements: N` which is persisted to the message metadata so the badge survives reload.
-- **Storage** — `localStorage["hc-effort-level"]` for the global default; `localStorage["hc-effort-per-chat"] = {convId: level}` for per-chat overrides. No DB migration needed.
+- **Callouts** — GitHub-style NOTE/TIP/IMPORTANT/WARNING/CAUTION blocks collect multiline quoted content into colored icon/label boxes; model guidance encourages their use.
+- **Keyboard caps** — `<kbd>` renders raised monospace shortcut keys.
+- **Color swatches** — clickable chips for hex (including alpha), RGB(A) and HSL(A) mentions without special syntax.
+- **Charts** — `chart` JSON fences support bar, line, pie, doughnut, scatter, radar and polarArea; simple labels/data or multiple datasets, theme palettes/axes/tooltips, source/copy controls. Uses Chart.js 4.4.4 from jsDelivr.
+- **Tables** — real grouped header/body rows, per-column alignment, wrapping and horizontal scrolling replace clipped cells.
+- **Multiline rendering** — shared consumed-line tracking prevents duplicate callout/table rows.
+- **ChartBlock** — bordered chart header, source/copy, explicit parse/render errors with raw JSON, rebuild on data/theme changes, per-slice circular colors and translucent axis-chart fills.
+- **Model guidance** — adds callouts, keys, colors and charts alongside Mermaid/math; chart fences replace unnecessary saved matplotlib/seaborn/Plotly/pandas images when values are already known.
+- **Deep Researcher** — uses charts for quantitative results, appropriate caveat/advice callouts, aligned comparisons and key/code formatting.
+- **Preset updates** — existing Deep Researcher seeds receive prompt/tool updates on startup while retaining model, KB and parameter choices.
+- **Compute then chart** — clarified that image-saving restrictions do not forbid computation: execute arithmetic/aggregations, print JSON, then render chart fences.
+- **Research computation** — adds `execute_code` to new/existing seeds for CAGR/CMGR, weighted averages, variance, shares, conversions and aggregations; routes pure math to code, substantive questions to research and trivial lookups to neither.
+- **Research-loop limits** — prompt guidance caps repeated same-topic research at two similar/approximate results; projected/preliminary/YTD figures are synthesized with uncertainty callouts instead of endless searches for unavailable final numbers.
+
+## Effort Levels
+
+- **Self-review** — 0–3 additional answer passes may use tools to verify claims.
+- **Levels** — Blurt (0), Ponder (1), Forge (2), Galaxy Brain (3).
+- **Controls** — global Settings default and per-chat composer override inherited by new chats.
+- **Display** — each refinement replaces/re-streams the answer, shows round progress and leaves a persistent Refined N× badge.
+- **Bounds** — `effort_rounds` re-enters the agent loop with a critique prompt; total `MAX_AGENT_ROUNDS` still applies.
+- **Events** — `refinement_start {round,total}` and `done.refinements` persist review count in message metadata.
+- **Storage** — `hc-effort-level` and `hc-effort-per-chat` localStorage keys; no database migration.
 
 </details>
 
@@ -1237,49 +1115,48 @@ Each gate state's tool result tells the model exactly what to call next, with th
 <details>
 <summary>Alpha v16.1.1 — April 22, 2026</summary>
 
-### Rich Rendering
-- **Mermaid.js diagrams** — ` ```mermaid ` code fences render inline as live SVG: flowcharts, sequence, class, state, ER, gantt, mindmap, pie. Theme-synced (34 mapped variables) and re-render when the user switches themes mid-conversation.
-- **KaTeX math** — Inline `$...$`, display `$$...$$`, and LaTeX `\(...\)` / `\[...\]` delimiters all render as typeset math. Code blocks are ignored so `$` in source stays literal.
-- **`<MermaidBlock>` component** — Header with `◈ mermaid` label, source toggle, and copy button matching existing code-block styling. Broken diagrams show a red error banner plus the raw source instead of breaking the message.
-- **`<MDWrap>` wrapper** — Wraps render surfaces including chat, council cards, HF README, and the changelog view, then invokes KaTeX auto-render after mount. Streaming messages skip wrapping so partial tokens don't flicker.
-- **Multi-line display math** — `md()` pre-splits non-code segments by `$$...$$` before line-splitting so equations spanning multiple lines render as one KaTeX node instead of fragmenting across `<div>`s.
-- **Backend rendering hint** — `chat.py` injects a system message telling the model diagrams/math render inline (not via `write_file` or `generate_code`) and explicitly warns against embedding `$...$` LaTeX inside Mermaid node labels.
-- **Display-math escape inside inline code** — `md()` now masks `$$` and `$` inside single-line backtick inline code before the display-math split, so documentation examples that quote a math delimiter render as inline code instead of being yanked out as a math block.
-- **GFM task lists** — `- [ ]` / `- [x]` render as real checkboxes with strikethrough on completed items (read-only; reflects the markdown state).
-- **Collapsible `<details>`/`<summary>`** — Raw HTML `<details>` blocks render as interactive collapsibles with a chevron. New top-level `Collapsible` component.
-- **Diff code blocks** — fences tagged `diff` color `+` / `-` / hunk / metadata lines using the active theme's `ok`/`err`/`acc`/`mut` channels.
-- **Syntax highlighting** — Prism.js autoloader loaded via CDN; every code fence gets `language-X` highlighting via a new `CodeBlock` component that runs `Prism.highlightElement` after mount. Copy button and language chip preserved.
-- **Footnotes** — `[^label]` / `[^label]: …` pairs render as superscript numeric links with smooth-scroll to an auto-appended footnote block. Unique per-render IDs prevent collisions across messages.
+## Rich Rendering
 
-### Message Actions
-- **Timestamps fixed** — `created_at` now set at every in-session construction site (send, regenerate, edit, council) and preserved across streaming updates by spreading the prior message object. Fixes HH:MM labels that never appeared until a page reload. Reload path also preserves `id` + `created_at` from the backend.
-- **Regenerate with…** — The plain regenerate button is now a split button; the ▾ chevron opens a popover to pick a one-shot model / temperature / persona override for this single retry. `sendMessages` and `regenerate` accept an `overrides` parameter.
-- **Delete message with undo** — New trash button per message; removes immediately, shows a 5-second undo snackbar via a new fixed-position `ToastHost`. Backend: `DELETE /api/conversations/{conv_id}/messages/{msg_id}` + `db.delete_message()`. FTS trigger auto-syncs the search index.
-- **Collapsible python output** — Each code-output block header is click-to-toggle; ▾ rotates to show collapsed state. In-memory per `{msgIndex, outputIndex}`; default expanded.
+- **Mermaid** — inline SVG flowcharts, sequence/class/state/ER/Gantt/mindmap/pie diagrams with 34 theme mappings and live theme changes.
+- **KaTeX** — inline/display math using dollar or LaTeX delimiters; code stays literal. Multiline display math remains intact, and inline-code delimiters are masked before parsing.
+- **Diagram controls** — Mermaid header, source/copy buttons and readable errors with raw source.
+- **MDWrap** — applies math rendering to chat, councils, Hugging Face README and changelog after mount; skips streaming to avoid partial-token flicker.
+- **Model guidance** — diagrams/math render inline without file/code-generation tools; no LaTeX dollar expressions inside Mermaid labels.
+- **Task lists** — read-only unchecked/checked boxes with completed-item strikethrough.
+- **Collapsibles** — interactive HTML `<details>`/`<summary>` with chevrons.
+- **Diff fences** — theme colors for added/removed/hunk/metadata lines.
+- **Syntax highlighting** — Prism CDN autoloader and CodeBlock, retaining language labels/copy.
+- **Footnotes** — numbered superscripts, smooth scrolling, appended definitions and unique per-render IDs.
 
-### Themes
-- **Contrast rebalance** — Seven harshest themes rebalanced to meet readable minimums (text ≥7:1, dim ≥4.5:1, mut ≥3:1) without losing identity: Terminal (tamed neon body text, kept Matrix green accent), Cyberpunk (softened pure-magenta), Solarized Dark (lifted the famously-dim gray body text), Gruvbox (raised the dark-teal `f4`), Dracula (`mut` readable), Rosé Pine (fixed inverted dim/text hierarchy), Midnight (`mut` lifted). Nord, Catppuccin, Tokyo Night, One Light, Ayu Dark, Material Ocean, Solarized Light untouched.
+## Message Actions
 
-### Persistence & Streaming Robustness
-- **User message save moved server-side** — Frontend no longer POSTs the user message separately. `chat_stream_generate` defensively persists the latest user message at stream start if the DB's most-recent user row doesn't match. Eliminates the fire-and-forget race that silently dropped user messages on flaky networks (and the duplicate it caused when both paths fired).
-- **Stable message order** — `get_conversation` now orders by `created_at ASC, id ASC`, so same-second user/assistant pairs (typical on fast greetings) can't flip on reload.
-- **Stream-clobber fix** — New `streamingCidRef` tracks the conversation being streamed; `loadConversation` skips the messages-array overwrite when loading the streaming conv. Previously, switching away mid-stream and back could fetch a backend snapshot with only the user message; the in-progress `m[m.length-1]` stream update then overwrote the user message with assistant content, making it disappear.
-- **Pills race fix** — New `streamSaveEvtsRef` accumulates events independently of the UI `evts` state, so `setEvts([])` on chat switch no longer wipes the metadata buffer that `saved_events` reads from at stream finalization. Pills persist on the completed message.
+- **Timestamps** — set on send/regenerate/edit/council creation and retained with message IDs through streaming/reload.
+- **Regenerate with…** — one-shot model, temperature or persona overrides.
+- **Delete/Undo** — immediate removal with five-second snackbar undo; message-delete API keeps FTS synchronized.
+- **Python output** — collapsible per-output cells, initially expanded, with in-memory state.
 
-### Cleanup
-- **Sentinel cleanup** — The `$$` backtick-masking in `md()` previously used null-byte sentinels, which made grep treat the frontend file as binary. Swapped for Unicode PUA characters (U+E000 / U+E001). Footnote sentinels use U+E010.
+## Themes
 
-### Bug Fixes
-- Fixed operator-precedence bug in `tools.py` execute_code error hinting — `"no such file" in err or "not found" in err and "command" not in err` was bound as `or (... and ...)`, silently skipping the `command` guard on the "no such file" branch. Parens now force the intended grouping.
-- Fixed dead-code `or` fallback in `run_shell` result text — `f"exit code: {exit_code}\n{out}{err}" or "(no output)"` is always truthy because the f-string contains literal text, so the no-output fallback never fired. Replaced with an explicit `if (stdout or stderr)` branch.
-- Fixed `analyze_workspace` crashing on malformed LLM JSON — the topic parser sliced `raw[start:end+1]` without checking `end > start`. If the response had `[` but no `]`, the empty slice raised inside `json.loads`. Added the `end > start` guard so it falls back to `[]` cleanly.
-- Fixed invalid CORS configuration — `allow_origins=["*"]` with `allow_credentials=True` is rejected by browsers per the CORS spec. Switched `allow_credentials` to `False` so preflight requests succeed.
-- Fixed XSS in full-text conversation search — SQLite's `snippet()` wraps matches in `<mark>` tags but does NOT HTML-escape surrounding message content, and the frontend rendered it via `dangerouslySetInnerHTML`. A malicious message could inject script/iframe tags that executed when searched. Snippet is now fully HTML-escaped with only `<mark>`/`</mark>` re-enabled.
-- Fixed `pull_model` silently returning empty on upstream errors — the streaming generator never checked `response.status_code` before iterating, so non-200 responses from Ollama produced no SSE events. Now yields a clear error event and bails out.
-- Fixed unbounded growth of `_indexing_status` dict — every KB file upload left a permanent entry. Terminal `done`/`error` statuses are now evicted on read.
-- Fixed deprecated `asyncio.get_event_loop()` calls in `agents/chat.py` — replaced with `asyncio.get_running_loop()` to silence deprecation warnings in Python 3.10+ and avoid the "no running loop" edge case on future versions.
-- Reduced chat-loop allocations — the per-round `_PARALLEL_SAFE` set and 22-entry `_TOOL_ICONS` dict are now module-level constants instead of being rebuilt every tool-calling round.
-- Minor: avatar upload no longer evaluates `file.filename or ""` three times in one expression.
+- Rebalanced Terminal, Cyberpunk, Solarized Dark, Gruvbox, Dracula, Rosé Pine and Midnight for text ≥7:1, dim ≥4.5:1 and muted ≥3:1 contrast. Preserved theme identities and left Nord, Catppuccin, Tokyo Night, One Light, Ayu Dark, Material Ocean and Solarized Light unchanged.
+
+## Persistence & Streaming
+
+- **User messages** — server-side persistence at stream start replaces racing frontend saves and duplicate writes.
+- **Ordering** — timestamp plus ID ordering keeps same-second messages stable.
+- **Conversation switching** — reloading the active stream cannot overwrite user messages with an incomplete server snapshot.
+- **Activity persistence** — event accumulation survives UI clears on chat switches, retaining completed-message pills.
+
+## Cleanup & Fixes
+
+- Replaced null-byte Markdown sentinels with Unicode private-use characters so source remains searchable; footnotes use separate markers.
+- Fixed code-execution error-hint operator precedence and shell no-output fallback.
+- Malformed workspace-analysis JSON safely falls back to an empty topic list.
+- Fixed wildcard CORS by disabling credential mode so preflights succeed.
+- Escaped full-text search snippets to prevent XSS while retaining match highlights.
+- Model-pull HTTP failures now emit explicit SSE errors.
+- Evict completed/failed indexing-status entries instead of leaking them.
+- Replaced deprecated event-loop lookup with the running-loop API.
+- Hoisted parallel-safe/tool-icon constants out of chat rounds and simplified repeated avatar-filename evaluation.
 
 </details>
 

@@ -57,7 +57,7 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
                 urllib.request.urlopen(url,timeout=1).close();break
             except Exception:time.sleep(.05)
         with sync_playwright() as playwright:
-            browser=playwright.chromium.launch(headless=True,args=['--no-sandbox'])
+            browser=getattr(playwright, os.environ.get('HYPRCHAT_TEST_BROWSER', 'chromium')).launch(headless=True,args=['--no-sandbox'])
             page=browser.new_page(viewport={'width':width,'height':900})
             page.context.tracing.start(screenshots=True,snapshots=True,sources=True)
             page.on('pageerror',lambda e:errors.append(str(e)))
@@ -77,9 +77,9 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             page.get_by_label('Browser interaction timeout (seconds)',exact=True).press('ArrowUp')
             expect(page.get_by_label('Browser interaction timeout (seconds)',exact=True)).to_have_value('16')
             page.get_by_text('Stage context overrides and effective values',exact=True).click()
-            page.get_by_label('acceptance context override',exact=True).fill('196608')
-            page.get_by_label('reviewer output override',exact=True).fill('16384')
-            page.get_by_label('reviewer thinking override',exact=True).select_option('on')
+            page.get_by_label('qa context override',exact=True).fill('196608')
+            page.get_by_label('builder output override',exact=True).fill('16384')
+            page.get_by_label('builder thinking override',exact=True).select_option('on')
             page.get_by_label('Excluded directory names',exact=True).fill('node_modules')
             page.get_by_label('Excluded directory names',exact=True).press('End')
             page.get_by_label('Excluded directory names',exact=True).press_sequentially(', generated')
@@ -88,16 +88,16 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             assert saved[-1]['openhands_num_ctx']==300000
             assert saved[-1]['daedalus_visual_model']=='qwen3.5:4b'
             assert saved[-1]['daedalus_visual_review'] is False
-            assert saved[-1]['daedalus_role_contexts']['acceptance']==196608
-            assert saved[-1]['daedalus_role_outputs']['reviewer']==16384
-            assert saved[-1]['daedalus_role_thinking']['reviewer']=='on'
+            assert saved[-1]['daedalus_role_contexts']['qa']==196608
+            assert saved[-1]['daedalus_role_outputs']['builder']==16384
+            assert saved[-1]['daedalus_role_thinking']['builder']=='on'
             assert saved[-1]['daedalus_compaction']=='off'
             assert saved[-1]['daedalus_browser_step_seconds']==16
             assert saved[-1]['daedalus_exclude_dirs']==['node_modules','generated']
             expect(page.get_by_label('Daedalus coding job').locator('.dj-state')).to_have_text('Building')
-            page.get_by_role('button',name='View details',exact=True).click()
-            page.get_by_role('button',name='Files & logs',exact=True).click()
-            page.get_by_text('Browse project evidence',exact=True).click()
+            page.get_by_role('button',name='Workbench',exact=True).press('Enter')
+            page.get_by_role('tab',name='Files',exact=True).click()
+            page.get_by_text('Browse working files',exact=True).click()
             expect(page.get_by_role('button',name='src/main.py',exact=True)).to_be_visible()
             page.get_by_label('Evidence type',exact=True).select_option('search')
             page.get_by_label('Search project evidence',exact=True).fill('late_function')
@@ -109,14 +109,14 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             page.get_by_role('button',name='Next page',exact=True).click()
             expect(page.get_by_text('return 42',exact=False)).to_be_visible()
             assert inspections[-1]['start']==300100 and inspections[-1]['sha256']=='source-hash'
-            page.get_by_role('button',name='Checks',exact=True).click()
+            page.get_by_role('tab',name='Checks',exact=True).click()
             page.get_by_text('Every check with its log',exact=True).click()
             page.get_by_role('button',name='Read full log',exact=True).click()
             expect(page.get_by_text('first page',exact=True)).to_be_visible()
             page.get_by_role('button',name='Next log page',exact=True).click()
             expect(page.get_by_text('last page',exact=True)).to_be_visible()
             page.screenshot(path=str(tmp_path/'daedalus-settings.png'),full_page=True)
-            page.get_by_role('button',name='Close job details',exact=True).click()
+            page.get_by_role('button',name='Close workbench',exact=True).click()
             page.get_by_role('button',name='Stop',exact=True).click()
             expect(page.get_by_label('Daedalus coding job').locator('.dj-state')).to_have_text('Stopped')
             expect(page.get_by_text('Reconnecting to progress. Last confirmed status is shown.')).to_be_visible()
@@ -133,12 +133,16 @@ def test_settings_and_job_refresh_in_browser(tmp_path,width):
             expect(page.get_by_text('The model-call allowance is used up.',exact=False)).to_be_visible()
             expect(page.get_by_role('button',name='Continue',exact=True)).to_be_visible()
             expect(page.get_by_text('Please file a public bug report.',exact=False)).to_have_count(0)
-            page.get_by_role('button',name='View details',exact=True).click()
-            expect(page.get_by_role('dialog')).to_be_visible()
+            page.get_by_role('button',name='Workbench',exact=True).press('Enter')
+            expect(page.get_by_role('dialog' if width < 640 else 'complementary',name='Workbench panel')).to_be_visible()
+            page.get_by_role('tab',name='Checks',exact=True).click()
             page.get_by_text('Diagnostic',exact=True).click()
             expect(page.get_by_text('Please file a public bug report.',exact=False)).to_be_visible()
-            page.keyboard.press('Escape')
-            expect(page.get_by_role('button',name='View details',exact=True)).to_be_focused()
+            if width < 640:
+                page.keyboard.press('Escape')
+            else:
+                page.get_by_role('button',name='Close workbench',exact=True).click()
+            expect(page.get_by_role('button',name='Workbench',exact=True)).to_be_focused()
             page.screenshot(path=str(tmp_path/f'progress-{width}.png'),full_page=True)
             page.context.tracing.stop(path=str(tmp_path/f'progress-{width}-trace.zip'))
             assert not errors
@@ -152,7 +156,7 @@ def test_browser_deletion_and_empty_text_assertions_reject_remaining_content():
     from playwright.sync_api import sync_playwright
     from coder_browser import interact
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch(headless=True)
+        browser=getattr(playwright, os.environ.get('HYPRCHAT_TEST_BROWSER', 'chromium')).launch(headless=True)
         page=browser.new_page()
         page.set_content('<ul id="items"><li>Keep me</li></ul><button id="delete" onclick="document.querySelector(\'li\').remove()">Delete</button>')
         absent={'action':'exists','selector':'li','value':False}
@@ -179,7 +183,7 @@ def test_policy4_composite_text_keeps_delete_actionable():
     from coder_browser import interact
     from coder_browser_schema import validate_steps
     with sync_playwright() as playwright:
-        browser=playwright.chromium.launch(headless=True)
+        browser=getattr(playwright, os.environ.get('HYPRCHAT_TEST_BROWSER', 'chromium')).launch(headless=True)
         page=browser.new_page()
         page.set_content('<ul><li>Entered text<button onclick="this.parentNode.remove()">Delete</button></li></ul>')
         steps=[{'action':'text','selector':'li','value':'Entered text'},
@@ -226,10 +230,15 @@ def test_policy7_scope_question_survives_refresh_and_continue(tmp_path, width):
             try: urllib.request.urlopen(url, timeout=1).close(); break
             except Exception: time.sleep(.05)
         with sync_playwright() as runtime:
-            browser = runtime.chromium.launch(headless=True)
+            browser = getattr(runtime, os.environ.get('HYPRCHAT_TEST_BROWSER', 'chromium')).launch(headless=True)
             page = browser.new_page(viewport={'width': width, 'height': 900})
             page.route('**/api/**', route_api); page.on('pageerror', lambda error: errors.append(str(error)))
-            page.goto(url); page.reload()
+            page.goto(url)
+            # Verify the persisted question was loaded before testing its refresh.
+            # Reloading while route.fulfill is pending creates WebKit mock CORS errors.
+            expect(page.get_by_label('Scope clarification',exact=True)).to_be_visible()
+            expect(page.get_by_label('Daedalus context window',exact=True)).to_have_value(str(DEFAULTS['openhands_num_ctx']))
+            page.reload()
             card = page.get_by_label('Daedalus coding job')
             expect(card.get_by_role('button', name='Continue', exact=True)).to_be_disabled()
             card.get_by_label('Scope clarification', exact=True).fill('Use JSON instead of CSV')

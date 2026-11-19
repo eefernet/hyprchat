@@ -27,6 +27,8 @@ KILLSWITCH="/usr/local/sbin/searxng-vpn-killswitch.sh"
 MARK="0x1"
 TABLE="100"
 MAX_TRIES="${OVPN_MAX_TRIES:-8}"
+CANDIDATE_HELPER="/usr/local/lib/hyprchat/vpn_candidates.py"
+FAILURE_STATE="/var/lib/searxng-vpn/failed-entries.json"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" | tee -a "$LOG_FILE"; }
 
@@ -78,6 +80,12 @@ while IFS= read -r cfg; do
     [ -n "${SEEN[$ip]:-}" ] && continue
     SEEN[$ip]=1; CANDIDATES+=("$cfg")
 done < <(printf '%s\n' "${CONFIGS[@]}" | shuf)
+
+# Keep the existing shuffled daily-use order, but avoid repeatedly selecting
+# an entry that just failed TLS or egress. All-cooling pools retry oldest first.
+ORDERED=$(printf '%s\n' "${CANDIDATES[@]}" | python3 "$CANDIDATE_HELPER" order "$FAILURE_STATE")
+[ -n "$ORDERED" ] || { log "No usable VPN entry addresses in the profile pool"; exit 1; }
+mapfile -t CANDIDATES <<< "$ORDERED"
 
 # --- VPN_UP gate ----------------------------------------------------------
 # Returns 0 only when ALL hold: tun0 exists, table-100 default routes via tun0,
@@ -153,6 +161,7 @@ for cfg in "${CANDIDATES[@]}"; do
     done
     if [ -z "$UP" ]; then
         log "  no tunnel from $(basename "$cfg") (TLS/connect timeout), trying next"
+        python3 "$CANDIDATE_HELPER" fail "$FAILURE_STATE" "$ENTRY_IP" || log "warning: could not record entry cooldown"
         continue
     fi
 
@@ -168,9 +177,11 @@ for cfg in "${CANDIDATES[@]}"; do
     if [ -n "$EXIT_IP" ]; then
         CHOSEN_IP="$ENTRY_IP"
         record_usage "$ENTRY_IP"
+        python3 "$CANDIDATE_HELPER" success "$FAILURE_STATE" "$ENTRY_IP" || log "warning: could not clear entry cooldown"
         break
     fi
     log "  tun0 up but searxng egress failed on $(basename "$cfg"), trying next"
+    python3 "$CANDIDATE_HELPER" fail "$FAILURE_STATE" "$ENTRY_IP" || log "warning: could not record entry cooldown"
 done
 
 if [ -z "$EXIT_IP" ]; then
@@ -182,5 +193,4 @@ if [ -z "$EXIT_IP" ]; then
 fi
 
 "$KILLSWITCH" apply
-MY_IP=$(curl -4 -sS --connect-timeout 3 --max-time 5 https://ifconfig.me/ip 2>/dev/null || echo "unknown")
-log "VPN up | searxng=$EXIT_IP | root=$MY_IP | entry=$CHOSEN_IP | after $TRIES tries"
+log "VPN up | searxng=$EXIT_IP | entry=$CHOSEN_IP | after $TRIES tries"

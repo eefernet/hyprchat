@@ -17,6 +17,7 @@ import httpx
 
 import config
 import leak_sources
+from web_privacy import anonymous_cookies
 from research_config import (
     REPORT_TEMPLATE_MAP,
     REPORT_TEMPLATES,
@@ -78,6 +79,7 @@ def _web_fetch_client(http):
             verify=getattr(config, "HTTP_VERIFY_SSL", True),
             proxy=proxy,
             trust_env=False,
+            cookies=anonymous_cookies(),
         )
         _WEB_FETCH_CLIENT_PROXY = proxy
     return _WEB_FETCH_CLIENT
@@ -523,7 +525,7 @@ async def _search_google_fallback(http, query: str, count: int = 10) -> list:
                 break
         return results
     except Exception as e:
-        print(f"[SEARCH] Google fallback failed: {e}")
+        print(f"[SEARCH] Google fallback failed: {type(e).__name__}")
         return []
 
 
@@ -618,7 +620,7 @@ async def _search_searxng(
             return results
         if fallback_state is not None:
             if fallback_state.get("remaining", 0) <= 0:
-                print(f"[SEARCH] Google fallback budget exhausted; skipping for {query[:60]!r}")
+                print("[SEARCH] Google fallback budget exhausted")
                 return results
             fallback_state["remaining"] -= 1
         results = await _search_google_fallback(http, query, count)
@@ -882,7 +884,7 @@ async def _fetch_github_repo_snapshot(http, url: str) -> dict | None:
             "files": [x.get("path") for x in selected],
         }
     except Exception as e:
-        print(f"[RESEARCH REPORT] GitHub snapshot failed for {url}: {e}")
+        print(f"[RESEARCH REPORT] GitHub snapshot failed: {type(e).__name__}")
         return None
 
 

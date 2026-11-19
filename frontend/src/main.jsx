@@ -112,6 +112,7 @@ import {
   userScopedUrl,
 } from './session.js';
 import { apiJson } from './api.js';
+import {fetchAnalytics} from './analytics.js';
 import {
   BACKGROUND_EFFECTS,
   FONTS,
@@ -630,6 +631,9 @@ function HyprChat(){
   const [ftsLoading,setFtsLoading]=useState(false);
   const [showMessageSearch,setShowMessageSearch]=useState(false);
   const [analyticsData,setAnalyticsData]=useState(null);
+  const [analyticsError,setAnalyticsError]=useState("");
+  const [analyticsLoading,setAnalyticsLoading]=useState(false);
+  const analyticsRequest=useRef(null);
   const [analyticsDays,setAnalyticsDays]=useState(30);
   const [analyticsGroup,setAnalyticsGroup]=useState("day");
   const [copied,setCopied]=useState(null);
@@ -640,6 +644,11 @@ function HyprChat(){
   // The header switches animate only after they were used once, never on page load.
   const [skyPlayed,setSkyPlayed]=useState(false);
   const [ghostPlayed,setGhostPlayed]=useState(false);
+  // The chat the Memory button was just clicked in. Its animation plays there and only for a moment after the
+  // click, so opening another chat with the other setting, or coming back to this one, is still.
+  const [memoryPlayedIn,setMemoryPlayedIn]=useState(null);
+  const memoryPlayTimer=useRef(null);
+  const playMemoryToggle=chat=>{setMemoryPlayedIn(chat);clearTimeout(memoryPlayTimer.current);memoryPlayTimer.current=setTimeout(()=>setMemoryPlayedIn(null),1300);};
   const toggleLightDark=()=>{setSkyPlayed(true);if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);try{localStorage.setItem("hc-prev-dark",tm);}catch{}setTm(LIGHT_PAIRS[tm]||"oneLight");}};
   const [autoTitle,setAutoTitle]=useState(()=>{try{return localStorage.getItem("hc-auto-title")!=="false";}catch{return true;}});
   const [ghostMode,setGhostMode]=useState(false);
@@ -1765,7 +1774,7 @@ function HyprChat(){
     // Nothing typed or counted for the previous profile may be left for the next one: an unsaved API key
     // stayed in its box (and could be saved under the other account), and the bell kept the old count.
     setProviderKeys({openai:"",anthropic:"",custom:""});setCustomBaseUrl(null);setCustomLabel(null);
-    setNotifUnseen(0);notifMaxIdRef.current=0;setAnalyticsData(null);setModelFacts({});settingRefusedRef.current=false;
+    setNotifUnseen(0);notifMaxIdRef.current=0;analyticsRequest.current?.abort();setAnalyticsData(null);setAnalyticsError("");setAnalyticsLoading(false);setModelFacts({});settingRefusedRef.current=false;
     imageSettingsSyncRef.current.reset();setImageSettingsError("");setImgChatLists(null);setImgChatWorkflows([]);
     setImgChatCkpt("");setImgChatRes("1024x1024");setImgChatVae("");setImgChatWorkflow("");
     setImgChatPrefix("");setImgChatNeg("");setImgChatComposeModel("");setImgChatAutoEnhance(false);
@@ -3043,6 +3052,7 @@ function HyprChat(){
   };
 
   const toggleGhostMode=async()=>{
+    setMemoryPlayedIn(null);   // Ghost switches memory off and back on by itself: that is not a click on Memory
     cancelSendPreparation();
     if(streaming||councilRunning){
       notify({type:"warning",text:"Finish the current response first",detail:"Ghost mode can only change between turns."});
@@ -3179,15 +3189,18 @@ function HyprChat(){
 
   // Load analytics data
   const loadAnalytics=useCallback(async()=>{
+    analyticsRequest.current?.abort();
+    const controller=new AbortController();analyticsRequest.current=controller;
+    const origin=hcCaptureUserContext();
+    const current=()=>!controller.signal.aborted&&origin.epoch===hcCaptureUserContext().epoch;
+    setAnalyticsLoading(true);setAnalyticsError("");
     try{
-      const [summary,grouped]=await Promise.all([
-        fetch(`${API}/api/analytics/tokens/summary`).then(r=>r.json()),
-        fetch(`${API}/api/analytics/tokens?days=${analyticsDays}&group_by=${analyticsGroup}`).then(r=>r.json())
-      ]);
-      setAnalyticsData({summary,grouped:Array.isArray(grouped)?grouped:[]});
-    }catch(e){console.error("Analytics error",e);notify({type:"warning",text:"Analytics failed to load",detail:e.message||String(e),duration:5000});}
-  },[analyticsDays,analyticsGroup,notify]);
-  useEffect(()=>{if(panel==="analytics")loadAnalytics();},[panel,loadAnalytics]);
+      const data=await fetchAnalytics(apiJson,analyticsDays,analyticsGroup,controller.signal);
+      if(current())setAnalyticsData(data);
+    }catch(e){if(current())setAnalyticsError(e.message||String(e));}
+    finally{if(current())setAnalyticsLoading(false);}
+  },[analyticsDays,analyticsGroup]);
+  useEffect(()=>{if(panel==="analytics")loadAnalytics();return()=>analyticsRequest.current?.abort();},[panel,loadAnalytics]);
 
   // ── Jarvis notification bell: poll unseen count (45s + window focus) ──
   useEffect(()=>{
@@ -5846,11 +5859,6 @@ function HyprChat(){
                 </div>}
             </div>;
           })()}
-          {panel==="chat"&&globalMemoryActive&&<span title="HyprChat memory active for this chat" style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 9px",borderRadius:"var(--hc-radius)",background:`${t.acc}10`,border:`1px solid ${t.acc}30`,color:t.acc,fontSize:"var(--hc-text-micro)",fontWeight:600,whiteSpace:"nowrap"}}>
-            <span style={{width:6,height:6,borderRadius:"50%",background:t.acc,flexShrink:0}}/>
-            Memory
-            <span style={{color:t.mut,fontWeight:500}}>HyprChat</span>
-          </span>}
           {panel==='chat'&&actId&&act&&!ghostActive&&!isMobile&&<ActionMenu
             key={`${currentUserId}:${actId}`}
             label={`Workspace context: ${workspaceContextLabel}`}
@@ -5870,6 +5878,11 @@ function HyprChat(){
               {label:'All workspaces',onClick:()=>{workspaceLoadEpoch.current++;setWsPanel(false);setActiveWs(null);setWsDetail(null);setPanel('workspaces');}},
             ]}
           />}
+          {/* Memory for this chat: always here, beside Ghost. Accent-coloured and named while it is on; off in Ghost mode. */}
+          {panel==="chat"&&<button type="button" aria-pressed={!!globalMemoryActive} aria-label="Memory in this chat" disabled={!!ghostActive} title={ghostActive?"Memory is off in Ghost mode":globalMemoryActive?"Memory is on: this chat uses what HyprChat remembers about you and can add to it. Click to turn it off.":"Memory is off for this chat. Click to turn it on."} onClick={()=>{playMemoryToggle(actId||"new");toggleGlobalMemory();}} className={`hc-icon-btn is-lg hc-memory-toggle${globalMemoryActive?" is-on":""}${memoryPlayedIn===(actId||"new")?" is-played":""}`} style={{"--mem-c":t.acc}}>
+            <span key={globalMemoryActive?"on":"off"} className="hc-memory-icon"><IC.Brain/><span className="hc-memory-sparks" aria-hidden="true"><i/><i/><i/></span></span>
+            {globalMemoryActive&&!isMobile&&<span className="hc-memory-label">Memory</span>}
+          </button>}
           {/* Ghost mode: always here, beside the light/dark switch. Pink and named while it is on. */}
           {panel==="chat"&&<button type="button" aria-pressed={!!ghostActive} aria-label="Ghost mode" title={ghostActive?"Ghost mode is on: this chat stays local and is not saved, indexed or added to history. Click to turn it off.":"Ghost mode: a chat that is never saved"} onClick={()=>{if(!(streaming||councilRunning))setGhostPlayed(true);toggleGhostMode();}} className={`hc-icon-btn is-lg hc-ghost-toggle${ghostActive?" is-on":""}${ghostPlayed?" is-played":""}`} style={{"--ghost-c":t.pink}}>
             <span key={ghostActive?"on":"off"} className="hc-ghost-icon"><IC.Ghost/></span>
@@ -5902,7 +5915,6 @@ function HyprChat(){
           {panel==="chat"&&<div style={{position:"relative",display:"flex"}}>
             <ActionMenu key={`options:${actId||"new"}`} label="Chat options" compact items={[
               act&&!act.is_council&&!act.persona_name&&{label:act.system_prompt?"Change the system prompt…":"Add a system prompt…",onClick:()=>setShowSysPromptPicker(true)},
-              {label:"Memory in this chat",checked:!!globalMemoryActive,disabled:ghostActive,onClick:toggleGlobalMemory},
               act&&(act.messages||[]).length>0&&{label:"Export as Markdown",onClick:()=>exportChat()},
               act&&(act.messages||[]).length>0&&{label:"Export as JSON",onClick:()=>exportChatJSON()},
               !isMobile&&{label:"Import a chat…",onClick:()=>importRef.current?.click()},
@@ -6721,9 +6733,9 @@ function HyprChat(){
           try{const r=await fetch(`${API}/api/model-configs/${mc.id}/avatar`,{method:"POST",body:fd});const d=await r.json().catch(()=>({}));if(!r.ok||!d.avatar_url)throw new Error(d.detail||`HTTP ${r.status}`);const parameters={...normalizeProfileParams(mc),avatar:d.avatar_url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
           catch(error){notify({type:"error",text:"Picture not changed",detail:error.message||String(error)});}
         }}/>}
-      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const deleteProfile=async(mc)=>{if(!await confirmAction({title:"Delete this profile?",body:`"${mc.name||"Untitled"}" and its settings will be deleted. Chats that used it keep their messages. This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;try{await apiJson(`/api/model-configs/${mc.id}`,{method:"DELETE"});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);}catch(e){notify({type:"error",text:"Profile was not deleted",detail:e.message});}};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
-          <div style={{display:"flex",alignItems:"flex-start",gap:10,minWidth:0,flex:1}}>
+      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const deleteProfile=async(mc)=>{if(!await confirmAction({title:"Delete this profile?",body:`"${mc.name||"Untitled"}" and its settings will be deleted. Chats that used it keep their messages. This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;try{await apiJson(`/api/model-configs/${mc.id}`,{method:"DELETE"});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);}catch(e){notify({type:"error",text:"Profile was not deleted",detail:e.message});}};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} className="hc-profile-card" style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
+        <div style={{display:"flex",flexWrap:"wrap",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
+          <div className="hc-profile-identity" style={{display:"flex",alignItems:"flex-start",gap:10,minWidth:0,flex:"1 1 240px",overflowWrap:"anywhere"}}>
             {avatarBox(mc,isE,t.acc,"agent")}
             <div style={{minWidth:0,flex:1}}>
               {isE?<input value={mc.name} onChange={e=>setName(mc,e.target.value)} style={{...inputS,fontSize:"var(--hc-text-control)",fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text,width:"min(360px,100%)"}}/>:<div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{mc.name}</div>}
@@ -6748,7 +6760,7 @@ function HyprChat(){
             <textarea value={params.description||""} onChange={e=>setProfileParam(mc.id,"description",e.target.value)} rows={2} placeholder={profileDescription({...mc,parameters:{...params,description:""}})} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/>
           </div>
           <details className="hc-advanced"><summary>Advanced model settings</summary>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,130px),1fr))",gap:8,marginBottom:12}}>
             <div><label style={labelS}>Temperature</label><input type="number" min="0" max="2" step="0.05" value={params.temperature??""} onChange={e=>setNumberParam(mc.id,"temperature",e.target.value)} placeholder="default" style={inputS}/></div>
             <div><label style={labelS}>Top P</label><input type="number" min="0" max="1" step="0.05" value={params.top_p??""} onChange={e=>setNumberParam(mc.id,"top_p",e.target.value)} placeholder="default" style={inputS}/></div>
             <div><label style={labelS}>Context</label><input type="number" min="0" step="1024" value={params.num_ctx??""} onChange={e=>setNumberParam(mc.id,"num_ctx",e.target.value)} placeholder="default" style={inputS}/></div>
@@ -6789,9 +6801,9 @@ function HyprChat(){
           {tools.map(tid=>{const tl=allTools.find(x=>x.id===tid);if(!tl)return null;const c=tl.id==="quick_search"?t.f1:t.warm;return <Chip key={tid} l={tl.name} c={c} bg={`${c}15`}/>;})}
           {kbIds.length>0&&<Chip l={`${kbIds.length} KB${kbIds.length===1?"":"s"}`} c={t.f1} bg={`${t.f1}15`}/>}
         </div>}
-      </div>;};const renderPersona=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const p=params.persona||{};const tags=parseTags(p.tags);const kbIds=mc.kb_ids||[];return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.pink}55`:`${t.brd}44`,padding:16}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
-          <div style={{display:"flex",alignItems:"flex-start",gap:11,minWidth:0,flex:1}}>
+      </div>;};const renderPersona=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const p=params.persona||{};const tags=parseTags(p.tags);const kbIds=mc.kb_ids||[];return <div key={mc.id} className="hc-profile-card" style={{...cardS,borderColor:isE?`${t.pink}55`:`${t.brd}44`,padding:16}}>
+        <div style={{display:"flex",flexWrap:"wrap",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
+          <div className="hc-profile-identity" style={{display:"flex",alignItems:"flex-start",gap:11,minWidth:0,flex:"1 1 240px",overflowWrap:"anywhere"}}>
             {avatarBox(mc,isE,t.pink,"persona")}
             <div style={{minWidth:0,flex:1}}>
               {isE?<input value={mc.name} onChange={e=>setName(mc,e.target.value)} style={{...inputS,fontSize:"var(--hc-text-control)",fontWeight:700,background:"transparent",border:"none",padding:0,color:t.text,width:"min(360px,100%)"}}/>:<div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{mc.name}</div>}
@@ -6829,7 +6841,7 @@ function HyprChat(){
               {!kbs.length&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontStyle:"italic"}}>No KBs — create some in Knowledge Bases</span>}
             </div>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,220px),1fr))",gap:10,marginBottom:12}}>
             <div><label style={labelS}>Short Description</label><textarea value={p.description||""} onChange={e=>setPersonaField(mc.id,"description",e.target.value)} rows={2} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/></div>
             <div><label style={labelS}>Personality</label><textarea value={p.personality||""} onChange={e=>setPersonaField(mc.id,"personality",e.target.value)} rows={2} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/></div>
             <div><label style={labelS}>Appearance <span style={{color:t.mut,fontWeight:400}}>(used for selfies / photos of this persona)</span></label><textarea value={p.appearance||""} onChange={e=>setPersonaField(mc.id,"appearance",e.target.value)} rows={2} placeholder="Physical appearance: hair, eyes, build, style, typical outfit… The persona uses this to generate photos of itself when asked." style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:58}}/></div>
@@ -6838,7 +6850,7 @@ function HyprChat(){
             <label style={labelS}>Scenario</label>
             <textarea value={p.scenario||""} onChange={e=>setPersonaField(mc.id,"scenario",e.target.value)} rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:80}}/>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))",gap:10,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,220px),1fr))",gap:10,marginBottom:12}}>
             <div><label style={labelS}>First Message</label><textarea value={p.first_message||""} onChange={e=>setPersonaField(mc.id,"first_message",e.target.value)} rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:80}}/></div>
             <div><label style={labelS}>Example Dialogue</label><textarea value={p.example_dialogue||""} onChange={e=>setPersonaField(mc.id,"example_dialogue",e.target.value)} rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:80}}/></div>
           </div>
@@ -6846,7 +6858,7 @@ function HyprChat(){
             <label style={labelS}>Lore / World Notes</label>
             <textarea value={p.lore||""} onChange={e=>setPersonaField(mc.id,"lore",e.target.value)} rows={3} style={{...inputS,resize:"vertical",lineHeight:1.5,minHeight:80}}/>
           </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,150px),1fr))",gap:8,marginBottom:12}}>
             <div><label style={labelS}>Tags</label><input value={tagsToText(p.tags)} onChange={e=>setPersonaField(mc.id,"tags",e.target.value)} placeholder="warm, noir, mentor" style={inputS}/></div>
             <div>
               <label style={labelS}>Rating</label>
@@ -6914,7 +6926,7 @@ function HyprChat(){
       :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={validPrompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} insertPrompt={insertPrompt} setPanel={setPanel}/>
 
       :panel==="models"?<PanelBoundary key={panel}><ModelsPanel m={modelsCtx}/></PanelBoundary>
-      :panel==="analytics"?<AnalyticsPanel font={font} t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
+      :panel==="analytics"?<AnalyticsPanel font={font} t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData} analyticsError={analyticsError} analyticsLoading={analyticsLoading}/>
 
       :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel focusId={workspaceJobFocus} workspaces={workspaces} t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else if(destination==='kb'){setPanel("kb");setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:"center"}),150);}else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
 

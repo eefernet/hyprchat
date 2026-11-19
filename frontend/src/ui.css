@@ -1,4 +1,11 @@
 /* Shared presentation, inherited by the app and body portals. */
+
+/* Large UI scales leave less room inside a card even on a wide viewport. */
+.hc-profile-card { container-type: inline-size; overflow-wrap: anywhere; }
+@container (max-width: 240px) {
+  .hc-profile-identity { flex-direction: column; }
+  .hc-profile-identity > div:last-child { width: 100%; }
+}
 :root {
   --hc-font-ui: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
   --hc-font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

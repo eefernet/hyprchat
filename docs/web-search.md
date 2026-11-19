@@ -85,6 +85,23 @@ address rejection, redirect checks, and connection address pinning at the proxy.
 The opt-in defaults off. See the operations guide before enabling it or rolling
 back the proxy. Service DNS outside the VPN is blocked even during recovery.
 
+Search-source icons are fetched from the source site's `/favicon.ico` through
+the authenticated image proxy, without a centralized favicon service. Both
+Quick Search and historical research-card thumbnails use that proxy. The
+VPN-scoped page-fetch client rejects persistent cookies, including on redirects,
+so sites cannot carry a cookie identifier across searches, profiles or VPN exits.
+Routine app access logs omit query strings; search-planner logs retain counts
+and errors rather than search text. Saved chat/research history still contains
+the user's sources and queries by design; these protections do not erase history
+or old logs.
+
+This is private search, not a claim of untraceability. Providers still receive
+the submitted query and the VPN exit address. Proton remains a trusted network
+operator, and identifying query text or traffic correlation can reveal identity.
+Opening an original source uses the user's browser connection and its existing
+site cookies; the server VPN does not protect that separate navigation. The
+reference installation's app-to-SearXNG HTTP hop also assumes a trusted LAN.
+
 Existing tool names and schemas remain unchanged. Automatic and council search
 keep `tool_done` and `source: quick_search`; model `research` keeps `tool_end`
 and its existing carousel channel. New status/diagnostic/provenance fields are

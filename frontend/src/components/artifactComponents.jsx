@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { API,userScopedUrl } from '../session.js';
 import { parseUtcishMs } from '../datetime.js';
 import useIsMobile from '../useIsMobile.js';
+import useFocusScope from '../useFocusScope.js';
 import { IC } from './icons.jsx';
 import ArtifactCanvas from './ArtifactCanvas.jsx';
 import DocumentRevisionReview from './DocumentRevisionReview.jsx';
@@ -727,6 +728,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
 
 function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onDelete,onUseInChat,notify,confirmAction,onRefreshList,onOpenArtifact}){
   const isMobile=useIsMobile();
+  const focus=useFocusScope(isMobile&&!!artifact?.id,onClose,{inertOutside:true});
   const [preview,setPreview]=useState(null);
   const [timeline,setTimeline]=useState([]);
   const [tagDraft,setTagDraft]=useState("");
@@ -767,7 +769,7 @@ function ArtifactDetailPanel({artifact,t,font,workspaces,kbs,onClose,onPatch,onD
   const addTag=async()=>{const tag=tagDraft.trim();if(!tag)return;await patch({tags:[...(a.tags||[]),tag]});setTagDraft("");};
   const duplicateRows=a.duplicates||[];
   const timelineRows=timeline||[];
-  return <div style={{width:isMobile?"auto":"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0,...(isMobile?{position:"absolute",inset:0,zIndex:40}:{})}}>
+  return <div ref={focus} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label="Artifact details" tabIndex={-1} style={{width:isMobile?"auto":"clamp(320px,42vw,430px)",maxWidth:"100vw",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:t.bgDeep,display:"flex",flexDirection:"column",overflow:"hidden",flexShrink:0,...(isMobile?{position:"absolute",inset:0,zIndex:40}:{})}}>
     <div style={{padding:"12px 14px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:8}}>
       <span style={{color:km.color,display:"flex"}}>{DetailIcon?<DetailIcon/>:null}</span>
       <div style={{minWidth:0,flex:1}}><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.title||a.filename}</div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.filename}</div></div>

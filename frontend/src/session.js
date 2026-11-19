@@ -44,6 +44,17 @@ export const proxiedImageUrl = src => {
   if(/%25[0-9A-F]{2}/i.test(raw)){try{raw = decodeURIComponent(raw);}catch{}}
   return userScopedUrl(`/api/img-proxy?u=${encodeURIComponent(raw)}`);
 };
+export const sourceFaviconUrl = value => {
+  try {
+    const raw=String(value||"").trim();
+    if(!raw)return "";
+    const url=new URL(/^https?:\/\//i.test(raw)?raw:`https://${raw}`);
+    if(!["http:","https:"].includes(url.protocol)||url.username||url.password)return "";
+    // Fetch only the site's generic icon through our private web proxy. Do
+    // not reveal every source domain to a centralized favicon provider.
+    return proxiedImageUrl(`${url.origin}/favicon.ico`);
+  }catch{return "";}
+};
 const _hyprFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => {
   const rawUrl = typeof input === "string" ? input : (input && input.url) || "";

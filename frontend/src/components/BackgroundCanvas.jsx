@@ -13,7 +13,8 @@ export default function BackgroundCanvas({effect,t,energy=0,still:stillOnly=fals
     if(!CANVAS_EFFECTS.includes(effect))return;
     const canvas=ref.current;
     if(!canvas)return;
-    const reduced=stillOnly||(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const motion=window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    let reduced=stillOnly||!!motion?.matches;
     const ctx=canvas.getContext("2d");
     if(!ctx)return;
     let raf=0, stopped=false, particles=[];
@@ -525,7 +526,7 @@ export default function BackgroundCanvas({effect,t,energy=0,still:stillOnly=fals
     };
     let lastDraw=0, lastTime=0, vt=0, speed=1;
     const step=(now)=>{
-      if(stopped)return;
+      if(stopped||reduced||document.hidden)return;
       if(!reduced)raf=requestAnimationFrame(step);
       if(now-lastDraw<15)return;                        // ~66fps cap; skips frames on 120Hz+
       const dt=Math.min(now-(lastTime||now-16.7),100);   // clamp giant deltas (tab resume)
@@ -540,8 +541,21 @@ export default function BackgroundCanvas({effect,t,energy=0,still:stillOnly=fals
       draw(time,dtf);
     };
     const onVis=()=>{
-      if(document.hidden)cancelAnimationFrame(raf);
+      cancelAnimationFrame(raf);
+      if(document.hidden)return;
       else if(!stopped&&!reduced){lastTime=0;lastDraw=0;raf=requestAnimationFrame(step);}
+    };
+    const onMotion=()=>{
+      const next=stillOnly||!!motion?.matches;
+      if(next===reduced)return;
+      reduced=next;cancelAnimationFrame(raf);
+      window.removeEventListener("pointermove",onPointer);
+      if(reduced)still();
+      else{
+        window.addEventListener("pointermove",onPointer,{passive:true});
+        lastTime=0;lastDraw=0;
+        if(!document.hidden)step(performance.now());
+      }
     };
     resize();
     // For checking an effect without waiting for the browser's own frames (which do not run in a hidden
@@ -555,8 +569,10 @@ export default function BackgroundCanvas({effect,t,energy=0,still:stillOnly=fals
     if(window.ResizeObserver){ro=new ResizeObserver(resize);ro.observe(canvas);}
     if(!reduced)window.addEventListener("pointermove",onPointer,{passive:true});
     document.addEventListener("visibilitychange",onVis);
-    if(!reduced)step(performance.now());
+    motion?.addEventListener("change",onMotion);
+    if(!reduced&&!document.hidden)step(performance.now());
     return ()=>{
+      motion?.removeEventListener("change",onMotion);
       density?.removeEventListener?.("change",resize);
       delete canvas.__hcBackground;
       stopped=true;cancelAnimationFrame(raf);

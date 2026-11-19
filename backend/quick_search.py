@@ -988,7 +988,7 @@ async def _fetch_clean_page(http, url: str) -> dict | None:
             if extracted and len(extracted) >= 200:
                 return {"url": url, "content": extracted[:100000]}
         except Exception as e:
-            print(f"[QS]   trafilatura failed for {url}: {type(e).__name__}: {e!r}")
+            print(f"[QS]   trafilatura failed: {type(e).__name__}")
 
     text = await asyncio.to_thread(_regex_strip_html, html)
     if len(text) < 200:

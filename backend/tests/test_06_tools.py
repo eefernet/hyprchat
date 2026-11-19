@@ -14,9 +14,14 @@ class TestToolCRUD:
         })
         assert r.status_code == 200
         tool = r.json()
-        assert "id" in tool
-        assert tool["name"] == "temp_tool"
-        client.delete(f"/api/tools/{tool['id']}")
+        try:
+            assert "id" in tool
+            # Validation aligns the exposed tool name with its callable entry point.
+            assert tool["name"] == "run"
+        finally:
+            if tool.get("id"):
+                cleanup = client.delete(f"/api/tools/{tool['id']}")
+                assert cleanup.status_code == 200
 
     def test_list_tools(self, client, created_tool):
         r = client.get("/api/tools")
