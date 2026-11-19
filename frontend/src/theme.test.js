@@ -73,3 +73,16 @@ test('interface fonts keep their positions and each one can be loaded', async ()
     }
   }
 });
+
+// 2026-11-19: the interface starts in a sans face. A browser that only ever had the old default is
+// switched once; a sans choice is kept; choosing "match code font" after the switch sticks.
+test('the interface font default is sans, once, without overriding a real choice', async () => {
+  const {defaultUiFont, DEFAULT_UI_FONT, UI_FONTS} = await import('./theme.js');
+  assert.equal(UI_FONTS[DEFAULT_UI_FONT].name, 'Figtree');
+  assert.equal(defaultUiFont(null, false), DEFAULT_UI_FONT);       // new browser
+  assert.equal(defaultUiFont('-1', false), DEFAULT_UI_FONT);       // the old default, written on first load
+  assert.equal(defaultUiFont('0', false), 0);                      // chose Inter: kept
+  assert.equal(defaultUiFont('2', true), 2);
+  assert.equal(defaultUiFont('-1', true), -1);                     // chose monospace after the switch: kept
+  assert.equal(defaultUiFont('99', false), DEFAULT_UI_FONT);       // a position that no longer exists
+});

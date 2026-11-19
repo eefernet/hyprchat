@@ -6,6 +6,13 @@ import {useChatFollow} from './useChatFollow.js';
 import {useBackgroundEvents} from './useBackgroundEvents.js';
 import {fromMessages,atStreamStart,applyUpdate,settle,compacted as contextCompacted,compactionIndex,compactionLimit,COMPACT_CHOICES,roomLeft,chatWindow,forRequest,keptReading,liveSpeed} from './contextMeter.js';
 import ContextMeter from './components/ContextMeter.jsx';
+import SettingRow, {SettingRows, Segmented} from './components/SettingRow.jsx';
+import PanelHeader from './components/PanelHeader.jsx';
+import ServiceMonitor from './components/ServiceMonitor.jsx';
+import ThemeGallery from './components/ThemeGallery.jsx';
+import BackgroundGallery from './components/BackgroundGallery.jsx';
+import {clampStrength, strengthLabel, scaledOpacity, STRENGTH_MIN, STRENGTH_MAX, STRENGTH_STEP} from './backgrounds.js';
+import {isLightTheme as themeIsLight} from './elevation.js';
 import CompactionNotice from './components/CompactionNotice.jsx';
 import {showJumpButton} from './chatScroll.js';
 import {messageParts,stampCard,resetOffsets,capSavedEvents,mergeContinued} from './messageParts.js';
@@ -20,11 +27,14 @@ import './ui.css';
 import './surfaces.css';
 import './motion.css';
 import './components/workspace.css';
+import './chatLayout.css';
 import {UI_THEMES, presentationTokens} from './theme.js';
 import ActionMenu from './components/ActionMenu.jsx';
 import ConvRow from './components/ConvRow.jsx';
 import WorkspaceSection from './components/WorkspaceSection.jsx';
 import ModelsPanel from './panels/ModelsPanel.jsx';
+import {shortAgo,fullWhen} from './relativeTime.js';
+import {serviceStatus} from './serviceStatus.js';
 import CommitNumberInput from './components/CommitNumberInput.jsx';
 import {searchOutcome,withoutModel,factsStore} from './modelsPage.js';
 import {sidebarSections,withMembership,mergeRows,withWorkspaces,workspaceSignature,touched,refreshLimit} from './sidebarSections.js';
@@ -106,6 +116,8 @@ import {
   BACKGROUND_EFFECTS,
   FONTS,
   UI_FONTS,
+  defaultUiFont,
+  DEFAULT_UI_FONT,
   THEMES,
   WELCOME_VERSION,
   degradedColor,
@@ -250,7 +262,9 @@ function HyprChat(){
   const listedChatsRef=useRef(0);   // how many rows the main chat list has handed out so far
   const [hyprfitLive,setHyprfitLive]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-hyprfit-live::${hcStoredUserId()||"default"}`)||"false")===true;}catch{return false;}});
   const [previewAutoOpen,setPreviewAutoOpen]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-preview-auto-open::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
-  const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
+  // The interface starts in a sans face (theme.js defaultUiFont): a browser that only ever had the old
+  // "match code font" default is switched once; the flag is written by the save effect below, not here.
+  const [uiFi,setUiFi]=useState(()=>{try{return defaultUiFont(localStorage.getItem("hc-ui-font"),localStorage.getItem("hc-ui-font-default-v2")==="1");}catch{return DEFAULT_UI_FONT;}});
   const [tokenLimit]=useState(()=>{try{return parseInt(localStorage.getItem("hc-token-limit")||"0");}catch{return 0;}});
   const [numCtx,setNumCtx]=useState(()=>{try{return parseInt(localStorage.getItem("hc-num-ctx")||"0");}catch{return 0;}});
   const [defaultTemp,setDefaultTemp]=useState(()=>{try{return parseFloat(localStorage.getItem("hc-temp")||"0.7");}catch{return 0.7;}});
@@ -276,7 +290,9 @@ function HyprChat(){
   const resolveEffort=(cid,overrides={})=>overrides.effort!==undefined?overrides.effort:(cid&&effortPerChat[cid]!==undefined?effortPerChat[cid]:(!cid&&pendingEffort!==null?pendingEffort:globalEffort));
   const [fontSize,setFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-font-size")||"16");}catch{return 16;}});
   const [uiFontSize,setUiFontSize]=useState(()=>{try{return parseInt(localStorage.getItem("hc-ui-font-size")||"14");}catch{return 14;}});
-  const [chatWidth,setChatWidth]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-w")||"880");}catch{return 880;}});
+  // Reading column: 800 by default. 880 was the old default and was always written to storage, so it is
+  // replaced once (flag hc-chat-w-default-v2); any other stored width is the owner's own choice.
+  const [chatWidth,setChatWidth]=useState(()=>{try{const stored=parseInt(localStorage.getItem("hc-chat-w")||"");const migrated=localStorage.getItem("hc-chat-w-default-v2")==="1";return Number.isFinite(stored)&&stored>0&&(migrated||stored!==880)?stored:800;}catch{return 800;}});
   const [wsModel,setWsModel]=useState(()=>{try{return localStorage.getItem("hc-ws-model")||"qwen2.5:7b";}catch{return "qwen2.5:7b";}});
   const [contextCompaction,setContextCompaction]=useState(()=>{try{return localStorage.getItem("hc-context-compaction")==="on";}catch{return false;}});
   const [chatCompactionPercent,setChatCompactionPercent]=useState(()=>{try{return parseInt(localStorage.getItem("hc-chat-compaction-percent"))||85;}catch{return 85;}});
@@ -317,7 +333,9 @@ function HyprChat(){
   const [previewError,setPreviewError]=useState(null);
   const [previewArchive,setPreviewArchive]=useState(null); // {filename, file_count, entries}
   const [pendingTheme,setPendingTheme]=useState(null);
-  const [pendingFont,setPendingFont]=useState(null);
+  const [themeUndo,setThemeUndo]=useState(null);
+  const [bgStrength,setBgStrength]=useState(()=>{try{return clampStrength(localStorage.getItem("hc-bg-strength"));}catch{return 1;}});
+  useEffect(()=>{try{localStorage.setItem("hc-bg-strength",String(bgStrength));}catch{}},[bgStrength]);
   const DEFAULT_LOADING_QUOTES=[
     {t:"The unexamined life is not worth living.",a:"Socrates"},
     {t:"I know that I know nothing.",a:"Socrates"},
@@ -424,9 +442,7 @@ function HyprChat(){
   const [pendingPersona,setPendingPersona]=useState(null);
   const [pendingModel,setPendingModel]=useState(()=>{try{return localStorage.getItem("hc-last-model")||"";}catch{return "";}});
   const modelChoiceRef=useRef({pending:"",byConv:{}});
-  const [showExportMenu,setShowExportMenu]=useState(false);
   const effortPickerRef=useRef(null);
-  const exportMenuRef=useRef(null);
   const [promptSearch,setPromptSearch]=useState("");
   const [editPrompt,setEditPrompt]=useState(null); // {id, title, content, category}
   const validPrompts=useMemo(()=>normalizePrompts(prompts),[prompts]);
@@ -437,6 +453,8 @@ function HyprChat(){
   const [renamingConv,setRenamingConv]=useState(null); // {id, title}: the chat whose name is being typed
   const [newTagInput,setNewTagInput]=useState("");
   const [pasteMode,setPasteMode]=useState(false);
+  const [toolsTab,setToolsTab]=useState("mine");
+  const [connectorFormsOpen,setConnectorFormsOpen]=useState(false);
   const [pasteCode,setPasteCode]=useState("");
   const [pasteToolName,setPasteToolName]=useState("");
   const [pasteToolDesc,setPasteToolDesc]=useState("");
@@ -473,7 +491,7 @@ function HyprChat(){
     for(const [key,value] of Object.entries(presentationTokens(t,font,codeFont,uiFontSize/14)))document.documentElement.style.setProperty(key,String(value));
   },[t,font,codeFont,uiFontSize]);
   const LIGHT_PAIRS={hyprflat:"oneLight",nord:"oneLight",catppuccin:"oneLight",gruvbox:"oneLight",tokyoNight:"oneLight",rosePine:"oneLight",dracula:"oneLight",midnight:"oneLight",terminal:"oneLight",cyberpunk:"oneLight",solarizedDark:"solarizedLight",materialOcean:"oneLight",ayuDark:"oneLight",oneLight:"hyprflat",solarizedLight:"solarizedDark"};
-  const isLightTheme=tm==="oneLight"||tm==="solarizedLight";
+  const isLightTheme=themeIsLight(THEMES[tm]||THEMES.hyprflat);
   const settingsLoadedRef=useRef(false);
   const seenSettingEffectRef=useRef({});
   const skipSettingPatchRef=useRef({});
@@ -535,7 +553,7 @@ function HyprChat(){
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content",t.bg);
   },[tm,t.bg,isLightTheme]);
   useEffect(()=>{try{localStorage.setItem("hc-font",String(fi));}catch{}},[fi]);
-  useEffect(()=>{try{localStorage.setItem("hc-ui-font",String(uiFi));}catch{}},[uiFi]);
+  useEffect(()=>{try{localStorage.setItem("hc-ui-font",String(uiFi));localStorage.setItem("hc-ui-font-default-v2","1");}catch{}},[uiFi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
   useEffect(()=>{persistServerSetting("hc-num-ctx","default_num_ctx",numCtx,String(numCtx));},[numCtx]);
   useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}persistPref("default-temp",defaultTemp);},[defaultTemp]);
@@ -550,7 +568,7 @@ function HyprChat(){
   useEffect(()=>{persistPref("effort-per-chat",effortPerChat);},[effortPerChat]);
   useEffect(()=>{try{localStorage.setItem("hc-font-size",fontSize);}catch{}},[fontSize]);
   useEffect(()=>{try{localStorage.setItem("hc-ui-font-size",uiFontSize);}catch{}},[uiFontSize]);
-  useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);}catch{}},[chatWidth]);
+  useEffect(()=>{try{localStorage.setItem("hc-chat-w",chatWidth);localStorage.setItem("hc-chat-w-default-v2","1");}catch{}},[chatWidth]);
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
   useEffect(()=>{persistPref("fun-verbs",funVerbs);},[funVerbs]);
   useEffect(()=>{persistPref("hyprfit-live",hyprfitLive);},[hyprfitLive]);
@@ -619,6 +637,10 @@ function HyprChat(){
   const [showScrollBottom,setShowScrollBottom]=useState(false);
   const [dragOver,setDragOver]=useState(false);
   const [prevDarkTheme,setPrevDarkTheme]=useState(()=>{try{return localStorage.getItem("hc-prev-dark")||"hyprflat";}catch{return "hyprflat";}});
+  // The header switches animate only after they were used once, never on page load.
+  const [skyPlayed,setSkyPlayed]=useState(false);
+  const [ghostPlayed,setGhostPlayed]=useState(false);
+  const toggleLightDark=()=>{setSkyPlayed(true);if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);try{localStorage.setItem("hc-prev-dark",tm);}catch{}setTm(LIGHT_PAIRS[tm]||"oneLight");}};
   const [autoTitle,setAutoTitle]=useState(()=>{try{return localStorage.getItem("hc-auto-title")!=="false";}catch{return true;}});
   const [ghostMode,setGhostMode]=useState(false);
   const [pendingUseMemories,setPendingUseMemories]=useState(false);
@@ -761,7 +783,28 @@ function HyprChat(){
   const [mcs,setMcs]=useState([]);
   const [health,setHealth]=useState({});
   const [showHealthMonitor,setShowHealthMonitor]=useState(false);
+  // The left bar's status line shows this. It was read once per sign-in, so a service that went down
+  // later kept its green dot; it is now read again when the window gets focus and every two minutes
+  // while the tab is visible.
+  const refreshHealth=()=>fetch(`${API}/api/health`).then(r=>r.ok?r.json():null).then(d=>{if(d?.services)setHealth(d.services);}).catch(()=>{});
   const [healthHistory,setHealthHistory]=useState(null);
+  const [healthHistoryLoading,setHealthHistoryLoading]=useState(false);
+  const [healthHistoryError,setHealthHistoryError]=useState("");
+  const healthHistoryRun=useRef(0);
+  // The monitor's data: ninety days of history plus the state right now. Loaded every time the monitor
+  // opens or Refresh is pressed; a failure keeps the last copy and says so.
+  const loadHealthHistory=async()=>{
+    const run=++healthHistoryRun.current;
+    setHealthHistoryLoading(true);setHealthHistoryError("");
+    refreshHealth();
+    try{
+      const r=await fetch(`${API}/api/health/history?days=90`);
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      if(run===healthHistoryRun.current)setHealthHistory(d);
+    }catch(e){if(run===healthHistoryRun.current&&e?.name!=="AbortError")setHealthHistoryError(e.message||String(e));}
+    finally{if(run===healthHistoryRun.current)setHealthHistoryLoading(false);}
+  };
   const [pullName,setPullName]=useState("");
   const pullInputRef=useRef(null);
   const [editMc,setEditMc]=useState(null);
@@ -1992,7 +2035,7 @@ function HyprChat(){
     apiJson("/api/tools").then(d=>setTools(Array.isArray(d)?d:[])).catch(()=>{});
     refreshConnectors();
     fetch(`${API}/api/model-configs`).then(r=>r.json()).then(d=>setMcs((d||[]).map(mc=>({...mc,parameters:normalizeProfileParams(mc)})))).catch(()=>{});
-    fetch(`${API}/api/health`).then(r=>r.json()).then(d=>setHealth(d.services||{})).catch(()=>{});
+    refreshHealth();
     fetch(`${API}/api/model-providers`).then(r=>r.json()).then(d=>{const map={};(d.providers||[]).forEach(p=>{map[p.provider]=p;});setModelProviders(map);}).catch(()=>{});
     fetch(`${API}/api/settings`).then(r=>r.json()).then(d=>{
       setDocumentsEnabled(d.document_tools_enabled===true);
@@ -2759,7 +2802,7 @@ function HyprChat(){
   useEffect(()=>{
     const handler=(e)=>{
       if(e.key!=="Escape")return;
-      setDownloadsExpanded(false);setShowPromptPicker(false);setShowQuickMenu(false);setShowEffortPicker(false);setShowExportMenu(false);setShowSysPromptPicker(false);setShowNavMore(false);setRegenPopover(null);setQuickSearchError(null);
+      setDownloadsExpanded(false);setShowPromptPicker(false);setShowQuickMenu(false);setShowEffortPicker(false);setShowSysPromptPicker(false);setShowNavMore(false);setRegenPopover(null);setQuickSearchError(null);
       setConfirmDialog(d=>{if(d?.resolve)d.resolve(false);return null;});
       if(panel==="chat")setTimeout(()=>{try{inpRef.current?.focus({preventScroll:true});}catch{inpRef.current?.focus();}},0);
     };
@@ -2778,13 +2821,6 @@ function HyprChat(){
     document.addEventListener("mousedown",handler);
     return()=>document.removeEventListener("mousedown",handler);
   },[showQuickMenu]);
-  useEffect(()=>{
-    if(!showExportMenu)return;
-    exportMenuRef.current?.querySelector('[role="menuitem"]')?.focus();
-    const handler=(e)=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setShowExportMenu(false);};
-    document.addEventListener("mousedown",handler);
-    return()=>document.removeEventListener("mousedown",handler);
-  },[showExportMenu]);
   useEffect(()=>{
     if(!showEffortPicker)return;
     const handler=(e)=>{if(effortPickerRef.current&&!effortPickerRef.current.contains(e.target))setShowEffortPicker(false);};
@@ -3180,6 +3216,13 @@ function HyprChat(){
     window.addEventListener("focus",onFocus);
     return ()=>{stopped=true;clearInterval(iv);window.removeEventListener("focus",onFocus);};
   },[]);
+  useEffect(()=>{
+    if(!authReady)return;
+    const check=()=>{if(document.visibilityState==="visible")refreshHealth();};
+    const timer=setInterval(check,120000);
+    window.addEventListener("focus",check);
+    return()=>{clearInterval(timer);window.removeEventListener("focus",check);};
+  },[authReady,currentUserId]);
 
   const clearDeletedModelRefs=(deletedModels=[],newModels=models)=>{
     const deletedSet=new Set((deletedModels||[]).filter(Boolean));
@@ -5293,6 +5336,8 @@ function HyprChat(){
   const _navShort={...Object.fromEntries(NAV_ITEMS.map(i=>[i.label,i.short])),Settings:"Settings",More:"More",Search:"Search"};
   const openSettings=()=>{setShowNavMore(false);if(panel!=="settings")previousPanelRef.current=panel;setPanel("settings");};
   const closeSettings=()=>{setShowHealthMonitor(false);setPanel(previousPanelRef.current||"chat");};
+  // The Service Monitor takes the place of Settings inside the same dialog (ServiceMonitor.jsx).
+  const openServiceMonitor=()=>{openSettings();setShowHealthMonitor(true);loadHealthHistory();};
   const navBtnS=(active=false,extra={})=>({
     width:56,height:showNavLabels?54:42,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,borderRadius:"var(--hc-radius)",cursor:"pointer",
     border:"1px solid transparent",position:"relative",flexShrink:0,padding:showNavLabels?"3px 0 1px":0,fontFamily:font,
@@ -5300,7 +5345,6 @@ function HyprChat(){
   });
   const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center",...((_navShort[lab]||lab).length>9?{fontSize:"calc(var(--hc-text-secondary) - 1.5px)",letterSpacing:"-0.03em"}:null)}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
-  const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?degradedColor(t):t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${serviceLabel(n)}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
     if(isGhostConv(c))return false;
     const matchSearch=(c.title||"").toLowerCase().includes(sq.toLowerCase());
@@ -5361,25 +5405,10 @@ function HyprChat(){
     <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut}}><span>{minLabel??min}</span><span>{maxLabel??max}</span></div>
     {hint?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4,lineHeight:1.5}}>{hint}</div>:null}
   </div>);
-  const chipRow=(options,value,onSelect,{color=t.acc,stretch=false}={})=>(
-    <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-      {options.map(o=>{const active=value===o.v;return <button key={String(o.v)} title={o.title} onClick={()=>onSelect(o.v)} style={{...(stretch?{flex:1}:{}),padding:"6px 12px",borderRadius:"var(--hc-radius)",border:`1px solid ${active?color:t.brd}44`,background:active?`${color}22`:t.bgDeep,color:active?color:t.dim,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:active?700:400,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5,transition:"background .15s ease,border-color .15s ease,color .15s ease"}}>{o.label}</button>;})}
-    </div>);
+  // A few exclusive choices: one tray with the chosen option raised (SettingRow.jsx).
+  const chipRow=(options,value,onSelect,{color,label}={})=>(<Segmented options={options} value={value} onChange={onSelect} color={color} label={label}/>);
   const msgToolbarS={display:"inline-flex",alignItems:"center",gap:2,marginTop:4};
   const msgActionS=(c=t.mut)=>({background:"transparent",border:"none",color:c,cursor:"pointer",padding:"0 8px",height:28,minHeight:28,borderRadius:"var(--hc-radius-sm)",fontFamily:font,fontSize:"var(--hc-text-secondary)",display:"inline-flex",alignItems:"center",justifyContent:"center",gap:5});
-  // Shared panel header recipe (Research pattern). Plain function — call as {panelHeader(...)}.
-  const panelHeader=(icon,title,extras,{color=t.acc,left,subtitle}={})=>(
-    <div className="hc-panel-heading" style={{padding:"18px 24px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexShrink:0}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
-        <span style={{display:"flex",color}}>{icon}</span>
-        <div style={{minWidth:0}}>
-          <div style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color}}>{title}</div>
-          {subtitle?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>{subtitle}</div>:null}
-        </div>
-        {left||null}
-      </div>
-      {extras?<div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>{extras}</div>:null}
-    </div>);
   const standaloneCoderJobs=coderWorkflows.filter(w=>w.workflow_version===3&&w.conversation_id===actId);
   // The model and context window the chat on screen will use for its next reply (context pill, draft size note).
   const activeChatContext=()=>{
@@ -5525,9 +5554,8 @@ function HyprChat(){
   const _uiScale=uiFontSize/14;
   return <PlayfulStatusContext.Provider value={funVerbs}><div className="hc-app-viewport"><div className={`hc-app${isMobile&&uiFontSize>=18?" hc-large-ui":""}`} data-font-sans={uiFont?"":undefined} style={{"--hc-ui-scale":_uiScale,height:`${(100/_uiScale).toFixed(3)}vh`,width:`${(100/_uiScale).toFixed(3)}vw`,zoom:_uiScale,display:"flex",fontFamily:font,background:t.bg,color:t.text,overflow:"hidden",position:"relative"}}>
     {inspectorMessage!=null&&<ContextInspector messageId={inspectorMessage} t={t} onClose={()=>setInspectorMessage(null)} onRestore={(id,saved)=>setConvs(p=>p.map(c=>(c.messages||[]).some(m=>m.id===id)?{...c,...(Number(c.summary_until_msg_id)>=Number(id)?{summary_until_msg_id:0}:{}),messages:c.messages.map(m=>m.id===id?{...m,...saved}:m)}:c))}/>}
-    {bgEffect==="dots"&&<div style={{position:"absolute",inset:0,opacity:.42,zIndex:0,pointerEvents:"none",backgroundImage:`radial-gradient(circle,${isLightTheme?THEMES[tm].text:THEMES[tm].acc}18 1px,transparent 1.4px)`,backgroundSize:"24px 24px"}}/>}
-    <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0}/>
-    {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:.4}}/>}
+    <BackgroundCanvas effect={bgEffect} t={THEMES[tm]} energy={streaming||councilRunning?1:0} strength={bgStrength}/>
+    {bgEffect==="scanlines"&&<div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg,transparent 0%,${THEMES[tm].acc}04 50%,transparent 100%)`,backgroundSize:"100% 4px",animation:"scanline 8s linear infinite",opacity:scaledOpacity(.4,bgStrength)}}/>}
 
     {userGateOpen&&<div className="hc-viewport-overlay hc-scrim" style={{position:"fixed",inset:0,zIndex:320,display:"flex",alignItems:"center",justifyContent:"center",padding:18}}>
       <div className="hc-dialog-card hc-dialog hc-elev-3" style={{width:"min(520px,94vw)",padding:20}}>
@@ -5596,29 +5624,25 @@ function HyprChat(){
     </div>
 
     {/* CONVERSATION LIST */}
-    <div className="hc-conversation-sidebar" data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{...(isMobile
+    <div className="hc-conversation-sidebar" data-testid="conversation-sidebar" aria-label="Conversations" inert={!sidebar?"":undefined} style={{"--sb-ok":t.ok,"--sb-warn":degradedColor(t),...(isMobile
       ?{position:"absolute",left:68,top:0,bottom:0,width:"min(292px, calc(100% - 76px))",minWidth:0,paddingTop:"var(--hc-content-safe-top)",paddingBottom:"var(--hc-content-safe-bottom)",transform:sidebar?"translateX(0)":"translateX(calc(-100% - 68px))",transition:"transform .25s ease",zIndex:60}
       :{width:sidebar?304:0,minWidth:sidebar?304:0,transition:"all .3s cubic-bezier(.4,0,.2,1)",position:"relative",zIndex:10}),display:"flex",flexDirection:"column",borderRight:"1px solid var(--hc-line-subtle)",overflow:"hidden"}}>
       <div style={{padding:"12px 10px 6px",flexShrink:0}}>
         <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc,marginBottom:6,paddingLeft:2}}>HyprChat <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,letterSpacing:1,color:t.warm,opacity:.95,padding:"1px 5px",background:`${t.warm}14`,border:`1px solid ${t.warm}40`,borderRadius:"var(--hc-radius-sm)"}}>ALPHA</span></div>
-        <button onClick={()=>{openSettings();setSettingsTab("users");}} style={{width:"100%",display:"flex",alignItems:"center",gap:7,background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",color:t.dim,borderRadius:"var(--hc-radius)",padding:"6px 8px",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8,textAlign:"left"}}>
-          <span style={{display:"flex",color:t.acc}}><IC.User/></span>
-          <span style={{minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:700}}>{currentUser?.name||"Choose user"}</span>
-          <span style={{marginLeft:"auto",fontSize:"var(--hc-text-secondary)",color:t.mut}}>switch</span>
-        </button>
       </div>
       <div style={{padding:"0 8px 6px",display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
-        <div style={{display:"flex",gap:4}}>
-          {(wsPanel&&activeWs||panel==='chat'&&act?.effective_workspace)&&<button onClick={()=>startBlankChat(true)} style={btnS(t.mut)}>New general chat</button>}
-          <button onClick={()=>startBlankChat()} title={`New chat (${MOD_KEY} N)`} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,background:t.acc,border:`1px solid ${t.acc}`,color:t.bg,padding:"10px 12px",borderRadius:"var(--hc-radius)",cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600,boxShadow:"none"}}><IC.Plus/> New Chat</button>
+        <div className="sb-top">
+          <label className="sb-search">
+            <span className="sb-search-icon" aria-hidden="true"><IC.Search/></span>
+            <input ref={titleSearchRef} value={sq} onChange={e=>setSq(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){if(sq)setSq("");else closeSidebarSearch();}}} placeholder="Search chats" aria-label="Search chats"/>
+            {sq&&<button type="button" className="sb-search-clear" aria-label="Clear search" onClick={()=>setSq("")}>×</button>}
+          </label>
+          <button type="button" className="sb-new" onClick={()=>startBlankChat()} aria-label="New Chat" title={`New chat (${MOD_KEY} N)`}><IC.Plus/></button>
         </div>
+        {(wsPanel&&activeWs||panel==='chat'&&act?.effective_workspace)&&<button type="button" className="sb-general" onClick={()=>startBlankChat(true)}>New chat outside this workspace</button>}
         {!wsPanel&&<>
         {showMessageSearch&&<div className="hc-reveal" style={{display:"flex",flexDirection:"column",gap:4}}>
           <button style={btnS(t.acc)} onClick={()=>{setPanel('library');if(isMobile)setSidebar(false);}}>Search all saved content</button>
-          <div style={{position:"relative"}}>
-            <input ref={titleSearchRef} value={sq} onChange={e=>setSq(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Filter chat titles..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:"var(--hc-text-control)"}}/>
-            <span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",color:t.mut,display:"flex",pointerEvents:"none",opacity:.75}}><IC.Search/></span>
-          </div>
           <div style={{position:"relative"}}>
             <input ref={ftsRef} value={ftsQuery} onChange={e=>setFtsQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){closeSidebarSearch();}}} placeholder="Search all messages..." style={{...inputS,padding:"7px 30px 7px 9px",fontSize:"var(--hc-text-control)"}}/>
             {ftsLoading?<span style={{position:"absolute",right:9,top:"50%",transform:"translateY(-50%)",display:"flex",color:t.mut}}><Spinner size={12}/></span>:<button onClick={closeSidebarSearch} title="Close search" style={{position:"absolute",right:5,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",lineHeight:1,padding:"2px 4px"}}>×</button>}
@@ -5642,9 +5666,10 @@ function HyprChat(){
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${t.brd}22`,color:t.dim}}>{r.role==="user"?"You":r.role==="assistant"?"Reply":r.role}</span></div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
-        </div>:(()=>{const filtering=!!sq.trim()||!!activeTagFilter;const side=sidebarSections(filtC,workspaces,{collapsed:wsCollapsed,expanded:wsExpanded,filtering,activeId:panel==="chat"?actId:null,nowMs:Date.now(),getMs:c=>_parseUtcishMs(c.updated_at)});const menuWorkspaces=workspaces.slice(0,8);const renderConv=(c,opts={})=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const isPinned=c.pinned==="1"||c.pinned===1;const local=isGhostConv(c)||/^l-/.test(String(c.id));
+        </div>:(()=>{const filtering=!!sq.trim()||!!activeTagFilter;const nowMs=Date.now();const side={...sidebarSections(filtC,workspaces,{collapsed:wsCollapsed,expanded:wsExpanded,filtering,activeId:panel==="chat"?actId:null,nowMs,getMs:c=>_parseUtcishMs(c.updated_at)}),nowMs};const menuWorkspaces=workspaces.slice(0,8);const renderConv=(c,opts={})=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const isPinned=c.pinned==="1"||c.pinned===1;const local=isGhostConv(c)||/^l-/.test(String(c.id));
           const addTag=()=>{const tag=newTagInput.trim();if(!tag)return;setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");};
-          return <ConvRow key={opts.key||c.id} conv={c} title={c.title||"New Chat"} t={t} inputS={inputS} btnS={btnS} nested={!!opts.nested}
+          const updatedMs=_parseUtcishMs(c.updated_at);
+          return <ConvRow key={opts.key||c.id} conv={c} title={c.title||"New Chat"} t={t} inputS={inputS} btnS={btnS} nested={!!opts.nested} when={shortAgo(updatedMs,side.nowMs)} whenTitle={fullWhen(updatedMs)}
             workspaces={local?[]:menuWorkspaces.map(w=>({id:w.id,name:w.name,member:(c.workspace_ids||[]).includes(w.id)}))}
             active={c.id===actId&&panel==="chat"} replying={streaming&&streamingCidRef.current===c.id} unread={unreadReplies.has(c.id)}
             hasDraft={c.id!==actId&&chatDrafts.hasDraft(c.id)} queued={(messageQueue.all[c.id]?.items||[]).length}
@@ -5688,9 +5713,16 @@ function HyprChat(){
           </div>;
         })}
       </div>}
-      <div style={{padding:"7px 11px",borderTop:"1px solid var(--hc-line-subtle)",fontSize:"var(--hc-text-secondary)",color:t.mut,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-        {svc("ollama")}Models {svc("codebox")}Sandbox {svc("searxng")}Search {svc("n8n")}Automation{health.comfyui!==undefined&&<> {svc("comfyui")}Images</>}{health.stt!==undefined&&<> {svc("stt")}Listen</>}{health.tts!==undefined&&<> {svc("tts")}Speak</>}
-      </div>
+      {(()=>{const status=serviceStatus(health);const lines=["ollama","codebox","searxng","n8n","comfyui","stt","tts"].filter(n=>health[n]!==undefined).map(n=>`${serviceLabel(n)}: ${health[n]?.status||"?"}${health[n]?.response_ms!=null?` (${health[n].response_ms} ms)`:""}`);
+        return <div className="sb-foot">
+          <button type="button" className="sb-profile" onClick={()=>{openSettings();setSettingsTab("users");}} title="Profiles and sign-in">
+            <span className="sb-avatar" aria-hidden="true">{(currentUser?.name||"?").trim().charAt(0).toUpperCase()||"?"}</span>
+            <span className="sb-name">{currentUser?.name||"Choose user"}</span>
+          </button>
+          <button type="button" className={`sb-status is-${status.tone}`} onClick={openServiceMonitor} title={[...lines,"Open the service monitor"].join("\n")}>
+            <span className="sb-status-dot" aria-hidden="true"/>{status.text}
+          </button>
+        </div>;})()}
     </div>
 
     {/* Mobile drawer backdrop */}
@@ -5730,27 +5762,12 @@ function HyprChat(){
               <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:500,color:type==="persona"?t.text:c}}>{act.persona_name}</span>
             </div>
             <button onClick={leaveActiveProfile} className="hc-chip" style={{"--chip-c":t.err,fontFamily:font}}><IC.X/> Leave {label}</button></>;})()}
-            {!act.is_council&&!act.persona_name&&<div className="hc-header-secondary" style={{position:"relative"}}>
-              <button onClick={()=>setShowSysPromptPicker(p=>!p)} className="hc-chip" style={{"--chip-c":act.system_prompt?t.warm:t.mut,fontFamily:font,...(act.system_prompt?{}:{background:"transparent"})}}>
-                {act.system_prompt?"\u{1F4CB} System Prompt":"\u002B System Prompt"}
-              </button>
-              {showSysPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 6px)",left:0,zIndex:9999,minWidth:260,maxWidth:340,padding:8}}>
-                {(()=>{const sysPrompts=validPrompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
-                  {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:`${t.surface}66`,border:"1px solid var(--hc-line-subtle)",transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
-                    <div style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:t.text}}>{p.title}</div>
-                    <div style={{fontSize:"var(--hc-text-micro)",color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
-                  </div>)}
-                </div>
-                {act.system_prompt&&<div style={{borderTop:"1px solid var(--hc-line-subtle)",marginTop:4,paddingTop:4}}>
-                  <button onClick={()=>{uConv(actId,{system_prompt:""});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:"var(--hc-text-micro)"}}>Clear System Prompt</button>
-                </div>}</>
-                :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:"var(--hc-text-micro)"}}>No system prompt templates. Check "Available as System Prompt" on any prompt in the Prompt Library.</div>;})()}
-              </div>}
-            </div>}
+            {!act.is_council&&!act.persona_name&&act.system_prompt&&<button onClick={()=>setShowSysPromptPicker(p=>!p)} className="hc-chip" title="This chat has its own system prompt. Click to change or remove it." style={{"--chip-c":t.warm,fontFamily:font}}>System prompt</button>}
           </>}
         </div>
+        {panel==="chat"&&!isMobile&&<div className="hc-chat-title" title={act?.title||undefined}>{act?(act.title||"New chat"):""}</div>}
         {/* Token counter + export — persistent */}
-        <div className="hc-header-secondary" style={{display:"flex",alignItems:"center",gap:8,...(isMobile?{flexWrap:"wrap",minWidth:0,maxWidth:"100%"}:{})}}>
+        <div className="hc-header-secondary" style={{display:"flex",alignItems:"center",gap:8,...(isMobile?{minWidth:0,maxWidth:"100%"}:{})}}>
           {/* Activity Center */}
           {downloads.length>0&&(()=>{
             const active=downloads.filter(d=>!_activityIsTerminal(d.status));
@@ -5834,7 +5851,7 @@ function HyprChat(){
             Memory
             <span style={{color:t.mut,fontWeight:500}}>HyprChat</span>
           </span>}
-          {panel==='chat'&&actId&&act&&!ghostActive&&<ActionMenu
+          {panel==='chat'&&actId&&act&&!ghostActive&&!isMobile&&<ActionMenu
             key={`${currentUserId}:${actId}`}
             label={`Workspace context: ${workspaceContextLabel}`}
             triggerText={workspaceContextLabel}
@@ -5853,31 +5870,19 @@ function HyprChat(){
               {label:'All workspaces',onClick:()=>{workspaceLoadEpoch.current++;setWsPanel(false);setActiveWs(null);setWsDetail(null);setPanel('workspaces');}},
             ]}
           />}
-          {panel==="chat"&&ghostActive&&<span title="Ghost mode: this chat stays local and is not saved, indexed, or added to history." className="hc-chip" style={{"--chip-c":t.pink}}>
-            <IC.Ghost/> Ghost
-          </span>}
-          {panel==="chat"&&<button onClick={toggleGlobalMemory} aria-label="HyprChat memory" aria-pressed={globalMemoryActive} disabled={ghostActive} title={act?(globalMemoryActive?"HyprChat memory on: this chat recalls accepted global memories and queues suggestions":"HyprChat memory: recall accepted global memories and queue suggestions for this chat"):(globalMemoryActive?"HyprChat memory on for the next chat":"HyprChat memory: enable recall for the next chat")} className={`hc-icon-btn is-lg${globalMemoryActive?" is-open":""}`} style={{color:ghostActive?`${t.mut}66`:globalMemoryActive?t.acc:t.mut,cursor:ghostActive?"default":"pointer",opacity:ghostActive?0.45:1}}><IC.Brain/></button>}
-          {panel==="chat"&&<button onClick={toggleGhostMode} aria-label="Ghost mode" aria-pressed={ghostActive} title={ghostActive?"Ghost mode on: this chat is local only and will not be saved or indexed":"Ghost mode: start a chat that is never saved or indexed"} className="hc-icon-btn is-lg" style={{color:ghostActive?t.pink:t.mut,background:ghostActive?`${t.pink}18`:undefined}}><IC.Ghost/></button>}
-          {/* Dark/Light mode toggle */}
-          <button onClick={()=>{if(isLightTheme){setTm(prevDarkTheme);}else{setPrevDarkTheme(tm);localStorage.setItem("hc-prev-dark",tm);setTm(LIGHT_PAIRS[tm]||"oneLight");}}} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} aria-label={isLightTheme?"Switch to dark mode":"Switch to light mode"} className="hc-icon-btn is-lg" style={{color:t.mut,fontSize:"var(--hc-text-control)"}}><span key={isLightTheme?"sun":"moon"} className="hc-theme-icon">{isLightTheme?<IC.Sun/>:<IC.Moon/>}</span></button>
-          {/* Export / Import */}
-          {panel==="chat"&&act&&(act.messages||[]).length>0&&<>
-            <div ref={exportMenuRef} onBlur={e=>{if(!e.currentTarget.contains(e.relatedTarget))setShowExportMenu(false);}} onKeyDown={e=>{
-              if(e.key==="Escape"){e.preventDefault();e.stopPropagation();setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();}
-              if(showExportMenu&&['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
-                e.preventDefault();const items=Array.from(exportMenuRef.current.querySelectorAll('[role="menuitem"]'));const i=items.indexOf(document.activeElement);
-                items[e.key==='Home'?0:e.key==='End'?items.length-1:(i+(e.key==='ArrowDown'?1:-1)+items.length)%items.length]?.focus();
-              }
-            }} style={{position:"relative"}}>
-              <button onClick={()=>setShowExportMenu(p=>!p)} aria-label="Export chat" aria-expanded={showExportMenu} aria-haspopup="menu" title="Export chat" className="hc-chip" style={{"--chip-c":showExportMenu?t.acc:t.mut,fontFamily:font,...(showExportMenu?{}:{background:"transparent"})}}><IC.Upload/> Export</button>
-              {showExportMenu&&<div role="menu" aria-label="Export chat" className="hc-pop hc-elev-2" data-placement="bottom" data-align="end" style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:250,minWidth:150,padding:5}}>
-                <button role="menuitem" onClick={()=>{setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();exportChat();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",textAlign:"left"}}><span>Markdown</span><span style={{color:t.mut,fontSize:"var(--hc-text-micro)"}}>MD</span></button>
-                <button role="menuitem" onClick={()=>{setShowExportMenu(false);exportMenuRef.current?.querySelector('button')?.focus();exportChatJSON();}} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,background:"transparent",border:"none",color:t.dim,cursor:"pointer",padding:"7px 9px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-micro)",textAlign:"left"}}><span>JSON</span><span style={{color:t.mut,fontSize:"var(--hc-text-micro)"}}>JSON</span></button>
-              </div>}
-            </div>
-          </>}
+          {/* Ghost mode: always here, beside the light/dark switch. Pink and named while it is on. */}
+          {panel==="chat"&&<button type="button" aria-pressed={!!ghostActive} aria-label="Ghost mode" title={ghostActive?"Ghost mode is on: this chat stays local and is not saved, indexed or added to history. Click to turn it off.":"Ghost mode: a chat that is never saved"} onClick={()=>{if(!(streaming||councilRunning))setGhostPlayed(true);toggleGhostMode();}} className={`hc-icon-btn is-lg hc-ghost-toggle${ghostActive?" is-on":""}${ghostPlayed?" is-played":""}`} style={{"--ghost-c":t.pink}}>
+            <span key={ghostActive?"on":"off"} className="hc-ghost-icon"><IC.Ghost/></span>
+            {ghostActive&&!isMobile&&<span className="hc-ghost-label">Ghost</span>}
+          </button>}
+          {/* Dark/Light mode toggle (on a phone it is an item of the Chat options menu) */}
+          {!isMobile&&<button onClick={toggleLightDark} title={isLightTheme?"Switch to dark mode":"Switch to light mode"} aria-label={isLightTheme?"Switch to dark mode":"Switch to light mode"} className="hc-icon-btn is-lg hc-sky-toggle" style={{color:t.mut,fontSize:"var(--hc-text-control)","--sky-sun":t.warm}}>
+            <span className={`hc-sky${skyPlayed?" is-animated":""}`} aria-hidden="true">
+              <span className={`hc-sky-sun ${isLightTheme?"is-up":"is-down"}`}><IC.Sun/></span>
+              <span className={`hc-sky-moon ${isLightTheme?"is-down":"is-up"}`}><IC.Moon/></span>
+            </span>
+          </button>}
           <input ref={importRef} type="file" accept=".json" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importChatJSON(e.target.files[0]);e.target.value="";}}/>
-          {!isMobile&&panel==="chat"&&<button onClick={()=>importRef.current?.click()} title="Import chat from JSON" className="hc-chip" style={{"--chip-c":t.mut,background:"transparent",fontFamily:font}}><IC.Download/> Import</button>}
           {panel==="chat"&&act&&!(act.is_council==="1"||act.is_council===1||act.is_council===true)&&(()=>{
             // Context pill. The reading comes from the server (contextMeter.js); this is the window the
             // next reply will get: shown before a chat's first reply, and when the chat's model or context
@@ -5894,6 +5899,33 @@ function HyprChat(){
             };
             return <ContextMeter reading={contextReadings[actId]} expect={{model:modelName,asked:cloudModel||codingContext?0:chatCtx.asked}} fallbackWindow={maxCtx} compactPercent={compactPercent} live={live} actions={actions} speed={tokS} onInspect={(()=>{const last=[...(act?.messages||[])].reverse().find(m=>m.role==="assistant"&&m.id!=null&&!m.isS);return last?()=>setInspectorMessage(last.id):null;})()}/>;
           })()}
+          {panel==="chat"&&<div style={{position:"relative",display:"flex"}}>
+            <ActionMenu key={`options:${actId||"new"}`} label="Chat options" compact items={[
+              act&&!act.is_council&&!act.persona_name&&{label:act.system_prompt?"Change the system prompt…":"Add a system prompt…",onClick:()=>setShowSysPromptPicker(true)},
+              {label:"Memory in this chat",checked:!!globalMemoryActive,disabled:ghostActive,onClick:toggleGlobalMemory},
+              act&&(act.messages||[]).length>0&&{label:"Export as Markdown",onClick:()=>exportChat()},
+              act&&(act.messages||[]).length>0&&{label:"Export as JSON",onClick:()=>exportChatJSON()},
+              !isMobile&&{label:"Import a chat…",onClick:()=>importRef.current?.click()},
+              ...(isMobile&&actId&&act&&!ghostActive?[
+                {key:'ws:auto',label:'Workspace context: automatic',role:'menuitemradio',checked:workspaceContextMode==='auto',disabled:workspaceContextSaving,onClick:()=>changeWorkspaceContext('auto')},
+                {key:'ws:off',label:'Workspace context: off',role:'menuitemradio',checked:workspaceContextMode==='off',disabled:workspaceContextSaving,onClick:()=>changeWorkspaceContext('off')},
+                ...workspaces.map(w=>({key:`ws:${w.id}`,label:`Workspace context: ${w.name}`,role:'menuitemradio',checked:workspaceContextMode==='selected'&&act.workspace_context.workspace_id===w.id,disabled:workspaceContextSaving,onClick:()=>changeWorkspaceContext(w.id)})),
+              ]:[]),
+              isMobile&&{label:isLightTheme?"Switch to dark mode":"Switch to light mode",onClick:toggleLightDark},
+            ]}/>
+            {act&&showSysPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="bottom" style={{position:"absolute",top:"calc(100% + 6px)",right:0,zIndex:9999,minWidth:260,maxWidth:340,padding:8}}>
+                {(()=>{const sysPrompts=validPrompts.filter(p=>p.is_system||(p.category&&p.category.toLowerCase()==="system prompt"));return sysPrompts.length?<><div style={{maxHeight:200,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                  {sysPrompts.map(p=><div key={p.id} onClick={()=>{uConv(actId,{system_prompt:p.content});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:p.content})});setShowSysPromptPicker(false);}} style={{padding:"7px 10px",borderRadius:"var(--hc-radius)",cursor:"pointer",background:`${t.surface}66`,border:"1px solid var(--hc-line-subtle)",transition:"background .12s"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.warm}15`} onMouseLeave={e=>e.currentTarget.style.background=`${t.surface}66`}>
+                    <div style={{fontSize:"var(--hc-text-micro)",fontWeight:600,color:t.text}}>{p.title}</div>
+                    <div style={{fontSize:"var(--hc-text-micro)",color:t.mut,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,80)}...</div>
+                  </div>)}
+                </div>
+                {act.system_prompt&&<div style={{borderTop:"1px solid var(--hc-line-subtle)",marginTop:4,paddingTop:4}}>
+                  <button onClick={()=>{uConv(actId,{system_prompt:""});if(!isGhostConv(act))fetch(`${API}/api/conversations/${actId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({system_prompt:""})});setShowSysPromptPicker(false);}} style={{...btnS(t.err),width:"100%",justifyContent:"center",fontSize:"var(--hc-text-micro)"}}>Clear System Prompt</button>
+                </div>}</>
+                :<div style={{padding:12,textAlign:"center",color:t.mut,fontSize:"var(--hc-text-micro)"}}>No system prompt templates. Check "Available as System Prompt" on any prompt in the Prompt Library.</div>;})()}
+              </div>}
+          </div>}
         </div>
       </div>
 
@@ -5926,7 +5958,7 @@ function HyprChat(){
       :panel==="images"?<ImageStudioPanel key={currentUserId} t={t} font={font} configured={!!comfyuiUrl} onUseInChat={att=>{if(att){setAttachments(p=>[...p,att]);setPanel("chat");notify({type:"success",text:"Image added to composer",duration:1800});}}} notify={notify} confirmAction={confirmAction} inputS={inputS} fieldLabelS={secFieldLabelS} sliderField={sliderField}/>
       :panel==="memory"?<MemoryProfilePanel t={t} API={API} font={font} notify={notify} onOpenConv={id=>loadConversation(id)} models={models} wsModel={wsModel}/>
       :panel==="kb"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    {panelHeader(<IC.Database/>,"Knowledge Bases",<button onClick={createKb} style={btnS(t.acc)}><IC.Plus/> New KB</button>)}
+    <PanelHeader t={t} icon={<IC.Database/>} title="Knowledge Bases" subtitle="Documents your chats can search and quote."><button className="hc-button is-primary" onClick={createKb}><IC.Plus/> New knowledge base</button></PanelHeader>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {kbs.map(kb=><div key={kb.id} style={cardS}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
@@ -6041,11 +6073,17 @@ function HyprChat(){
   </div>
 
       :panel==="tools"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    {panelHeader(<IC.Tool/>,"Tools",<>
-        <button onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(pasteMode?t.warm:t.mut)}>
-          {pasteMode?<><IC.X/> Cancel</>:<><IC.Code/> Paste Code</>}
+    <PanelHeader t={t} icon={<IC.Tool/>} title="Tools" subtitle="What a model can do in a chat besides writing."
+      nav={<Segmented label="Tool lists" value={toolsTab} onChange={setToolsTab} options={[{v:"mine",label:`Your tools · ${tools.length}`},{v:"connectors",label:`Connectors · ${mcpServers.length+openapiConnectors.length}`},{v:"builtin",label:`Built-in · ${builtinTools.length}`}]}/>}>
+      {toolsTab==="connectors"&&<>
+        <button className="hc-button" onClick={refreshConnectors}><IC.Refresh/> Refresh</button>
+        <button className="hc-button is-primary" aria-expanded={connectorFormsOpen} onClick={()=>setConnectorFormsOpen(open=>!open)}>{connectorFormsOpen?<><IC.X/> Close</>:<><IC.Plus/> Add connector</>}</button>
+      </>}
+      {toolsTab==="mine"&&<>
+        <button className="hc-button" onClick={()=>{setPasteMode(p=>!p);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}}>
+          {pasteMode?<><IC.X/> Cancel</>:<><IC.Code/> Paste code</>}
         </button>
-        <label style={btnS(t.warm)}><IC.Upload/> Upload .py<input type="file" accept=".py" multiple style={{display:"none"}} onChange={async e=>{
+        <label className="hc-button" style={{cursor:"pointer"}}><IC.Upload/> Upload .py<input type="file" accept=".py" multiple style={{display:"none"}} onChange={async e=>{
           for(const f of e.target.files){const fd=new FormData();fd.append("file",f);
             try{const r=await fetch(`${API}/api/tools/upload`,{method:"POST",body:fd});const d=await r.json().catch(()=>({}));
               if(!r.ok){notify({type:"error",text:`Upload failed: ${f.name}`,detail:d.detail||`HTTP ${r.status}`});continue;}
@@ -6059,9 +6097,10 @@ function HyprChat(){
             if(!r.ok){notify({type:"error",text:"Tool create failed",detail:d.detail||`HTTP ${r.status}`});return;}
             setTools(p=>[...p,d]);setEditTool(d.id);}
           catch{const id=`t-${Date.now()}`;setTools(p=>[...p,{id,...tl}]);setEditTool(id);}
-        }} style={btnS(t.acc)}><IC.Plus/> New</button>
-      </>,{color:t.warm})}
-    {pasteMode&&<div style={{padding:16,borderBottom:"1px solid var(--hc-line-subtle)",background:`${t.warm}07`,animation:"fadeIn .2s"}}>
+        }} className="hc-button is-primary"><IC.Plus/> New tool</button>
+      </>}
+    </PanelHeader>
+    {toolsTab==="mine"&&pasteMode&&<div style={{padding:16,borderBottom:"1px solid var(--hc-line-subtle)",background:`${t.warm}07`,animation:"fadeIn .2s"}}>
       <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.warm,marginBottom:8,letterSpacing:0,textTransform:"none"}}>Paste Python Tool</div>
       <textarea value={pasteCode} rows={10} placeholder={"def my_tool(query: str) -> str:\n    \"\"\"Brief description of what this tool does.\"\"\"\n    # your code here\n    return result"}
         onChange={e=>{
@@ -6101,8 +6140,7 @@ function HyprChat(){
       </div>
     </div>}
     <div style={{flex:1,overflowY:"auto",padding:20}}>
-      {builtinTools.length>0&&<div style={{marginBottom:16}}>
-        <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,letterSpacing:0,textTransform:"none",marginBottom:8}}>Built-in</div>
+      {toolsTab==="builtin"&&builtinTools.length>0&&<div style={{marginBottom:16}}>
         {builtinTools.map(bt=>{
           const isExp=expandedBuiltin===bt.id;
           const isCa=bt.id==="codeagent";
@@ -6160,12 +6198,9 @@ function HyprChat(){
           </div>;
         })}
       </div>}
-      <div style={{marginBottom:16}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
-          <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,letterSpacing:0,textTransform:"none"}}>Connectors</div>
-          <button onClick={refreshConnectors} style={{...btnS(t.mut),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}>Refresh</button>
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:10,marginBottom:10}}>
+      {toolsTab==="connectors"&&<div style={{marginBottom:16}}>
+        {!connectorFormsOpen&&!mcpServers.length&&!openapiConnectors.length&&<EmptyState icon={<IC.Plug/>} title="No connectors yet" hint="A connector gives chats the tools of an MCP server or of any service with an OpenAPI description." action={<button className="hc-button is-primary" onClick={()=>setConnectorFormsOpen(true)}><IC.Plus/> Add connector</button>}/>}
+        {connectorFormsOpen&&<div className="hc-reveal" style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,280px),1fr))",gap:10,marginBottom:10}}>
           <div style={{...cardS,borderColor:`${t.acc}33`}}>
             <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:8}}>MCP Server</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 110px",gap:8,marginBottom:8}}>
@@ -6216,7 +6251,7 @@ function HyprChat(){
               finally{setConnectorBusy("");}
             }} style={{...btnS(t.f1),opacity:connectorBusy==="create:openapi"?0.5:1}}>Add OpenAPI</button>
           </div>
-        </div>
+        </div>}
         {[...mcpServers.map(x=>({...x,kind:"mcp"})),...openapiConnectors.map(x=>({...x,kind:"openapi"}))].map(c=>{
           const col=c.kind==="mcp"?t.acc:t.f1;const busy=connectorBusy===`${c.kind}:${c.id}`;const basePath=c.kind==="mcp"?"mcp-servers":"openapi-connectors";
           return <div key={`${c.kind}:${c.id}`} style={{...cardS,borderColor:`${col}33`,marginBottom:8}}>
@@ -6237,9 +6272,9 @@ function HyprChat(){
           {connectorTools.slice(0,40).map(tl=><span key={tl.id} title={tl.description} style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.acc}12`,border:`1px solid ${t.acc}28`,color:t.acc}}>{tl.name||tl.display_name}</span>)}
           {connectorTools.length>40&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,padding:"3px 8px"}}>+{connectorTools.length-40} more</span>}
         </div>}
-      </div>
-      {!tools.length&&!pasteMode&&<EmptyState icon={<IC.Tool/>} title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} style={btnS(t.warm)}><IC.Plus/> Paste Code</button>}/>}
-      {tools.map(tl=>{
+      </div>}
+      {toolsTab==="mine"&&!tools.length&&!pasteMode&&<EmptyState icon={<IC.Tool/>} title="No custom tools yet" hint="Paste Python code or upload a .py file to create a tool the AI can call." action={<button onClick={()=>{setPasteMode(true);setPasteCode("");setPasteToolName("");setPasteToolDesc("");}} className="hc-button"><IC.Plus/> Paste code</button>}/>}
+      {toolsTab==="mine"&&tools.map(tl=>{
         const snippet=(tl.code||"").split("\n").slice(0,2).join("\n");
         return <div key={tl.id} style={{...cardS,borderColor:editTool===tl.id?`${t.warm}55`:`${t.brd}44`}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:editTool===tl.id?8:0}}>
@@ -6270,16 +6305,17 @@ function HyprChat(){
   </div>
 
       :panel==="research"?(()=>{const tmpl=researchTemplates.find(x=>x.id===researchDraft.report_type)||researchTemplates[0]||{id:"analyst",label:"Analyst Report",default_depth:4,sections:[]};const report=activeResearch;const body=cleanResearchMarkdown(researchLiveMarkdown||report?.report_markdown||"").trim();const sources=report?.sources||[];const findings=report?.findings||[];const metrics=report?.metrics||{};const audit=metrics.audit||{};const statusMeta=s=>{const k=String(s||"queued").toLowerCase();const m={complete:[t.ok,"Complete"],partial:[t.warm,"Partial"],running:[t.acc,"Running"],queued:[t.warm,"Queued"],failed:[t.err,"Failed"],interrupted:[t.warm,"Interrupted"],cancelling:[t.warm,"Cancelling"],cancelled:[t.mut,"Cancelled"]};return m[k]||m.queued;};const tierMeta=tier=>{const k=Number(tier??2);const m={0:["Primary",t.ok],1:["Investigative",t.warm],2:["General",t.mut],3:["Fact-check",t.f1]};return m[k]||m[2];};const fmtAudit=x=>typeof x==="string"?x:`${x?.finding_id?`Finding #${x.finding_id}: `:""}${x?.issue||x?.note||x?.summary||JSON.stringify(x)}`;const eventLabel=(ev,i)=>{const d=ev.data||{};if(ev.type==="research_phase")return `${d.label||d.phase||"Phase"}${d.detail?` - ${d.detail}`:""}`;if(ev.type==="research_source_found")return `Found [S${d.index||d.source_index||"?"}] ${d.title||d.url||"source"}`;if(ev.type==="research_source_read")return `Read [S${d.source_index||"?"}] ${d.title||d.url||"source"}${d.chars?` (${Math.max(1,Math.round(d.chars/1000))}k chars)`:""}`;if(ev.type==="research_finding")return `Extracted Finding #${d.finding_id||i+1}${d.claim?`: ${d.claim}`:""}`;if(ev.type==="research_audit")return d.message||`Evidence audit${d.coverage_score!==undefined?` - model assessment ${d.coverage_score}/100`:""}`;if(ev.type==="research_done")return `Report ${d.status||"complete"}${d.summary?` - ${d.summary}`:""}`;if(ev.type==="research_error")return d.error||d.status?`Stopped - ${d.error||d.status}`:"Research stopped";return d.label||d.status||d.message||d.title||d.phase||ev.type;};const activeStatus=statusMeta(report?.status);const reportStatus=String(report?.status||"").toLowerCase();const reportLive=["queued","running"].includes(reportStatus);const reportStartedMs=_parseUtcishMs(report?.created_at)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.ts)||_parseUtcishMs((researchEvents||[]).find(e=>e.type==="research_started")?.timestamp);const elapsedSeconds=reportLive&&reportStartedMs?Math.max(Math.floor((activityNow-reportStartedMs)/1000),Math.round(metrics.elapsed||0)):Math.round(metrics.elapsed||0);const elapsedLabel=elapsedSeconds>0?`${elapsedSeconds}s`:"--";const filteredReports=researchReports.filter(r=>!researchReportFilter||`${r.title||""} ${r.query||""} ${r.summary||""}`.toLowerCase().includes(researchReportFilter.toLowerCase()));const sectionHeadings=researchHeadings(body);const cardS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:14,display:"flex",flexDirection:"column",gap:9};const cardHeadS={fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,textTransform:"none",letterSpacing:0};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}><IC.Search/><span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc}}>Deep Research</span>{researchRunning&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"3px 8px",borderRadius:"var(--hc-radius)",background:`${t.acc}14`,border:`1px solid ${t.acc}33`,color:t.acc}}>live</span>}<div style={{display:"flex",gap:3,marginLeft:8,padding:3,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",background:`${t.bgDeep}F5`}}>{[["new","New"],["reports",researchReports.length?`Reports ${researchReports.length}`:"Reports"]].map(([id,label])=><button key={id} onClick={()=>setResearchView(id)} style={{fontSize:"var(--hc-text-control)",padding:"5px 9px",borderRadius:"var(--hc-radius)",border:"none",background:researchView===id?`${t.acc}22`:"transparent",color:researchView===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontWeight:researchView===id?800:600,transition:"background .15s ease,color .15s ease"}}>{label}</button>)}</div></div>
-      {researchView==="reports"&&<div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center"}}>
-        {activeResearchId&&researchRunning&&<button onClick={()=>cancelResearchReport(activeResearchId)} style={btnS(t.err)}><IC.Stop/> Stop</button>}
-        {activeResearchId&&<button onClick={()=>rerunResearchReport(activeResearchId)} style={btnS(t.acc)}><IC.Refresh/> Rerun</button>}
+    <PanelHeader t={t} icon={<IC.Search/>} title="Deep Research" subtitle={researchRunning?"A report is being written now.":"Sourced reports written from many searches."}
+      nav={<Segmented label="Research views" value={researchView} onChange={setResearchView} options={[{v:"reports",label:researchReports.length?`Reports · ${researchReports.length}`:"Reports"},{v:"new",label:"New report"}]}/>}>
+      {researchView==="reports"&&<>
+        {activeResearchId&&researchRunning&&<button className="hc-button is-danger" onClick={()=>cancelResearchReport(activeResearchId)}><IC.Stop/> Stop</button>}
+        {activeResearchId&&<button className="hc-button" onClick={()=>rerunResearchReport(activeResearchId)}><IC.Refresh/> Rerun</button>}
         {contentWidth<900&&<button className="hc-button" onClick={()=>setResearchListOpen(true)}>Report list</button>}
         {contentWidth<1200&&<button className="hc-button" onClick={()=>setResearchDetailsOpen(true)}>Evidence & audit</button>}
         {body&&<ActionMenu label="Export report" items={[{label:'Markdown',onClick:exportResearchMarkdown},{label:'PDF',onClick:exportResearchPdf},{label:'Print',onClick:printResearchReport}]}/>}
-      </div>}
-    </div>
+        <button className="hc-button is-primary" onClick={()=>setResearchView("new")}><IC.Plus/> New report</button>
+      </>}
+    </PanelHeader>
     {researchView==="reports"&&report&&<ResearchRecovery key={report.id} report={report} t={t} btnS={btnS} inputS={inputS} onRefresh={()=>loadResearchReport(report.id)}/>}
     {researchView==="new"?
     <div style={{flex:1,overflowY:"auto",minHeight:0,padding:"28px 24px"}}>
@@ -6495,19 +6531,12 @@ function HyprChat(){
   </div>;})()
 
       :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={flexWrap:"wrap",padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}F5`};const sectionS={background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:12};const kickerS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,textTransform:"none",letterSpacing:0};const metaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:"var(--hc-radius)",background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:"var(--hc-radius)",border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600});const nativeSelectS={...inputS,fontSize:"var(--hc-text-secondary)",padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};try{const r=await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||`HTTP ${r.status}`);}catch(error){notify({type:"error",text:"Member not saved",detail:error.message||String(error)});return;}updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
-    <div style={headerS}>
-      <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
-        <span style={{width:30,height:30,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}14`,border:`1px solid ${t.pink}32`,color:t.pink}}><IC.Council/></span>
-        <div style={{minWidth:0}}>
-          <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.text}}>Council of AI</div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}>Run moderated multi-model discussions with custom or persona-backed members.</div>
-        </div>
-      </div>
+    <PanelHeader t={t} icon={<IC.Council/>} color={t.pink} title="Council of AI" subtitle="Moderated discussions between several models or personas.">
       <button onClick={async()=>{
         const r=await fetch(`${API}/api/councils`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"New Council",host_model:models[0]||"qwen3.5:27b",host_system_prompt:""})});
         const c=await r.json();setCouncils(p=>[c,...p]);setActiveCouncilId(c.id);
-      }} style={{...btnS(t.pink),padding:"8px 12px",fontWeight:700}}><IC.Plus/> New Council</button>
-    </div>
+      }} className="hc-button is-primary"><IC.Plus/> New council</button>
+    </PanelHeader>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {councilPresets.length>0&&<div style={{...sectionS,marginBottom:14,padding:12}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:10}}>
@@ -6844,14 +6873,8 @@ function HyprChat(){
           </div>
         </div>}
       </div>;};return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"14px 20px 0",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"flex-end",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"flex-end",gap:4,flexWrap:"wrap",minWidth:0}}>
-        <span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc,marginRight:12,paddingBottom:10}}>Agents</span>
-        {[["agents",<IC.Cube/>,"Agents",agentProfiles.length],["personas",<IC.User/>,"Personas",personaProfiles.length]].map(([key,ico,label,count])=><button key={key} onClick={()=>{setProfileTab(key);setEditMc(null);}} style={{padding:"8px 16px",borderRadius:"8px 8px 0 0",border:`1px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):t.brd}44`,borderBottom:`2px solid ${profileTab===key?(key==="personas"?t.pink:t.acc):"transparent"}`,background:profileTab===key?`${key==="personas"?t.pink:t.acc}12`:"transparent",color:profileTab===key?(key==="personas"?t.pink:t.acc):t.mut,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:profileTab===key?800:500,marginBottom:-1,display:"flex",alignItems:"center",gap:6}}>
-          {ico}{label}<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{count}</span>
-        </button>)}
-      </div>
-      <div style={{display:"flex",gap:5,flexWrap:"wrap",paddingBottom:9}}>
+    <PanelHeader t={t} icon={profileTab==="personas"?<IC.User/>:<IC.Cube/>} color={profileTab==="personas"?t.pink:t.acc} title={profileTab==="personas"?"Personas":"Agents"} subtitle={profileTab==="personas"?"Characters to talk with: a voice, a look and a backstory.":"Assistants set up for a kind of work: a model, instructions, tools and knowledge."}
+      nav={<Segmented label="Profile kinds" value={profileTab} onChange={key=>{setProfileTab(key);setEditMc(null);}} options={[{v:"agents",label:`Agents · ${agentProfiles.length}`},{v:"personas",label:`Personas · ${personaProfiles.length}`}]}/>}>
         <button onClick={async()=>{
           const ok=await confirmAction({title:"Restore default agents",body:"Restore the built-in agents and persona templates? Existing custom profiles are left alone unless the backend explicitly updates a matching default.",confirmLabel:"Restore Defaults",tone:"warning"});
           if(!ok)return;
@@ -6863,13 +6886,11 @@ function HyprChat(){
             const names=(d.restored||[]).filter(x=>x.status==="ok").map(x=>x.name).join(", ");
             notify({type:"success",text:"Defaults restored",detail:names||"No defaults changed."});
           }catch(e){notify({type:"error",text:"Restore failed",detail:e.message});}
-        }} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}>Restore Defaults</button>
-        <button onClick={createAgent} style={btnS(t.acc)}><IC.Plus/> New Agent</button>
-        <button onClick={createPersona} style={btnS(t.pink)}><IC.Plus/> New Persona</button>
-        {profileTab==="personas"&&<><input ref={charCardImportRef} type="file" accept=".png,.json,application/json,image/png" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importCharacterCard(e.target.files[0]);e.target.value="";}}/>
-          <button onClick={()=>charCardImportRef.current?.click()} style={btnS(t.pink)}><IC.Download/> Import Card</button></>}
-      </div>
-    </div>
+        }} className="hc-button">Restore defaults</button>
+      {profileTab==="personas"&&<><input ref={charCardImportRef} type="file" accept=".png,.json,application/json,image/png" style={{display:"none"}} onChange={e=>{if(e.target.files?.[0])importCharacterCard(e.target.files[0]);e.target.value="";}}/>
+        <button className="hc-button" onClick={()=>charCardImportRef.current?.click()}><IC.Download/> Import card</button></>}
+      {profileTab==="personas"?<button className="hc-button is-primary" onClick={createPersona}><IC.Plus/> New persona</button>:<button className="hc-button is-primary" onClick={createAgent}><IC.Plus/> New agent</button>}
+    </PanelHeader>
     <div style={{padding:"10px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(min(100%,260px),1fr))",gap:8,background:`${t.surface}F5`}}>
       <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 10px",borderRadius:"var(--hc-radius)",border:`1px solid ${t.acc}24`,background:`${t.acc}08`,minWidth:0}}>
         <span style={{display:"flex",color:t.acc,marginTop:1,flexShrink:0}}><IC.Cube/></span>
@@ -6926,7 +6947,7 @@ function HyprChat(){
           {showScrollTop&&<button onClick={()=>{chatFollow.release();chatScrollRef.current?.scrollTo({top:0,behavior:"smooth"});}} style={{position:"absolute",top:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to top">{"\u2191"}</button>}
           {showScrollBottom&&<button onClick={()=>{chatFollow.follow();setShowScrollBottom(false);}} style={{position:"absolute",bottom:12,right:20,zIndex:20,...glass,border:"1px solid var(--hc-line)",borderRadius:"50%",width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",color:t.mut,fontSize:"var(--hc-text-control)",boxShadow:`0 2px 8px ${t.bg}88`}} title="Scroll to bottom">{"\u2193"}</button>}
           {/* Messages */}
-          <div ref={chatFollow.attach} onScroll={e=>{const distance=chatFollow.onScroll(e);setShowScrollTop(e.currentTarget.scrollTop>400);setShowScrollBottom(showJumpButton(distance,streaming));}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
+          <div ref={chatFollow.attach} className="hc-chat-scroll" onScroll={e=>{const distance=chatFollow.onScroll(e);setShowScrollTop(e.currentTarget.scrollTop>400);setShowScrollBottom(showJumpButton(distance,streaming));}} style={{flex:1,overflowY:"auto",padding:"20px 0 18px"}}>
           {!act||!(act.messages||[]).length&&!councilRunning&&!standaloneCoderJobs.length?<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:isMobile?"auto":"100%",gap:10,opacity:(loadingConv||act?.is_council)?0.68:1,paddingBottom:isEmptyChatSurface&&!isMobile?250:0,minHeight:isMobile?"100%":0,pointerEvents:"none",transition:"padding-bottom .35s ease"}}>
             {loadingConv?<SkeletonList t={t} rows={3} avatar style={{width:"min(760px,90%)"}}/>
             :<><ChatHero t={t} font={font} user={currentUser} tagline={dailyWelcome} isCouncil={!!act?.is_council} lifted={isEmptyChatSurface&&!isMobile} compact={isMobile&&keyboardOpen} mobile={isMobile}/>
@@ -7125,7 +7146,7 @@ function HyprChat(){
               </div>}
               <div ref={chatEnd}/>
             </div>;
-          })():<CodeCardSession key={`${currentUserId}:${actId||"empty"}`}><div className="hc-msg-list" style={{maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
+          })():<CodeCardSession key={`${currentUserId}:${actId||"empty"}`}><div className="hc-msg-list" style={{"--hc-chat-w":`${chatWidth}px`,maxWidth:chatWidth,margin:"0 auto",padding:"2px 18px 0"}}>
             {(()=>{const messageRows=(act.messages||[]).map((msg,index)=>({msg,index})).filter(({msg})=>msg.role==="user"||msg.role==="assistant");
               const totalMessages=messageRows.length;
               const visibleCount=Math.max(CHAT_HISTORY_RENDER_CHUNK,visibleMessageCounts[actId]||CHAT_HISTORY_RENDER_CHUNK);
@@ -7440,7 +7461,7 @@ function HyprChat(){
               </span>)}
           </div>}
           </div>
-          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",borderRadius:isEmptyChatSurface?26:22,padding:isEmptyChatSurface?"10px 8px 10px 16px":"8px 8px 8px 16px",display:"flex",alignItems:"center",gap:6,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
+          <div className={`hc-composer-box${isEmptyChatSurface?" empty-composer-box":""}`} data-state={composerState} data-focused={composerFocused?"true":"false"} data-active={composerActive?"true":"false"} style={{maxWidth:chatWidth,margin:"0 auto",borderRadius:isEmptyChatSurface?26:16,padding:isEmptyChatSurface?"10px 8px 10px 16px":"10px 10px 8px 12px",display:"flex",flexWrap:isEmptyChatSurface?"nowrap":"wrap",alignItems:"center",gap:6,rowGap:4,minHeight:isEmptyChatSurface?60:48,position:"relative",overflow:"visible",isolation:"isolate","--empty-composer-glow":`${composerColor}24`,"--hc-composer-tone":composerColor}}>
             {composerActive&&<div aria-hidden="true" style={{position:"absolute",inset:0,borderRadius:"inherit",pointerEvents:"none",overflow:"hidden",zIndex:0}}>
               {["top","right","bottom","left"].map(side=><span key={side} className={`composer-trace composer-trace-${side}`} style={{"--trace-color":composerColor}}/>)}
             </div>}
@@ -7486,7 +7507,7 @@ function HyprChat(){
                 {(()=>{const coderMc=mcs.find(m=>isCoderPersonaName(m.name));const isCoderActive=isCoderPersonaName(act?.persona_name)||(!actId&&isCoderPersonaName(pendingPersona?.persona_name));return coderMc?<button onClick={()=>{setShowQuickMenu(false);if(!actId){if(isCoderActive){setPendingPersona(null);setPendingToolIds([]);setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}const persona={model:coderMc.base_model||models[0]||"qwen3.5:27b",system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)};modelChoiceRef.current.pending=persona.model||"";setPendingPersona(persona);setPendingToolIds(persona.tool_ids||[]);setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);return;}if(isCoderActive){uConv(actId,{model_config_id:null,persona_name:null,persona_avatar:null,system_prompt:"",tool_ids:[]});setLastPersonaId(null);localStorage.removeItem("hc-last-persona");return;}uConv(actId,{model:coderMc.base_model||act?.model,system_prompt:coderMc.system_prompt,tool_ids:coderMc.tool_ids||[],model_config_id:coderMc.id,persona_name:coderMc.name,persona_avatar:profileAvatar(coderMc)});setLastPersonaId(coderMc.id);localStorage.setItem("hc-last-persona",coderMc.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"8px 10px",borderRadius:"var(--hc-radius)",border:"none",background:isCoderActive?`${t.ok}18`:`${t.surface}66`,color:isCoderActive?t.ok:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",textAlign:"left"}}>&lt;/&gt; {isCoderActive?"Disable Daedalus":"Activate Daedalus"}</button>:null;})()}
               </div>}
             </div>
-            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS}/>
+            <ComposerToolsMenu key={actId||"new"} tools={allTools} activeToolIds={activeToolIds} onToggle={toggleToolId} busy={streaming||!!preparingSend} isMobile={isMobile} t={t} font={font} inputS={inputS} labelled={!isEmptyChatSurface&&!isMobile}/>
             <input ref={fileRef} type="file" multiple style={{display:"none"}} onChange={e=>{if(e.target.files?.length)handleFileUpload(Array.from(e.target.files));e.target.value="";}}/>
             {validPrompts.length>0&&<div className="hc-composer-anchor" ref={promptPickerRef} style={{position:"relative",flexShrink:0}}>
               {showPromptPicker&&<div className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" style={{position:"absolute",bottom:"110%",left:0,zIndex:310,minWidth:280,maxWidth:360,padding:8}}>
@@ -7520,7 +7541,7 @@ function HyprChat(){
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();submitComposer();}}}
               placeholder={`${act?.is_council&&councilRunning?"⚖️ Council is deliberating...":act?.is_council?"Bring forth your query, the council awaits...":streaming&&streamingCidRef.current===actId?(isMobile?"Queue the next message…":"Type your next message: Enter adds it to the queue"):isMobile?"Message…":"What's on your mind?"}`} rows={1}
               disabled={councilRunning||loadingConv||(!!preparingSend&&!messageQueue.queue.sending)}
-              style={{flex:1,minWidth:0,width:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"8px 0",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
+              style={{...(isEmptyChatSurface?{flex:1,width:0}:{flex:"1 0 100%",order:-1,width:"auto"}),minWidth:0,overflowY:"auto",background:"transparent",border:"none",color:t.text,fontFamily:font,fontSize:isMobile?16:14,resize:"none",padding:isEmptyChatSurface?"11px 0":"4px 4px 2px",minHeight:isEmptyChatSurface?38:"auto",maxHeight:140,lineHeight:1.6}}
               onFocus={()=>setComposerFocused(true)} onBlur={()=>setComposerFocused(false)}
               onPaste={e=>{const files=Array.from(e.clipboardData?.files||[]);if(files.length){e.preventDefault();handleFileUpload(files);}}}/>
             {!act?.is_council&&(()=>{
@@ -7546,6 +7567,7 @@ function HyprChat(){
                 </div>}
               </div>;
             })()}
+            {!isEmptyChatSurface&&<span className="hc-composer-spacer" aria-hidden="true"/>}
             {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:"var(--hc-radius)",cursor:"pointer"}}>Retry transcription</button>}
             {sttUrl&&(recording||(!streaming&&!councilRunning&&!preparingSend))&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} className="hc-icon-btn is-lg" style={{color:recording?t.err:transcribing?t.warm:t.mut,background:recording?`${t.err}22`:undefined,cursor:transcribing?"default":"pointer",animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
               {transcribing?<Spinner size={13} style={{color:t.warm}}/>:<IC.Mic/>}
@@ -7563,8 +7585,10 @@ function HyprChat(){
       </>}
       {/* Settings dialog: a body portal, rendered beside the panel chain so it opens from any view, including a workspace detail. */}
       {settingsPresence.mounted&&ReactDOM.createPortal(<div className="hc-viewport-overlay hc-scrim" {...settingsPresence.props} style={{position:"fixed",inset:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font,color:t.text}} onClick={e=>{if(e.target===e.currentTarget)closeSettings();}}>
-    <div ref={settingsFocus} role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1} className="hc-dialog hc-dialog-card hc-elev-3" style={{zoom:_uiScale,width:isMobile?"calc(100vw / var(--hc-ui-scale))":"min(1100px,calc(95vw / var(--hc-ui-scale)))",maxHeight:isMobile?"calc((var(--hc-viewport-height) - var(--hc-safe-bottom)) / var(--hc-ui-scale))":"calc(var(--hc-viewport-height) / var(--hc-ui-scale))",height:isMobile?"calc((var(--hc-viewport-height) - var(--hc-safe-bottom)) / var(--hc-ui-scale))":"calc(85vh / var(--hc-ui-scale))",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",overflow:"hidden",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
-      <div style={{borderRight:"none",background:"var(--hc-sunken)",padding:isMobile?"calc(8px + env(safe-area-inset-top, 0px) / var(--hc-ui-scale)) 12px 8px":"18px 14px",display:"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:"1px solid var(--hc-line-subtle)",alignItems:"center"}:{})}}>
+    <div ref={settingsFocus} role="dialog" aria-modal="true" aria-label={showHealthMonitor?"Service monitor":"Settings"} tabIndex={-1} className="hc-dialog hc-dialog-card hc-elev-3" style={{zoom:_uiScale,width:isMobile?"calc(100vw / var(--hc-ui-scale))":"min(1100px,calc(95vw / var(--hc-ui-scale)))",maxHeight:isMobile?"calc((var(--hc-viewport-height) - var(--hc-safe-bottom)) / var(--hc-ui-scale))":"calc(var(--hc-viewport-height) / var(--hc-ui-scale))",height:isMobile?"calc((var(--hc-viewport-height) - var(--hc-safe-bottom)) / var(--hc-ui-scale))":"calc(85vh / var(--hc-ui-scale))",display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"260px minmax(0,1fr)",overflow:"hidden",...(isMobile?{gridTemplateRows:"auto minmax(0,1fr)",borderRadius:0,border:"none"}:{})}}>
+      {/* The Service Monitor takes the whole card. Settings stays mounted underneath (hidden), so a field being edited is still there on Back. */}
+      {showHealthMonitor&&<ServiceMonitor t={t} health={health} history={healthHistory} loading={healthHistoryLoading} error={healthHistoryError} onRefresh={loadHealthHistory} onClose={closeSettings} onBack={()=>{setShowHealthMonitor(false);setSettingsTab("connections");}}/>}
+      <div style={{borderRight:"none",background:"var(--hc-sunken)",padding:isMobile?"calc(8px + env(safe-area-inset-top, 0px) / var(--hc-ui-scale)) 12px 8px":"18px 14px",display:showHealthMonitor?"none":"flex",flexDirection:isMobile?"row":"column",gap:8,overflow:"hidden",...(isMobile?{borderBottom:"1px solid var(--hc-line-subtle)",alignItems:"center"}:{})}}>
         <div style={{display:isMobile?"none":"flex",alignItems:"center",gap:9,marginBottom:10}}>
           <span style={{color:t.acc,display:"flex"}}><IC.Settings/></span>
           <div>
@@ -7589,8 +7613,8 @@ function HyprChat(){
         </button>;})()}
         {isMobile&&<button aria-label="Close" className="hc-icon-btn is-lg" onClick={closeSettings} style={{flexShrink:0,marginLeft:4,color:t.mut}}><IC.X/></button>}
       </div>
-      <div style={{display:"flex",overflow:"hidden",minWidth:0,...(isMobile?{flexDirection:"column"}:{})}}>
-    <div style={{flex:showHealthMonitor?"0 0 52%":"1 1 auto",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden",transition:"flex .3s ease"}}>
+      <div style={{display:showHealthMonitor?"none":"flex",overflow:"hidden",minWidth:0,...(isMobile?{flexDirection:"column"}:{})}}>
+    <div style={{flex:"1 1 auto",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden"}}>
     <div style={{flexShrink:0,padding:isMobile?"12px 14px 10px":"18px 30px 12px",borderBottom:"1px solid var(--hc-line-subtle)"}}>
       <div style={{maxWidth:980,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
         <h3 style={{fontSize:"var(--hc-text-title)",fontWeight:600,color:t.text,margin:0}}>{activeSettingsTitle}</h3>
@@ -7651,13 +7675,7 @@ function HyprChat(){
       <div className="hc-tab-pane" style={{display:settingsTab==="connections"?"block":"none"}}>
         <DocumentSettings enabled={documentsEnabled} onChange={setDocumentsEnabled} t={t} font={font}/>
         {settingSection("Service Status",
-            <button onClick={async()=>{
-              const next=!showHealthMonitor;
-              setShowHealthMonitor(next);
-              if(next&&!healthHistory){try{const r=await fetch(`${API}/api/health/history?days=90`);if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();setHealthHistory(d);}catch(e){console.error("Health history:",e);notify({type:"warning",text:"Health history failed",detail:e.message||String(e),duration:5000});}}
-            }} style={{padding:"5px 11px",borderRadius:"var(--hc-radius)",border:`1px solid ${showHealthMonitor?t.acc:t.brd}44`,background:showHealthMonitor?`${t.acc}22`:t.bgDeep,color:showHealthMonitor?t.acc:t.dim,fontSize:"var(--hc-text-control)",cursor:"pointer",fontFamily:font,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
-              <span style={{fontSize:"var(--hc-text-control)"}}>{showHealthMonitor?"◂":"▸"}</span> Monitor
-            </button>,
+            <button type="button" className="hc-button" onClick={openServiceMonitor}><IC.Activity/> Open monitor</button>,
           <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
             {["ollama","codebox","n8n","searxng","comfyui","stt","tts"].filter(n=>health[n]!==undefined||["ollama","codebox","n8n","searxng"].includes(n)).map(n=>{const s=health[n]||{};const rl=s?.rate_limited;const c=s?.status==="ok"?t.ok:s?.status==="degraded"?degradedColor(t):s?.status?t.err:t.mut;const label=serviceLabel(n);return <div key={n} title={`${label}: ${s?.status||"unknown"}${s?.response_ms!=null?` (${s.response_ms}ms)`:""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 11px",background:t.bgDeep,borderRadius:"var(--hc-radius)",border:`1px solid ${rl?degradedColor(t):t.brd}24`,fontSize:"var(--hc-text-secondary)"}}>
               <div style={{width:8,height:8,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}66`}}/>
@@ -7688,10 +7706,7 @@ function HyprChat(){
                   {isCustom&&<input value={customBaseUrl??(st.base_url||"")} onChange={e=>setCustomBaseUrl(e.target.value)} placeholder="Full base URL, e.g. https://openrouter.ai/api/v1" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px",gridColumn:"1 / -1"}}/>}
                   {isCustom&&<input value={customLabel??(st.custom_label||"")} onChange={e=>setCustomLabel(e.target.value)} placeholder="Display name (e.g. OpenRouter)" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",gridColumn:"1 / -1"}}/>}
                   <input type="password" value={key} onChange={e=>setProviderKeys(p=>({...p,[provider]:e.target.value}))} placeholder={st.key_hint?`Saved ${st.key_hint}`:placeholder} style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",padding:"8px 10px"}}/>
-                  <label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
-                    <input type="checkbox" checked={enabled} onChange={e=>saveModelProvider(provider,{enabled:e.target.checked})} disabled={!!busy}/>
-                    Enabled
-                  </label>
+                  <Switch on={!!enabled} disabled={!!busy} onChange={()=>saveModelProvider(provider,{enabled:!enabled})} label={`${enabled?"Disable":"Enable"} this provider`}><span className="hc-switch-text">{enabled?"Enabled":"Off"}</span></Switch>
                   <div style={{gridColumn:"1 / -1",display:"flex",gap:8,alignItems:"center",fontSize:"var(--hc-text-secondary)",color:statusColor}}>
                     <span style={{width:7,height:7,borderRadius:"50%",background:statusColor,boxShadow:`0 0 6px ${statusColor}66`}}/>
                     <span>{configured?(enabled?`Ready${isCustom?"":` (${st.key_source})`}`:isCustom?"Disabled":"Key disabled"):isCustom?"No base URL saved":"No key saved"}</span>
@@ -7775,10 +7790,7 @@ function HyprChat(){
                 {ttsVoices.map(v=><option key={v} value={v}>{v}</option>)}
               </select>
             </label>}
-            {ttsUrl&&<label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:t.dim,cursor:"pointer"}}>
-              <input type="checkbox" checked={ttsAutoplay} onChange={e=>{setTtsAutoplay(e.target.checked);localStorage.setItem("hc-tts-autoplay",e.target.checked?"1":"0");}}/>
-              Auto-play replies
-            </label>}
+            {ttsUrl&&<Switch on={!!ttsAutoplay} onChange={()=>{const next=!ttsAutoplay;setTtsAutoplay(next);localStorage.setItem("hc-tts-autoplay",next?"1":"0");}} label="Auto-play replies"><span className="hc-switch-text">Auto-play replies</span></Switch>}
             <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Mic capture needs a secure context — over plain HTTP, allow this origin in chrome://flags/#unsafely-treat-insecure-origin-as-secure</span>
           </div>
         )}
@@ -7823,79 +7835,50 @@ function HyprChat(){
       {/* TILE: Model & Generation */}
       <div className="hc-tab-pane" style={{display:settingsTab==="generation"?"block":"none"}}>
         {settingSection("Generation Defaults",null,<>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
+        <SettingRows>
+        <SettingRow wide label="Default Context Window" help={<>Sets num_ctx for all chats. Per-model overrides in Model Manager.</>}>
           {chipRow([4096,8192,16384,32768,65536,131072,262144].map(v=>({v,label:v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:String(v)})),numCtx,setNumCtx)}
-          <CommitNumberInput aria-label="Default context tokens" min="1" step="1" value={numCtx} onCommit={setNumCtx} valid={n=>Number.isInteger(n)&&n>0} style={{...inputS,marginTop:8}}/>
-          {numCtx>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
-        </div>
-        <LoadedModels limit={chatMaxLoadedModels} onLimit={setChatMaxLoadedModels} active={settingsTab==="generation"}/>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Thinking Mode</div>
+          <CommitNumberInput aria-label="Default context tokens" min="1" step="1" value={numCtx} onCommit={setNumCtx} valid={n=>Number.isInteger(n)&&n>0} style={{...inputS,width:130}}/>
+          <span className="sr-value" style={{textAlign:"left"}}>tokens</span>
+        </SettingRow>
+        <SettingRow label="Thinking Mode" help={<>For models without native effort levels. Persona overrides take priority; Auto uses the model default. Native effort selections take priority over these switches.</>}>
           {chipRow(["auto","on","off"].map(v=>({v,label:v==="auto"?"Auto":v==="on"?"On":"Off"})),thinkMode,setThinkMode)}
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>For models without native effort levels. Persona overrides take priority; Auto uses the model default. Native effort selections take priority over these switches.</div>
-        </div>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Default Self-Review Level</div>
+        </SettingRow>
+        <SettingRow wide label="Default Self-Review Level" help={<>For models without native effort levels, the model reviews its initial answer. {EFFORT_LEVELS[reviewLevel(globalEffort)].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</>}>
           {chipRow(EFFORT_LEVELS.map((lv,v)=>({v,title:lv.desc,label:<><span style={{fontSize:"var(--hc-text-control)"}}>{lv.emoji}</span>{lv.name}</>})),globalEffort,setGlobalEffort,{color:t.pink})}
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>For models without native effort levels, the model reviews its initial answer. {EFFORT_LEVELS[reviewLevel(globalEffort)].name} = {globalEffort===0?"no review":`${globalEffort} review pass${globalEffort>1?"es":""}`}. Each chat can override this.</div>
-        </div>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Auto-Compact Long Chats</div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:contextCompaction?t.ok:t.dim,cursor:"pointer"}}>
-            <input type="checkbox" checked={contextCompaction} onChange={e=>setContextCompaction(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
-            {contextCompaction?"Enabled":"Disabled"}
-          </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>When a chat fills its context window, earlier messages are summarized by the chat model and recent ones are kept word for word. Original messages are never modified.</div>
-          <div style={{marginTop:10,opacity:contextCompaction?1:.45,pointerEvents:contextCompaction?"auto":"none"}} aria-disabled={!contextCompaction}>
-            <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Compact when the chat reaches</div>
-            {chipRow(COMPACT_CHOICES.map(v=>({v,label:`${v}%`,title:`Summarize earlier messages when the chat fills ${v}% of the context window`})),chatCompactionPercent,setChatCompactionPercent,{color:t.ok})}
-            {(()=>{const {limit,capped}=compactionLimit(numCtx,chatCompactionPercent);return limit?<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Fires at about {limit.toLocaleString()} of {Number(numCtx).toLocaleString()} tokens (your default context){capped?"; limited to leave room for a reply.":"."} A chat with its own context size uses the same rule.</div>:null;})()}
+        </SettingRow>
+        <SettingRow label="Auto-Compact Long Chats" help={<>When a chat fills its context window, earlier messages are summarized by the chat model and recent ones are kept word for word. Original messages are never modified.</>} below={<div className={`sr-row is-wide${contextCompaction?"":" is-disabled"}`} style={{borderTop:0,padding:0}} aria-disabled={!contextCompaction}>
+            <div className="sr-text"><div className="sr-name">Compact when the chat reaches</div>
+            {(()=>{const {limit,capped}=compactionLimit(numCtx,chatCompactionPercent);return limit?<div className="sr-help">Fires at about {limit.toLocaleString()} of {Number(numCtx).toLocaleString()} tokens (your default context){capped?"; limited to leave room for a reply.":"."} A chat with its own context size uses the same rule.</div>:null;})()}</div>
+            <div className="sr-control">{chipRow(COMPACT_CHOICES.map(v=>({v,label:`${v}%`,title:`Summarize earlier messages when the chat fills ${v}% of the context window`})),chatCompactionPercent,setChatCompactionPercent,{color:t.ok})}</div>
             {roomLeft(numCtx).tight&&<div role="alert" style={{fontSize:"var(--hc-text-secondary)",color:t.warm,marginTop:6}}>A {Number(numCtx).toLocaleString()}-token context is too small for chat: HyprChat's own instructions and tools take about 3,500 tokens of every request, which leaves about {roomLeft(numCtx).room.toLocaleString()} for the conversation and the reply. Replies will be cut off and compaction cannot help. Use 8,192 or more.</div>}
-          </div>
-        </div>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Tool rounds per reply</div>
+          </div>}>
+          <Switch on={!!contextCompaction} onChange={()=>setContextCompaction(!contextCompaction)} label="Auto-Compact Long Chats"/>
+        </SettingRow>
+        <SettingRow label="Tool rounds per reply" help={<>How many times one reply may call the model while it works with tools (running code, searching, reading files). A reply that reaches the limit writes its answer from what it has found, and you can ask it to continue. Coding jobs have their own limits.</>}>
           {chipRow([12,20,40,60,100].map(v=>({v,label:String(v),title:`A reply may call the model up to ${v} times while it uses tools`})),chatMaxRounds,setChatMaxRounds)}
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>How many times one reply may call the model while it works with tools (running code, searching, reading files). A reply that reaches the limit writes its answer from what it has found, and you can ask it to continue. Coding jobs have their own limits.</div>
-        </div>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Keep Tool Results</div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:chatToolMemory?t.ok:t.dim,cursor:"pointer"}}>
-            <input type="checkbox" checked={chatToolMemory} onChange={e=>setChatToolMemory(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
-            {chatToolMemory?"Enabled":"Disabled"}
-          </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Later turns of a chat still get what earlier replies' tools ran and returned (code output, files read, pages fetched), trimmed to fit, so "continue" carries on instead of starting over. This uses more of the context window; auto-compaction folds it into the summary when the chat fills. Email, connector and chat-search results are never kept. Not used in Ghost chats or coding jobs.</div>
-        </div>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Message Times</div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:chatTimeNotes?t.ok:t.dim,cursor:"pointer"}}>
-            <input type="checkbox" checked={chatTimeNotes} onChange={e=>setChatTimeNotes(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
-            {chatTimeNotes?"Enabled":"Disabled"}
-          </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>The model is told when each of your messages was sent, and when there was a long pause before one ("3 days after the previous message"), so it can answer questions about time and tell today's messages from older ones. Nothing changes in what you see. Not used in Ghost chats or coding chats.</div>
-        </div>
-        <div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Smart KB Reranking</div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:ragReranker?t.ok:t.dim,cursor:"pointer"}}>
-            <input type="checkbox" checked={ragReranker} onChange={e=>setRagReranker(e.target.checked)} style={{accentColor:t.ok,cursor:"pointer"}}/>
-            {ragReranker?"Enabled":"Disabled"}
-          </label>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Knowledge-base retrieval reorders its candidate excerpts with a quick Workspace Analysis Model relevance pass before answering. Sharper citations at the cost of ~1-2s per KB question; falls back to normal ranking on any error.</div>
-        </div>
+        </SettingRow>
+        <SettingRow label="Keep Tool Results" help={<>Later turns of a chat still get what earlier replies' tools ran and returned (code output, files read, pages fetched), trimmed to fit, so "continue" carries on instead of starting over. This uses more of the context window; auto-compaction folds it into the summary when the chat fills. Email, connector and chat-search results are never kept. Not used in Ghost chats or coding jobs.</>}>
+          <Switch on={!!chatToolMemory} onChange={()=>setChatToolMemory(!chatToolMemory)} label="Keep Tool Results"/>
+        </SettingRow>
+        <SettingRow label="Message Times" help={<>The model is told when each of your messages was sent, and when there was a long pause before one ("3 days after the previous message"), so it can answer questions about time and tell today's messages from older ones. Nothing changes in what you see. Not used in Ghost chats or coding chats.</>}>
+          <Switch on={!!chatTimeNotes} onChange={()=>setChatTimeNotes(!chatTimeNotes)} label="Message Times"/>
+        </SettingRow>
+        <SettingRow label="Smart KB Reranking" help={<>Knowledge-base retrieval reorders its candidate excerpts with a quick Workspace Analysis Model relevance pass before answering. Sharper citations at the cost of ~1-2s per KB question; falls back to normal ranking on any error.</>}>
+          <Switch on={!!ragReranker} onChange={()=>setRagReranker(!ragReranker)} label="Smart KB Reranking"/>
+        </SettingRow>
+        </SettingRows>
+        <LoadedModels limit={chatMaxLoadedModels} onLimit={setChatMaxLoadedModels} active={settingsTab==="generation"}/>
         </>,"Global model behavior. Individual chats can still override effort and tools.")}
 
-        {settingSection("Workspace Analysis Model",null,<div>
-          <ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:6}}>Small, fast model for workspace topic auto-detection.</div>
-        </div>)}
+        {settingSection("Helper Model",null,<SettingRows>
+          <SettingRow wide label="Workspace Analysis Model" help="A small, fast model for the jobs around a chat: titles, workspace topics, search planning and memory suggestions.">
+            <div style={{flex:1,minWidth:0,maxWidth:520}}><ModelPicker value={wsModel} onChange={setWsModel} models={models} modelDetails={modelDetails} t={t} font={font}/></div>
+          </SettingRow>
+        </SettingRows>)}
 
         {settingSection("Smart Model Routing",
-          <label style={{display:"flex",alignItems:"center",gap:6,fontSize:"var(--hc-text-secondary)",color:modelRouting.enabled?t.ok:t.mut,cursor:"pointer",whiteSpace:"nowrap"}}>
-            <input type="checkbox" checked={modelRouting.enabled} onChange={e=>{const next={...modelRouting,enabled:e.target.checked};setModelRouting(next);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_routing:next})}).then(()=>refreshModels()).catch(()=>{});}} style={{accentColor:t.ok,cursor:"pointer"}}/>
-            {modelRouting.enabled?"Enabled":"Disabled"}
-          </label>,
+          <Switch on={!!modelRouting.enabled} onChange={()=>{const next={...modelRouting,enabled:!modelRouting.enabled};setModelRouting(next);fetch(`${API}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({model_routing:next})}).then(()=>refreshModels()).catch(()=>{});}} label="Smart Model Routing"><span className="hc-switch-text">{modelRouting.enabled?"On":"Off"}</span></Switch>,
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:12,opacity:modelRouting.enabled?1:.55}}>
             {[["chat","💬 Chat","casual conversation, writing, general questions"],["code","💻 Code","programming, debugging, scripts"],["reasoning","🧠 Reasoning","math, logic, multi-step analysis"],["long_context","📜 Long Context","prompts over ~12K tokens (no classifier call)"]].map(([k,label,hint])=><div key={k}>
               <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:700,marginBottom:4}}>{label}</div>
@@ -8025,97 +8008,72 @@ function HyprChat(){
 
       {/* TILE: Appearance */}
       <div className="hc-tab-pane" style={{display:settingsTab==="appearance"?"block":"none"}}>
-        {settingSection("Theme & Background",null,(()=>{
+        {settingSection("Theme",themeUndo&&themeUndo!==tm?<span className="ap-undo">Was {THEMES[themeUndo]?.name}. <button type="button" onClick={()=>{setTm(themeUndo);setThemeUndo(null);flashSettingsPulse("Saved locally","success");}}>Undo</button></span>:null,(()=>{
             const previewKey=pendingTheme||tm;
             const pTh=UI_THEMES[previewKey]||t;
             return <div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(170px,1fr))",gap:8,alignItems:"end",marginBottom:8}}>
-                <div>
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Theme</div>
-                  <select aria-label="Theme" value={previewKey} onChange={e=>setPendingTheme(e.target.value)} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
-                    {Object.entries(THEMES).map(([k,th])=><option key={k} value={k}>{th.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Background</div>
-                  <select aria-label="Background" value={bgEffect} onChange={e=>{setBgEffect(e.target.value);flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
-                    {BACKGROUND_EFFECTS.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div className="hc-theme-grid" role="group" aria-label="Theme palettes">
-                {Object.entries(UI_THEMES).map(([key,palette])=><button key={key} type="button" className="hc-theme-choice" aria-pressed={previewKey===key} onClick={()=>setPendingTheme(key)} style={{background:palette.bg,color:palette.text,border:`1px solid ${previewKey===key?palette.acc:palette.brd}`,borderRadius:"var(--hc-radius)",padding:12,font: "inherit",fontSize:"var(--hc-text-secondary)"}}>
-                  <span>{palette.name}</span><span className="hc-theme-swatches" aria-hidden="true">{[palette.acc,palette.acc2,palette.warm,palette.pink].map((color,i)=><i key={i} style={{background:color}}/>)}</span>
-                </button>)}
-              </div>
+              <ThemeGallery themes={UI_THEMES} current={tm} onPreview={setPendingTheme} onPick={key=>{if(key===tm)return;setThemeUndo(tm);setTm(key);setPendingTheme(null);flashSettingsPulse("Saved locally","success");}}/>
+              <div className="ap-preview-caption">{previewKey===tm?`${pTh.name}, in use now`:`Preview of ${pTh.name}`}</div>
               <div className="hc-theme-preview" style={presentationTokens(pTh,font,codeFont,uiFontSize/14)} aria-label="Theme preview">
                 <div className="preview-user">Make something useful.</div>
                 <div className="preview-answer"><strong>A little clarity goes a long way.</strong><br/><span style={{color:"var(--hc-muted)"}}>Readable answers, thoughtful details, your colors.</span></div>
                 <pre><span style={{color:"var(--code-keyword)"}}>const</span>{' idea = '}<span style={{color:"var(--code-string)"}}>"Hello, HyprChat"</span>{';\n'}<span style={{color:"var(--code-function)"}}>console.log</span>{'(idea);'}</pre>
               </div>
-              <div style={{display:"flex",gap:6}}>
-                {pendingTheme&&pendingTheme!==tm&&<><button onClick={()=>{setTm(pendingTheme);setPendingTheme(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:"var(--hc-radius)",background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Apply</button>
-                <button onClick={()=>setPendingTheme(null)} style={{padding:"6px 12px",borderRadius:"var(--hc-radius)",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button></>}
-              </div>
             </div>;
-          })())}
-        {settingSection("Activity",null,toggleField("Playful status words",funVerbs,()=>setFunVerbs(v=>!v),funVerbs?"On":"Off"),"A little personality while working. Specific actions and errors keep their precise labels.")}
-        {settingSection("Previews",null,toggleField("Open previews automatically",previewAutoOpen,()=>setPreviewAutoOpen(v=>!v),previewAutoOpen?"On":"Off"),"Full HTML pages in replies and Daedalus web apps open in the side pane as they arrive. The Preview button on a code block always works.")}
-        {settingSection("Typography",null,(()=>{
-            const previewIdx=pendingFont!==null?pendingFont:fi;
-            const pF=FONTS[previewIdx]||FONTS[0];
-            return <div>
-              <label htmlFor="hc-code-font" style={{display:'block',marginBottom:8}}>Code font</label>
-              <select id="hc-code-font" value={previewIdx} onChange={e=>setPendingFont(parseInt(e.target.value))} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:pF.v,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8}}>
-                {FONTS.map((f,i)=><option key={i} value={i} style={{fontFamily:f.v}}>{f.name}</option>)}
-              </select>
-              <label htmlFor="hc-ui-font" style={{display:'block',marginBottom:8}}>Interface &amp; chat font</label>
-              <select id="hc-ui-font" aria-describedby="hc-ui-font-help" value={uiFi} onChange={e=>{setUiFi(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{width:"100%",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"8px 12px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",marginBottom:8}}>
+          })(),"Click a theme to use it. Point at one to try it in the preview underneath.")}
+        {settingSection("Background",null,<>
+          <BackgroundGallery effects={BACKGROUND_EFFECTS} value={bgEffect} onPick={id=>{setBgEffect(id);flashSettingsPulse("Saved locally","success");}} t={THEMES[tm]}/>
+          <SettingRows>
+            <SettingRow label="Strength" help="How visible the background is behind the app." disabled={bgEffect==="off"}>
+              <input type="range" className="sr-range" aria-label="Background strength" min={STRENGTH_MIN} max={STRENGTH_MAX} step={STRENGTH_STEP} value={bgStrength} onChange={e=>setBgStrength(clampStrength(e.target.value))}/>
+              <span className="sr-value">{strengthLabel(bgStrength)}</span>
+            </SettingRow>
+          </SettingRows>
+        </>,"Drawn behind the whole app. The pictures here are stills; the real background moves gently, unless your system asks for reduced motion.")}
+        {settingSection("Text",null,<>
+          <SettingRows>
+            <SettingRow label="Interface and chat font" help={<span id="hc-ui-font-help">Used for menus, settings and chat text. “Match code font” uses the code font for these too. Code blocks always use the code font.</span>}>
+              <select id="hc-ui-font" aria-label="Interface and chat font" aria-describedby="hc-ui-font-help" className="sr-select" value={uiFi} onChange={e=>{setUiFi(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}}>
                 <option value={-1}>Match code font (monospace)</option>
                 {UI_FONTS.map((f,i)=><option key={i} value={i} style={{fontFamily:f.v}}>{f.name}</option>)}
               </select>
-              <div id="hc-ui-font-help" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:10}}>The interface font applies to menus, settings and chat text. Choose “Match code font” to use the selected code font for these too. Code blocks always use the code font.</div>
-              <div style={{padding:"10px 14px",background:t.bgDeep,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",marginBottom:8}}>
-                <div style={{fontFamily:uiFont?uiFont.v:pF.v,fontSize:fontSize,color:t.text,marginBottom:6,lineHeight:1.6}}>The quick brown fox jumps over the lazy dog.</div>
-                <div style={{fontFamily:pF.v,fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.5}}>{"const x = () => { return 42; };"}</div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:12,marginTop:8}}>
-                  <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:6}}>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>UI scale</span>
-                    <select aria-label="UI scale" value={uiFontSize} onChange={e=>{setUiFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"4px 8px",borderRadius:"var(--hc-radius)",fontFamily:pF.v,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
-                      {[10,11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
-                    </select>
-                  </div>
-                  <div style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:6}}>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim}}>Reading text size</span>
-                    <select aria-label="Reading text size" aria-describedby="hc-reading-size-help" value={fontSize} onChange={e=>{setFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}} style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"4px 8px",borderRadius:"var(--hc-radius)",fontFamily:pF.v,fontSize:"var(--hc-text-control)",cursor:"pointer"}}>
-                      {[11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
-                    </select>
-                  </div>
-                </div>
-                <div id="hc-reading-size-help" style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:8}}>Changes body text in chats, council responses, and research reports.</div>
-              </div>
-              <div style={{display:"flex",gap:6}}>
-                {pendingFont!==null&&pendingFont!==fi&&<><button onClick={()=>{setFi(pendingFont);setPendingFont(null);flashSettingsPulse("Saved locally","success");}} style={{flex:1,padding:"6px 12px",borderRadius:"var(--hc-radius)",background:`${t.ok}22`,border:`1px solid ${t.ok}44`,color:t.ok,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Apply</button>
-                <button onClick={()=>setPendingFont(null)} style={{padding:"6px 12px",borderRadius:"var(--hc-radius)",background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.dim,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)"}}>Cancel</button></>}
-              </div>
-            </div>;
-          })())}
-        {settingSection("Chat Width",null,
-          chipRow([560,640,720,800,880,960,1040,1120,1200].map(v=>({v,label:String(v)})),chatWidth,v=>{setChatWidth(v);flashSettingsPulse("Saved locally","success");})
-        )}
-        {settingSection("Behavior",null,
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          {[
-            [compactMode,setCompactMode,"Compact"],
-            [autoExpandThink,setAutoExpandThink,"Auto-think"],
-            [showNavLabels,setShowNavLabels,"Nav Labels"],
-            [autoTitle,setAutoTitle,"Auto Title"],
-          ].map(([val,setter,label],idx)=><div key={idx} onClick={()=>{setter(!val);flashSettingsPulse("Saved locally","success");}} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 12px",background:`${t.bgDeep}`,borderRadius:"var(--hc-radius)",border:`1px solid ${val?t.acc:t.brd}33`,cursor:"pointer",fontSize:"var(--hc-text-secondary)"}}>
-            <span style={{color:val?t.acc:t.mut,fontSize:"var(--hc-text-control)"}}>{val?<IC.ToggleOn/>:<IC.ToggleOff/>}</span>
-            <span style={{color:val?t.acc:t.dim,fontWeight:600}}>{label}</span>
-          </div>)}
+            </SettingRow>
+            <SettingRow label="Code font" help="Used in code blocks, terminals and file names.">
+              <select id="hc-code-font" aria-label="Code font" className="sr-select" value={fi} onChange={e=>{setFi(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}}>
+                {FONTS.map((f,i)=><option key={i} value={i} style={{fontFamily:f.v}}>{f.name}</option>)}
+              </select>
+            </SettingRow>
+            <SettingRow label="UI scale" help="Size of the whole interface.">
+              <select aria-label="UI scale" className="sr-select" value={uiFontSize} onChange={e=>{setUiFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}}>
+                {[10,11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
+              </select>
+            </SettingRow>
+            <SettingRow label="Reading text size" help={<span id="hc-reading-size-help">Body text in chats, council responses and research reports.</span>}>
+              <select aria-label="Reading text size" aria-describedby="hc-reading-size-help" className="sr-select" value={fontSize} onChange={e=>{setFontSize(parseInt(e.target.value));flashSettingsPulse("Saved locally","success");}}>
+                {[11,12,13,14,15,16,17,18,19,20,22,24].map(v=><option key={v} value={v}>{v}px</option>)}
+              </select>
+            </SettingRow>
+            <SettingRow wide label="Chat width" help="How wide the reading column is, in pixels. Code, tables and charts may use a little more when the window has room.">
+              {chipRow([560,640,720,800,880,960,1040,1120,1200].map(v=>({v,label:String(v)})),chatWidth,v=>{setChatWidth(v);flashSettingsPulse("Saved locally","success");},{label:"Chat width"})}
+            </SettingRow>
+          </SettingRows>
+          <div className="ap-font-sample" aria-label="Font sample">
+            <div style={{fontFamily:uiFont?uiFont.v:codeFont,fontSize:fontSize,color:t.text,marginBottom:6,lineHeight:1.6}}>The quick brown fox jumps over the lazy dog.</div>
+            <div style={{fontFamily:codeFont,fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.5}}>{"const x = () => { return 42; };"}</div>
           </div>
-        )}
+        </>)}
+        {settingSection("Behavior",null,<SettingRows>
+          {[
+            [funVerbs,setFunVerbs,"Playful status words","A little personality while a reply is being worked on. Specific actions and errors keep their precise labels."],
+            [previewAutoOpen,setPreviewAutoOpen,"Open previews automatically","Full HTML pages in replies and Daedalus web apps open in the side pane as they arrive. The Preview button on a code block always works."],
+            [autoExpandThink,setAutoExpandThink,"Show thinking as it happens","Opens the activity details by themselves while a model is reasoning."],
+            [autoTitle,setAutoTitle,"Name new chats automatically","A new chat gets a title from its first exchange."],
+            [compactMode,setCompactMode,"Compact messages","Less space between messages."],
+            [showNavLabels,setShowNavLabels,"Navigation labels","Show the names under the icons of the navigation rail."],
+          ].map(([val,setter,label,help])=><SettingRow key={label} label={label} help={help}>
+            <Switch on={!!val} onChange={()=>{setter(!val);flashSettingsPulse("Saved locally","success");}} label={label}/>
+          </SettingRow>)}
+        </SettingRows>)}
         {settingSection("Navigation Bar",null,
           <NavLayoutEditor t={t} layout={navLayout} isMobile={isMobile}
             onChange={next=>{setNavLayout(next);flashSettingsPulse("Saved","success");}}/>,
@@ -8362,69 +8320,6 @@ function HyprChat(){
     </div>
   </div>
 
-    {/* ── HEALTH MONITOR PANEL (slides in from right) ── */}
-    {showHealthMonitor&&<div style={{flex:isMobile?"0 0 48%":"0 0 50%",display:"flex",flexDirection:"column",minWidth:0,minHeight:0,overflow:"hidden",borderLeft:isMobile?"none":"1px solid var(--hc-line-subtle)",background:`${t.bg}`,animation:"fadeIn .3s ease",...(isMobile?{borderTop:"1px solid var(--hc-line-subtle)"}:{})}}>
-      <div style={{flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,padding:isMobile?"12px 14px 10px":"18px 24px 12px",borderBottom:"1px solid var(--hc-line-subtle)"}}>
-        <h3 style={{fontSize:"var(--hc-text-title)",fontWeight:600,color:t.text,margin:0}}>Service Monitor</h3>
-        <button aria-label="Close service monitor" data-tip="Close" className="hc-icon-btn is-lg tip-below" onClick={()=>setShowHealthMonitor(false)} style={{color:t.mut}}><IC.X/></button>
-      </div>
-      <div style={{flex:1,minHeight:0,overflowY:"auto",padding:isMobile?"14px":"16px 24px 20px"}}>
-      {!healthHistory?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading uptime data...</div>
-      :Object.keys(healthHistory.services||{}).length===0?<EmptyState compact icon={<IC.Activity/>} title="No health data yet" hint="Checks run every 5 minutes — data will appear shortly."/>
-      :Object.entries(healthHistory.services).map(([svc,data])=>{
-        const statusColor=data.current_status==="ok"?t.ok:data.current_status==="degraded"?degradedColor(t):t.err;
-        const statusLabel=data.current_status==="ok"?"Operational":data.current_status==="degraded"?"Degraded":"Down";
-        const days=data.days||[];
-        // Pad to 90 days with gray (no data) bars
-        const padded=[];
-        const now=new Date();
-        for(let i=89;i>=0;i--){
-          const d=new Date(now);d.setDate(d.getDate()-i);
-          const ds=d.toISOString().slice(0,10);
-          const found=days.find(x=>x.day===ds);
-          padded.push(found||{day:ds,ok_pct:0,degraded_pct:0,error_pct:0,total_checks:0,avg_ms:0});
-        }
-        const isRL=svc==="searxng"&&health.searxng?.rate_limited;
-        return <div key={svc} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius-card)",padding:"14px 16px",marginBottom:14}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text}}>{serviceLabel(svc)}</span>
-              {isRL&&<span style={{padding:"3px 10px",borderRadius:"var(--hc-radius)",background:`${degradedColor(t)}18`,border:`1px solid ${degradedColor(t)}44`,fontSize:"var(--hc-text-secondary)",fontWeight:600,color:degradedColor(t)}}>Still Operational, limited engine usage</span>}
-            </div>
-            <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:isRL?degradedColor(t):statusColor}}>{isRL?"Rate Limited":statusLabel}</div>
-          </div>
-          {/* Uptime bar chart */}
-          <div style={{display:"flex",gap:1,height:34,alignItems:"flex-end",marginBottom:6}}>
-            {padded.map((d,i)=>{
-              const hasData=d.total_checks>0;
-              const barColor=!hasData?`${t.brd}33`:d.error_pct>50?t.err:d.error_pct>0?"#e05050":d.degraded_pct>30?degradedColor(t):d.degraded_pct>0?"#b8d040":t.ok;
-              const title=hasData?`${d.day}\n${d.ok_pct}% ok, ${d.degraded_pct}% degraded, ${d.error_pct}% down\n${d.total_checks} checks, avg ${d.avg_ms}ms`:`${d.day}\nNo data`;
-              return <div key={i} title={title} style={{flex:1,height:hasData?34:20,background:barColor,borderRadius:"var(--hc-radius-sm)",cursor:"pointer",opacity:hasData?1:.3,transition:"opacity .15s"}}
-                onMouseEnter={e=>e.target.style.opacity="0.7"} onMouseLeave={e=>e.target.style.opacity=hasData?"1":"0.3"}/>;
-            })}
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>90 days ago</span>
-            <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,fontWeight:600}}>{data.uptime_pct}% uptime</span>
-            <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>Today</span>
-          </div>
-          {data.avg_response_ms>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Avg response: {data.avg_response_ms}ms</div>}
-        </div>;
-      })}
-
-      {/* Legend */}
-      <div style={{display:"flex",gap:12,padding:"8px 0",fontSize:"var(--hc-text-secondary)",color:t.dim}}>
-        {[[t.ok,"Operational"],[degradedColor(t),"Degraded"],[t.err,"Down"],[`${t.brd}33`,"No data"]].map(([c,l])=><div key={l} style={{display:"flex",alignItems:"center",gap:5}}>
-          <div style={{width:12,height:12,borderRadius:"var(--hc-radius-sm)",background:c}}/>{l}
-        </div>)}
-      </div>
-
-      {/* Refresh button */}
-      <button onClick={async()=>{try{const r=await fetch(`${API}/api/health/history?days=90`);const d=await r.json();setHealthHistory(d);}catch{}
-        try{const r2=await fetch(`${API}/api/health`);const d2=await r2.json();setHealth(d2.services||{});}catch{}
-      }} style={{...btnS(t.f1),fontSize:"var(--hc-text-control)",padding:"6px 14px",marginTop:4}}><IC.Refresh/> Refresh</button>
-      </div>
-    </div>}
   </div>
     </div>
   </div>,document.body)}

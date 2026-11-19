@@ -1,0 +1,42 @@
+/* The chat screen's layout: one-row header title, the reading column with wide blocks that may break
+   out of it, and the composer. Colours are theme tokens. */
+
+/* Header: the chat's title takes whatever room the controls leave and is cut with an ellipsis. */
+.hc-chat-title { flex: 1 1 0; min-width: 0; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-wrap: nowrap !important; color: var(--hc-secondary); font-size: var(--hc-text-control); font-weight: 500; }
+
+/* Reading column. Prose stays at the chosen width (--hc-chat-w); blocks that are wide by nature get up
+   to 96px more on each side when the pane has that room, and none when it does not (a phone, a narrow
+   pane, a wide chat-width setting). The room is measured on the scroll area, which is the container. */
+.hc-chat-scroll { container-type: inline-size; container-name: hc-chat; }
+.hc-msg-list { --hc-breakout: 0px; }
+@container hc-chat (min-width: 900px) {
+  .hc-msg-list { --hc-breakout: clamp(0px, calc((100cqw - var(--hc-chat-w, 800px) - 60px) / 2), 96px); }
+}
+.hc-msg-list .msg-row.is-assistant :is(.hc-code-card, .hc-table-wrap, .hc-wide-block, .hc-tool-cards, .hc-runs, .dj-card) {
+  margin-left: calc(-1 * var(--hc-breakout));
+  margin-right: calc(-1 * var(--hc-breakout));
+}
+.hc-msg-list .msg-row.is-assistant .hc-table-wrap { max-width: none; }
+/* Charts and diagrams set their own margin inline, so this one has to insist. */
+.hc-msg-list .msg-row.is-assistant .hc-wide-block { margin-left: calc(-1 * var(--hc-breakout)) !important; margin-right: calc(-1 * var(--hc-breakout)) !important; }
+/* A wide block inside another one (a table in a tool card) keeps its parent's width. */
+.hc-msg-list :is(.hc-tool-cards, .hc-runs, .dj-card, .hc-wide-block) :is(.hc-code-card, .hc-table-wrap, .hc-wide-block, .hc-tool-cards, .hc-runs) { margin-left: 0; margin-right: 0; }
+
+/* Composer in a chat: the text on its own row, the controls underneath. The welcome screen keeps its
+   single-row pill. `.hc-composer-spacer` pushes the mic and Send to the right of the second row. */
+.hc-composer-spacer { flex: 1 1 0; min-width: 0; }
+.hc-tools-anchor .hc-tools-label { font-size: var(--hc-text-secondary); font-weight: 500; }
+
+/* Web sources under a reply: one line when closed. */
+.hc-sources { margin: 10px 0 4px; }
+.hc-sources.is-open { border: 1px solid var(--hc-line-subtle); border-radius: var(--hc-radius); overflow: hidden; }
+.hc-sources-line { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px; padding: 3px 6px; border: 0; border-radius: var(--hc-radius); background: none; color: var(--hc-secondary); font: inherit; font-size: var(--hc-text-secondary); text-align: left; cursor: pointer; }
+.hc-sources.is-open .hc-sources-line { padding: 7px 10px; border-radius: 0; }
+.hc-sources-line:hover { background: color-mix(in srgb, var(--hc-text) 5%, transparent); }
+.hc-sources-line:focus-visible { outline: 2px solid color-mix(in srgb, var(--hc-accent) 60%, transparent); outline-offset: 1px; }
+.hc-sources-icons { display: flex; align-items: center; flex-shrink: 0; }
+.hc-sources-count { flex-shrink: 0; color: var(--hc-text); font-weight: 600; }
+.hc-sources-domains { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hc-muted); }
+.hc-sources-toggle { flex-shrink: 0; color: var(--hc-accent); }
+.hc-sources-meta { padding: 0 10px 7px; color: var(--hc-muted); font-size: var(--hc-text-secondary); }
+@media (max-width: 768px), (pointer: coarse) { .hc-sources-line { min-height: 44px; } }

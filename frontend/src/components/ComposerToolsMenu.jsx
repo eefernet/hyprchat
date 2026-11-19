@@ -9,7 +9,7 @@ const MAX_CONNECTOR_ROWS=80;
 // Tools icon inside the composer box. Its popover holds a switch per tool and,
 // when connectors are configured, the searchable connector operations. Rows are
 // flat list items (surfaces.css .hc-tool-row); the switch carries the on state.
-export default function ComposerToolsMenu({tools,activeToolIds,onToggle,busy,isMobile,t,font,inputS}){
+export default function ComposerToolsMenu({tools,activeToolIds,onToggle,busy,isMobile,t,font,inputS,labelled=false}){
   const [open,setOpen]=useState(false),[search,setSearch]=useState("");
   const rootRef=useRef(null),menuId=useId();
   const presence=usePresence(open);
@@ -40,8 +40,8 @@ export default function ComposerToolsMenu({tools,activeToolIds,onToggle,busy,isM
   };
   return <div ref={rootRef} className="hc-composer-anchor hc-tools-anchor" style={{flexShrink:0}}>
     <span style={{position:"relative",display:"flex"}}>
-      <button type="button" onClick={()=>{setOpen(p=>!p);setSearch("");}} aria-haspopup="dialog" aria-expanded={open} aria-controls={menuId} aria-label={`Tools, ${activeCount} on`} title={toolsTitle(activeNames)} className={`hc-icon-btn is-lg${open?" is-open":""}`} style={{color:lit?t.acc:t.mut,opacity:lit?1:.75}}><IC.Tool/></button>
-      {activeCount>0&&<span aria-hidden="true" style={{position:"absolute",top:-3,right:-3,minWidth:15,height:15,padding:"0 4px",borderRadius:"var(--hc-radius-pill)",background:t.acc,color:t.bg,fontSize:"var(--hc-text-micro)",fontWeight:600,display:"flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",pointerEvents:"none"}}>{activeCount>99?"99+":activeCount}</span>}
+      <button type="button" onClick={()=>{setOpen(p=>!p);setSearch("");}} aria-haspopup="dialog" aria-expanded={open} aria-controls={menuId} aria-label={`Tools, ${activeCount} on`} title={toolsTitle(activeNames)} className={`hc-icon-btn is-lg${open?" is-open":""}`} style={{color:lit?t.acc:t.mut,opacity:lit?1:.75,...(labelled?{width:"auto",padding:"0 9px",gap:6}:{})}}><IC.Tool/>{labelled&&<span className="hc-tools-label">Tools{activeCount>0?` · ${activeCount}`:""}</span>}</button>
+      {!labelled&&activeCount>0&&<span aria-hidden="true" style={{position:"absolute",top:-3,right:-3,minWidth:15,height:15,padding:"0 4px",borderRadius:"var(--hc-radius-pill)",background:t.acc,color:t.bg,fontSize:"var(--hc-text-micro)",fontWeight:600,display:"flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box",pointerEvents:"none"}}>{activeCount>99?"99+":activeCount}</span>}
     </span>
     {presence.mounted&&<div id={menuId} role="dialog" aria-label="Tools" className="hc-composer-menu hc-pop hc-elev-2" data-placement="top" {...presence.props} style={{position:"absolute",bottom:"calc(100% + 8px)",left:0,zIndex:310,width:320,maxWidth:"calc(100vw - 32px)",...(isMobile?{}:{maxHeight:"max(160px, min(380px, calc(100vh / var(--hc-ui-scale, 1) - 340px)))"}),overflow:"hidden",padding:6,display:"flex",flexDirection:"column",gap:4,boxSizing:"border-box"}}>
       <div style={{display:"flex",alignItems:"baseline",gap:7,padding:"4px 8px 2px",flexShrink:0}}>

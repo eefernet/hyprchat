@@ -200,7 +200,7 @@ export function MermaidBlock({code,theme,font,epoch,printMode=false,streaming=fa
   const headStyle=printMode
     ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
     :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:"1px solid var(--hc-line)"};
-  return <div className={printMode?"mermaid-print-block":undefined} style={wrapStyle}>
+  return <div className={printMode?"mermaid-print-block":"hc-wide-block"} style={wrapStyle}>
     <div style={headStyle}>
       <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:700}}>◈ mermaid{repaired&&<span style={{color:t.warm,letterSpacing:0,textTransform:"none",fontWeight:600}}>repaired</span>}</span>
       {!printMode&&<div style={{display:"flex",gap:4}}>
@@ -350,7 +350,7 @@ export function ChartBlock({code,theme,font,epoch,kind="chart",printMode=false,s
   const headStyle=printMode
     ?{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5pt 8pt",background:"#f8fafc",borderBottom:`1px solid ${t.brd}`}
     :{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 12px",background:`${t.surface}F5`,borderBottom:"1px solid var(--hc-line)"};
-  return <div className={printMode?"chart-print-block":undefined} style={wrapStyle}>
+  return <div className={printMode?"chart-print-block":"hc-wide-block"} style={wrapStyle}>
     <div style={headStyle}>
       <span style={{display:"flex",alignItems:"center",gap:5,fontSize:"var(--hc-text-secondary)",color:t.acc,textTransform:"none",letterSpacing:0,fontWeight:700}}>◈ {kind}</span>
       {!printMode&&<div style={{display:"flex",gap:4}}>

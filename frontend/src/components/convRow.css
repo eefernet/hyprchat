@@ -1,14 +1,28 @@
 /* One chat in the left bar (ConvRow.jsx). Colours come from the theme tokens; the row's accent and
    hover colour are passed in as --conv-accent / --conv-row-hover-bg. */
 .conv-item{margin-bottom:2px}
-.conv-row{display:flex;align-items:center;gap:0;position:relative;overflow:hidden;box-sizing:border-box;min-height:48px;padding:0 7px 0 12px;border:1px solid transparent;border-radius:var(--hc-radius);cursor:pointer;outline:none}
+.conv-row{display:flex;align-items:center;gap:0;position:relative;overflow:hidden;box-sizing:border-box;min-height:36px;padding:0 4px 0 10px;border:1px solid transparent;border-radius:var(--hc-radius);cursor:pointer;outline:none}
 .conv-row:focus-visible{border-color:var(--hc-accent-ring,var(--hc-accent));box-shadow:0 0 0 2px color-mix(in srgb,var(--hc-accent) 28%,transparent)}
 .conv-main{display:flex;align-items:center;gap:6px;flex:1;min-width:0;overflow:hidden;white-space:nowrap;font-size:var(--hc-text-control)}
 .conv-main .conv-title-clip{min-width:0;flex:1;overflow:hidden;white-space:nowrap}
 .conv-mark{display:flex;flex-shrink:0}
 .conv-mark-box{align-items:center;justify-content:center;width:18px;height:18px}
 .conv-avatar{width:18px;height:18px;border-radius:var(--hc-radius);object-fit:cover;flex-shrink:0}
-.conv-menu{flex-shrink:0;margin-left:8px}
+.conv-tail{display:grid;align-items:center;justify-items:end;flex-shrink:0;min-width:28px;margin-left:6px}
+.conv-tail>*{grid-area:1/1}
+.conv-menu{flex-shrink:0}
+.conv-when{padding-right:6px;color:var(--hc-muted);font-size:var(--hc-text-micro);font-variant-numeric:tabular-nums;white-space:nowrap}
+/* The "…" button takes the time's place when the row is pointed at, focused, or its menu is open. */
+.conv-tail .conv-menu .hc-button.is-compact{opacity:0}
+.conv-row:hover .conv-tail .hc-button.is-compact,.conv-row:focus-within .conv-tail .hc-button.is-compact,.conv-tail .hc-button.is-compact[aria-expanded="true"]{opacity:1}
+.conv-row:hover .conv-when,.conv-row:focus-within .conv-when,.conv-row:has(.hc-button[aria-expanded="true"]) .conv-when{visibility:hidden}
+/* Touch screens have no hover: show both, side by side, with a full-size button. */
+@media (max-width:768px),(pointer:coarse){
+  .conv-row{min-height:44px}
+  .conv-tail{display:flex;gap:2px}
+  .conv-tail .conv-menu .hc-button.is-compact{opacity:1;width:40px;min-width:40px;height:40px;min-height:40px}
+  .conv-row:hover .conv-when,.conv-row:focus-within .conv-when,.conv-row:has(.hc-button[aria-expanded="true"]) .conv-when{visibility:visible}
+}
 /* A reply that finished while another chat was open: steady, so it reads differently from the pulsing "replying" dot. */
 .conv-unread{width:7px;height:7px;flex-shrink:0;border-radius:50%;background:var(--hc-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--hc-accent) 20%,transparent);animation:hc-indicator-in var(--hc-dur-2) var(--hc-ease-out)}
 .conv-draft{color:var(--hc-muted);opacity:.75}

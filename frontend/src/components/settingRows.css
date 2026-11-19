@@ -1,0 +1,37 @@
+/* Setting rows: name and help on the left, the control on the right (SettingRow.jsx). */
+.sr-list { container-type: inline-size; display: flex; flex-direction: column; }
+.sr-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 24px; row-gap: 10px; align-items: center; padding: 14px 0; border-top: 1px solid var(--hc-line-subtle); }
+.sr-list > .sr-row:first-child { border-top: 0; padding-top: 2px; }
+.sr-list > .sr-row:last-child { padding-bottom: 2px; }
+.sr-text { min-width: 0; }
+.sr-name { font-size: var(--hc-text-control); font-weight: 600; color: var(--hc-text); letter-spacing: -.01em; }
+.sr-help { margin-top: 3px; font-size: var(--hc-text-secondary); line-height: 1.5; color: var(--hc-muted); max-width: 62ch; }
+.sr-control { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.sr-control select { max-width: 260px; }
+.sr-below { grid-column: 1 / -1; min-width: 0; }
+.sr-row.is-wide { grid-template-columns: minmax(0, 1fr); }
+.sr-row.is-wide > .sr-control { justify-content: flex-start; }
+.sr-row.is-disabled > .sr-control, .sr-row.is-disabled > .sr-below { opacity: .45; pointer-events: none; }
+@container (max-width: 560px) {
+  .sr-row { grid-template-columns: minmax(0, 1fr); }
+  .sr-control { justify-content: flex-start; }
+  .sr-control select { max-width: 100%; }
+}
+
+/* Segmented control: one tray, the chosen option raised. It may wrap when the choices do not fit. */
+.sr-seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; max-width: 100%; border-radius: var(--hc-radius); background: var(--hc-sunken); border: 1px solid var(--hc-line-subtle); }
+.sr-seg-option { min-height: 30px; padding: 0 12px; border: 0; border-radius: calc(var(--hc-radius) - 3px); background: transparent; color: var(--hc-secondary); font: inherit; font-size: var(--hc-text-secondary); font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; transition: background var(--hc-dur-2, .15s), color var(--hc-dur-2, .15s); }
+.sr-seg-option:hover { color: var(--hc-text); background: color-mix(in srgb, var(--hc-text) 6%, transparent); }
+.sr-seg-option[aria-checked="true"] { background: var(--hc-elev-2, var(--hc-elev-1)); color: var(--seg-c, var(--hc-text)); font-weight: 650; box-shadow: var(--hc-shadow-1), inset 0 0 0 1px color-mix(in srgb, var(--seg-c, var(--hc-accent)) 45%, transparent); }
+html[data-hc-mobile] .sr-seg-option { min-height: 38px; }
+
+/* Plain select used as a row's control. */
+.sr-select { background: var(--hc-sunken); border: 1px solid var(--hc-line); color: var(--hc-text); padding: 7px 10px; border-radius: var(--hc-radius); font: inherit; font-size: var(--hc-text-control); cursor: pointer; }
+.sr-value { font-family: var(--hc-font-code); font-size: var(--hc-text-secondary); color: var(--hc-secondary); min-width: 4ch; text-align: right; }
+.sr-range { width: 180px; max-width: 100%; accent-color: var(--hc-accent); }
+
+/* In a page header on a phone the tray scrolls sideways instead of wrapping onto several rows. */
+@media (max-width: 700px) {
+  .hc-panel-nav > .sr-seg { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .hc-panel-nav > .sr-seg::-webkit-scrollbar { display: none; }
+}

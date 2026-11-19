@@ -86,7 +86,38 @@ button { transition: background-color var(--hc-dur-1) var(--hc-ease-out), border
 .hc-dots > i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: hc-breathe 1.2s ease-in-out infinite; }
 .hc-dots > i:nth-child(2) { animation-delay: .16s; }
 .hc-dots > i:nth-child(3) { animation-delay: .32s; }
-.hc-theme-icon { display: inline-flex; animation: hc-rotate-in var(--hc-dur-3) var(--hc-ease-spring) both; }
+/* Light/dark switch: the sun and the moon share one small sky. The one in use is up; on a click it sets
+   to the right while the other rises from the left, both on an arc around a point below the button
+   (which clips them at its edge, the horizon). Nothing moves until the switch was used once. */
+.hc-sky-toggle { overflow: hidden; }
+.hc-sky { position: relative; display: block; width: 18px; height: 18px; }
+.hc-sky > span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; transform-origin: 50% 260%; }
+.hc-sky > .is-down { opacity: 0; transform: rotate(80deg); }
+.hc-sky > .hc-sky-sun.is-up { color: var(--sky-sun, currentColor); }
+.hc-sky.is-animated > .is-up { animation: hc-sky-rise 640ms var(--hc-ease-spring) both; }
+.hc-sky.is-animated > .is-down { animation: hc-sky-set 420ms var(--hc-ease-out) both; }
+@keyframes hc-sky-rise { from { opacity: 0; transform: rotate(-80deg); } 55% { opacity: 1; } to { opacity: 1; transform: rotate(0); } }
+@keyframes hc-sky-set { from { opacity: 1; transform: rotate(0); } to { opacity: 0; transform: rotate(80deg); } }
+
+/* Ghost mode button. Turning it on: the ghost pops up with a wobble and a ring puffs out, then it
+   bobs gently for as long as the mode is on. Turning it off: it drifts up and away, then the plain
+   icon settles back. `is-played` is set by the first click, so a page load is still. */
+.hc-ghost-toggle { position: relative; overflow: visible; gap: 6px; transition: background var(--hc-dur-2) var(--hc-ease-out), color var(--hc-dur-2) var(--hc-ease-out); }
+.hc-ghost-toggle { color: var(--hc-muted); }
+.hc-ghost-toggle.is-on { width: auto; color: var(--ghost-c); background: color-mix(in srgb, var(--ghost-c) 14%, transparent); }
+.hc-ghost-toggle.is-on:has(.hc-ghost-label) { padding: 0 10px 0 8px; }
+.hc-ghost-toggle.is-on:hover:not(:disabled) { color: var(--ghost-c); background: color-mix(in srgb, var(--ghost-c) 24%, transparent); }
+.hc-ghost-icon { display: inline-flex; }
+.hc-ghost-label { font-size: var(--hc-text-micro); font-weight: 600; }
+.hc-ghost-toggle.is-on .hc-ghost-icon { animation: hc-ghost-bob 3.2s ease-in-out infinite; }
+.hc-ghost-toggle.is-played.is-on .hc-ghost-icon { animation: hc-ghost-appear 560ms var(--hc-ease-spring) both, hc-ghost-bob 3.2s ease-in-out 560ms infinite; }
+.hc-ghost-toggle.is-played.is-on .hc-ghost-label { animation: hc-fade-in var(--hc-dur-3) var(--hc-ease-out) 120ms both; }
+.hc-ghost-toggle.is-played:not(.is-on) .hc-ghost-icon { animation: hc-ghost-vanish 520ms var(--hc-ease-out) both; }
+.hc-ghost-toggle.is-played.is-on::after { content: ""; position: absolute; left: 16px; top: 50%; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2px solid var(--ghost-c); pointer-events: none; animation: hc-ghost-puff 620ms var(--hc-ease-out) both; }
+@keyframes hc-ghost-appear { 0% { opacity: 0; transform: translateY(9px) scale(.5); } 45% { opacity: 1; transform: translateY(-4px) scale(1.18) rotate(-10deg); } 72% { transform: translateY(1px) scale(.96) rotate(7deg); } 100% { opacity: 1; transform: none; } }
+@keyframes hc-ghost-vanish { 0% { opacity: 1; transform: none; } 50% { opacity: 0; transform: translateY(-9px) scale(.7); } 51% { opacity: 0; transform: translateY(6px) scale(.8); } 100% { opacity: 1; transform: none; } }
+@keyframes hc-ghost-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@keyframes hc-ghost-puff { from { opacity: .7; transform: scale(.4); } to { opacity: 0; transform: scale(1.9); } }
 .hc-send-btn { transition: background-color var(--hc-dur-2) var(--hc-ease-out), border-radius var(--hc-dur-2) var(--hc-ease-spring), transform var(--hc-dur-1) var(--hc-ease-out); }
 .hc-send-btn[data-state="stop"] { border-radius: 30%; }
 .hc-send-btn > svg { animation: hc-icon-pop var(--hc-dur-2) var(--hc-ease-spring) both; }

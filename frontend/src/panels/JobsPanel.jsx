@@ -50,7 +50,8 @@ export default function JobsPanel({t,btnS,inputS,onNavigate,workspaces=[],worksp
     finally{if(version===epoch.current)setBusy('');}
   };
   return <section style={{padding:embedded?0:20,overflowY:embedded?'visible':'auto',height:embedded?'auto':'100%',color:t.text}}>
-    <PanelHeader embedded={embedded} t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/>
+    {/* The section already has the page padding: the header reaches the edges like on every other page. */}
+    <div style={embedded?undefined:{margin:'-20px -20px 16px'}}><PanelHeader embedded={embedded} t={t} icon={<IC.Layers/>} title="Jobs" subtitle="Progress and saved outputs from background work."/></div>
     <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
       {!embedded&&<select aria-label="Jobs workspace" value={workspace} disabled={!!workspaceId} onChange={e=>{setWorkspace(e.target.value);setOffset(0);}} style={{...inputS,flex:'1 1 160px',width:'auto'}}><option value="">All workspaces</option>{workspaces.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>}
       <SelectionControl label="Job type" value={kind} onChange={v=>{setKind(v);setOffset(0);}} options={[{value:'',label:'All types'},...kinds.map(value=>({value,label:JOB_KIND[value]||humanize(value)}))]}/>

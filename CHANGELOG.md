@@ -30,6 +30,29 @@
 - **Backgrounds** — with "reduce motion" on, the background shows a still picture instead of going blank; small layout changes no longer restart the animation; moving the window to another display keeps it sharp.
 - **Smaller fixes** — settings saved at the same moment no longer overwrite each other, briefs give task times in your time zone, the "message too large" warning counts non-Latin text correctly, a renamed skill is not half-saved when the name is taken, and building a large bundle no longer stalls other requests.
 
+## Interface refresh
+
+- **Sans text by default** — menus, settings and chat text use Figtree unless you picked a font yourself; code stays monospace. "Match code font" in Settings → Appearance brings the old look back.
+- **Chat list** — rows are tighter and show when the chat was last used ("12m", "Tue", "3 Nov"); the time gives way to the "…" button when you point at a row. Search and New chat share one row at the top, and your profile sits at the bottom next to one status line ("All services up" or what is down) that opens the connection monitor.
+- **Chat header in one row** — the chat's title is in the header, and system prompt, memory, export and import moved into one "…" menu. On a phone the workspace choice and the light/dark switch are in that menu too.
+- **Ghost mode button** — always in the chat header beside the light/dark switch. It turns pink and says "Ghost" while the mode is on; the ghost pops up when you switch it on and drifts away when you switch it off.
+- **Sunrise and moonrise** — the light/dark switch sets the sun or moon to one side while the other rises from the horizon.
+- **Reading column** — 800 pixels by default (your own choice in Settings is kept). Code, tables, charts and diagrams use up to 96 pixels more on each side when the window has room.
+- **Composer** — the text sits on its own line with attach, Tools, effort and Send underneath.
+- **Search sources in one line** — "4 sources", the first sites and "Show all"; the search query is shown when you open it.
+- **Settings in rows** — Model & Generation and Appearance show each setting's name and explanation on the left and its control on the right, with switches instead of "Enabled / Disabled" checkboxes.
+- **Themes** — pick from preview cards grouped Dark and Light; a click applies at once and "Undo" takes you back.
+- **Backgrounds** — a gallery of still thumbnails grouped Calm, Technical and Space, and a Strength slider from Subtle to Strong. The dot grid is easier to see at Normal; Subtle is what it used to be.
+- **Northern Lights** — a new background next to Aurora Lines: curtains of green, teal and violet light that fold and shimmer, in their real colours on every theme.
+- **Four Christmas backgrounds** — Snowfall (flakes at three depths over a low snow bank), Christmas Lights (strings of bulbs that twinkle, chase and fade by colour), Silent Night (pines, a bright star and light snow) and Holiday Glow (soft drifting discs of red, gold and green). They are in a new Christmas group in Settings → Appearance.
+- **Pixel Rain rebuilt** — drops fall in aligned columns at three depths, each with a glowing head, a tail that fades out and a small splash at the bottom.
+- **Dot Grid is alive** — a band of light crosses the grid every few seconds, dots near your pointer brighten, and now and then a ripple spreads. It stays a still grid with reduced motion.
+- **Other backgrounds improved** — Blackbox Terminal is columns of falling glyphs with a bright head; Synapse Rain's droplets have tails; Cosmic Microwave twinkles and drifts; Quantum Foam flashes where a dot lands.
+- **Background fixes** — Blueprint Ghosts did not move at all: its drawings are now traced in, fade and reappear elsewhere. Monastery Candlelight flickered with random noise: it is now a steady flame glow with rising embers. Quantum Foam ran faster on fast screens.
+- **Service Monitor is its own panel** — "Open monitor" in Settings → Connections, or the status line at the bottom of the chat list, opens the monitor in place of Settings with the services side by side. The arrow at the top left goes back to Settings and the X closes it. It loads fresh data every time it opens and says so when the history could not be loaded.
+- **One page header everywhere** — Research, Council, Agents, Image Studio, Artifacts, Memory, Knowledge Bases, Tools, Models and Jobs share the same title bar with at most one highlighted action.
+- **Tools page** — three tabs (Your tools, Connectors, Built-in); the connector forms open from "Add connector" instead of always filling the page.
+
 ## Workspaces in the chat list
 
 - **Chats are grouped under their workspace** — the chat list has a Workspaces block between Pinned and the date groups. Each workspace is a row that opens and closes (it stays as you left it), with its five newest chats underneath, "Show N more" for the rest, and a "+" that starts a new chat in it. A workspace chat is listed there and no longer in Today / Yesterday; pinned chats stay in Pinned.

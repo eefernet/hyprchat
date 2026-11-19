@@ -11,6 +11,8 @@ import DocumentRevisionReview from './DocumentRevisionReview.jsx';
 import {apiJson} from '../api.js';
 import OfficePreview from './OfficePreview.jsx';
 import EmptyState from './EmptyState.jsx';
+import PanelHeader from './PanelHeader.jsx';
+import {Segmented} from './SettingRow.jsx';
 import { Skeleton, SkeletonGrid } from './Skeleton.jsx';
 
 const artifactKindMeta=(kind,t,metadata={})=>{
@@ -506,10 +508,9 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   const section=(label,Icon,children,extra=null)=><section style={railSectionS}>{sectionHead(label,Icon,extra)}{children}</section>;
   const grid2={display:"grid",gridTemplateColumns:"minmax(0,1fr) minmax(0,1fr)",gap:8,alignItems:"end"};
   const railBtn=(c,opts={})=>({minHeight:34,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,padding:"7px 10px",borderRadius:"var(--hc-radius)",background:opts.solid?c:`${c}14`,border:opts.solid?`1px solid ${c}`:`1px solid ${c}3d`,color:opts.solid?t.bgDeep:c,cursor:opts.disabled?"default":"pointer",fontFamily:font,fontWeight:600,fontSize:"var(--hc-text-secondary)",opacity:opts.disabled?0.55:1,boxSizing:"border-box"});
-  if(!configured)return <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10,color:t.mut}}>
-    <span style={{fontSize:42,opacity:.5}}>🎨</span>
-    <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.dim}}>Image Studio</div>
-    <div style={{fontSize:"var(--hc-text-secondary)",maxWidth:380,textAlign:"center"}}>ComfyUI is not configured. Set the ComfyUI URL in Settings → Connections to enable local Stable Diffusion image generation.</div>
+  if(!configured)return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <PanelHeader t={t} icon={<IC.Image/>} title="Image Studio" subtitle="Pictures made on your own hardware with ComfyUI."/>
+    <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}><EmptyState icon={<IC.Image/>} title="ComfyUI is not connected" hint="Set the ComfyUI address in Settings → Connections to make pictures here and in chat."/></div>
   </div>;
   const elapsed=job?Math.round((Date.now()-job.started)/1000):0;
   const smallBtn=(c)=>({fontSize:"var(--hc-text-secondary)",padding:"6px 9px",borderRadius:"var(--hc-radius)",background:`${c}14`,border:`1px solid ${c}35`,color:c,cursor:"pointer",fontFamily:font,fontWeight:600,display:"inline-flex",alignItems:"center",gap:5,textDecoration:"none"});
@@ -525,13 +526,10 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   </div>);
   const navBtn=(dir,disabled,onClick,big)=>(<button onClick={onClick} disabled={disabled} style={{width:big?46:30,height:big?46:58,flexShrink:0,borderRadius:big?23:8,border:"1px solid var(--hc-line)",background:big?"rgba(0,0,0,.45)":`${t.surface}cc`,color:disabled?t.mut:t.text,fontSize:big?20:14,cursor:disabled?"default":"pointer",opacity:disabled?0.35:1,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:font}}>{dir}</button>);
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",flexWrap:"wrap",alignItems:"center",gap:8}}>
-      <IC.Image/><span style={{fontSize:"var(--hc-text-display)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Image Studio</span>
-      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginLeft:8}}>Local Stable Diffusion via ComfyUI</span>
-      <div style={{flex:1}}/>
-      {gallery.length>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginRight:6}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
+    <PanelHeader t={t} icon={<IC.Image/>} title="Image Studio" subtitle="Pictures made on your own hardware with ComfyUI.">
+      {gallery.length>0&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{gallery.length} image{gallery.length===1?"":"s"}</span>}
       {gallery.length>0&&<ActionMenu label="Gallery actions" items={[{label:'Delete all images',destructive:true,onClick:purgeAll}]}/>}
-    </div>
+    </PanelHeader>
     <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
       {/* LEFT RAIL — prompt + all generation inputs */}
       <div style={{width:isMobile?"100%":"clamp(330px,30vw,420px)",flexShrink:0,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",overflowY:"auto",padding:16,display:"flex",flexDirection:"column",gap:12,...(isMobile?{maxHeight:"46%",borderBottom:"1px solid var(--hc-line-subtle)"}:{})}}>
@@ -1011,16 +1009,13 @@ function ArtifactStudioPanel({t,font,workspaces,kbs,onPreview,onOpenConv,onUseIn
   const toggleSelected=(id,on)=>setSelected(p=>{const n=new Set(p);if(on)n.add(id);else n.delete(id);return n;});
   return <div style={{flex:1,display:"flex",overflow:"hidden",position:"relative"}}>
   <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8,minWidth:160}}><IC.Layers/><span style={{fontSize:"var(--hc-text-display)",fontWeight:600,letterSpacing:0,textTransform:"none",color:t.acc}}>Artifacts</span></div>
-      <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-        {filters.map(([id,label])=><button key={id} onClick={()=>setView(id)} style={{padding:"6px 10px",borderRadius:"var(--hc-radius)",border:`1px solid ${view===id?t.acc:t.brd}35`,background:view===id?`${t.acc}18`:"transparent",color:view===id?t.acc:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:view===id?800:600}}>{label}</button>)}
-      </div>
-      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search artifacts..." style={{marginLeft:"auto",minWidth:180,background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",outline:undefined}}/>
+    <PanelHeader t={t} icon={<IC.Layers/>} title="Artifacts" subtitle="Files your chats and jobs have delivered."
+      nav={<Segmented label="Artifact kinds" value={view} onChange={setView} options={filters.map(([id,label])=>({v:id,label}))}/>}>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search artifacts…" aria-label="Search artifacts" style={{minWidth:180,background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)"}}/>
       {selected.size>0&&<><select aria-label="Batch export format" value={batchFormat} onChange={e=>setBatchFormat(e.target.value)}>{['pdf','txt','csv','docx','pptx','xlsx'].map(f=><option key={f}>{f}</option>)}</select><button onClick={async()=>{try{const ids=Array.from(selected);const conversationId=items.find(a=>selected.has(a.id))?.conversation_id;await apiJson('/api/documents/batch-export',{method:'POST',body:{artifact_ids:ids,format:batchFormat,conversation_id:conversationId}});notify?.({type:'success',text:'Batch export queued',detail:'Follow progress and per-file results in Jobs.'});}catch(e){notify?.({type:'error',text:'Export failed',detail:e.message});}}} style={{background:t.surface,color:t.text,border:`1px solid ${t.brd}`,borderRadius:"var(--hc-radius)",padding:7}}>Export {selected.size}</button></>}
       {selected.size>0&&<button onClick={bundleSelected} style={{background:`${t.warm}16`,border:`1px solid ${t.warm}35`,color:t.warm,cursor:"pointer",padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Bundle {selected.size}</button>}
-      <button onClick={load} style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",color:t.mut,cursor:"pointer",padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",fontWeight:600}}>Refresh</button>
-    </div>
+      <button className="hc-button" onClick={load}>Refresh</button>
+    </PanelHeader>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       {loading&&<SkeletonGrid t={t} cards={6} minW={250} cardH={120}/>}
       {!loading&&!items.length&&<EmptyState icon={<IC.Package/>} title="No artifacts yet" hint="Files the assistant delivers with download_file or download_project are collected here."/>}

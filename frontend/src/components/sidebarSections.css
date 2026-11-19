@@ -3,17 +3,17 @@
 .ws-sec { margin-bottom: 2px; }
 .ws-sec-head { display: flex; align-items: center; gap: 2px; padding-right: 7px; border-radius: var(--hc-radius); }
 .ws-sec-head:hover, .ws-sec-head:focus-within { background: color-mix(in srgb, var(--hc-text) 6%, transparent); }
-.ws-sec-toggle { flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 6px 0 12px; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-text); font: inherit; font-size: var(--hc-text-control); font-weight: 600; text-align: left; cursor: pointer; }
+.ws-sec-toggle { flex: 1; min-width: 0; min-height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 6px 0 12px; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-text); font: inherit; font-size: var(--hc-text-control); font-weight: 600; text-align: left; cursor: pointer; }
 .ws-sec-toggle:focus-visible, .ws-sec-add:focus-visible, .ws-sec-more:focus-visible { outline: none; border-color: var(--hc-accent-ring, var(--hc-accent)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--hc-accent) 28%, transparent); }
 .ws-sec-icon { display: flex; flex-shrink: 0; color: var(--hc-secondary); }
 .ws-sec-toggle[aria-expanded="true"] .ws-sec-icon { color: var(--ws-sec-accent, var(--hc-accent)); }
 .ws-sec-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-sec-count { flex-shrink: 0; min-width: 18px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--hc-text) 9%, transparent); color: var(--hc-secondary); font-size: var(--hc-text-secondary); font-weight: 600; line-height: 18px; text-align: center; }
-.ws-sec-add { flex-shrink: 0; width: 32px; height: 32px; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-muted); cursor: pointer; opacity: 0; }
+.ws-sec-add { flex-shrink: 0; width: 28px; height: 28px; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-muted); cursor: pointer; opacity: 0; }
 .ws-sec-head:hover .ws-sec-add, .ws-sec-head:focus-within .ws-sec-add { opacity: 1; }
 .ws-sec-add:hover { color: var(--hc-text); background: color-mix(in srgb, var(--hc-text) 8%, transparent); }
 .ws-sec-body { padding-left: 14px; margin-left: 20px; border-left: 1px solid var(--hc-line-subtle, var(--hc-line)); }
-.ws-sec-body .conv-row { min-height: 40px; }
+.ws-sec-body .conv-row { min-height: 34px; }
 .ws-sec-empty { padding: 6px 12px 8px; color: var(--hc-muted); font-size: var(--hc-text-secondary); }
 .ws-sec-more, .hc-conv-older { display: block; min-height: 32px; padding: 4px 12px; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-muted); font: inherit; font-size: var(--hc-text-secondary); text-align: left; cursor: pointer; }
 .ws-sec-more:hover, .hc-conv-older:hover { color: var(--hc-text); }
@@ -22,6 +22,39 @@
 /* Touch screens have no hover: the "+" is always there, and the small links get a full-size target. */
 @media (max-width: 768px), (pointer: coarse) {
   .ws-sec-add { opacity: 1; width: 44px; height: 44px; }
+  .ws-sec-toggle { min-height: 44px; }
+  .ws-sec-body .conv-row { min-height: 44px; }
   .ws-sec-more, .hc-conv-older { min-height: 44px; }
   .ws-sec-body { padding-left: 8px; margin-left: 16px; }
+}
+
+/* The top row (search + new chat) and the footer (profile + one status line) of the left bar. */
+.sb-top { display: flex; gap: 6px; align-items: center; }
+.sb-search { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 8px; border: 1px solid var(--hc-line); border-radius: var(--hc-radius); background: var(--hc-sunken); color: var(--hc-muted); }
+.sb-search:focus-within { border-color: var(--hc-accent-ring, var(--hc-accent)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--hc-accent) 22%, transparent); }
+.sb-search-icon { display: flex; flex-shrink: 0; opacity: .8; }
+.sb-search input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: transparent; color: var(--hc-text); font: inherit; font-size: var(--hc-text-control); }
+.sb-search input::placeholder { color: var(--hc-muted); }
+.sb-search-clear { min-height: 0; padding: 0 2px; border: 0; background: none; color: var(--hc-muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.sb-new { flex-shrink: 0; width: 34px; height: 34px; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid var(--hc-accent); border-radius: var(--hc-radius); background: var(--hc-accent); color: var(--hc-surface); cursor: pointer; }
+.sb-new:hover { filter: brightness(1.08); }
+.sb-new:focus-visible, .sb-profile:focus-visible, .sb-status:focus-visible, .sb-general:focus-visible { outline: 2px solid color-mix(in srgb, var(--hc-accent) 60%, transparent); outline-offset: 2px; }
+.sb-general { min-height: 30px; padding: 4px 8px; border: 1px dashed var(--hc-line); border-radius: var(--hc-radius); background: none; color: var(--hc-secondary); font: inherit; font-size: var(--hc-text-secondary); text-align: left; cursor: pointer; }
+.sb-general:hover { color: var(--hc-text); border-style: solid; }
+.sb-foot { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--hc-line-subtle); }
+.sb-profile { flex: 1; min-width: 0; min-height: 32px; display: flex; align-items: center; gap: 8px; padding: 2px 6px; border: 0; border-radius: var(--hc-radius); background: none; color: var(--hc-text); font: inherit; font-size: var(--hc-text-control); text-align: left; cursor: pointer; }
+.sb-profile:hover, .sb-status:hover { background: color-mix(in srgb, var(--hc-text) 6%, transparent); }
+.sb-avatar { flex-shrink: 0; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: color-mix(in srgb, var(--hc-accent) 18%, transparent); color: var(--hc-accent); font-size: var(--hc-text-secondary); font-weight: 600; }
+.sb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.sb-status { flex-shrink: 0; max-width: 62%; min-height: 28px; display: flex; align-items: center; gap: 6px; padding: 2px 8px; border: 0; border-radius: 999px; background: none; color: var(--hc-secondary); font: inherit; font-size: var(--hc-text-micro); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.sb-status-dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--hc-muted); }
+.sb-status.is-ok .sb-status-dot { background: var(--sb-ok, #4caf7a); }
+.sb-status.is-slow { color: var(--sb-warn, var(--hc-text)); }
+.sb-status.is-slow .sb-status-dot { background: var(--sb-warn, #d8a03a); }
+.sb-status.is-down { color: var(--hc-danger); }
+.sb-status.is-down .sb-status-dot { background: var(--hc-danger); }
+@media (max-width: 768px), (pointer: coarse) {
+  .sb-search, .sb-new { height: 44px; }
+  .sb-new { width: 44px; }
+  .sb-profile, .sb-status { min-height: 44px; }
 }

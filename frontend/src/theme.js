@@ -41,6 +41,17 @@ export const UI_FONTS = [
   {name:"DM Sans",v:"'DM Sans',sans-serif",i:"DM+Sans:wght@400;500;600;700"},
 ];
 
+// Which interface font a browser starts with. The default used to be -1 ("match the code font", so the
+// whole app was monospace) and that value was written to storage on first load, so "never chose" and
+// "chose monospace" look the same. `migrated` is the one-time flag `hc-ui-font-default-v2`: until it is
+// set, a missing or -1 choice becomes DEFAULT_UI_FONT; after that -1 is a real choice and is kept.
+export const DEFAULT_UI_FONT = UI_FONTS.findIndex(font => font.name === "Figtree");
+export function defaultUiFont(stored, migrated) {
+  const saved = stored === null || stored === undefined || stored === "" ? NaN : Number(stored);
+  if (Number.isInteger(saved) && UI_FONTS[saved]) return saved;
+  return migrated ? -1 : DEFAULT_UI_FONT;
+}
+
 export const BACKGROUND_EFFECTS = [
   {id:"dots",name:"Dot Grid"},
   {id:"rain",name:"Pixel Rain"},
@@ -63,6 +74,11 @@ export const BACKGROUND_EFFECTS = [
   {id:"candle",name:"Monastery Candlelight"},
   {id:"microwave",name:"Cosmic Microwave"},
   {id:"blueprint",name:"Blueprint Ghosts"},
+  {id:"northern",name:"Northern Lights"},
+  {id:"snowfall",name:"Snowfall"},
+  {id:"xmasLights",name:"Christmas Lights"},
+  {id:"silentNight",name:"Silent Night"},
+  {id:"holidayGlow",name:"Holiday Glow"},
   {id:"scanlines",name:"Scanlines"},
   {id:"off",name:"Off"},
 ];

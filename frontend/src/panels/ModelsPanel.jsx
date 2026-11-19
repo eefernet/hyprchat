@@ -1,4 +1,5 @@
 import React from 'react';
+import PanelHeader from '../components/PanelHeader.jsx';
 import {IC} from '../components/icons.jsx';
 import InstalledTab from '../components/models/InstalledTab.jsx';
 import RecommendedTab from '../components/models/RecommendedTab.jsx';
@@ -19,20 +20,15 @@ export default function ModelsPanel({m}) {
   const fromHf = rows.filter(row => row.huggingFace).length;
   const refresh = tab === 'hyprfit' ? () => m.fit.load(true) : tab === 'hf' && m.hf.search.trim() ? () => { m.refreshModels(); m.hf.doSearch(m.hf.search); } : m.refreshModels;
   return <div className="mp" style={{'--mp-ok': t.ok, '--mp-warn': t.warm, '--mp-bad': t.err}}>
-    <header className="mp-bar">
-      <div>
-        <div className="mp-title">Models</div>
-        <div className="mp-sub">{rows.length} installed{fromHf ? `, ${fromHf} from Hugging Face` : ''}</div>
-      </div>
-      <div className="mp-tabs" role="tablist" aria-label="Models">
+    <PanelHeader t={t} icon={<IC.Layers/>} title="Models" subtitle={`${rows.length} installed${fromHf ? `, ${fromHf} from Hugging Face` : ''}`}
+      nav={<div className="mp-tabs" role="tablist" aria-label="Models">
         {TABS.map(([id, label]) => <button key={id} type="button" role="tab" className="mp-tab" aria-selected={tab === id}
           onClick={() => { setTab(id); if (id !== 'ollama') m.setSelected(null); if (id !== 'hf') m.hf.clear(); }}>
           {label}{id === 'ollama' ? ` · ${rows.length}` : ''}
         </button>)}
-      </div>
-      <div className="mp-spacer"/>
+      </div>}>
       <button type="button" className="hc-button is-compact" aria-label={tab === 'hyprfit' ? 'Refresh recommendations' : 'Refresh'} title={tab === 'hyprfit' ? 'Refresh recommendations' : 'Refresh'} onClick={refresh}><IC.Refresh/></button>
-    </header>
+    </PanelHeader>
     {tab === 'ollama' && <InstalledTab m={m} rows={rows}/>}
     {tab === 'hyprfit' && <RecommendedTab m={m}/>}
     {tab === 'hf' && <HuggingFaceTab m={m}/>}

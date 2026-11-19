@@ -1,16 +1,19 @@
 import React, { useEffect, useRef } from 'react';
 import {isLightTheme} from '../elevation.js';
+import {CANVAS_EFFECTS, effectOpacity} from '../backgrounds.js';
+import {EFFECT_MODULES} from '../backgroundEffects/index.js';
 
-export default function BackgroundCanvas({effect,t,energy=0}){
+// `still`: draw the settled picture once and run no animation loop or pointer listener (gallery
+// thumbnails). `strength` multiplies the effect's own opacity (Appearance → Background strength).
+export default function BackgroundCanvas({effect,t,energy=0,still:stillOnly=false,strength=1}){
   const ref=useRef(null);
   // Activity energy (0..1) read by the frame loop: streaming makes every effect run a touch faster.
   const energyRef=useRef(0);energyRef.current=energy;
   useEffect(()=>{
-    const canvasEffects=["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"];
-    if(!canvasEffects.includes(effect))return;
+    if(!CANVAS_EFFECTS.includes(effect))return;
     const canvas=ref.current;
     if(!canvas)return;
-    const reduced=window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reduced=stillOnly||(window.matchMedia&&window.matchMedia("(prefers-reduced-motion: reduce)").matches);
     const ctx=canvas.getContext("2d");
     if(!ctx)return;
     let raf=0, stopped=false, particles=[];
@@ -62,9 +65,13 @@ export default function BackgroundCanvas({effect,t,energy=0}){
     // coords only — particle state never mutates from the pointer.
     const par={x:0,y:0,tx:0,ty:0};
     const PAR=12;
+    // Where the pointer is on the canvas, for effects that react to it (the dot grid's spotlight).
+    const pointer={x:0,y:0,seen:false};
     const onPointer=(e)=>{
       par.tx=(e.clientX/window.innerWidth-.5)*2;
       par.ty=(e.clientY/window.innerHeight-.5)*2;
+      const rect=canvas.getBoundingClientRect();
+      if(rect.width>0&&rect.height>0){pointer.x=(e.clientX-rect.left)/rect.width*view.w;pointer.y=(e.clientY-rect.top)/rect.height*view.h;pointer.seen=true;}
     };
     const ox=(z)=>par.x*PAR*z, oy=(z)=>par.y*PAR*z;
     // ── flagship transient state (reset in seed so no stale refs survive reseeds) ──
@@ -73,7 +80,6 @@ export default function BackgroundCanvas({effect,t,energy=0}){
     let shoot=null, shootTimer=4000;          // stars shooting star
     let auroraBands=[], flowRamp=[];
     let circGenCounter=0;
-    const makeRain=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h-h*.4,c:colors[i%colors.length],a:.08+Math.random()*.16,v:1+Math.random()*2.6,drift:(Math.random()-.5)*.42,size:2+(Math.random()>.82?2:0),blocks:1+Math.floor(Math.random()*4),gap:6+Math.floor(Math.random()*8)});
     const makeFlow=(w,h,i)=>({x:Math.random()*w,y:Math.random()*h,c:colors[i%colors.length],a:.16+Math.random()*.24,s:.36+Math.random()*.8,z:.4+Math.random()*.6});
     const makeStar=(w,h,i)=>{
       const zr=Math.random(), z=zr<.5?.35:zr<.8?.6:1;
@@ -94,11 +100,24 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       const zr=Math.random();
       return {x,y,segs,total,gen:++circGenCounter,z:zr<.4?.5:zr<.75?.75:1,c:colors[i%colors.length],a:.11+Math.random()*.16,phase:Math.random()*Math.PI*2,v:.045+Math.random()*.1};
     };
+    // Pictures an effect paints once and copies every frame (a still grid, a gradient strip, a row of
+    // trees). `paint` draws in CSS pixels; the picture is kept until the canvas is resized.
+    const layers=new Map();
+    const layer=(key,lw,lh,paint)=>{
+      let made=layers.get(key); if(made)return made;
+      const c=document.createElement("canvas");
+      c.width=Math.max(1,Math.ceil(lw*view.dpr));c.height=Math.max(1,Math.ceil(lh*view.dpr));
+      const g=c.getContext("2d");g.scale(view.dpr,view.dpr);paint(g,lw,lh);
+      made={img:c,w:lw,h:lh};layers.set(key,made);return made;
+    };
+    // Effects that live in their own files (backgroundEffects/) get what the ones below share.
+    const env={ctx,t,colors,light:isLightTheme(t),still:reduced,noise,snap,mix,drawGlow,fade,layer,ox,oy,pointer,clampCount,random:Math.random,get view(){return view;}};
+    const external=EFFECT_MODULES[effect]?EFFECT_MODULES[effect](env):null;
     const seed=(w,h)=>{
       const area=w*h;
       pulses=[];packets=[];shoot=null;
-      if(effect==="rain")particles=Array.from({length:clampCount(area/36000,24,78)},(_,i)=>makeRain(w,h,i));
-      else if(effect==="flow"){
+      if(external){particles=[];external.seed(w,h);return;}
+      if(effect==="flow"){
         particles=Array.from({length:clampCount(area/11000,70,240)},(_,i)=>makeFlow(w,h,i));
         flowRamp=Array.from({length:9},(_,i)=>mix(t.acc,t.acc2||t.acc,i/8));
       }
@@ -126,26 +145,13 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       canvas.height=Math.max(1,Math.floor(view.h*dpr));
       ctx.setTransform(dpr,0,0,dpr,0,0);
       ctx.imageSmoothingEnabled=false;
-      sprites.clear();
+      sprites.clear();layers.clear();
       // Lay the particles out again only when the area really changed (first run, a window resize, the
       // side pane opening). A small change keeps them, so the animation does not restart.
       const grown=!seeded||Math.abs(view.w*view.h-seeded.w*seeded.h)>seeded.w*seeded.h*.15;
       if(grown){seed(view.w,view.h);seeded={w:view.w,h:view.h};}
       ctx.clearRect(0,0,view.w,view.h);
       if(reduced)still();
-    };
-    const drawRain=(time,w,h,dtf)=>{
-      ctx.clearRect(0,0,w,h);
-      particles.forEach((p,i)=>{
-        p.y+=p.v*dtf;
-        p.x+=(p.drift+Math.sin(time*.001+i)*.05)*dtf;
-        if(p.y>h+40||p.x<-20||p.x>w+20)Object.assign(p,makeRain(w,h,i),{y:-Math.random()*h*.35});
-        const x=snap(p.x,4), y=snap(p.y,4);
-        ctx.fillStyle=p.c;
-        ctx.globalAlpha=p.a;
-        for(let b=0;b<p.blocks;b++)ctx.fillRect(x,y-b*p.gap,p.size,p.size*2);
-      });
-      ctx.globalAlpha=1;
     };
     const drawFlow=(time,w,h,dtf)=>{
       fade(.05);
@@ -359,7 +365,18 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       ctx.clearRect(0,0,w,h);const cx=w*.22,cy=h*.72;for(let i=0;i<10;i++){const r=((time*.045+i*90)%(Math.max(w,h)*1.2));ctx.globalAlpha=Math.max(0,.16-r/(Math.max(w,h)*7));ctx.strokeStyle=colors[i%colors.length];ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(cx,cy,r,-.95,-.05);ctx.stroke();}ctx.globalAlpha=1;
     };
     const drawQuantum=(time,w,h,dtf)=>{
-      ctx.clearRect(0,0,w,h);particles.forEach((p,i)=>{if(Math.random()<.012){p.x=Math.random()*w;p.y=Math.random()*h;}p.x+=Math.sin(time*.001+p.phase)*.25*dtf;p.y+=Math.cos(time*.0008+p.phase)*.25*dtf;ctx.globalAlpha=p.a*(.35+.65*Math.sin(time*.006+i)**2);ctx.fillStyle=p.c;ctx.fillRect(snap(p.x,2),snap(p.y,2),p.r,p.r);});ctx.globalAlpha=1;
+      ctx.clearRect(0,0,w,h);
+      particles.forEach((p,i)=>{
+        if(Math.random()<.012*dtf){p.x=Math.random()*w;p.y=Math.random()*h;p.flash=1;}
+        p.x+=Math.sin(time*.001+p.phase)*.25*dtf;p.y+=Math.cos(time*.0008+p.phase)*.25*dtf;
+        const x=snap(p.x,2), y=snap(p.y,2);
+        if(p.flash>0){
+          ctx.globalCompositeOperation="lighter";drawGlow(p.c,5+p.r*2,x+p.r/2,y+p.r/2,p.flash*.5);ctx.globalCompositeOperation="source-over";
+          p.flash-=.05*dtf;
+        }
+        ctx.globalAlpha=p.a*(.35+.65*Math.sin(time*.006+i)**2);ctx.fillStyle=p.c;ctx.fillRect(x,y,p.r,p.r);
+      });
+      ctx.globalAlpha=1;
     };
     const drawVeins=(time,w,h)=>{
       ctx.clearRect(0,0,w,h);particles.slice(0,70).forEach((p,i)=>{const x=(p.x+time*.015*(i%3+1))%(w+160)-80;const y=p.y;ctx.globalAlpha=.08+p.a*.25;ctx.strokeStyle=p.c;ctx.beginPath();ctx.moveTo(x,y);for(let k=0;k<5;k++)ctx.lineTo(x+k*48,y+Math.sin(time*.0008+i+k)*34);ctx.stroke();});ctx.globalAlpha=1;
@@ -371,7 +388,22 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       ctx.globalCompositeOperation="source-over";ctx.globalAlpha=1;
     };
     const drawTerminal=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.font="11px monospace";const glyphs="01AF39#{}[]<>/sys:root";particles.slice(0,90).forEach((p,i)=>{const y=(p.y+time*.018*(1+i%4))%(h+40);ctx.globalAlpha=.04+p.a*.22;ctx.fillStyle=p.c;ctx.fillText(glyphs[(i+Math.floor(time*.002))%glyphs.length],snap(p.x,12),snap(y,14));});ctx.globalAlpha=1;
+      ctx.clearRect(0,0,w,h);ctx.font="12px monospace";ctx.textBaseline="top";
+      const glyphs="01AF39#{}[]<>/sys:root", ROW=14, TAIL=9;
+      particles.slice(0,Math.min(particles.length,Math.max(24,Math.floor(w/26)))).forEach((p,i)=>{
+        const x=snap(p.x,14), span=h+TAIL*ROW+40;
+        const head=Math.floor(((p.y+time*.022*(1+i%4))%span)/ROW)*ROW-20;
+        ctx.fillStyle=p.c;
+        for(let k=0;k<TAIL;k++){
+          const y=head-k*ROW;
+          if(y<-ROW||y>h)continue;
+          const fall=1-k/TAIL;
+          ctx.globalAlpha=k===0?Math.min(.75,.3+p.a):(.03+p.a*.3)*fall*fall;
+          // A glyph keeps its place on the screen for a while, then changes: the stream reads as falling text.
+          ctx.fillText(glyphs[(i*7+Math.floor(y/ROW)*3+Math.floor(time*.0016+k*.37+i))%glyphs.length],x,y);
+        }
+      });
+      ctx.globalAlpha=1;
     };
     const drawOrbital=(time,w,h)=>{
       ctx.clearRect(0,0,w,h);particles.slice(0,12).forEach((p,i)=>{const z=.3+(i%5)*.14;const cx=w*((i%4)+1)/5+ox(z),cy=h*(.24+Math.floor(i/4)*.22)+oy(z),r=34+(i%5)*18;ctx.globalAlpha=.09;ctx.strokeStyle=p.c;ctx.beginPath();ctx.ellipse(cx,cy,r,r*.42,(i%3)*.6,0,Math.PI*2);ctx.stroke();const a=time*.00035*(i%3+1)+p.phase;const bx=cx+Math.cos(a)*r,by=cy+Math.sin(a)*r*.42;ctx.globalCompositeOperation="lighter";drawGlow(p.c,4,bx,by,.4);ctx.globalCompositeOperation="source-over";ctx.globalAlpha=.42;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(bx,by,2.2,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
@@ -380,7 +412,23 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.3),oy(.3));ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let y=h*.18;y<h;y+=36){ctx.globalAlpha=.045+(y/h)*.08;ctx.beginPath();for(let x=0;x<=w;x+=36){const yy=y+Math.sin(x*.012+time*.0008+y*.01)*10;if(x===0)ctx.moveTo(x,yy);else ctx.lineTo(x,yy);}ctx.stroke();}for(let x=0;x<w;x+=52){ctx.globalAlpha=.04;ctx.beginPath();ctx.moveTo(x,h*.18);ctx.lineTo(w/2+(x-w/2)*1.8,h);ctx.stroke();}ctx.restore();ctx.globalAlpha=1;
     };
     const drawSynapse=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.6),oy(.6));particles.slice(0,45).forEach((p,i)=>{const y=(p.y+time*.035*(1+i%3))%(h+80)-40;ctx.strokeStyle=p.c;ctx.globalAlpha=.08+p.a*.15;ctx.beginPath();ctx.moveTo(p.x,y);ctx.bezierCurveTo(p.x+30,y+30,p.x-20,y+70,p.x+50,y+110);ctx.stroke();const dx2=p.x+Math.sin(time*.004+i)*34,dy2=y+((time*.08+i*17)%110);ctx.globalCompositeOperation="lighter";drawGlow(p.c,5,dx2,dy2,.4);ctx.globalCompositeOperation="source-over";ctx.globalAlpha=.45;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(dx2,dy2,2,0,Math.PI*2);ctx.fill();});ctx.restore();ctx.globalAlpha=1;
+      ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.6),oy(.6));
+      particles.slice(0,45).forEach((p,i)=>{
+        const y=(p.y+time*.035*(1+i%3))%(h+80)-40;
+        ctx.strokeStyle=p.c;ctx.globalAlpha=.08+p.a*.15;ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(p.x,y);ctx.bezierCurveTo(p.x+30,y+30,p.x-20,y+70,p.x+50,y+110);ctx.stroke();
+        const size=1.4+(i%3)*.7, travel=(time*.08+i*17)%110;
+        ctx.fillStyle=p.c;
+        for(let k=4;k>=0;k--){
+          const back=travel-k*7;
+          if(back<0)continue;
+          const dx2=p.x+Math.sin((time-k*90)*.004+i)*34, dy2=y+back;
+          if(k===0){ctx.globalCompositeOperation="lighter";drawGlow(p.c,4+size*2,dx2,dy2,.4);ctx.globalCompositeOperation="source-over";}
+          ctx.globalAlpha=.5*(1-k/5);
+          ctx.beginPath();ctx.arc(dx2,dy2,size*(1-k*.14),0,Math.PI*2);ctx.fill();
+        }
+      });
+      ctx.restore();ctx.globalAlpha=1;
     };
     const drawSonar=(time,w,h)=>{
       ctx.clearRect(0,0,w,h);const cx=w*.78+ox(.4),cy=h*.68+oy(.4),max=Math.max(w,h);
@@ -396,18 +444,60 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       ctx.globalCompositeOperation="source-over";ctx.restore();ctx.globalAlpha=1;
     };
     const drawCandle=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);const grd=ctx.createRadialGradient(w*.5,h*.42,20,w*.5,h*.42,Math.max(w,h)*.7);grd.addColorStop(0,`${t.warm}20`);grd.addColorStop(1,"rgba(0,0,0,0)");ctx.fillStyle=grd;ctx.globalAlpha=.5+.1*Math.sin(time*.006);ctx.fillRect(0,0,w,h);for(let i=0;i<40;i++){ctx.globalAlpha=.015;ctx.fillStyle=i%2?t.warm:t.acc;ctx.fillRect(Math.random()*w,Math.random()*h,1,Math.random()*80);}ctx.globalAlpha=1;
+      ctx.clearRect(0,0,w,h);
+      const flicker=noise(time*.0042,1.7)*.7+noise(time*.011,8.3)*.3;
+      const cx=w*.5+ox(.3)+(noise(time*.0016,4.1)-.5)*14, cy=h*.46+oy(.3);
+      const grd=ctx.createRadialGradient(cx,cy,20,cx,cy,Math.max(w,h)*(.62+.1*flicker));
+      grd.addColorStop(0,`${t.warm}2c`);grd.addColorStop(.45,`${t.warm}12`);grd.addColorStop(1,`${t.warm}00`);
+      ctx.fillStyle=grd;ctx.globalAlpha=.55+.45*flicker;ctx.fillRect(0,0,w,h);
+      ctx.globalCompositeOperation="lighter";
+      particles.slice(0,28).forEach((p,i)=>{
+        const rise=h*.62, travel=(time*.011*p.v+p.phase*160)%rise, life=1-travel/rise;
+        const x=w*.5+(p.x/w-.5)*w*.46+Math.sin(time*.0011+p.phase+travel*.012)*16;
+        drawGlow(i%4?t.warm:t.acc,2+p.r,x,h*.9-travel,.5*life*life*(.5+p.a));
+      });
+      ctx.globalCompositeOperation="source-over";ctx.globalAlpha=1;
     };
     const drawMicrowave=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);particles.forEach((p,i)=>{ctx.globalAlpha=.035+p.a*.12;ctx.fillStyle=colors[(i+Math.floor(time*.0004))%colors.length];ctx.fillRect(snap(p.x,3),snap(p.y,3),2,2);});ctx.globalAlpha=1;
+      ctx.clearRect(0,0,w,h);
+      const drift=time*.0035;
+      particles.forEach((p,i)=>{
+        const twinkle=.5+.5*Math.sin(time*.0011*p.v+p.phase);
+        const x=((p.x+drift*(.4+p.v))%(w+6)+w+6)%(w+6)-3, y=((p.y+drift*.25)%(h+6)+h+6)%(h+6)-3;
+        ctx.globalAlpha=(.05+p.a*.26)*(.35+.65*twinkle);
+        ctx.fillStyle=colors[(i+Math.floor(time*.0004))%colors.length];
+        const size=twinkle>.92&&p.r>2.6?3:2;
+        ctx.fillRect(snap(x,3),snap(y,3),size,size);
+      });
+      ctx.globalAlpha=1;
     };
     const drawBlueprint=(time,w,h)=>{
-      ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.3),oy(.3));ctx.strokeStyle=t.acc;ctx.lineWidth=1;for(let i=0;i<16;i++){const x=(particles[i]?.x||0),y=(particles[i]?.y||0),ww=60+(i%5)*26,hh=30+(i%4)*18;ctx.globalAlpha=.045+(i%3)*.02;ctx.strokeRect(snap(x,16),snap(y,16),ww,hh);ctx.beginPath();ctx.moveTo(snap(x,16)-16,snap(y,16)+hh/2);ctx.lineTo(snap(x,16)+ww+16,snap(y,16)+hh/2);ctx.moveTo(snap(x,16)+ww/2,snap(y,16)-16);ctx.lineTo(snap(x,16)+ww/2,snap(y,16)+hh+16);ctx.stroke();}ctx.restore();ctx.globalAlpha=1;
+      ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(ox(.3),oy(.3));ctx.strokeStyle=t.acc;ctx.lineWidth=1;
+      for(let i=0;i<16;i++){
+        const period=13000+i*850, at=time+i*1900, cycle=Math.floor(at/period), f=(at%period)/period;
+        const ww=60+(i%5)*26, hh=30+(i%4)*18;
+        const x=snap(n2(i*1.7+.3,cycle*3.1+.7)*(w-ww),16)+Math.sin(time*.00012+i)*8, y=snap(n2(i*2.3+5.1,cycle*1.9+2.2)*(h-hh),16);
+        const traced=Math.min(1,f/.22), fadeOut=f>.82?(1-f)/.18:1, perimeter=2*(ww+hh);
+        ctx.globalAlpha=(.07+(i%3)*.03)*fadeOut;
+        ctx.setLineDash([perimeter*traced,perimeter]);
+        ctx.strokeRect(x,y,ww,hh);
+        ctx.setLineDash([]);
+        // The centre lines appear once the outline is drawn.
+        const marks=Math.min(1,Math.max(0,(f-.22)/.1));
+        if(marks>0){
+          ctx.globalAlpha*=marks*.8;
+          ctx.beginPath();
+          ctx.moveTo(x-16*marks,y+hh/2);ctx.lineTo(x+ww+16*marks,y+hh/2);
+          ctx.moveTo(x+ww/2,y-16*marks);ctx.lineTo(x+ww/2,y+hh+16*marks);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();ctx.globalAlpha=1;
     };
     const draw=(time,dtf)=>{
       const w=view.w, h=view.h;
-      if(effect==="rain")drawRain(time,w,h,dtf);
-      else if(effect==="flow")drawFlow(time,w,h,dtf);
+      if(external){external.draw(time,w,h,dtf);ctx.globalCompositeOperation="source-over";ctx.globalAlpha=1;return;}
+      if(effect==="flow")drawFlow(time,w,h,dtf);
       else if(effect==="aurora")drawAurora(time,w,h);
       else if(effect==="stars")drawStars(time,w,h,dtf);
       else if(effect==="circuit")drawCircuit(time,w,h,dtf);
@@ -454,6 +544,9 @@ export default function BackgroundCanvas({effect,t,energy=0}){
       else if(!stopped&&!reduced){lastTime=0;lastDraw=0;raf=requestAnimationFrame(step);}
     };
     resize();
+    // For checking an effect without waiting for the browser's own frames (which do not run in a hidden
+    // tab or pane): run `ms` worth of frames at once on the effect's own clock.
+    canvas.__hcBackground={effect,advance:(ms=1000)=>{const frames=Math.max(1,Math.round(ms/16.667));for(let i=0;i<frames;i++){vt+=16.667;ctx.globalCompositeOperation="source-over";draw(vt,1);}return frames;}};
     window.addEventListener("resize",resize);
     // Moving the window to a display with another pixel density changes devicePixelRatio without a resize.
     const density=window.matchMedia?window.matchMedia(`(resolution: ${window.devicePixelRatio||1}dppx)`):null;
@@ -465,14 +558,14 @@ export default function BackgroundCanvas({effect,t,energy=0}){
     if(!reduced)step(performance.now());
     return ()=>{
       density?.removeEventListener?.("change",resize);
+      delete canvas.__hcBackground;
       stopped=true;cancelAnimationFrame(raf);
       window.removeEventListener("resize",resize);
       if(ro)ro.disconnect();
       window.removeEventListener("pointermove",onPointer);
       document.removeEventListener("visibilitychange",onVis);
     };
-  },[effect,t.acc,t.acc2,t.warm,t.f1]);
-  if(!["rain","flow","aurora","stars","circuit","neural","sacred","signal","quantum","veins","solar","terminalGhost","orbital","lattice","synapse","sonar","magnetic","candle","microwave","blueprint"].includes(effect))return null;
-  const opacity=effect==="rain"?0.58:effect==="flow"?0.8:effect==="aurora"?0.62:effect==="stars"?0.82:effect==="circuit"?0.78:effect==="candle"?0.48:effect==="microwave"?0.5:0.7;
-  return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity:opacity*(isLightTheme(t)?.55:1)}}/>;
+  },[effect,t.acc,t.acc2,t.warm,t.f1,stillOnly]);
+  if(!CANVAS_EFFECTS.includes(effect))return null;
+  return <canvas ref={ref} aria-hidden="true" style={{position:"absolute",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity:effectOpacity(effect,isLightTheme(t),strength)}}/>;
 }

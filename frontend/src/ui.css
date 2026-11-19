@@ -1,6 +1,6 @@
 /* Shared presentation, inherited by the app and body portals. */
 :root {
-  --hc-font-ui: "JetBrains Mono", monospace;
+  --hc-font-ui: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
   --hc-font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --hc-space-1: 4px; --hc-space-2: 8px; --hc-space-3: 12px;
   --hc-space-4: 16px; --hc-space-5: 20px; --hc-space-6: 24px;

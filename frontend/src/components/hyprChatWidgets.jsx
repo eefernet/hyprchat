@@ -832,23 +832,20 @@ function QuickSearchSourcesPanel({payload,t,font,defaultOpen=false}){
   const freshness=payload?.freshness_mode||payload?.resolved_date||"";
   const shown=results.slice(0,18);
   const meta=[freshness,domains.slice(0,3).join(", ")].filter(Boolean).join(" - ");
-  return <div style={{margin:"12px 0 4px",border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",background:`${t.surface}F5`,overflow:"hidden",boxShadow:"none"}}>
-    <button type="button" aria-expanded={open} onClick={()=>setOpen(o=>!o)} style={{width:"100%",border:"none",background:`${t.surface}F5`,color:t.dim,cursor:"pointer",fontFamily:font,padding:"7px 10px",display:"grid",gridTemplateColumns:"auto 1fr auto",alignItems:"center",gap:9,textAlign:"left"}}>
-      <span style={{display:"inline-flex",alignItems:"center",gap:6,color:t.f1,fontSize:"var(--hc-text-secondary)",fontWeight:700,textTransform:"none",letterSpacing:0,whiteSpace:"nowrap"}}>
-        <span style={{transition:"transform .16s",transform:open?"rotate(90deg)":"rotate(0)",display:"inline-block",fontSize:"var(--hc-text-secondary)"}}>▶</span>
-        <IC.Search/> Sources
-        <span style={{color:t.mut,fontWeight:600,letterSpacing:0}}>({results.length})</span>
-      </span>
-      <span style={{minWidth:0,display:"flex",flexDirection:"column",gap:1}}>
-        <span style={{fontSize:"var(--hc-text-secondary)",color:t.text,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{query}</span>
-        {meta&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{meta}</span>}
-      </span>
-      <span style={{display:"flex",alignItems:"center",justifyContent:"flex-end",minWidth:0,paddingLeft:4}}>
-        {results.slice(0,6).map((r,i)=><span key={`${r.url}-${i}`} style={{marginLeft:i?-5:0,position:"relative",zIndex:10-i}}>
-          <SourceFavicon url={r.url} domain={r.domain} size={20} theme={t} title={r.domain}/>
+  // Closed: one quiet line (how many, the first sites, their icons). The search text and freshness
+  // are shown once it is opened; they used to fill the closed strip.
+  return <div className={`hc-sources${open?" is-open":""}`}>
+    <button type="button" className="hc-sources-line" aria-expanded={open} onClick={()=>setOpen(o=>!o)}>
+      <span className="hc-sources-icons" aria-hidden="true">
+        {results.slice(0,4).map((r,i)=><span key={`${r.url}-${i}`} style={{marginLeft:i?-5:0,position:"relative",zIndex:10-i}}>
+          <SourceFavicon url={r.url} domain={r.domain} size={16} theme={t} title={r.domain}/>
         </span>)}
       </span>
+      <span className="hc-sources-count">{results.length} source{results.length===1?"":"s"}</span>
+      <span className="hc-sources-domains">{domains.slice(0,3).join(", ")}{domains.length>3?` and ${domains.length-3} more`:""}</span>
+      <span className="hc-sources-toggle">{open?"Hide":"Show all"}</span>
     </button>
+    {open&&<div className="hc-sources-meta">Searched for “{query}”{freshness?` · ${freshness}`:""}</div>}
     {open&&<div style={{padding:9,borderTop:"1px solid var(--hc-line-subtle)",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(240px,1fr))",gap:7}}>
       {shown.map((r,i)=>{
         const isMedia=r.type==="youtube"||r.type==="image";
@@ -1309,10 +1306,10 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
     </div>
   </div>;};
   return <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    <div style={{padding:"16px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{display:"flex",color:t.acc}}><IC.Brain/></span><span style={{fontSize:"var(--hc-text-display)",fontWeight:700,letterSpacing:0,textTransform:"none",color:t.acc}}>Memory & Profile</span></div>
-      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button onClick={scanMemory} disabled={scanning} style={btnS(t.warm)}>{scanning?"Scanning":"Scan Recent"}</button><button onClick={refresh} disabled={loading} style={btnS(t.acc)}>{loading?"Loading":"Refresh"}</button></div>
-    </div>
+    <PanelHeader t={t} icon={<IC.Brain/>} title="Memory & Profile" subtitle="What HyprChat remembers about you across chats.">
+      <button className="hc-button" onClick={refresh} disabled={loading}>{loading?"Loading…":"Refresh"}</button>
+      <button className="hc-button is-primary" onClick={scanMemory} disabled={scanning}>{scanning?"Scanning…":"Scan recent chats"}</button>
+    </PanelHeader>
     <div style={{flex:1,overflowY:"auto",padding:20}}>
       <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(280px,0.62fr) minmax(280px,1fr)",gap:14,alignItems:"start"}}>
         <div style={{background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:16}}>

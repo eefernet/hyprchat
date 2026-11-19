@@ -13,7 +13,10 @@ import './convRow.css';
 //
 // `nested`: the row sits under its workspace's header, so it does not repeat the folder icon.
 // `workspaces`: [{id,name,member}] for the menu's "In workspace" items (a chat can be in several).
-export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,queued=0,council,persona,avatar,accent,pinned,tags=[],tagFilter,rename,tagEditor,inputS,btnS,on,nested=false,workspaces=[]}){
+// `when` / `whenTitle`: how long ago the chat was last used ("2h", "Tue") and the full date for its tooltip.
+// The time and the "…" button share one place at the end of the row: the button replaces the time on
+// hover or keyboard focus, and on touch screens both are shown.
+export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,queued=0,council,persona,avatar,accent,pinned,tags=[],tagFilter,rename,tagEditor,inputS,btnS,on,nested=false,workspaces=[],when='',whenTitle=''}){
   const measureTitle=e=>{
     const row=e.currentTarget,clip=row.querySelector('.conv-title-clip'),text=row.querySelector('.conv-title-text');
     if(!clip||!text)return;
@@ -44,6 +47,8 @@ export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,qu
         {hasDraft&&<span className="conv-mark conv-draft" title="Unsent draft"><IC.Pencil/></span>}
         {queued>0&&<span className="conv-queued" title={`${queued} message${queued===1?'':'s'} waiting to be sent`}>{queued}</span>}
       </div>
+      <div className="conv-tail">
+      {when&&<span className="conv-when" title={whenTitle||undefined}>{when}</span>}
       <div className="conv-menu">
         <ActionMenu label={`Actions for ${title}`} compact items={[
           ...(on.pin?[{label:pinned?'Unpin':'Pin to top',onClick:on.pin}]:[]),   // not for chats that are not saved: the server has nothing to pin
@@ -53,6 +58,7 @@ export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,qu
           ...(on.setWorkspace?workspaces.map(ws=>({key:`ws:${ws.id}`,label:`In workspace: ${ws.name}`,checked:!!ws.member,onClick:()=>on.setWorkspace(ws.id,!ws.member)})):[]),
           {label:'Delete conversation',destructive:true,onClick:on.remove},
         ]}/>
+      </div>
       </div>
     </div>
     {tags.length>0&&<div className="conv-tags">
