@@ -34,6 +34,11 @@ export const UI_FONTS = [
   {name:"Inter",v:"'Inter',sans-serif",i:"Inter:wght@400;500;600;700"},
   {name:"Geist",v:"'Geist',sans-serif",i:"Geist:wght@400;500;600;700"},
   {name:"System",v:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",i:null},
+  // Added 2026-11-18. New entries go at the END: the saved choice is a position in this list.
+  {name:"Figtree",v:"'Figtree',sans-serif",i:"Figtree:wght@400;500;600;700"},
+  {name:"Hanken Grotesk",v:"'Hanken Grotesk',sans-serif",i:"Hanken+Grotesk:wght@400;500;600;700"},
+  {name:"Instrument Sans",v:"'Instrument Sans',sans-serif",i:"Instrument+Sans:wght@400;500;600;700"},
+  {name:"DM Sans",v:"'DM Sans',sans-serif",i:"DM+Sans:wght@400;500;600;700"},
 ];
 
 export const BACKGROUND_EFFECTS = [

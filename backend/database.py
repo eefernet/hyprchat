@@ -688,6 +688,20 @@ async def delete_user_pref(key: str, user_id: str | None = None) -> bool:
         await db.close()
 
 
+# Tables that belong to one profile, have no ON DELETE CASCADE from `users`, and were once left behind
+# when a profile was deleted: its scheduled tasks kept running and its mail, calendar and API passwords
+# stayed in the database. Children come before parents. tests/test_release_security.py fails when a new
+# table with a `user_id` column is covered neither here, nor in `_delete_user_conn`, nor by a cascade.
+USER_OWNED_TABLES = (
+    "task_runs", "scheduled_tasks",
+    "email_messages", "email_accounts",
+    "calendar_events", "caldav_accounts",
+    "notes", "notifications",
+    "model_provider_credentials", "assistant_profiles",
+    "coding_project_promotions",
+)
+
+
 async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_default: bool = False) -> bool:
     uid = _scope_user(uid)
     if uid == DEFAULT_USER_ID and not allow_default:
@@ -738,6 +752,8 @@ async def _delete_user_conn(conn: aiosqlite.Connection, uid: str, *, allow_defau
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
     for table in ("skill_revisions", "skill_files", "skill_conv_taint", "skills"):   # children first
         await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
+    for table in USER_OWNED_TABLES:
+        await conn.execute(f"DELETE FROM {table} WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_prefs WHERE user_id=?", (uid,))
     await conn.execute("DELETE FROM user_profile WHERE id=?", (uid,))
     await conn.execute("DELETE FROM user_sessions WHERE user_id=?", (uid,))
@@ -786,6 +802,7 @@ async def delete_all_users_and_data() -> dict:
             "research_sources", "research_events", "run_events", "workspace_memory_blocks",
             "artifact_tags", "artifact_workspaces", "artifact_events", "council_members",
             "kb_chunks_fts", "skill_revisions", "skill_files", "skill_conv_taint", "skills",
+            *USER_OWNED_TABLES,
         ):
             await db.execute(f"DELETE FROM {table}")
         for table in (
@@ -1183,10 +1200,41 @@ async def create_conversation(
         await db.close()
 
 
-async def get_conversations(limit: int = 50, offset: int = 0):
+async def _workspace_ids_for(db, user_id: str, conversation_ids: list) -> dict:
+    """{conversation id: [workspace ids it is linked to]} in one query per 400 chats.
+
+    This is membership (`workspace_conversations`), which the sidebar groups by. It is not
+    `effective_workspace`: that is the one workspace whose context a chat uses, and a chat linked to two
+    workspaces, or with its context switched off, has none.
+    """
+    found = {cid: [] for cid in conversation_ids}
+    for start in range(0, len(conversation_ids), 400):
+        chunk = conversation_ids[start:start + 400]
+        rows = await db.execute_fetchall(
+            f"""SELECT wc.conversation_id, wc.workspace_id FROM workspace_conversations wc
+                JOIN workspaces w ON w.id = wc.workspace_id
+                WHERE w.user_id = ? AND wc.conversation_id IN ({",".join("?" * len(chunk))})
+                ORDER BY wc.added_at ASC""",
+            (user_id, *chunk))
+        for row in rows:
+            found[row["conversation_id"]].append(row["workspace_id"])
+    return found
+
+
+async def get_conversations(limit: int = 50, offset: int = 0, workspace_id: str | None = None):
+    """The user's chats, pinned first then newest. With `workspace_id`: that workspace's chats, newest first."""
     user_id = _scope_user()
     db = await get_db()
     try:
+        if workspace_id:
+            cursor = await db.execute(
+                """SELECT c.* FROM conversations c
+                   JOIN workspace_conversations wc ON wc.conversation_id = c.id
+                   JOIN workspaces w ON w.id = wc.workspace_id
+                   WHERE c.user_id = ? AND w.user_id = ? AND wc.workspace_id = ?
+                   ORDER BY c.updated_at DESC LIMIT ? OFFSET ?""",
+                (user_id, user_id, workspace_id, limit, offset))
+            return await _listed_conversations(db, user_id, await cursor.fetchall())
         # The CAST(...pinned...) sort key defeats index-ordered scans on
         # purpose-built indexes, but conversation counts per user are small
         # (hundreds) and idx_conversations_user narrows to the user first, so
@@ -1196,19 +1244,24 @@ async def get_conversations(limit: int = 50, offset: int = 0):
             "SELECT * FROM conversations WHERE user_id=? ORDER BY CAST(COALESCE(pinned,'0') AS INTEGER) DESC, updated_at DESC LIMIT ? OFFSET ?",
             (user_id, limit, offset)
         )
-        rows = await cursor.fetchall()
-        convs = []
-        for r in rows:
-            c = dict(r)
-            try:
-                c["tool_ids"] = json.loads(c.get("tool_ids", "[]"))
-            except (json.JSONDecodeError, TypeError):
-                c["tool_ids"] = []
-            import workspace_service
-            convs.append(await workspace_service.context_info(c))
-        return convs
+        return await _listed_conversations(db, user_id, await cursor.fetchall())
     finally:
         await db.close()
+
+
+async def _listed_conversations(db, user_id: str, rows) -> list:
+    import workspace_service
+    links = await _workspace_ids_for(db, user_id, [r["id"] for r in rows])
+    convs = []
+    for r in rows:
+        c = dict(r)
+        try:
+            c["tool_ids"] = json.loads(c.get("tool_ids", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            c["tool_ids"] = []
+        c["workspace_ids"] = links.get(c["id"], [])
+        convs.append(await workspace_service.context_info(c))
+    return convs
 
 
 async def get_conversation(id: str):
@@ -1240,6 +1293,7 @@ async def get_conversation(id: str):
                 msg["metadata"] = {}
             parsed_msgs.append(msg)
         conv["messages"] = parsed_msgs
+        conv["workspace_ids"] = (await _workspace_ids_for(db, user_id, [id])).get(id, [])
         import workspace_service
         return await workspace_service.context_info(conv)
     finally:
@@ -1373,6 +1427,9 @@ def _scrub_surrogates(v):
     return "".join(out)
 
 
+QUIET_CONVERSATION_FIELDS = frozenset({"pinned", "title", "workspace_context"})
+
+
 async def update_conversation(id: str, **kwargs):
     if not kwargs:
         return
@@ -1389,7 +1446,10 @@ async def update_conversation(id: str, **kwargs):
             kwargs["use_memories"] = "1" if str(kwargs["use_memories"]).lower() in {"1", "true", "yes", "on"} else "0"
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = [_scrub_surrogates(v) for v in kwargs.values()] + [id, user_id]
-        await db.execute(f"UPDATE conversations SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", vals)
+        # `updated_at` is "last activity" and orders the chat list. Pinning, renaming or changing the
+        # workspace context is not activity: it used to move a week-old chat to Today after a reload.
+        touch = "" if set(kwargs) <= QUIET_CONVERSATION_FIELDS else ", updated_at = CURRENT_TIMESTAMP"
+        await db.execute(f"UPDATE conversations SET {sets}{touch} WHERE id = ? AND user_id = ?", vals)
         await db.commit()
     finally:
         await db.close()
@@ -4734,17 +4794,23 @@ async def fork_conversation(original_conv_id: str, fork_msg_id: int, new_conv_id
         if not original:
             return None
         original = dict(original)
-        now = datetime.utcnow().isoformat()
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")   # the format CURRENT_TIMESTAMP writes, so the list orders truly
         await db.execute(
             """INSERT INTO conversations
                (id, user_id, title, model, system_prompt, model_config_id, tool_ids,
-                persona_name, persona_avatar, forked_from, fork_point_msg_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                persona_name, persona_avatar, forked_from, fork_point_msg_id, workspace_context, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (new_conv_id, user_id, f"Fork of {original.get('title', 'Chat')}", original.get("model", ""),
              original.get("system_prompt", ""), original.get("model_config_id"),
              original.get("tool_ids", "[]"), original.get("persona_name", ""),
-             original.get("persona_avatar", ""), original_conv_id, str(fork_msg_id), now, now)
+             original.get("persona_avatar", ""), original_conv_id, str(fork_msg_id),
+             original.get("workspace_context") or json.dumps({"mode": "auto"}), now, now)
         )
+        # A fork stays in the workspaces its original is in (it used to leave them).
+        await db.execute(
+            """INSERT OR IGNORE INTO workspace_conversations (workspace_id, conversation_id, added_at)
+               SELECT workspace_id, ?, ? FROM workspace_conversations WHERE conversation_id = ?""",
+            (new_conv_id, now, original_conv_id))
         await db.execute("""
             INSERT INTO messages (conversation_id, role, content, metadata, created_at)
             SELECT ?, role, content, json_remove(COALESCE(NULLIF(metadata, ''), '{}'), '$.context'), created_at

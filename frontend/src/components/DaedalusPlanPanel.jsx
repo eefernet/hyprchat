@@ -1,5 +1,5 @@
 import React,{useState} from 'react';
-import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary,outcomeExplanation} from '../daedalusProgress.js';
+import {stageRail,loopLabel,planOutcomes,planSteps,checkSummary} from '../daedalusProgress.js';
 import {elapsedLabel} from '../daedalusJobs.js';
 import './daedalusPlan.css';
 
@@ -20,12 +20,6 @@ export function StageRail({job,timings}){
         <span className="dp-sr"> ({stage.state})</span></li>;})}</ol>
     {loops&&<p className="dp-loops">{loops}</p>}
   </div>;
-}
-
-export function ResultBanner({job,children}){
-  const banner=outcomeExplanation(job);
-  if(!banner)return null;
-  return <div className={`dp-banner dp-tone-${banner.tone}`} role="status"><strong>{banner.title}</strong>{banner.text&&<p>{banner.text}</p>}{children}</div>;
 }
 
 export function PlanSection({job,defaultOpen=true}){

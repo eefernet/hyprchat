@@ -1246,36 +1246,45 @@ function MemoryProfilePanel({t,API,font,notify,onOpenConv,models,wsModel}){
     setScanning(false);
   };
   const updateMemoryLocal=(m)=>setMemories(p=>p.map(x=>x.id===m.id?m:x));
+  // Every memory request goes through here: a refused request is an error, never a row. (The answer of
+  // a failed save, an error object, used to be put in the list and reported as "Memory added".)
+  const memoryCall=async(path,options)=>{
+    const r=await fetch(`${API}/api/memory/memories${path}`,options);
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
+    return d;
+  };
+  const jsonBody=body=>({headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   const acceptMemory=async(m)=>{
-    try{const r=await fetch(`${API}/api/memory/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});updateMemoryLocal(await r.json());notify&&notify({type:"success",text:"Memory accepted",duration:2200});}
+    try{updateMemoryLocal(await memoryCall(`/${m.id}/accept`,{method:"POST",...jsonBody({})}));notify&&notify({type:"success",text:"Memory accepted",duration:2200});}
     catch(e){notify&&notify({type:"error",text:"Memory accept failed",detail:e.message||String(e)});}
   };
   const rejectMemory=async(m)=>{
-    try{const r=await fetch(`${API}/api/memory/memories/${m.id}/reject`,{method:"POST"});updateMemoryLocal(await r.json());}
+    try{updateMemoryLocal(await memoryCall(`/${m.id}/reject`,{method:"POST"}));}
     catch(e){notify&&notify({type:"error",text:"Memory reject failed",detail:e.message||String(e)});}
   };
   const patchMemory=async(m,patch)=>{
-    try{const r=await fetch(`${API}/api/memory/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});updateMemoryLocal(await r.json());}
+    try{updateMemoryLocal(await memoryCall(`/${m.id}`,{method:"PATCH",...jsonBody(patch)}));}
     catch(e){notify&&notify({type:"error",text:"Memory update failed",detail:e.message||String(e)});}
   };
   const deleteMemory=async(m)=>{
-    try{await fetch(`${API}/api/memory/memories/${m.id}`,{method:"DELETE"});setMemories(p=>p.filter(x=>x.id!==m.id));}
+    try{await memoryCall(`/${m.id}`,{method:"DELETE"});setMemories(p=>p.filter(x=>x.id!==m.id));}
     catch(e){notify&&notify({type:"error",text:"Memory delete failed",detail:e.message||String(e)});}
   };
   const startMemEdit=(m)=>{setMemEdit(m.id);setMemEditText(m.content||"");};
   const saveMemEdit=async(m,accept=false)=>{
-    const r=await fetch(`${API}/api/memory/memories/${m.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:memEditText})});
-    let updated=await r.json();
-    if(accept){
-      const ar=await fetch(`${API}/api/memory/memories/${m.id}/accept`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({})});
-      updated=await ar.json();
-    }
-    updateMemoryLocal(updated);setMemEdit(null);setMemEditText("");
+    if(!memEditText.trim()){notify&&notify({type:"warning",text:"A memory cannot be empty",detail:"Type something, or delete the memory instead."});return;}
+    try{
+      let updated=await memoryCall(`/${m.id}`,{method:"PATCH",...jsonBody({content:memEditText.trim()})});
+      if(accept)updated=await memoryCall(`/${m.id}/accept`,{method:"POST",...jsonBody({})});
+      updateMemoryLocal(updated);setMemEdit(null);setMemEditText("");
+    }catch(e){notify&&notify({type:"error",text:"Memory not saved",detail:e.message||String(e)});}
   };
   const createManualMemory=async()=>{
     try{
-      const r=await fetch(`${API}/api/memory/memories`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content:newMemText,type:newMemType,status:"accepted",importance:3})});
-      const m=await r.json();setMemories(p=>[m,...p]);setNewMemText("");notify&&notify({type:"success",text:"Memory added",duration:2200});
+      if(!newMemText.trim())return;
+      const m=await memoryCall("",{method:"POST",...jsonBody({content:newMemText.trim(),type:newMemType,status:"accepted",importance:3})});
+      setMemories(p=>[m,...p]);setNewMemText("");notify&&notify({type:"success",text:"Memory added",duration:2200});
     }catch(e){notify&&notify({type:"error",text:"Memory add failed",detail:e.message||String(e)});}
   };
   const byStatus=s=>memories.filter(m=>m.status===s);

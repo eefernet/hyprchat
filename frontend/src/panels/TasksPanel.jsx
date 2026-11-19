@@ -107,11 +107,11 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
     catch(e){setErr(String(e.message||e));}
     finally{loadNotifs();}
   };
-  const saveNtfy=async()=>{
+  const saveNtfy=async(clearToken=false)=>{
     try{
       await apiJson("/api/notifications/channels/ntfy",{method:"PUT",
-        body:{url:ntfy.url,topic:ntfy.topic,token:ntfy.token,allow_private:!!ntfy.allow_private}});
-      notify&&notify({type:"success",text:"Channel saved",duration:2000});
+        body:{url:ntfy.url,topic:ntfy.topic,token:clearToken?"":ntfy.token,clear_token:clearToken===true,allow_private:!!ntfy.allow_private}});
+      notify&&notify({type:"success",text:clearToken===true?"Token removed":"Channel saved",duration:2000});
     }catch(e){setErr(String(e.message||e));notify&&notify({type:"error",text:"Channel save failed",detail:String(e.message||e)});}
     finally{loadNtfy();}
   };
@@ -255,7 +255,8 @@ export default function TasksPanel({t,btnS,cardS,inputS,confirmAction,tab,setTab
               <input type="checkbox" checked={!!ntfy.allow_private} onChange={e=>setNtfy(n=>({...n,allow_private:e.target.checked}))}/>
               Allow private/LAN ntfy server
             </label>
-            <button onClick={saveNtfy} style={btnS(t.ok)}>Save channel</button>
+            <button onClick={()=>saveNtfy(false)} style={btnS(t.ok)}>Save channel</button>
+            {ntfy.token_set&&<button onClick={()=>saveNtfy(true)} style={{...btnS(t.dim),marginLeft:8}}>Remove saved token</button>}
           </div>
         </>}
       </div>

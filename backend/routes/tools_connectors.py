@@ -186,6 +186,14 @@ async def list_connector_tools(enabled_only: bool = Query(True)):
     return [_connector_tool_public(t) for t in tools]
 
 
+def _main_only(fields: dict) -> None:
+    """Refuse the connector fields that only the Main profile may set (connector_privileges.py)."""
+    import connector_privileges
+    reason = connector_privileges.refusal(fields)
+    if reason:
+        raise HTTPException(403, reason)
+
+
 @router.get("/api/mcp-servers")
 async def list_mcp_servers():
     return await db.get_mcp_servers()
@@ -197,6 +205,9 @@ async def create_mcp_server(req: MCPServerCreate):
     transport = (req.transport or "stdio").strip().lower()
     if transport not in {"stdio", "http", "streamable_http", "sse"}:
         raise HTTPException(400, "transport must be stdio, http, streamable_http, or sse")
+    _main_only({"transport": transport, "command": req.command if transport == "stdio" else "", "url": req.url,
+                "env": req.env if transport == "stdio" else None, "headers": req.headers,
+                "allow_private": req.allow_private})
     await db.create_mcp_server(
         server_id,
         req.name,
@@ -219,6 +230,7 @@ async def update_mcp_server(server_id: str, req: MCPServerUpdate):
         kwargs["transport"] = (kwargs["transport"] or "stdio").strip().lower()
         if kwargs["transport"] not in {"stdio", "http", "streamable_http", "sse"}:
             raise HTTPException(400, "transport must be stdio, http, streamable_http, or sse")
+    _main_only({k: kwargs[k] for k in ("transport", "url", "headers", "allow_private") if k in kwargs})
     await db.update_mcp_server(server_id, **kwargs)
     return await db.get_mcp_server(server_id)
 
@@ -259,6 +271,8 @@ async def list_openapi_connectors():
 @router.post("/api/openapi-connectors")
 async def create_openapi_connector(req: OpenAPIConnectorCreate):
     connector_id = f"openapi-{uuid.uuid4().hex[:12]}"
+    _main_only({"spec_url": req.spec_url, "url": req.base_url, "auth": req.auth, "headers": req.headers,
+                "allow_private": req.allow_private})
     await db.create_openapi_connector(
         connector_id,
         req.name,
@@ -278,6 +292,8 @@ async def update_openapi_connector(connector_id: str, req: OpenAPIConnectorUpdat
     kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
     if "spec_json" in kwargs:
         kwargs["spec_json"] = _spec_json_to_text(kwargs["spec_json"])
+    _main_only({"spec_url": kwargs.get("spec_url"), "url": kwargs.get("base_url"), "auth": kwargs.get("auth"),
+                "headers": kwargs.get("headers"), "allow_private": kwargs.get("allow_private")})
     await db.update_openapi_connector(connector_id, **kwargs)
     return await db.get_openapi_connector(connector_id)
 

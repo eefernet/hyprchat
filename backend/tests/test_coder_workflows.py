@@ -44,7 +44,7 @@ def _import_chat_with_optional_stubs(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "quick_search",
-        types.SimpleNamespace(run_quick_search_for_chat=_noop_quick_search),
+        types.SimpleNamespace(run_quick_search_for_chat=_noop_quick_search, plain_turns=lambda messages: messages),
     )
     sys.modules.pop("agents.chat", None)
     return importlib.import_module("agents.chat")

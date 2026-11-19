@@ -362,19 +362,6 @@ async def seed_philosopher_personas():
     return {"id": "", "name": "Philosopher Personas", "personas": results}
 
 
-async def seed_coder_bot():
-    """Remove the deprecated v1 Coder Bot persona.
-
-    Daedalus is the maintained Coder Bot v2 replacement. Keep this endpoint as
-    a compatibility shim so old "seed Coder Bot" calls do not recreate v1.
-    """
-    all_configs = await db.get_model_configs()
-    existing = next((c for c in all_configs if (c.get("name") or "").strip() == "💻 Coder Bot"), None)
-    if existing:
-        await db.delete_model_config(existing["id"])
-    return {"id": existing["id"] if existing else "", "name": "💻 Coder Bot", "removed": existing is not None, "deprecated": True}
-
-
 async def seed_coder_bot_v2():
     """Seed Daedalus, the maintained coding persona."""
     persona_name = "🏛️ Daedalus"
@@ -771,7 +758,6 @@ async def seed_all_defaults():
     """Restore the maintained default agents and conversational personas."""
     results = []
     for fn in [
-        seed_coder_bot,
         seed_coder_bot_v2,
         seed_master_developer,
         seed_conspiracy_bot,

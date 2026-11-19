@@ -23,6 +23,11 @@ import './components/workspace.css';
 import {UI_THEMES, presentationTokens} from './theme.js';
 import ActionMenu from './components/ActionMenu.jsx';
 import ConvRow from './components/ConvRow.jsx';
+import WorkspaceSection from './components/WorkspaceSection.jsx';
+import ModelsPanel from './panels/ModelsPanel.jsx';
+import CommitNumberInput from './components/CommitNumberInput.jsx';
+import {searchOutcome,withoutModel,factsStore} from './modelsPage.js';
+import {sidebarSections,withMembership,mergeRows,withWorkspaces,workspaceSignature,touched,refreshLimit} from './sidebarSections.js';
 import ResponsiveDrawer from './components/ResponsiveDrawer.jsx';
 import {REVIEW_LEVELS,reviewLevel,effortChoices,nativeChoice,effortRequest} from "./effort.js";
 import DocumentActivity from "./components/DocumentActivity.jsx";
@@ -66,7 +71,6 @@ import {runIsLive,replyOutcome,deliveryStatus,activityStatus} from './runState.j
 import {trimHistory} from './historyTrim.js';
 import {editedMessage} from './editedMessage.js';
 import {needsTitle,renameTo} from './chatTitles.js';
-import ModelLimitNote from './components/ModelLimitNote.jsx';
 import LoadedModels from './components/LoadedModels.jsx';
 import OverflowNotice from './components/OverflowNotice.jsx';
 import DraftSizeNote from './components/DraftSizeNote.jsx';
@@ -143,9 +147,8 @@ import StarterChips from './components/StarterChips.jsx';
 import WaitingQuote from './components/WaitingQuote.jsx';
 import ShortcutSheet, { MOD_KEY } from './components/ShortcutSheet.jsx';
 import { Spinner, Dots } from './components/Spinner.jsx';
-import { groupByRecency } from './convGroups.js';
 import { formatDocumentTitle } from './documentTitle.js';
-import { hfCompatibilityReport, isMmproj as hfIsMmproj, fmtBytes as fmtPullBytes } from './hfCompat.js';
+import { hfCompatibilityReport, isMmproj as hfIsMmproj } from './hfCompat.js';
 import { IC } from './components/icons.jsx';
 import { SkeletonList } from './components/Skeleton.jsx';
 import {
@@ -238,6 +241,13 @@ function HyprChat(){
   // Interface font: -1 matches the code font (default); otherwise an index into UI_FONTS (sans faces).
   const [funVerbs,setFunVerbs]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-fun-verbs::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
   // HyprFit: also list live Hugging Face trending repos. Off unless switched on: the trending list put audio models and odd fine-tunes ahead of the curated picks.
+  // Left bar workspace sections (sidebarSections.js): which are closed (saved per user), which show all
+  // their chats (this visit only), and whether older chats than the first page are still to be fetched.
+  const [wsCollapsed,setWsCollapsed]=useState(()=>{try{const saved=JSON.parse(localStorage.getItem(`hc-sidebar-ws-collapsed::${hcStoredUserId()||"default"}`)||"{}");return saved&&typeof saved==="object"&&!Array.isArray(saved)?saved:{};}catch{return {};}});
+  const [wsExpanded,setWsExpanded]=useState({});
+  const [wsMoreBusy,setWsMoreBusy]=useState("");
+  const [olderChats,setOlderChats]=useState({busy:false,done:false});
+  const listedChatsRef=useRef(0);   // how many rows the main chat list has handed out so far
   const [hyprfitLive,setHyprfitLive]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-hyprfit-live::${hcStoredUserId()||"default"}`)||"false")===true;}catch{return false;}});
   const [previewAutoOpen,setPreviewAutoOpen]=useState(()=>{try{return JSON.parse(localStorage.getItem(`hc-preview-auto-open::${hcStoredUserId()||"default"}`)||"true")!==false;}catch{return true;}});
   const [uiFi,setUiFi]=useState(()=>{try{const saved=Number(localStorage.getItem("hc-ui-font")??"-1");return Number.isInteger(saved)&&UI_FONTS[saved]?saved:-1;}catch{return -1;}});
@@ -434,6 +444,9 @@ function HyprChat(){
   const [modelsTab,setModelsTab]=useState("ollama"); // "ollama"|"hf"|"hyprfit"
   const [hfSearch,setHfSearch]=useState("");
   const [hfResults,setHfResults]=useState([]);
+  const [hfError,setHfError]=useState("");          // why the last Hugging Face search failed
+  const [hfSearched,setHfSearched]=useState("");    // the text of the last search that ran
+  const [modelFacts,setModelFacts]=useState({});    // what Ollama reports per installed model (backend/model_facts.py)
   const [hfLoading,setHfLoading]=useState(false);
   const hfSelectSeq=useRef(null);
   const [hfSelected,setHfSelected]=useState(null); // model object from search
@@ -473,12 +486,14 @@ function HyprChat(){
     if(settingsPulseTimer.current)clearTimeout(settingsPulseTimer.current);
     settingsPulseTimer.current=setTimeout(()=>setSettingsPulse(null),1800);
   };
+  const settingRefusedRef=useRef(false),notifyRef=useRef(null);   // one explanation per visit, not one per refused setting
   const {hydrateServerSetting,persistServerSetting}=createSettingsSync({
     api:API,
     settingsLoadedRef,
     seenSettingEffectRef,
     skipSettingPatchRef,
     flashSettingsPulse,
+    onRefused:()=>{if(settingRefusedRef.current)return;settingRefusedRef.current=true;notifyRef.current?.({type:"warning",text:"Not saved: this is a server-wide setting",detail:"Only the Main profile can change it. Your change shows in this tab until you reload, and is not saved.",duration:9000});},
   });
 
   if(!imageSettingsSyncRef.current)imageSettingsSyncRef.current=createImageSettingsSync({
@@ -523,8 +538,8 @@ function HyprChat(){
   useEffect(()=>{try{localStorage.setItem("hc-ui-font",String(uiFi));}catch{}},[uiFi]);
   useEffect(()=>{try{localStorage.setItem("hc-token-limit",String(tokenLimit));}catch{}},[tokenLimit]);
   useEffect(()=>{persistServerSetting("hc-num-ctx","default_num_ctx",numCtx,String(numCtx));},[numCtx]);
-  useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}},[defaultTemp]);
-  useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}},[defaultTopP]);
+  useEffect(()=>{try{localStorage.setItem("hc-temp",String(defaultTemp));}catch{}persistPref("default-temp",defaultTemp);},[defaultTemp]);
+  useEffect(()=>{try{localStorage.setItem("hc-top-p",String(defaultTopP));}catch{}persistPref("default-top-p",defaultTopP);},[defaultTopP]);
   useEffect(()=>{try{localStorage.setItem("hc-compact",compactMode?"1":"0");}catch{}},[compactMode]);
   useEffect(()=>{try{localStorage.setItem("hc-auto-expand-think",autoExpandThink?"1":"0");}catch{}},[autoExpandThink]);
   useEffect(()=>{try{localStorage.setItem("hc-bg-effect",bgEffect);localStorage.setItem("hc-scanline",bgEffect==="scanlines"?"1":"0");}catch{}},[bgEffect]);
@@ -539,6 +554,7 @@ function HyprChat(){
   useEffect(()=>{persistPref("custom-quotes",customQuotes);},[customQuotes]);
   useEffect(()=>{persistPref("fun-verbs",funVerbs);},[funVerbs]);
   useEffect(()=>{persistPref("hyprfit-live",hyprfitLive);},[hyprfitLive]);
+  useEffect(()=>{persistPref("sidebar-ws-collapsed",wsCollapsed);},[wsCollapsed]);
   useEffect(()=>{persistPref("preview-auto-open",previewAutoOpen);configureWorkbench({autoOpen:previewAutoOpen});},[previewAutoOpen]);
   useEffect(()=>{persistServerSetting("hc-ws-model","workspace_model",wsModel);},[wsModel]);
   useEffect(()=>{persistServerSetting("hc-context-compaction","context_compaction",contextCompaction?"on":"off");},[contextCompaction]);
@@ -590,12 +606,6 @@ function HyprChat(){
   const [models,setModels]=useState([]);
   const [modelDetails,setModelDetails]=useState({});
   const [modelInfoCache,setModelInfoCache]=useState({});
-  const [modelInfoLoading,setModelInfoLoading]=useState(false);
-  const [showModelfile,setShowModelfile]=useState(false);
-  const [fixTemplateFamily,setFixTemplateFamily]=useState("chatml");
-  const [fixingTemplate,setFixingTemplate]=useState(false);
-  const [fixTemplateMsg,setFixTemplateMsg]=useState(null);
-  const [makingToolModel,setMakingToolModel]=useState(null); // model name currently being processed
   const [sq,setSq]=useState("");
   const [ftsQuery,setFtsQuery]=useState("");
   const [ftsResults,setFtsResults]=useState([]);
@@ -645,6 +655,7 @@ function HyprChat(){
   const [users,setUsers]=useState([]);
   const [currentUser,setCurrentUser]=useState(null);
   const [currentUserId,setCurrentUserId]=useState(()=>hcStoredUserId());
+  const isMainUser=currentUserId==="default";   // the Main profile: server-wide settings and the risky connector options are its alone
   const [authReady,setAuthReady]=useState(false);
   useEffect(()=>{
     if(!authReady)return;
@@ -1175,7 +1186,10 @@ function HyprChat(){
     if(recorder){recorder.onstop=null;try{recorder.stop();}catch{}recorder.stream?.getTracks().forEach(track=>track.stop());}
     recChunksRef.current=[];setRecording(false);setTranscribing(false);setRetryRecording(null);
   };
-  useEffect(()=>{cancelVoice();},[actId,currentUserId,panel]);
+  useEffect(()=>{cancelVoice();},[actId,currentUserId]);
+  // Leaving the chat screen (opening Settings counts) ends a recording the normal way, so what was said
+  // is still transcribed into the draft. It used to be thrown away with no retry.
+  useEffect(()=>{stopSpeaking();if(mediaRecRef.current&&mediaRecRef.current.state==="recording"){try{mediaRecRef.current.stop();}catch{}}},[panel]);
   const transcribeRecording=async(blob,origin)=>{
     const current=()=>origin.epoch===hcCaptureUserContext().epoch&&origin.conversationId===actIdRef.current;
     if(!current())return;
@@ -1401,7 +1415,7 @@ function HyprChat(){
       }
       const saved=await apiJson(`/api/conversations/${encodeURIComponent(conversationId)}`,{method:'PATCH',body:{workspace_context:['auto','off'].includes(value)?{mode:value}:{mode:'selected',workspace_id:value}}});
       // A save may finish after navigation; only its originating chat can change.
-      if(currentUser())setConvs(prev=>currentUser()?prev.map(c=>c.id===conversationId?{...c,workspace_context:saved.workspace_context,effective_workspace:saved.effective_workspace}:c):prev);
+      if(currentUser())setConvs(prev=>currentUser()?prev.map(c=>c.id===conversationId?{...c,workspace_context:saved.workspace_context,effective_workspace:saved.effective_workspace,workspace_ids:saved.workspace_ids||c.workspace_ids||[]}:c):prev);
     }catch(error){
       if(currentUser()&&error.name!=='AbortError')notify({type:'error',text:'Context not changed',detail:error.message});
     }finally{
@@ -1409,6 +1423,73 @@ function HyprChat(){
       setWorkspaceContextPending(new Set(workspaceContextRequests.current));
     }
   };
+
+  // ── Left bar: chats grouped under their workspaces (rules in sidebarSections.js) ──
+  const listRow=c=>({...c,messages:[],is_council:c.is_council==="1"||c.is_council===1||c.is_council===true,council_config_id:c.council_config_id||null});
+  // A row's workspace fields are worked out by the server. Read them again without dropping any row.
+  const refreshChatRows=async()=>{
+    const origin=hcCaptureUserContext();
+    try{
+      const rows=await apiJson(`/api/conversations?limit=${refreshLimit(convsRef.current)}`);
+      if(origin.epoch!==hcCaptureUserContext().epoch||!Array.isArray(rows))return;
+      setConvs(prev=>mergeRows(prev,rows.filter(r=>!deletedChatsRef.current.has(r.id)),listRow));
+    }catch{}
+  };
+  const setChatWorkspace=async(conv,workspaceId,member)=>{
+    const origin=hcCaptureUserContext(),id=conv.id,same=()=>origin.epoch===hcCaptureUserContext().epoch;
+    setConvs(prev=>prev.map(c=>c.id===id?withMembership(c,workspaceId,member):c));
+    try{
+      if(member)await apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/conversations`,{method:'POST',body:{conversation_id:id}});
+      else await apiJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(id)}`,{method:'DELETE'});
+      if(!same())return;
+      const list=await apiJson('/api/workspaces');
+      if(same())setWorkspaces(list);   // the counts changed, which also re-reads the chat rows (effect below)
+    }catch(error){
+      if(!same()||error.name==='AbortError')return;
+      setConvs(prev=>prev.map(c=>c.id===id?withMembership(c,workspaceId,!member):c));
+      notify({type:'error',text:member?'Chat not added to the workspace':'Chat not removed from the workspace',detail:error.message});
+    }
+  };
+  const showMoreInWorkspace=async section=>{
+    if(!section.needsFetch){setWsExpanded(p=>({...p,[section.id]:true}));return;}
+    const origin=hcCaptureUserContext();
+    setWsMoreBusy(section.id);
+    try{
+      const rows=await apiJson(`/api/conversations?workspace_id=${encodeURIComponent(section.id)}&limit=500`);
+      if(origin.epoch!==hcCaptureUserContext().epoch||!Array.isArray(rows))return;
+      setConvs(prev=>mergeRows(prev,rows.filter(r=>!deletedChatsRef.current.has(r.id)),listRow));
+      // The answer is every chat of the workspace, so it is also the true count (a stale one would leave a "Show 1 more" that never goes away).
+      if(rows.length<500)setWorkspaces(prev=>prev.map(w=>w.id===section.id?{...w,conv_count:rows.length}:w));
+      setWsExpanded(p=>({...p,[section.id]:true}));
+    }catch(error){if(error.name!=='AbortError')notify({type:'error',text:'Chats not loaded',detail:error.message});}
+    finally{setWsMoreBusy(v=>v===section.id?"":v);}
+  };
+  const loadOlderChats=async()=>{
+    const origin=hcCaptureUserContext(),page=100,overlap=10;
+    setOlderChats({busy:true,done:false});
+    try{
+      // Ask a little before where the list stopped: chats deleted since then moved everything up.
+      const offset=Math.max(0,listedChatsRef.current-overlap);
+      const rows=await apiJson(`/api/conversations?limit=${page+overlap}&offset=${offset}`);
+      if(origin.epoch!==hcCaptureUserContext().epoch||!Array.isArray(rows))return;
+      listedChatsRef.current=offset+rows.length;
+      setConvs(prev=>mergeRows(prev,rows.filter(r=>!deletedChatsRef.current.has(r.id)),listRow));
+      setOlderChats({busy:false,done:rows.length<page+overlap});
+    }catch(error){
+      if(origin.epoch!==hcCaptureUserContext().epoch)return;
+      setOlderChats({busy:false,done:false});
+      if(error.name!=='AbortError')notify({type:'error',text:'Older chats not loaded',detail:error.message});
+    }
+  };
+  // A workspace was renamed, deleted, or gained or lost a chat (from any screen): the chat rows follow.
+  const wsSignature=workspaceSignature(workspaces),wsSignatureSeen=useRef(null);
+  useEffect(()=>{
+    if(wsSignatureSeen.current===null||wsSignatureSeen.current===wsSignature){wsSignatureSeen.current=wsSignature;return;}
+    wsSignatureSeen.current=wsSignature;
+    if(workspaces.length)setConvs(prev=>withWorkspaces(prev,workspaces));
+    const timer=setTimeout(refreshChatRows,250);
+    return()=>clearTimeout(timer);
+  },[wsSignature]);
   const globalMemoryActive=!ghostActive&&(act?(act.use_memories==="1"||act.use_memories===1||act.use_memories===true):pendingUseMemories);
   const toggleGlobalMemory=()=>{
     if(ghostActive)return;
@@ -1637,6 +1718,11 @@ function HyprChat(){
   };
 
   const resetUserScopedState=()=>{
+    setWsExpanded({});setWsMoreBusy("");setOlderChats({busy:false,done:false});listedChatsRef.current=0;
+    // Nothing typed or counted for the previous profile may be left for the next one: an unsaved API key
+    // stayed in its box (and could be saved under the other account), and the bell kept the old count.
+    setProviderKeys({openai:"",anthropic:"",custom:""});setCustomBaseUrl(null);setCustomLabel(null);
+    setNotifUnseen(0);notifMaxIdRef.current=0;setAnalyticsData(null);setModelFacts({});settingRefusedRef.current=false;
     imageSettingsSyncRef.current.reset();setImageSettingsError("");setImgChatLists(null);setImgChatWorkflows([]);
     setImgChatCkpt("");setImgChatRes("1024x1024");setImgChatVae("");setImgChatWorkflow("");
     setImgChatPrefix("");setImgChatNeg("");setImgChatComposeModel("");setImgChatAutoEnhance(false);
@@ -1685,6 +1771,9 @@ function HyprChat(){
         {key:"native-effort",legacy:"hc-native-effort",set:setNativeEffort,fallback:{},convMap:true},
         {key:"fun-verbs",legacy:"hc-fun-verbs",set:setFunVerbs,fallback:true},
         {key:"hyprfit-live",set:setHyprfitLive,fallback:false},
+        {key:"sidebar-ws-collapsed",set:setWsCollapsed,fallback:{}},
+        {key:"default-temp",legacy:"hc-temp",set:setDefaultTemp,fallback:0.7},
+        {key:"default-top-p",legacy:"hc-top-p",set:setDefaultTopP,fallback:0.9},
         {key:"preview-auto-open",legacy:"hc-preview-auto-open",set:setPreviewAutoOpen,fallback:true},
         {key:"nav-layout",legacy:"hc-nav-layout",set:setNavLayout,fallback:DEFAULT_NAV_LAYOUT},
       ];
@@ -1796,8 +1885,12 @@ function HyprChat(){
     })();
     return()=>{cancelled=true;};
   },[]);
+  // Preference edits wait 1.2 s before they are sent. Send them NOW, while the requests still belong to
+  // the profile that made them: switching used to drop them and the server's older value came back.
+  const flushPrefs=async()=>{try{await Promise.race([Promise.allSettled(prefsSyncRef.current?.flush()||[]),new Promise(resolve=>setTimeout(resolve,1500))]);}catch{}};
   const loginAsUser=async(userId=loginUserId,password=loginPassword)=>{
     setLoginError("");
+    await flushPrefs();
     try{
       const r=await fetch(`${API}/api/users/login`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({user_id:userId,password:password||""})});
       const d=await r.json().catch(()=>({}));
@@ -1813,6 +1906,7 @@ function HyprChat(){
   };
   const logoutCurrentUser=async()=>{
     const uid=currentUserId||hcStoredUserId();
+    await flushPrefs();
     try{await fetch(`${API}/api/users/logout`,{method:"POST"});}catch{}
     try{localStorage.removeItem(HC_USER_KEY);localStorage.removeItem(hcSessionKey(uid));}catch{}
     hcSetUserContext("default","");
@@ -1831,7 +1925,10 @@ function HyprChat(){
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       setNewUserName("");setNewUserPassword("");
       await refreshUsers().catch(()=>{});
-      await loginAsUser(d.user.id,password);
+      // From the sign-in screen the new profile is the one being signed in to. From Settings, Main made
+      // it for someone else and stays signed in (it used to be switched into the new, empty profile).
+      if(userGateOpen||!authReady)await loginAsUser(d.user.id,password);
+      else notify({type:"success",text:"Profile created",detail:`"${d.user?.name||name}" can now sign in from the profile switcher.`});
     }catch(e){
       setLoginError(e.message||"Could not create user");
       notify({type:"error",text:"User create failed",detail:e.message||String(e)});
@@ -1879,7 +1976,7 @@ function HyprChat(){
     const loadOrigin=hcCaptureUserContext();
     const dismissLoader=dismissHyprLoader;
     setTimeout(dismissLoader,5000); // fallback
-    fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
+    fetch(`${API}/api/models`).then(r=>r.json()).then(d=>{const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});loadModelFacts();try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}dismissLoader();}).catch(()=>{setModels(["qwen3.5:27b","qwen3-coder:30b"]);dismissLoader();});
     fetch(`${API}/api/conversations`).then(r=>r.json()).then(cs=>{if(loadOrigin.epoch!==hcCaptureUserContext().epoch)return;if(cs.length){
       // Seed last-model from most recent conversation if not set
       try{if(!localStorage.getItem("hc-last-model")&&cs[0]?.model)localStorage.setItem("hc-last-model",cs[0].model);}catch{}
@@ -1887,7 +1984,10 @@ function HyprChat(){
       // Login already resets selection. Late history must preserve navigation,
       // drafts and any conversation opened or created while the request ran.
       setConvs(current=>{const known=new Set(current.map(c=>c.id));return [...current,...cs.filter(c=>!known.has(c.id)).map(c=>({...c, messages: [], is_council: isCouncil(c.is_council), council_config_id: c.council_config_id||null}))];});
-    }}).catch(()=>{});
+    }
+    // The list comes 50 at a time; fewer than that means there is nothing older to ask for.
+    listedChatsRef.current=cs.length;setOlderChats({busy:false,done:cs.length<50});
+    }).catch(()=>{});
     apiJson("/api/knowledge-bases").then(d=>setKbs(Array.isArray(d)?d:[])).catch(()=>{});
     apiJson("/api/tools").then(d=>setTools(Array.isArray(d)?d:[])).catch(()=>{});
     refreshConnectors();
@@ -2948,6 +3048,10 @@ function HyprChat(){
   // ── Keyboard Shortcuts ──
   useEffect(()=>{
     const handler=(e)=>{
+      // A shortcut acts on the app behind an open dialog or the sign-in screen, where nobody can see it
+      // (Ctrl+N started a chat under the Settings dialog). There, the keys keep their normal meaning.
+      const covered=userGateOpen||!authReady||!!document.querySelector('dialog[open],[aria-modal="true"]');
+      if(covered&&(e.ctrlKey||e.metaKey)&&["k","n","/"].includes(e.key))return;
       if((e.ctrlKey||e.metaKey)&&e.key==="k"){e.preventDefault();openSidebarSearch("messages");}
       if((e.ctrlKey||e.metaKey)&&e.key==="n"){e.preventDefault();startBlankChat();}
       if((e.ctrlKey||e.metaKey)&&e.key==="/"){e.preventDefault();setSidebar(p=>!p);}
@@ -3004,6 +3108,7 @@ function HyprChat(){
     }
     setConvTags(p=>{const n={...p};delete n[id];return n;});
     chatDrafts.drop(id);messageQueue.drop(id);streamEndedRef.current.delete(id);
+    if((chat.workspace_ids||[]).length)setWorkspaces(p=>p.map(w=>chat.workspace_ids.includes(w.id)?{...w,conv_count:Math.max(0,(w.conv_count||0)-1)}:w));
   };
 
   // Full-text search across conversations
@@ -3172,7 +3277,7 @@ function HyprChat(){
     const ok=await confirmAction({title:"Delete other users",body:`Delete ${count} other user profile${count===1?"":"s"} and all data associated with them? The current user (${currentUser?.name||currentUserId||"current"}) is kept. Type DELETE OTHER USERS to confirm.`,confirmLabel:"Delete Other Users",tone:"danger",requiredText:"DELETE OTHER USERS"});
     if(!ok)return;
     try{
-      const r=await fetch(`${API}/api/users`,{method:"DELETE"});
+      const r=await fetch(`${API}/api/users`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE OTHER USERS"})});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       try{(users||[]).forEach(u=>{if(u.id!==currentUserId)localStorage.removeItem(hcSessionKey(u.id));});}catch{}
@@ -3184,7 +3289,7 @@ function HyprChat(){
     const ok=await confirmAction({title:"Delete all / fresh install",body:"Delete all users, sessions, chats, memories, artifacts, statistics, and locally installed Ollama models? This includes the current user. Type DELETE EVERYTHING to confirm.",confirmLabel:"Delete Everything",tone:"danger",requiredText:"DELETE EVERYTHING"});
     if(!ok)return;
     try{
-      const r=await fetch(`${API}/api/danger-zone/fresh-install`,{method:"POST"});
+      const r=await fetch(`${API}/api/danger-zone/fresh-install`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"DELETE EVERYTHING"})});
       const d=await r.json().catch(()=>({}));
       if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
       try{
@@ -3352,6 +3457,7 @@ function HyprChat(){
   const sendMessages=async(cid, messagesToSend, appendUser, overrides)=>{
     overrides = overrides || {};
     setStreaming(true);setRestoredRunCid(null);setTokC(0);setTokS(0);setEvts([]);
+    if(appendUser)setConvs(prev=>touched(prev,cid,new Date().toISOString()));   // newest activity: the chat leads its group in the left bar
     updateReading(cid,r=>atStreamStart(messagesToSend,r));
     setCurrentRunNotice(null);
     streamSaveEvtsRef.current=[];
@@ -4473,7 +4579,14 @@ function HyprChat(){
   };
 
   // Refresh models from Ollama (single source of truth)
-  const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}}catch{}};
+  const refreshModels=async()=>{try{const r=await fetch(`${API}/api/models`);const d=await r.json();const next=d.models||[];setModels(next);setModelDetails(d.model_details||{});try{const last=localStorage.getItem("hc-last-model")||"";if(last&&next.length&&!next.includes(last))localStorage.setItem("hc-last-model",next[0]||"");}catch{}loadModelFacts();}catch{}};
+  // What each installed model can do and how much it can hold, as Ollama reports it. Read after the list
+  // (and again whenever it is refreshed); the page and the model picker fall back to a name guess until then.
+  const loadModelFacts=async()=>{const origin=hcCaptureUserContext();try{const d=await apiJson('/api/models/facts');if(origin.epoch===hcCaptureUserContext().epoch&&d&&typeof d.models==='object')setModelFacts(d.models||{});}catch{}};
+  const loadModelInfo=(name,force=false)=>{
+    if(!name||(!force&&modelInfoCache[name]!==undefined))return;
+    fetch(`${API}/api/models/${encodeURIComponent(name)}/info`).then(r=>r.ok?r.json():{}).then(d=>setModelInfoCache(p=>({...p,[name]:d||{}}))).catch(()=>setModelInfoCache(p=>({...p,[name]:{}})));
+  };
   const loadHyprfit=async(refresh=false,live=hyprfitLive)=>{
     setHyprfitLoading(true);
     try{
@@ -4534,14 +4647,6 @@ function HyprChat(){
       notify({type:"error",text:"HyprFit hardware rescan failed",detail:e.message||String(e)});
     }
     setHyprfitRescanning(false);
-  };
-  const fillPullFromHyprfit=(name)=>{
-    if(!name)return;
-    setPullName(name);
-    setModelParamsOpen(null);
-    setShowModelfile(false);
-    setModelsTab("ollama");
-    setTimeout(()=>{try{pullInputRef.current?.scrollIntoView({block:"center",behavior:"smooth"});pullInputRef.current?.focus();}catch{}},80);
   };
 
   const refreshModelProviders=async()=>{
@@ -4633,33 +4738,20 @@ function HyprChat(){
       if(wsModel===m){setWsModel(fallback);}
       try{if(localStorage.getItem("hc-last-model")===m)localStorage.setItem("hc-last-model",fallback);}catch{}
       if(modelParamsOpen===m)setModelParamsOpen(null);
+      setModelParams(p=>withoutModel(p,m));setModelInfoCache(p=>withoutModel(p,m));setModelFacts(p=>withoutModel(p,m));
       notify({type:"success",text:"Model deleted",detail:m});
     }catch(e){notify({type:"error",text:"Model delete failed",detail:e.message});}
   };
-  const patchToolModel=async(m,successText="Modelfile patched for tool calling.")=>{
-    if(!m||makingToolModel)return;
-    const activityId=addActivity({name:`Enable tools: ${m}`,kind:"model",message:"Patching modelfile...",pct:20});
-    setMakingToolModel(m);
-    try{
-      const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/create-tool-model`,{method:"POST"});
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok)throw new Error(d.detail||r.statusText||`HTTP ${r.status}`);
-      updateActivity(activityId,{status:"done",message:"Tool calling enabled",pct:100});
-      notify({type:"success",text:"Tool calling enabled",detail:successText});
-    }catch(e){
-      updateActivity(activityId,{status:"error",error:e.message,message:"Patch failed"});
-      notify({type:"error",text:"Tool patch failed",detail:e.message});
-    }finally{
-      setMakingToolModel(null);
-    }
-  };
 
   // Pull model — uses shared downloads UI
-  const pullModel=async()=>{
-    if(!pullName.trim())return;
-    const dlId=`pull-${Date.now()}`;const dlName=pullName.trim();
-    setDownloads(p=>[...p,{id:dlId,name:dlName,kind:"model",status:"creating",pct:0,message:"Pulling from Ollama...",error:null,completedBytes:0,totalBytes:0,startTime:Date.now(),speed:0,eta:0,retry:()=>{setPullName(dlName);notify({type:"info",text:"Model name restored",detail:"Press Pull to retry.",duration:4000});}}]);
-    setDownloadsExpanded(true);setPullName("");
+  const pullModel=async(named)=>{
+    // `named`: install this model (a recommendation's Install button, or Retry). Without it: the name typed in the box.
+    const typed=typeof named!=="string";
+    const dlName=(typed?pullName:named).trim();
+    if(!dlName)return;
+    const dlId=`pull-${Date.now()}`;
+    setDownloads(p=>[...p,{id:dlId,name:dlName,kind:"model",status:"creating",pct:0,message:"Pulling from Ollama...",error:null,completedBytes:0,totalBytes:0,startTime:Date.now(),speed:0,eta:0,retry:()=>pullModel(dlName)}]);
+    setDownloadsExpanded(true);if(typed)setPullName("");
     const updDl=upd=>setDownloads(p=>p.map(d=>d.id===dlId?{...d,...upd}:d));
     try{
       const res=await fetch(`${API}/api/models/pull`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:dlName})});
@@ -4705,11 +4797,12 @@ function HyprChat(){
   // HuggingFace helpers
   const hfDoSearch=async(q,ggufOnly=hfGgufOnly)=>{
     if(!q.trim())return;
-    setHfLoading(true);setHfResults([]);setHfSelected(null);setHfModelInfo(null);setHfReadme(null);
+    setHfLoading(true);setHfResults([]);setHfError("");setHfSearched(q.trim());setHfSelected(null);setHfModelInfo(null);setHfReadme(null);
     try{
       const r=await fetch(`${API}/api/hf/search?${new URLSearchParams({q,gguf_only:ggufOnly,limit:24})}`);
-      const d=await r.json();setHfResults(Array.isArray(d)?d:[]);
-    }catch{setHfResults([]);}
+      const out=searchOutcome(await r.json().catch(()=>null),r.ok);
+      setHfResults(out.results);setHfError(out.error);
+    }catch(e){setHfResults([]);setHfError(e?.name==="AbortError"?"":"Hugging Face could not be reached.");}
     setHfLoading(false);
   };
   // Strip HTML tags from HuggingFace README content (badges, img, div, etc.)
@@ -4764,17 +4857,19 @@ function HyprChat(){
     return()=>c.abort();
   },[hfCompatKey]);
   const hfReport=hfCompatibilityReport({model:hfSelected,info:hfModelInfo,readme:hfReadme,selectedFiles:hfSelectedFiles,compat:hfCompatData});
-  const hfDownload=async()=>{
-    if(!hfSelected||!hfSelectedFiles.length)return;
+  const hfDownload=async(again)=>{
+    // `again`: the same request once more (Retry on a failed download), whatever is selected on the page now.
+    const job=again&&again.repo?again:(hfSelected&&hfSelectedFiles.length?{repo:hfSelected.id,files:hfSelectedFiles,name:hfDownloadName.trim(),force:hfReport.flagged,
+      size:(Array.isArray(hfModelInfo?.gguf_files)?hfModelInfo.gguf_files:[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0)}:null);
+    if(!job||hfDownloadRepo)return;
     const dlId=`dl-${Date.now()}`;
-    const dlName=hfDownloadName.trim();
-    const totalSize=(hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0);
-    setHfDownloadRepo(hfSelected.id);
-    setDownloads(p=>[...p,{id:dlId,name:dlName||hfSelectedFiles[0],kind:"model",status:"creating",pct:0,message:"Contacting Ollama...",error:null,completedBytes:0,totalBytes:totalSize,startTime:Date.now(),speed:0,eta:0,retry:()=>{notify({type:"info",text:"Retry from HuggingFace tab",detail:"The same file selection is still available if the model panel has not changed.",duration:5000});}}]);
+    const dlName=job.name,totalSize=job.size;
+    setHfDownloadRepo(job.repo);
+    setDownloads(p=>[...p,{id:dlId,name:dlName||job.files[0],kind:"model",status:"creating",pct:0,message:"Contacting Ollama...",error:null,completedBytes:0,totalBytes:totalSize,startTime:Date.now(),speed:0,eta:0,retry:()=>hfDownload(job)}]);
     setDownloadsExpanded(true);
     const updDl=upd=>setDownloads(p=>p.map(d=>d.id===dlId?{...d,...upd}:d));
     try{
-      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:hfSelected.id,filenames:hfSelectedFiles,model_name:dlName,force:hfReport.flagged})});
+      const res=await fetch(`${API}/api/hf/download`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo_id:job.repo,filenames:job.files,model_name:dlName,force:!!job.force})});
       if(!res.ok){const msg=`Server error: ${res.status} ${res.statusText}`;updDl({status:"error",error:msg});notify({type:"error",text:"HuggingFace download failed",detail:msg});setHfDownloadRepo(null);return;}
       const rdr=res.body.getReader(),dec=new TextDecoder();let buf="";
       let lastBytes=0,lastTime=Date.now(),lastSpeedUpdate=0,curSpeed=0,curEta=0;
@@ -4789,7 +4884,7 @@ function HyprChat(){
             if(d.status==="error"){updDl({status:"error",error:d.message});notify({type:"error",text:"HuggingFace download failed",detail:d.message});}
             else if(d.status==="done"){
               updDl({status:"done",pct:100,message:d.message||"Done!"});
-              notify({type:"success",text:"Model downloaded",detail:dlName||hfSelectedFiles[0]});
+              notify({type:"success",text:"Model downloaded",detail:dlName||job.files[0]});
               refreshModels();
             }else if(d.status==="downloading"){
               const now=Date.now();
@@ -4813,20 +4908,6 @@ function HyprChat(){
     setHfDownloadRepo(null);
   };
   const fmtSize=(bytes)=>{if(!bytes)return"—";if(bytes>1e9)return`${(bytes/1e9).toFixed(1)} GB`;if(bytes>1e6)return`${(bytes/1e6).toFixed(0)} MB`;return`${(bytes/1e3).toFixed(0)} KB`;};
-  // capTags colors are intentionally fixed (not theme tokens): they mirror ModelPicker.modelCaps as cross-theme capability identity badges.
-  const capTags=(n)=>{const b=(n||"").toLowerCase();const caps=[];if(b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});if(b.match(/llava|vision|[\-:]vl$|[\-:]vl[\-:]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});if(b.match(/mixtral|moe|dbrx|switch|jamba|arctic/))caps.push({label:"MoE",emoji:"🔀",color:"#f39c12"});if(b.match(/qwen3(?!\.5)|deepseek-r1|r1-|thinking|reflection|reason/i)&&!b.match(/qwen3\.5/))caps.push({label:"Thinking",emoji:"💭",color:"#a78bfa"});if(b.match(/abliterated|uncensored|unfiltered|dolphin/))caps.push({label:"Uncensored",emoji:"🔓",color:"#ef4444"});if(b.match(/instruct|chat|it(?:$|[\-:])/))caps.push({label:"Instruct",emoji:"📝",color:"#64748b"});return caps;};
-  const quantLabel=(filename)=>{if(!filename)return null;const m=filename.match(/[_\-\.](Q[0-9]_[A-Z_]+|[FQIB][0-9]+(?:_[A-Z0-9]+)?|fp16|bf16|f32|f16|int[48])/i);return m?m[1].toUpperCase():null;};
-  const quantColor=(q)=>{if(!q)return"#888888";const l=q.toLowerCase();if(l.match(/^(f32|fp32)$/))return"#ef4444";if(l.match(/^(f16|fp16|bf16)$/))return"#f97316";if(l.match(/^q8/))return"#eab308";if(l.match(/^q6/))return"#84cc16";if(l.match(/^q5/))return"#22c55e";if(l.match(/^q4/))return"#06b6d4";if(l.match(/^q3|^q2|^iq/))return"#8b5cf6";return"#94a3b8";};
-  const isMultiPart=(files)=>files.some(f=>/\d{5}-of-\d{5}\.gguf$/i.test(f.name));
-  const getPartGroups=(files)=>{
-    const groups={};
-    files.forEach(f=>{
-      const m=f.name.match(/^(.+)-(\d{5})-of-(\d{5})\.gguf$/i);
-      if(m){const key=`${m[1]}(${m[3]} parts)`;if(!groups[key])groups[key]=[];groups[key].push(f);}
-      else{groups[f.name]=[f];}
-    });
-    return groups;
-  };
 
   // Markdown
   const inlineParse=(text,opts={})=>{
@@ -5217,7 +5298,7 @@ function HyprChat(){
     border:"1px solid transparent",position:"relative",flexShrink:0,padding:showNavLabels?"3px 0 1px":0,fontFamily:font,
     ...extra
   });
-  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center"}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
+  const nb=(p,ico,lab)=>{const active=panel===p;return <button className={`nav-panel-button${active?" is-active":""}`} onClick={()=>{workspaceLoadEpoch.current++;setWsPanel(false);if(p==='workspaces'){setActiveWs(null);setWsDetail(null);}setPanel(p);if(isMobile)setSidebar(false);}} title={lab} aria-label={lab} aria-current={active?"page":undefined} style={navBtnS(active)}><span style={{fontSize:showNavLabels?15:18,display:"flex",alignItems:"center",justifyContent:"center"}}>{ico}</span>{showNavLabels&&<div style={{fontSize:"var(--hc-text-secondary)",marginTop:4,lineHeight:1.2,textAlign:"center",...((_navShort[lab]||lab).length>9?{fontSize:"calc(var(--hc-text-secondary) - 1.5px)",letterSpacing:"-0.03em"}:null)}}>{_navShort[lab]||lab}</div>}{active&&<div className="nav-indicator"/>}</button>;};
   const moreNavActive=navLayout.more.some(id=>panel===id);
   const svc=n=>{const s=health[n];const c=s?.status==="ok"?t.ok:s?.status==="degraded"?degradedColor(t):t.err;const rl=s?.rate_limited?" [Rate Limited]":"";return <div title={`${serviceLabel(n)}: ${s?.status||"?"}${rl}${s?.response_ms!=null?" ("+s.response_ms+"ms)":""}${s?.search_summary?`\n${s.search_summary}\n${searchHealthSample(s)}`:""}`} style={{width:6,height:6,borderRadius:"50%",background:c,boxShadow:`0 0 6px ${c}88`}}/>;};
   const filtC=convs.filter(c=>{
@@ -5401,17 +5482,25 @@ function HyprChat(){
   ];
   const activeSettingsTitle=(settingsTabs.find(([id])=>id===settingsTab)||settingsTabs[0])[2];
   const selectedLoginUser=users.find(u=>u.id===loginUserId)||users[0]||null;
-  const localModelCount=models.filter(m=>!m.startsWith("hf.co/")&&!isCloudModelName(m)).length;
-  const hfModelCount=models.filter(m=>m.startsWith("hf.co/")).length;
-  const installedModelCount=localModelCount+hfModelCount;
-  const mmPanelS={background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",boxShadow:"none"};
-  const mmPanelStrongS={background:`${t.surface}F5`,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",boxShadow:"none"};
-  const mmKickerS={fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600};
-  const mmMetaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.4};
+  // Everything the Models page needs from here (panels/ModelsPanel.jsx draws it; rules in modelsPage.js).
+  factsStore.current=modelFacts;
+  notifyRef.current=notify;
+  const modelsCtx={t,isMobile,API,btnS,inputS,notify,confirmAction,downloads,
+    models,modelDetails,modelFacts,modelParams,setModelParams,modelInfoCache,
+    selected:modelParamsOpen,setSelected:setModelParamsOpen,search:modelSearch,setSearch:setModelSearch,
+    loadInfo:loadModelInfo,forgetInfo:name=>setModelInfoCache(p=>withoutModel(p,name)),
+    numCtx,defaultTemp,setDefaultTemp,defaultTopP,setDefaultTopP,
+    pullName,setPullName,pullModel,pullInputRef,deleteModel,useModel:useModelFromManager,refreshModels,
+    tab:modelsTab,setTab:setModelsTab,renderMarkdown:text=><MDWrap>{md(text)}</MDWrap>,
+    hf:{search:hfSearch,setSearch:setHfSearch,ggufOnly:hfGgufOnly,setGgufOnly:setHfGgufOnly,loading:hfLoading,results:hfResults,error:hfError,searched:hfSearched,
+      doSearch:hfDoSearch,selected:hfSelected,select:hfSelectModel,clear:()=>setHfSelected(null),info:hfModelInfo,readme:hfReadme,readmeLoading:hfReadmeLoading,
+      selectedFiles:hfSelectedFiles,setSelectedFiles:setHfSelectedFiles,downloadName:hfDownloadName,setDownloadName:setHfDownloadName,
+      download:hfDownload,downloadRepo:hfDownloadRepo,report:hfReport,compatLoading:hfCompatLoading},
+    fit:{data:hyprfit,loading:hyprfitLoading,profile:hyprfitProfile,setProfile:setHyprfitProfile,saving:hyprfitSaving,save:saveHyprfitProfile,
+      rescanning:hyprfitRescanning,rescan:rescanHyprfitHardware,rescanStatus:hyprfitRescanStatus,rescanCopy:hyprfitRescanCopy,
+      category:hyprfitCategory,setCategory:setHyprfitCategory,live:hyprfitLive,setLive:setHyprfitLive,load:loadHyprfit}};
   // The tint and border keep the badge's own colour; the text is that colour made readable on this theme.
   const mmChipS=(c=t.acc,bg)=>({fontSize:"var(--hc-text-secondary)",padding:"2px 7px",borderRadius:"var(--hc-radius)",background:bg||`${c}16`,border:`1px solid ${c}35`,color:readableOn(t,c),fontWeight:600,lineHeight:1.15,whiteSpace:"nowrap"});
-  const mmIconBtnS=(c=t.mut)=>({width:28,height:28,borderRadius:"var(--hc-radius)",border:`1px solid ${c}30`,background:`${c}10`,color:c,cursor:"pointer",display:"inline-flex",alignItems:"center",justifyContent:"center",padding:0,flexShrink:0});
-  const mmSectionTitleS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.dim,textTransform:"none",letterSpacing:0,marginBottom:10};
 
   // ============================================================
   // PANELS
@@ -5459,14 +5548,15 @@ function HyprChat(){
             <IC.Check/> Sign In
           </button>}
         </div>
-        <div style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:14}}>
+        {users.find(u=>u.id==="default")?.password_enabled?<div style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:14,fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.5}}>To add a profile, sign in as Main and open Settings → Users.</div>
+        :<div style={{borderTop:"1px solid var(--hc-line-subtle)",paddingTop:14}}>
           <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.dim,textTransform:"none",letterSpacing:0,marginBottom:8}}>New Profile</div>
           <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(0,1fr) minmax(0,1fr) auto",gap:8}}>
             <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Name" style={inputS}/>
             <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={inputS}/>
             <button onClick={createManagedUser} disabled={!newUserName.trim()} style={{...btnS(t.ok),opacity:newUserName.trim()?1:.45,whiteSpace:"nowrap",justifyContent:"center"}}><IC.Plus/> Create</button>
           </div>
-        </div>
+        </div>}
       </div>
     </div>}
 
@@ -5552,9 +5642,10 @@ function HyprChat(){
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2,display:"flex",gap:4,alignItems:"center"}}><span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 4px",borderRadius:"var(--hc-radius-sm)",background:`${t.brd}22`,color:t.dim}}>{r.role==="user"?"You":r.role==="assistant"?"Reply":r.role}</span></div>
             <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:2,lineHeight:1.4,maxHeight:40,overflow:"hidden"}} dangerouslySetInnerHTML={{__html:(r.snippet||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/&lt;(\/?mark)&gt;/g,"<$1>")}}/>
           </div>)}
-        </div>:(()=>{const pinnedC=filtC.filter(c=>c.pinned==="1"||c.pinned===1);const unpinnedC=filtC.filter(c=>c.pinned!=="1"&&c.pinned!==1);const renderConv=(c)=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const isPinned=c.pinned==="1"||c.pinned===1;const local=isGhostConv(c)||/^l-/.test(String(c.id));
+        </div>:(()=>{const filtering=!!sq.trim()||!!activeTagFilter;const side=sidebarSections(filtC,workspaces,{collapsed:wsCollapsed,expanded:wsExpanded,filtering,activeId:panel==="chat"?actId:null,nowMs:Date.now(),getMs:c=>_parseUtcishMs(c.updated_at)});const menuWorkspaces=workspaces.slice(0,8);const renderConv=(c,opts={})=>{const isCouncil=c.is_council==="1"||c.is_council===1||c.is_council===true;const hasPersona=!!c.persona_name&&!isCouncil;const profileType=hasPersona?getConversationProfileType(c):null;const convProfile=hasPersona?getProfileForConversation(c):null;const convAvatar=hasPersona?(c.persona_avatar||profileAvatar(convProfile)):null;const isPinned=c.pinned==="1"||c.pinned===1;const local=isGhostConv(c)||/^l-/.test(String(c.id));
           const addTag=()=>{const tag=newTagInput.trim();if(!tag)return;setConvTags(p=>({...p,[c.id]:[...new Set([...(p[c.id]||[]),tag])]}));setNewTagInput("");};
-          return <ConvRow key={c.id} conv={c} title={c.title||"New Chat"} t={t} inputS={inputS} btnS={btnS}
+          return <ConvRow key={opts.key||c.id} conv={c} title={c.title||"New Chat"} t={t} inputS={inputS} btnS={btnS} nested={!!opts.nested}
+            workspaces={local?[]:menuWorkspaces.map(w=>({id:w.id,name:w.name,member:(c.workspace_ids||[]).includes(w.id)}))}
             active={c.id===actId&&panel==="chat"} replying={streaming&&streamingCidRef.current===c.id} unread={unreadReplies.has(c.id)}
             hasDraft={c.id!==actId&&chatDrafts.hasDraft(c.id)} queued={(messageQueue.all[c.id]?.items||[]).length}
             council={isCouncil} persona={hasPersona?(profileType==="persona"?"persona":"agent"):null} avatar={convAvatar?avatarSrc(convAvatar):null}
@@ -5566,7 +5657,17 @@ function HyprChat(){
               generateTitle:local?null:()=>generateTitle(c.id),
               toggleTags:()=>{setShowTagEditor(showTagEditor===c.id?null:c.id);setNewTagInput('');},tagInput:setNewTagInput,addTag,
               removeTag:tag=>setConvTags(p=>({...p,[c.id]:(p[c.id]||[]).filter(x=>x!==tag)})),
-              filterTag:tag=>setActiveTagFilter(activeTagFilter===tag?null:tag),remove:()=>delChat(c.id)}}/>;};return <>{pinnedC.length>0&&<><div className="hc-conv-group-head" style={{color:t.warm}}><IC.Pin/> Pinned</div>{pinnedC.map(renderConv)}</>}{groupByRecency(unpinnedC,Date.now(),c=>_parseUtcishMs(c.updated_at)).map(g=><React.Fragment key={g.key}><div className="hc-conv-group-head">{g.label}</div>{g.items.map(renderConv)}</React.Fragment>)}</>;})()}
+              setWorkspace:local?undefined:(workspaceId,member)=>setChatWorkspace(c,workspaceId,member),
+              filterTag:tag=>setActiveTagFilter(activeTagFilter===tag?null:tag),remove:()=>delChat(c.id)}}/>;};return <>
+          {side.pinned.length>0&&<><div className="hc-conv-group-head" style={{color:t.warm}}><IC.Pin/> Pinned</div>{side.pinned.map(c=>renderConv(c))}</>}
+          {side.sections.length>0&&<><div className="hc-conv-group-head">Workspaces</div>
+            {side.sections.map(section=><WorkspaceSection key={section.id} section={section} t={t} renderChat={renderConv} busy={wsMoreBusy===section.id} on={{
+              toggle:()=>setWsCollapsed(p=>{const next={...p};if(next[section.id])delete next[section.id];else next[section.id]=true;return next;}),
+              newChat:()=>startWorkspaceChat(section.id),openWorkspace:()=>openWorkspace(section.id),
+              showMore:()=>showMoreInWorkspace(section),showFewer:()=>setWsExpanded(p=>({...p,[section.id]:false}))}}/>)}</>}
+          {side.groups.map(g=><React.Fragment key={g.key}><div className="hc-conv-group-head">{g.label}</div>{g.items.map(c=>renderConv(c))}</React.Fragment>)}
+          {!filtering&&!olderChats.done&&filtC.length>0&&<button type="button" className="hc-conv-older" disabled={olderChats.busy} onClick={loadOlderChats}>{olderChats.busy?"Loading…":"Show older chats"}</button>}
+        </>;})()}
       </div>:<div style={{flex:1,overflowY:"auto",padding:"8px 6px"}}>
         <button onClick={async()=>{
           try{const d=await apiJson("/api/workspaces",{method:"POST",body:{name:"New Workspace"}});setWorkspaces(p=>[...p,d]);openWorkspace(d.id);}catch(e){notify({type:"error",text:"Workspace not created",detail:e.message});}
@@ -6069,22 +6170,22 @@ function HyprChat(){
             <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:t.acc,marginBottom:8}}>MCP Server</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 110px",gap:8,marginBottom:8}}>
               <input value={mcpDraft.name} onChange={e=>setMcpDraft(p=>({...p,name:e.target.value}))} placeholder="GitHub MCP" style={inputS}/>
-              <select value={mcpDraft.transport} onChange={e=>setMcpDraft(p=>({...p,transport:e.target.value}))} style={inputS}>
-                <option value="stdio">stdio</option><option value="http">http</option><option value="streamable_http">streamable_http</option><option value="sse">sse</option>
+              <select value={!isMainUser&&mcpDraft.transport==="stdio"?"streamable_http":mcpDraft.transport} onChange={e=>setMcpDraft(p=>({...p,transport:e.target.value}))} style={inputS}>
+                {isMainUser&&<option value="stdio">stdio</option>}<option value="http">http</option><option value="streamable_http">streamable_http</option><option value="sse">sse</option>
               </select>
             </div>
-            <input value={mcpDraft.command} onChange={e=>setMcpDraft(p=>({...p,command:e.target.value}))} placeholder="Command for stdio, e.g. npx" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
+            {isMainUser&&<input value={mcpDraft.command} onChange={e=>setMcpDraft(p=>({...p,command:e.target.value}))} placeholder="Command for stdio, e.g. npx" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>}
             <input value={mcpDraft.url} onChange={e=>setMcpDraft(p=>({...p,url:e.target.value}))} placeholder="HTTP endpoint for Streamable HTTP/SSE" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            {isMainUser&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
               <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Args JSON array</div><textarea value={mcpDraft.args} onChange={e=>setMcpDraft(p=>({...p,args:e.target.value}))} rows={3} placeholder={'["-y","@modelcontextprotocol/server-github"]'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
               <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Env placeholders</div><textarea value={mcpDraft.env} onChange={e=>setMcpDraft(p=>({...p,env:e.target.value}))} rows={3} placeholder={'{"GITHUB_TOKEN":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
-            </div>
-            <div style={{marginBottom:8}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>HTTP headers</div><textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={'{"Authorization":"Bearer ${TOKEN}"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
-            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}><input type="checkbox" checked={mcpDraft.allow_private} onChange={e=>setMcpDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
+            </div>}
+            <div style={{marginBottom:8}}><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>HTTP headers</div><textarea value={mcpDraft.headers} onChange={e=>setMcpDraft(p=>({...p,headers:e.target.value}))} rows={2} placeholder={isMainUser?'{"Authorization":"Bearer ${TOKEN}"}':'{"Authorization":"Bearer your-key"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
+            {isMainUser?<label style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}><input type="checkbox" checked={mcpDraft.allow_private} onChange={e=>setMcpDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>:<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}>Servers that run a command, server secrets and private addresses are for the Main profile. Put your own key directly in a header.</div>}
             <button disabled={connectorBusy==="create:mcp"} onClick={async()=>{
               setConnectorBusy("create:mcp");
               try{
-                const payload={name:mcpDraft.name.trim()||"MCP Server",transport:mcpDraft.transport,command:mcpDraft.command.trim(),url:mcpDraft.url.trim(),args:parseConnectorJson(mcpDraft.args,[],"MCP args"),env:parseConnectorJson(mcpDraft.env,{},"MCP env"),headers:parseConnectorJson(mcpDraft.headers,{},"MCP headers"),allow_private:mcpDraft.allow_private};
+                const payload={name:mcpDraft.name.trim()||"MCP Server",transport:!isMainUser&&mcpDraft.transport==="stdio"?"streamable_http":mcpDraft.transport,command:mcpDraft.command.trim(),url:mcpDraft.url.trim(),args:parseConnectorJson(mcpDraft.args,[],"MCP args"),env:parseConnectorJson(mcpDraft.env,{},"MCP env"),headers:parseConnectorJson(mcpDraft.headers,{},"MCP headers"),allow_private:mcpDraft.allow_private};
                 const r=await fetch(`${API}/api/mcp-servers`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
                 const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
                 setMcpDraft({name:"",transport:"stdio",command:"",url:"",args:"[]",env:"{}",headers:"{}",allow_private:false});
@@ -6099,10 +6200,10 @@ function HyprChat(){
             <input value={openapiDraft.spec_url} onChange={e=>setOpenapiDraft(p=>({...p,spec_url:e.target.value}))} placeholder="OpenAPI JSON/YAML URL" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
             <input value={openapiDraft.base_url} onChange={e=>setOpenapiDraft(p=>({...p,base_url:e.target.value}))} placeholder="Base URL override (optional)" style={{...inputS,marginBottom:8,fontFamily:codeFont}}/>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
-              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Auth JSON</div><textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
-              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Headers JSON</div><textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={'{"X-Api-Key":"${API_KEY}"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
+              {isMainUser&&<div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Auth JSON</div><textarea value={openapiDraft.auth} onChange={e=>setOpenapiDraft(p=>({...p,auth:e.target.value}))} rows={4} placeholder={'{"type":"bearer","token_placeholder":"GITHUB_TOKEN"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>}
+              <div><div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,fontWeight:600,textTransform:"none",letterSpacing:0,margin:"0 0 4px 2px"}}>Headers JSON</div><textarea value={openapiDraft.headers} onChange={e=>setOpenapiDraft(p=>({...p,headers:e.target.value}))} rows={4} placeholder={isMainUser?'{"X-Api-Key":"${API_KEY}"}':'{"X-Api-Key":"your-key"}'} style={{...inputS,fontFamily:codeFont,resize:"vertical"}}/></div>
             </div>
-            <label style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}><input type="checkbox" checked={openapiDraft.allow_private} onChange={e=>setOpenapiDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>
+            {isMainUser?<label style={{display:"flex",alignItems:"center",gap:7,fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}><input type="checkbox" checked={openapiDraft.allow_private} onChange={e=>setOpenapiDraft(p=>({...p,allow_private:e.target.checked}))}/> Allow private/local URL</label>:<div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:8}}>Connector auth, server secrets and private addresses are for the Main profile. Put your own key directly in a header.</div>}
             <button disabled={connectorBusy==="create:openapi"} onClick={async()=>{
               setConnectorBusy("create:openapi");
               try{
@@ -6126,8 +6227,8 @@ function HyprChat(){
                 <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{c.kind.toUpperCase()} · {c.health||"unknown"} · {c.tool_count||0} tools</div>
               </div>
               <button disabled={busy} onClick={()=>discoverConnector(c.kind,c.id)} style={{...btnS(col),fontSize:"var(--hc-text-control)",padding:"4px 8px",opacity:busy?0.5:1}}>{busy?"Checking":"Discover"}</button>
-              <button onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!c.enabled})});await refreshConnectors();}} style={{...btnS(c.enabled?t.ok:t.mut),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}>{c.enabled?"On":"Off"}</button>
-              <button aria-label="Delete" onClick={async()=>{await fetch(`${API}/api/${basePath}/${c.id}`,{method:"DELETE"}).catch(()=>{});await refreshConnectors();}} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}><IC.Trash/></button>
+              <button aria-pressed={!!c.enabled} onClick={async()=>{try{const r=await fetch(`${API}/api/${basePath}/${c.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:!c.enabled})});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||`HTTP ${r.status}`);}catch(error){notify({type:"error",text:"Connector not changed",detail:error.message||String(error)});}await refreshConnectors();}} style={{...btnS(c.enabled?t.ok:t.mut),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}>{c.enabled?"On":"Off"}</button>
+              <button aria-label={`Delete ${c.name||"connector"}`} onClick={async()=>{if(!await confirmAction({title:"Delete this connector?",body:`"${c.name||"Connector"}" and the tools found on it will be removed from every chat. This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;try{const r=await fetch(`${API}/api/${basePath}/${c.id}`,{method:"DELETE"});if(!r.ok&&r.status!==404)throw new Error(`HTTP ${r.status}`);}catch(error){notify({type:"error",text:"Connector not deleted",detail:error.message||String(error)});}await refreshConnectors();}} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",padding:"4px 8px"}}><IC.Trash/></button>
             </div>
             {c.last_error&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,marginTop:7,whiteSpace:"pre-wrap"}}>{c.last_error}</div>}
           </div>;
@@ -6393,7 +6494,7 @@ function HyprChat(){
     </div>}
   </div>;})()
 
-      :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={flexWrap:"wrap",padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}F5`};const sectionS={background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:12};const kickerS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,textTransform:"none",letterSpacing:0};const metaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:"var(--hc-radius)",background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:"var(--hc-radius)",border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600});const nativeSelectS={...inputS,fontSize:"var(--hc-text-secondary)",padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)}).catch(()=>{});updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
+      :panel==="council"?(()=>{const personaProfiles=mcs.filter(isPersonaProfile);const panelS={flex:1,display:"flex",flexDirection:"column",overflow:"hidden"};const headerS={flexWrap:"wrap",padding:"14px 20px",borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,background:`${t.surface}F5`};const sectionS={background:`${t.surface}F5`,border:"1px solid var(--hc-line-subtle)",borderRadius:"var(--hc-radius)",padding:12};const kickerS={fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.mut,textTransform:"none",letterSpacing:0};const metaS={fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.45};const chipS=(c=t.acc)=>({display:"inline-flex",alignItems:"center",gap:4,padding:"2px 7px",borderRadius:"var(--hc-radius)",background:`${c}12`,border:`1px solid ${c}32`,color:c,fontSize:"var(--hc-text-secondary)",fontWeight:600,whiteSpace:"nowrap"});const segmentS=(on,c)=>({padding:"5px 9px",borderRadius:"var(--hc-radius)",border:`1px solid ${on?c:t.brd}38`,background:on?`${c}16`:`${t.surface}55`,color:on?c:t.mut,cursor:"pointer",fontFamily:font,fontSize:"var(--hc-text-secondary)",fontWeight:600});const nativeSelectS={...inputS,fontSize:"var(--hc-text-secondary)",padding:"8px 10px",background:t.bgDeep,color:t.text};const memberProfile=m=>m?.model_config_id?personaProfiles.find(mc=>mc.id===m.model_config_id):null;const memberView=m=>{const mc=memberProfile(m);return{profile:mc,missing:!!m?.model_config_id&&!mc,name:mc?.name||m.persona_name||m.model?.split(":")[0]||"Council member",model:mc?.base_model||m.model||"",prompt:mc?.system_prompt||m.system_prompt||"",avatar:mc?profileAvatar(mc):"",linked:!!mc};};const updateMemberLocal=(cid,mid,patch)=>setCouncils(p=>p.map(c=>c.id===cid?{...c,members:(c.members||[]).map(m=>m.id===mid?{...m,...patch}:m)}:c));const saveMember=async(council,member)=>{const linked=editMemberForm.model_config_id?personaProfiles.find(mc=>mc.id===editMemberForm.model_config_id):null;const up={model:linked?.base_model||editMemberForm.model||member.model||models[0]||"",model_config_id:editMemberForm.model_config_id||"",system_prompt:linked?.system_prompt??editMemberForm.system_prompt??"",persona_name:linked?.name??editMemberForm.persona_name??""};try{const r=await fetch(`${API}/api/councils/members/${member.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(up)});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||`HTTP ${r.status}`);}catch(error){notify({type:"error",text:"Member not saved",detail:error.message||String(error)});return;}updateMemberLocal(council.id,member.id,up);setEditMember(null);};const addCustomMember=async(council)=>{if(!models.length)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:models[0],model_config_id:"",system_prompt:"",persona_name:""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:m.model||models[0]||"",model_config_id:"",system_prompt:"",persona_name:""});};const addPersonaMember=async(council)=>{const mc=personaProfiles[0];if(!mc)return;const r=await fetch(`${API}/api/councils/${council.id}/members`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""})});const m=await r.json();setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:[...(c.members||[]),m]}:c));setEditMember(m.id);setEditMemberForm({model:mc.base_model||models[0]||"",model_config_id:mc.id,system_prompt:mc.system_prompt||"",persona_name:mc.name||""});};return <div style={panelS}>
     <div style={headerS}>
       <div style={{display:"flex",alignItems:"center",gap:10,minWidth:0}}>
         <span style={{width:30,height:30,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.pink}14`,border:`1px solid ${t.pink}32`,color:t.pink}}><IC.Council/></span>
@@ -6441,7 +6542,7 @@ function HyprChat(){
             </div>
             <div style={{display:"flex",gap:5,alignItems:"center",justifyContent:"flex-end"}}>
               <button onClick={()=>setActiveCouncilId(isActive?null:council.id)} style={btnS(isActive?t.pink:t.mut)}>{isActive?<><IC.ChevDown/> Collapse</>:<><IC.ChevDown/> Expand</>}</button>
-              <button aria-label="Delete" onClick={async()=>{await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
+              <button aria-label={`Delete ${council.name||"council"}`} onClick={async()=>{if(!await confirmAction({title:"Delete this council?",body:`"${council.name||"Untitled council"}" and its members will be deleted. Chats that used it keep their messages but can no longer continue. This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;try{const r=await fetch(`${API}/api/councils/${council.id}`,{method:"DELETE"});if(!r.ok&&r.status!==404)throw new Error(`HTTP ${r.status}`);}catch(error){notify({type:"error",text:"Council not deleted",detail:error.message||String(error)});return;}setCouncils(p=>p.filter(c=>c.id!==council.id));if(activeCouncilId===council.id)setActiveCouncilId(null);}} style={btnS(t.err)}><IC.Trash/></button>
             </div>
           </div>
           {isActive&&<div style={{padding:14,display:"flex",flexDirection:"column",gap:12}}>
@@ -6467,6 +6568,7 @@ function HyprChat(){
                 <input type="range" min={0} max={5} value={council.debate_rounds||0}
                   onChange={e=>{const v=parseInt(e.target.value);setCouncils(p=>p.map(c=>c.id===council.id?{...c,debate_rounds:v}:c));}}
                   onMouseUp={e=>{const v=parseInt(e.target.value);fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
+                  onKeyUp={e=>{const v=parseInt(e.target.value);fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
                   onTouchEnd={()=>{const v=council.debate_rounds||0;fetch(`${API}/api/councils/${council.id}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({debate_rounds:v})}).catch(()=>{});}}
                   style={{width:"100%",accentColor:t.pink}}/>
               </div>
@@ -6528,7 +6630,7 @@ function HyprChat(){
                     <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:3,WebkitBoxOrient:"vertical",overflow:"hidden",minHeight:42}}>{view.prompt||"No member prompt set."}</div>
                     <div style={{display:"flex",gap:5,marginTop:"auto"}}>
                       <button onClick={()=>{const v=memberView(member);setEditMember(member.id);setEditMemberForm({model:v.model||member.model||models[0]||"",model_config_id:member.model_config_id||"",system_prompt:v.prompt||"",persona_name:v.name||""});}} style={{...btnS(t.acc),flex:1,justifyContent:"center",fontSize:"var(--hc-text-control)"}}><IC.Pencil/> Edit</button>
-                      <button aria-label="Delete" onClick={async()=>{await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"}).catch(()=>{});setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
+                      <button aria-label="Remove member" onClick={async()=>{try{const r=await fetch(`${API}/api/councils/members/${member.id}`,{method:"DELETE"});if(!r.ok&&r.status!==404)throw new Error(`HTTP ${r.status}`);}catch(error){notify({type:"error",text:"Member not removed",detail:error.message||String(error)});return;}setCouncils(p=>p.map(c=>c.id===council.id?{...c,members:c.members.filter(m=>m.id!==member.id)}:c));}} style={btnS(t.err)}><IC.Trash/></button>
                     </div>
                   </>}
                 </div>;})}
@@ -6584,10 +6686,13 @@ function HyprChat(){
         {isE&&<input type="file" accept="image/*" style={{display:"none"}} onChange={async e=>{
           const f=e.target.files[0];if(!f)return;
           const fd=new FormData();fd.append("file",f);
-          try{const r=await fetch(`${API}/api/model-configs/${mc.id}/avatar`,{method:"POST",body:fd});const d=await r.json();const parameters={...normalizeProfileParams(mc),avatar:d.avatar_url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
-          catch{const url=URL.createObjectURL(f);const parameters={...normalizeProfileParams(mc),avatar:url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
+          e.target.value="";   // the same file can be picked again after a failure
+          // A refused or failed upload leaves the picture as it was. It used to clear it (no check of the
+          // answer) or keep a browser-only blob: address that was then saved with the profile.
+          try{const r=await fetch(`${API}/api/model-configs/${mc.id}/avatar`,{method:"POST",body:fd});const d=await r.json().catch(()=>({}));if(!r.ok||!d.avatar_url)throw new Error(d.detail||`HTTP ${r.status}`);const parameters={...normalizeProfileParams(mc),avatar:d.avatar_url};setMcs(p=>p.map(x=>x.id===mc.id?{...x,parameters}:x));}
+          catch(error){notify({type:"error",text:"Picture not changed",detail:error.message||String(error)});}
         }}/>}
-      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const deleteProfile=async(mc)=>{try{await apiJson(`/api/model-configs/${mc.id}`,{method:"DELETE"});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);}catch(e){notify({type:"error",text:"Profile was not deleted",detail:e.message});}};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
+      </label>;};const createAgent=async()=>{const mc={name:"New Agent",base_model:models[0]||"",system_prompt:"You are a focused assistant for specialized work. Use your available tools when they help complete the task.",tool_ids:[],kb_ids:[],parameters:{profile_type:"agent",description:"Custom agent for coding, research, automation, or specialized work."}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("agents");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const createPersona=async()=>{const persona={description:"",personality:"",appearance:"",scenario:"",first_message:"",example_dialogue:"",lore:"",tags:[],rating:"PG-13",thinking_mode:"auto",advanced_prompt:""};const mc={name:"New Persona",base_model:models[0]||"",system_prompt:buildPersonaPrompt({name:"New Persona",...persona}),tool_ids:[],kb_ids:[],parameters:{profile_type:"persona",persona,description:""}};try{const r=await fetch(`${API}/api/model-configs`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(mc)});if(!r.ok)throw new Error(`Profile creation failed (HTTP ${r.status})`);const d=await r.json();const norm={...d,parameters:normalizeProfileParams(d)};setMcs(p=>[norm,...p]);setProfileTab("personas");setEditMc(norm.id);}catch(e){notify({type:"error",text:"Profile was not created",detail:e.message});}};const deleteProfile=async(mc)=>{if(!await confirmAction({title:"Delete this profile?",body:`"${mc.name||"Untitled"}" and its settings will be deleted. Chats that used it keep their messages. This cannot be undone.`,confirmLabel:"Delete",tone:"danger"}))return;try{await apiJson(`/api/model-configs/${mc.id}`,{method:"DELETE"});setMcs(p=>p.filter(x=>x.id!==mc.id));if(editMc===mc.id)setEditMc(null);}catch(e){notify({type:"error",text:"Profile was not deleted",detail:e.message});}};const renderAgent=(mc)=>{const isE=editMc===mc.id;const params=normalizeProfileParams(mc);const tools=mc.tool_ids||[];const kbIds=mc.kb_ids||[];const hasCoding=tools.includes("codeagent")||isCoderPersonaName(mc.name);const hasResearch=tools.some(x=>x.includes("research"));return <div key={mc.id} style={{...cardS,borderColor:isE?`${t.acc}55`:`${t.brd}44`}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:10}}>
           <div style={{display:"flex",alignItems:"flex-start",gap:10,minWidth:0,flex:1}}>
             {avatarBox(mc,isE,t.acc,"agent")}
@@ -6787,793 +6892,7 @@ function HyprChat(){
 
       :panel==="prompts"?<PromptLibraryPanel t={t} btnS={btnS} cardS={cardS} inputS={inputS} prompts={validPrompts} setPrompts={setPrompts} editPrompt={editPrompt} setEditPrompt={setEditPrompt} setInp={setInp} insertPrompt={insertPrompt} setPanel={setPanel}/>
 
-      :panel==="models"?<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-    {/* Toolbar */}
-    <div style={{padding:"14px 20px",flexShrink:0,display:"flex",alignItems:"center",gap:14,borderBottom:"1px solid var(--hc-line-subtle)",background:`${t.bgDeep}F5`,minHeight:62,boxSizing:"border-box",flexWrap:"wrap"}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,minWidth:180}}>
-        <span style={{display:"flex",color:t.acc}}><IC.Database/></span>
-        <div>
-          <div style={{fontSize:"var(--hc-text-display)",fontWeight:600,color:t.acc,letterSpacing:0,textTransform:"none",lineHeight:1}}>Models</div>
-          <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:3}}>{installedModelCount} installed · {hfModelCount} from Hugging Face</div>
-        </div>
-      </div>
-      <div style={{display:"flex",alignItems:"center",gap:4,padding:3,minWidth:0,maxWidth:"100%",flexWrap:"wrap",borderRadius:"var(--hc-radius)",border:"1px solid var(--hc-line-subtle)",background:`${t.surface}F5`}}>
-        {[["ollama","Ollama","🦙",installedModelCount],["hf","Hugging Face","🤗",hfModelCount],["hyprfit","HyprFit","⚡",null]].map(([key,label,icon,count])=>{
-          const active=modelsTab===key;
-          return <button key={key} onClick={()=>{setModelsTab(key);setModelParamsOpen(null);setShowModelfile(false);if(key!=="hf")setHfSelected(null);}} style={{padding:"7px 13px",flexShrink:0,whiteSpace:"nowrap",borderRadius:"var(--hc-radius)",border:"none",background:active?`${t.acc}18`:"transparent",color:active?t.acc:t.mut,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:active?900:700,display:"flex",alignItems:"center",gap:7,transition:"all .15s"}}>
-            <span>{icon}</span><span>{label}</span>{count!=null&&<span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:"var(--hc-text-secondary)",padding:"1px 5px"}}>{count}</span>}
-          </button>;
-        })}
-      </div>
-      <div style={{flex:1}}/>
-      <button onClick={modelsTab==="hyprfit"?()=>loadHyprfit(true):refreshModels} title={modelsTab==="hyprfit"?"Refresh HyprFit":"Refresh models"} style={mmIconBtnS(t.acc)}><IC.Refresh/></button>
-    </div>
-
-    {/* ── OLLAMA TAB ── */}
-    {modelsTab==="ollama"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
-
-      {/* Left: model list */}
-      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}F5`,...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
-        {/* Search bar */}
-        <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)"}}>
-          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
-            <div style={{position:"relative",flex:1}}>
-              <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:t.mut,display:"flex",opacity:.75}}><IC.Search/></span>
-              <input value={modelSearch} onChange={e=>setModelSearch(e.target.value)} placeholder="Search installed models..." style={{...inputS,width:"100%",fontSize:"var(--hc-text-control)",padding:"9px 13px 9px 34px",background:t.bgDeep}}/>
-            </div>
-          </div>
-          <div style={{display:"flex",gap:6,alignItems:"center",justifyContent:"space-between"}}>
-            <span style={mmKickerS}>Inventory</span>
-            <span style={mmMetaS}>{localModelCount} local · {hfModelCount} HF</span>
-          </div>
-        </div>
-        <div style={{flex:1,overflowY:"auto",padding:"10px 12px 14px"}}>
-          {(()=>{
-            const searchLower=modelSearch.toLowerCase();
-            const families={};
-            const visibleModels=models.filter(m=>!isCloudModelName(m));
-            visibleModels.filter(m=>!searchLower||m.toLowerCase().includes(searchLower)).forEach(m=>{
-              const [name,tag="latest"]=m.split(":");
-              const base=name.toLowerCase();
-              let fam="Other";
-              if(base.startsWith("hf.co/"))fam="HuggingFace";
-              else if(base.includes("qwen"))fam="Qwen";
-              else if(base.includes("llama"))fam="Llama";
-              else if(base.includes("mistral")||base.includes("mixtral"))fam="Mistral";
-              else if(base.includes("gemma"))fam="Gemma";
-              else if(base.includes("phi"))fam="Phi";
-              else if(base.includes("deepseek"))fam="DeepSeek";
-              else if(base.includes("command"))fam="Command";
-              else if(base.includes("wizard")||base.includes("vicuna"))fam="WizardLM";
-              else if(base.includes("hermes"))fam="Hermes";
-              if(!families[fam])families[fam]=[];
-              families[fam].push({m,name,tag});
-            });
-            const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
-            const icon=(n)=>{const b=n.toLowerCase();if(b.startsWith("hf.co/"))return"🤗";if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral")||b.includes("mixtral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";if(b.includes("wizard"))return"🧙";return"🤖";};
-            const famEmoji={HuggingFace:"🤗",Qwen:"🌸",Llama:"🦙",Mistral:"💨",Gemma:"💎",Phi:"φ",DeepSeek:"🔍",Command:"⚡",WizardLM:"🧙",Hermes:"🏛",Other:"🤖"};
-            const allItems=Object.values(families).flat();
-            if(!visibleModels.length)return <div style={{...mmPanelS,padding:14}}><EmptyState t={t} font={font} compact icon={<IC.Layers/>} title="No installed models yet" hint="Pull a model from Ollama to get started." action={<button onClick={()=>{try{pullInputRef.current?.scrollIntoView({block:"center",behavior:"smooth"});pullInputRef.current?.focus();}catch{}}} style={{...btnS(t.acc),fontSize:"var(--hc-text-control)"}}><IC.Download/> Pull a Model</button>}/></div>;
-            if(allItems.length===0&&searchLower)return <div style={{...mmPanelS,padding:"28px 14px",color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"center"}}>No models matching "{modelSearch}"</div>;
-            return Object.entries(families).map(([fam,items])=><div key={fam} style={{marginBottom:16}}>
-              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,margin:"0 2px 7px",display:"flex",alignItems:"center",gap:7}}>
-                <span style={{opacity:.82}}>{famEmoji[fam]||"🤖"}</span><span style={{fontWeight:700}}>{fam}</span><span style={{opacity:.6}}>{items.length}</span>
-              </div>
-              {items.map(({m,name,tag})=>{
-                const sc=szCol(tag);const sel=modelParamsOpen===m;
-                const hasCustom=Object.values(modelParams[m]||{}).some(v=>v&&v!=="default");
-                const md=modelDetails[m]||{};
-                const quant=(md.details?.quantization_level||"").toUpperCase();
-                const paramSz=md.details?.parameter_size||"";
-                const diskSz=md.size?fmtSize(md.size):"";
-                const caps=capTags(m);
-                return <div key={m} onClick={()=>{const newSel=sel?null:m;setModelParamsOpen(newSel);setShowModelfile(false);setFixTemplateMsg(null);setFixTemplateFamily("");if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
-                  style={{display:"flex",alignItems:"center",gap:12,padding:"13px 14px",borderRadius:"var(--hc-radius)",marginBottom:7,cursor:"pointer",background:sel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${sel?t.acc:t.brd}${sel?"55":"18"}`,transition:"all .15s",boxShadow:sel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-                  <span style={{fontSize:"var(--hc-text-title)",flexShrink:0,width:24,textAlign:"center"}}>{icon(name)}</span>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:sel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.25}}>{name}</span>
-                      {m.startsWith("hf.co/")&&<span style={mmChipS(t.warm)}>HF</span>}
-                      {hasCustom&&<div style={{width:6,height:6,borderRadius:"50%",background:t.acc,flexShrink:0}} title="Custom parameters"/>}
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:5,flexWrap:"wrap"}}>
-                      {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:600}}>{paramSz}</span>}
-                      {!paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:sc,fontWeight:600}}>{tag}</span>}
-                      {quant&&(()=>{const qc=quantColor(quant);return <span style={{...mmChipS(qc),fontSize:"var(--hc-text-secondary)",padding:"2px 7px"}}>{quant}</span>;})()}
-                      {diskSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,opacity:.85}}>{diskSz}</span>}
-                    </div>
-                    {caps.length>0&&<div style={{display:"flex",gap:3,marginTop:4,flexWrap:"wrap"}}>
-                      {caps.slice(0,3).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:"var(--hc-text-secondary)",padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
-                    </div>}
-                  </div>
-                  <button onClick={e=>{e.stopPropagation();deleteModel(m);}} title="Delete model" style={{...mmIconBtnS(t.err),opacity:.35,background:"transparent",borderColor:"transparent"}} onMouseEnter={e=>e.currentTarget.style.opacity=1} onMouseLeave={e=>e.currentTarget.style.opacity=.35}><IC.Trash/></button>
-                  <span style={{fontSize:"var(--hc-text-control)",color:sel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:sel?"rotate(90deg)":"none"}}>›</span>
-                </div>;
-              })}
-            </div>);
-          })()}
-        </div>
-      </div>
-
-      {/* Right: parameter detail */}
-      <div style={{flex:1,overflowY:"auto",padding:"24px 28px 40px"}}>
-        {!modelParamsOpen?
-          /* Global defaults shown when nothing is selected */
-          <div style={{maxWidth:860}}>
-            <div style={{...mmPanelStrongS,padding:18,marginBottom:16}}>
-              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
-                <div style={{minWidth:isMobile?0:220,flex:"1 1 260px"}}>
-                  <div style={mmKickerS}>Ollama pull</div>
-                  <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.text,marginTop:4}}>Pull Ollama model</div>
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.45}}>Install a model by name, then tune its overrides from the inventory list.</div>
-                </div>
-                <div style={{display:"flex",gap:8,alignItems:"center",flex:"1 1 340px",minWidth:isMobile?0:280,flexWrap:isMobile?"wrap":"nowrap"}}>
-                  <input ref={pullInputRef} value={pullName} onChange={e=>setPullName(e.target.value)} placeholder="llama3.1:8b" onKeyDown={e=>e.key==="Enter"&&pullModel()} style={{...inputS,flex:1,minWidth:180,fontSize:"var(--hc-text-control)",padding:"9px 11px",background:t.bgDeep}}/>
-                  <button onClick={pullModel} disabled={!pullName.trim()} style={{...btnS(t.ok),padding:"9px 14px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:pullName.trim()?1:.55}}><IC.Download/> Pull</button>
-                </div>
-              </div>
-            </div>
-            <div style={{...mmPanelStrongS,padding:20,marginBottom:16}}>
-              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:18,flexWrap:"wrap"}}>
-                <div>
-                  <div style={mmKickerS}>Defaults</div>
-                  <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,marginTop:4}}>Global model behavior</div>
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,maxWidth:520,lineHeight:1.5}}>Applied to every model unless that model has its own override. Select a model from the inventory to tune context and sampling individually.</div>
-                </div>
-                <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                  <span style={mmChipS(t.acc)}>{models.filter(m=>!isCloudModelName(m)).length} installed</span>
-                  <span style={mmChipS(t.warm)}>{Object.keys(modelParams).filter(k=>Object.values(modelParams[k]||{}).some(v=>v&&v!=="default")).length} overrides</span>
-                </div>
-              </div>
-            {[
-              ["Default Temperature","range","0","2","0.05",defaultTemp,v=>setDefaultTemp(parseFloat(v)),v=>v.toFixed(2),"Precise","Balanced","Creative","temperature"],
-              ["Default Top-P","range","0.1","1","0.05",defaultTopP,v=>setDefaultTopP(parseFloat(v)),v=>v.toFixed(2),"Focused","Balanced","Diverse","top_p"],
-            ].map(([lbl,type,min,max,step,val,setter,fmt,l1,l2,l3,tipKey])=>
-              <div key={lbl} style={{...mmPanelS,padding:"14px 16px",marginBottom:12}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
-                  <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl} {tipKey&&<Tip k={tipKey} t={t}/>}</span>
-                  <span style={{fontSize:"var(--hc-text-reading)",fontWeight:700,color:t.acc,fontVariantNumeric:"tabular-nums"}}>{fmt(val)}</span>
-                </div>
-                <input type="range" min={min} max={max} step={step} value={val} onChange={e=>setter(e.target.value)} style={{width:"100%",accentColor:t.acc,cursor:"pointer",height:6}}/>
-                <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
-              </div>
-            )}
-            </div>
-            <div style={{...mmPanelS,padding:"14px 16px",display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:12}}>
-              <div>
-                <div style={mmKickerS}>Next step</div>
-                <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginTop:5,lineHeight:1.5}}>Select an installed model to set its context window, tool template, and per-model sampling overrides.</div>
-              </div>
-              <div>
-                <div style={mmKickerS}>Global context</div>
-                <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.acc,marginTop:5}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx}</div>
-                <div style={mmMetaS}>Configured from Settings</div>
-              </div>
-            </div>
-          </div>
-        :
-          /* Per-model parameters */
-          (()=>{
-            const m=modelParamsOpen;const [name,tag="latest"]=m.split(":");const mp=modelParams[m]||{};
-            const hasCustom=Object.values(mp).some(v=>v&&v!=="default");
-            const icon=(n)=>{const b=n.toLowerCase();if(b.includes("qwen"))return"🌸";if(b.includes("llama"))return"🦙";if(b.includes("mistral"))return"💨";if(b.includes("gemma"))return"💎";if(b.includes("phi"))return"φ";if(b.includes("deepseek"))return"🔍";if(b.includes("coder")||b.includes("code"))return"💻";return"🤖";};
-            const szCol=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
-            const sc=szCol(tag);
-            const md=modelDetails[m]||{};const det=md.details||{};
-            const diskSz=md.size?fmtSize(md.size):"";
-            const quant=(det.quantization_level||"").toUpperCase();
-            const paramSz=det.parameter_size||"";
-            const family=det.family||"";
-            const format=(det.format||"").toUpperCase();
-            const modifiedAt=md.modified_at?(()=>{try{return new Date(md.modified_at).toLocaleDateString();}catch{return md.modified_at;}})():"";
-            const info=modelInfoCache[m]||{};
-            const TEMPLATE_OPTIONS=[["chatml","ChatML (Qwen / most instruct)"],["llama3","Llama 3.x"],["mistral","Mistral / Mixtral"],["gemma","Gemma 2 / 3"]];
-            // Auto-detect template family whenever selected model changes
-            const detectedFamily=(()=>{const b=m.toLowerCase();if(b.includes("qwen")||b.includes("chatml"))return"chatml";if(b.includes("llama")||b.includes("hermes"))return"llama3";if(b.includes("mistral")||b.includes("mixtral"))return"mistral";if(b.includes("gemma"))return"gemma";return"chatml";})();
-            const effectiveFamily=fixTemplateFamily||detectedFamily;
-            const applyTemplate=async()=>{
-              const activityId=addActivity({name:`Template patch: ${m}`,kind:"model",message:`Applying ${effectiveFamily} template...`,pct:20});
-              setFixingTemplate(true);setFixTemplateMsg(null);
-              try{
-                const r=await fetch(`${API}/api/models/${encodeURIComponent(m)}/fix-template`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({family:effectiveFamily})});
-                const d=await r.json();
-                if(!r.ok)throw new Error(d.detail||"Unknown error");
-                setFixTemplateMsg({ok:true,text:`Template applied (${effectiveFamily}). Model recreated — tool calling should now work.`});
-                updateActivity(activityId,{status:"done",message:"Template applied",pct:100});
-                notify({type:"success",text:"Template applied",detail:`${effectiveFamily} template was applied to ${m}.`});
-              }catch(e){
-                setFixTemplateMsg({ok:false,text:`Failed: ${e.message}`});
-                updateActivity(activityId,{status:"error",error:e.message,message:"Template patch failed"});
-                notify({type:"error",text:"Template patch failed",detail:e.message});
-              }
-              setFixingTemplate(false);
-            };
-            return <div className="hc-reveal" style={{maxWidth:900}}>
-              {/* Model header */}
-              <div style={{...mmPanelStrongS,padding:"18px 20px",marginBottom:14,display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-                <span style={{fontSize:28,width:40,height:40,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.acc}10`,border:`1px solid ${t.acc}22`,flexShrink:0}}>{icon(name)}</span>
-                <div style={{flex:1,minWidth:220}}>
-                  <div style={mmKickerS}>Installed model</div>
-                  <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,marginTop:3,wordBreak:"break-word"}}>{name}</div>
-                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:7}}>
-                    <span style={mmChipS(sc)}>{tag}</span>
-                    {quant&&<span style={mmChipS(quantColor(quant))}>{quant}</span>}
-                    {format&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{format}</span>}
-                    {hasCustom&&<span style={mmChipS(t.acc)}>Custom overrides</span>}
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
-                  <button onClick={()=>useModelFromManager(m)} style={{...btnS(t.acc),padding:"8px 16px",fontSize:"var(--hc-text-control)",fontWeight:700}}>Use Model</button>
-                  <button onClick={()=>deleteModel(m)} title="Delete model" style={mmIconBtnS(t.err)}><IC.Trash/></button>
-                </div>
-              </div>
-              {/* Tool calling template fix */}
-              <details style={{...mmPanelS,marginBottom:14,padding:"0 14px"}}>
-                <summary style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.warm,cursor:"pointer",padding:"12px 0",display:"flex",alignItems:"center",gap:7}}>🔧 Advanced · Tool Calling Template</summary>
-                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,margin:"0 0 12px",lineHeight:1.5}}>Apply a chat template so this model can use tools. This is mainly for custom GGUF models.</div>
-                <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginBottom:fixTemplateMsg?10:0}}>
-                  <select value={effectiveFamily} onChange={e=>setFixTemplateFamily(e.target.value)}
-                    style={{background:t.bgDeep,border:"1px solid var(--hc-line)",color:t.text,padding:"7px 10px",borderRadius:"var(--hc-radius)",fontFamily:font,fontSize:"var(--hc-text-control)",flex:1,minWidth:160,cursor:"pointer"}}>
-                    {TEMPLATE_OPTIONS.map(([k,l])=><option key={k} value={k}>{l}</option>)}
-                  </select>
-                  <button onClick={applyTemplate} disabled={fixingTemplate}
-                    style={{...btnS(t.warm),padding:"7px 16px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:fixingTemplate?0.6:1}}>
-                    {fixingTemplate?"Applying...":"Apply Template"}
-                  </button>
-                </div>
-                {fixTemplateMsg&&<div style={{fontSize:"var(--hc-text-secondary)",color:fixTemplateMsg.ok?t.ok:t.err,padding:"6px 10px",background:fixTemplateMsg.ok?`${t.ok}12`:`${t.err}12`,borderRadius:"var(--hc-radius)",border:`1px solid ${fixTemplateMsg.ok?t.ok:t.err}33`}}>{fixTemplateMsg.text}</div>}
-              </details>
-              {/* Info strip */}
-              {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:14}}>
-                {paramSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Parameters</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{paramSz}</div></div>}
-                {diskSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Disk Size</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{diskSz}</div></div>}
-                {family&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Family</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize",marginTop:4}}>{family}</div></div>}
-                {modifiedAt&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Added</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.dim,marginTop:4}}>{modifiedAt}</div></div>}
-              </div>}
-              {/* Modelfile viewer */}
-              <div style={{...mmPanelS,marginBottom:14,padding:"12px 14px"}}>
-                <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.dim,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,display:"flex",alignItems:"center",gap:6,marginBottom:showModelfile?10:0,fontWeight:600}}>
-                  <span style={{transition:"transform .2s",transform:showModelfile?"rotate(90deg)":"none",display:"inline-block"}}>›</span>
-                  {modelInfoLoading&&!info.modelfile?"Loading modelfile...":"View Modelfile"}
-                </button>
-                {showModelfile&&<pre style={{background:t.bgDeep,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius-card)",padding:"12px 14px",fontSize:"var(--hc-text-secondary)",color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:260,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
-              </div>
-              {/* Parameter sliders */}
-              <div style={{...mmSectionTitleS,marginTop:18}}>Generation overrides</div>
-              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:12}}>Leave blank to inherit global defaults.</div>
-              {[
-                ["temperature","Temperature","0","2","0.05","Precise","Balanced","Creative"],
-                ["top_p","Top-P","0.1","1","0.05","Focused","Balanced","Diverse"],
-                ["repeat_penalty","Repeat Penalty","1","2","0.05","None","Normal","Strong"],
-              ].map(([key,lbl,min,max,step,l1,l2,l3])=>{
-                const raw=mp[key]||"";const isEmpty=raw===""||raw==="default";
-                const numVal=isEmpty?parseFloat(key==="temperature"?defaultTemp:key==="top_p"?defaultTopP:"1.1"):parseFloat(raw);
-                return <div key={key} style={{...mmPanelS,padding:"13px 14px",marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                    <span style={{fontSize:"var(--hc-text-secondary)",color:isEmpty?t.mut:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl}</span>
-                    <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,opacity:.7}}>reset</button>}
-                      <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:54,textAlign:"right"}}>{isEmpty?"global":numVal.toFixed(2)}</span>
-                    </div>
-                  </div>
-                  <input type="range" min={min} max={max} step={step} value={numVal}
-                    onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))}
-                    style={{width:"100%",accentColor:isEmpty?t.mut:t.acc,cursor:"pointer",opacity:isEmpty?0.6:1,height:6}}/>
-                  <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
-                </div>;
-              })}
-              {/* Top-K */}
-              <div style={{marginBottom:10}}>
-                {(()=>{
-                  const key="top_k";const val=mp[key]||"";const isEmpty=val===""||val==="default";
-                  return <div style={{...mmPanelS,padding:"13px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:700}}>Top-K</span>
-                      {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>reset</button>}
-                    </div>
-                    <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))}
-                      placeholder="Default" min="1" max="200" step="1"
-                      style={{...inputS,padding:"7px 10px",fontSize:"var(--hc-text-control)",color:isEmpty?t.mut:t.acc,width:"100%"}}/>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5}}>Integer sample pool</div>
-                  </div>;
-                })()}
-              </div>
-              {/* Context Window — button grid, defaults to global numCtx */}
-              <div style={{...mmPanelS,padding:"13px 14px",marginBottom:16}}>
-                {(()=>{
-                  const ctxVal=mp["num_ctx"]||"";const isDefault=ctxVal===""||ctxVal==="default";
-                  const effectiveCtx=isDefault?numCtx:parseInt(ctxVal);
-                  return <div>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                      <span style={{fontSize:"var(--hc-text-secondary)",color:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>Context Window <Tip k="num_ctx" t={t}/></span>
-                      <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        {!isDefault&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>reset to global</button>}
-                        <span style={{fontSize:"var(--hc-text-secondary)",color:isDefault?t.mut:t.acc,fontWeight:600}}>{isDefault?"global default":""}</span>
-                      </div>
-                    </div>
-                    <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
-                      {[4096,8192,16384,32768,65536,131072,262144].map(v=><button key={v} onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:v===numCtx?"":String(v)}}))} style={{padding:"6px 14px",borderRadius:"var(--hc-radius)",border:`1px solid ${effectiveCtx===v?t.acc:t.brd}44`,background:effectiveCtx===v?`${t.acc}22`:t.bgDeep,color:effectiveCtx===v?t.acc:t.dim,fontFamily:font,fontSize:"var(--hc-text-control)",cursor:"pointer",fontWeight:effectiveCtx===v?700:400}}>
-                        {v>=1024?`${(v/1024).toFixed(0)}K`:v}
-                      </button>)}
-                    </div>
-                    <input aria-label="Model context tokens" type="number" min="1" step="1" value={isDefault?"":ctxVal} placeholder={`Global: ${numCtx}`} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),num_ctx:e.target.value}}))} style={{...inputS,marginTop:8}}/>
-                    {effectiveCtx>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:isDefault?t.mut:t.acc,marginTop:4,fontWeight:600}}>{effectiveCtx>=1024?`${(effectiveCtx/1024).toFixed(0)}K`:effectiveCtx} tokens{isDefault?" (from Settings)":""}</div>}
-                    <ModelLimitNote model={m} asked={effectiveCtx} t={t}/>
-                  </div>;
-                })()}
-              </div>
-              {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",width:"100%",justifyContent:"center",padding:"8px 16px"}}>Reset All to Defaults</button>}
-            </div>;
-          })()
-        }
-      </div>
-    </div>}
-
-    {/* ── HUGGINGFACE TAB ── */}
-    {modelsTab==="hf"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
-
-      {/* Left: search + installed Hugging Face models */}
-      <div style={{width:isMobile?"100%":"clamp(360px,30vw,460px)",minWidth:isMobile?0:340,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",display:"flex",flexDirection:"column",overflow:"hidden",background:`${t.bgDeep}F5`,...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
-        <div style={{padding:"12px 12px 10px",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-            <div>
-              <div style={mmKickerS}>Hugging Face</div>
-              <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:3}}>Search GGUF models</div>
-            </div>
-            <span style={mmChipS(t.warm)}>{hfModelCount} installed</span>
-          </div>
-        </div>
-
-        <>
-        <div style={{padding:"12px 12px 10px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)"}}>
-          <div style={{display:"flex",gap:6}}>
-            <input value={hfSearch} onChange={e=>setHfSearch(e.target.value)} onKeyDown={e=>e.key==="Enter"&&hfDoSearch(hfSearch)}
-              placeholder="Search HuggingFace models..." style={{...inputS,flex:1,fontSize:"var(--hc-text-control)",padding:"9px 11px",background:t.bgDeep}}/>
-            <button aria-label="Search" onClick={()=>hfDoSearch(hfSearch)} disabled={hfLoading||!hfSearch.trim()} style={{...btnS(t.acc),padding:"7px 10px",flexShrink:0,opacity:(!hfLoading&&hfSearch.trim())?1:.55}}><IC.Search/></button>
-          </div>
-          <label style={{display:"flex",alignItems:"center",gap:6,marginTop:8,cursor:"pointer",fontSize:"var(--hc-text-secondary)",color:t.mut}}>
-            <input type="checkbox" checked={hfGgufOnly} onChange={e=>setHfGgufOnly(e.target.checked)} style={{accentColor:t.acc}}/>
-            GGUF only (Ollama-compatible)
-          </label>
-          {!hfResults.length&&!hfLoading&&<div style={{marginTop:10,fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.7}}>
-            Try: {["Llama 3","Qwen2.5","Mistral","Gemma","Phi-3"].map((s,i)=><span key={s}>
-              <span style={{color:t.acc,cursor:"pointer"}} onClick={()=>{setHfSearch(s);hfDoSearch(s);}}>{s}</span>
-              {i<4?" · ":""}
-            </span>)}
-          </div>}
-        </div>
-        <div style={{flex:1,overflowY:"auto",padding:"10px 12px 14px"}}>
-          {hfLoading&&<div style={{display:"flex",justifyContent:"center",padding:24,gap:5,alignItems:"center",color:t.mut,fontSize:"var(--hc-text-secondary)"}}>
-            <div style={{display:"flex",gap:3}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:t.acc,animation:`pulse 1.4s ${i*.16}s infinite`}}/>)}</div>Searching...
-          </div>}
-          {hfResults.map(m=>{
-            const [author,name]=m.id.split("/");const isSel=hfSelected?.id===m.id;
-            const hfCaps=(()=>{const b=(m.id||"").toLowerCase();const pt=(m.pipeline_tag||"").toLowerCase();const caps=[];
-              if(pt==="feature-extraction"||b.match(/embed/))caps.push({label:"Embed",emoji:"🔢",color:"#9b59b6"});
-              if(pt==="image-text-to-text"||pt==="image-to-text"||b.match(/llava|vision|[\-:]vl[\-:$]/))caps.push({label:"Vision",emoji:"👁",color:"#e67e22"});
-              if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({label:"Code",emoji:"💻",color:"#2ecc71"});
-              if(!b.match(/embed/)&&(pt==="text-generation"||b.match(/qwen|llama|mistral|mixtral|command|hermes|deepseek|phi|gemma/)))caps.push({label:"Tools",emoji:"🔧",color:"#3498db"});
-              if(b.match(/mixtral|moe|dbrx|switch|jamba|arctic/))caps.push({label:"MoE",emoji:"🔀",color:"#f39c12"});
-              if(b.match(/qwen3(?!\.5)|deepseek-r1|r1-|thinking|reflection|reason/)&&!b.match(/qwen3\.5/))caps.push({label:"Thinking",emoji:"💭",color:"#a78bfa"});
-              if(b.match(/abliterated|uncensored|unfiltered|dolphin/))caps.push({label:"Uncensored",emoji:"🔓",color:"#ef4444"});
-              if(b.match(/instruct|chat|[\-:]it(?:$|[\-:])/))caps.push({label:"Instruct",emoji:"📝",color:"#64748b"});
-              return caps;})();
-            return <div key={m.id} onClick={()=>hfSelectModel(m)} style={{padding:"13px 14px",borderRadius:"var(--hc-radius)",marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-              <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{author}/</div>
-              <div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:6}}>{name||m.id}</div>
-              <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>⬇ {m.downloads>999?`${(m.downloads/1000).toFixed(1)}k`:m.downloads}</span>
-                <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>♥ {m.likes}</span>
-                {hfCaps.slice(0,4).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:"var(--hc-text-secondary)",padding:"2px 7px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
-              </div>
-            </div>;
-          })}
-          {(()=>{
-            const hfModels=models.filter(m=>m.startsWith("hf.co/"));
-            if(!hfModels.length)return null;
-            return <div style={{marginTop:hfResults.length?16:4,paddingTop:12,borderTop:"1px solid var(--hc-line-subtle)"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,margin:"0 2px 8px"}}>
-                <span style={mmKickerS}>Installed from Hugging Face</span>
-                <span style={mmMetaS}>{hfModels.length} model{hfModels.length===1?"":"s"}</span>
-              </div>
-              {hfModels.map(m=>{
-                const md=modelDetails[m]||{};
-                const quant=(md.details?.quantization_level||"").toUpperCase();
-                const paramSz=md.details?.parameter_size||"";
-                const diskSz=md.size?fmtSize(md.size):"";
-                const isSel=modelParamsOpen===m;
-                const repoPath=m.replace("hf.co/","");
-                const repoBase=repoPath.split(":")[0];
-                const repoName=repoBase.split("/").pop()||repoBase;
-                const caps=capTags(repoName);
-                return <div key={m} onClick={()=>{const newSel=isSel?null:m;setModelParamsOpen(newSel);setHfSelected(null);setShowModelfile(false);if(newSel&&!modelInfoCache[newSel]){setModelInfoLoading(true);fetch(`${API}/api/models/${encodeURIComponent(newSel)}/info`).then(r=>r.json()).then(d=>setModelInfoCache(p=>({...p,[newSel]:d}))).catch(()=>{}).finally(()=>setModelInfoLoading(false));}}}
-                  style={{padding:"11px 12px",borderRadius:"var(--hc-radius)",marginBottom:7,cursor:"pointer",background:isSel?`${t.acc}14`:`${t.surface}38`,border:`1px solid ${isSel?t.acc:t.brd}${isSel?"55":"18"}`,transition:"all .12s",display:"flex",alignItems:"center",gap:10,boxShadow:isSel?`inset 3px 0 0 ${t.acc}`:"none"}}>
-                  <span style={{fontSize:"var(--hc-text-title)",flexShrink:0,width:22,textAlign:"center"}}>🤗</span>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{repoBase}</div>
-                    <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:isSel?t.acc:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:2}}>{repoName}</div>
-                    <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",marginTop:5}}>
-                      {quant&&<span style={{...mmChipS(quantColor(quant)),fontSize:"var(--hc-text-secondary)",padding:"2px 6px"}}>{quant}</span>}
-                      {paramSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{paramSz}</span>}
-                      {diskSz&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{diskSz}</span>}
-                      {caps.slice(0,2).map(c=><span key={c.label} style={{...mmChipS(c.color),fontSize:"var(--hc-text-secondary)",padding:"2px 6px",fontWeight:700}}>{c.emoji} {c.label}</span>)}
-                    </div>
-                  </div>
-                  <span style={{fontSize:"var(--hc-text-control)",color:isSel?t.acc:t.mut,flexShrink:0,transition:"transform .2s",transform:isSel?"rotate(90deg)":"none"}}>›</span>
-                </div>;
-              })}
-            </div>;
-          })()}
-        </div>
-        </>
-      </div>
-
-      {/* Right: detail panel — installed model settings OR search detail */}
-      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-        {modelParamsOpen&&modelParamsOpen.startsWith("hf.co/")&&models.includes(modelParamsOpen)?
-          /* installed model settings panel */
-          <div style={{flex:1,overflowY:"auto",padding:"24px 28px 40px"}}>
-            {(()=>{
-              const m=modelParamsOpen;const [mname,mtag="latest"]=m.split(":");const mp=modelParams[m]||{};
-              const hasCustom=Object.values(mp).some(v=>v&&v!=="default");
-              const mdi=modelDetails[m]||{};const det=mdi.details||{};
-              const diskSz=mdi.size?fmtSize(mdi.size):"";
-              const quant=(det.quantization_level||"").toUpperCase();
-              const paramSz=det.parameter_size||"";
-              const family=det.family||"";
-              const format=(det.format||"").toUpperCase();
-              const modifiedAt=mdi.modified_at?(()=>{try{return new Date(mdi.modified_at).toLocaleDateString();}catch{return mdi.modified_at;}})():"";
-              const info=modelInfoCache[m]||{};
-              const repoPath=m.replace("hf.co/","");
-              const repoName=repoPath.split("/").pop()?.split(":")[0]||m;
-              const sc=(tag)=>{const l=(tag||"").toLowerCase();if(l.match(/70b|65b|72b/))return t.err;if(l.match(/30b|32b|34b/))return t.warm;if(l.match(/13b|14b|27b/))return t.acc;if(l.match(/7b|8b/))return t.ok;if(l.match(/1b|3b|4b/))return t.f1;return t.mut;};
-              return <div className="hc-reveal" style={{maxWidth:900}}>
-                <div style={{...mmPanelStrongS,padding:"18px 20px",marginBottom:14,display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
-                  <span style={{fontSize:26,width:40,height:40,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,flexShrink:0}}>🤗</span>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={mmKickerS}>{repoPath.split(":")[0]}</div>
-                    <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:3}}>{repoName}</div>
-                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:7}}>
-                      <span style={mmChipS(t.warm)}>HuggingFace</span>
-                      {quant&&<span style={mmChipS(quantColor(quant))}>{quant}</span>}
-                      {format&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{format}</span>}
-                      {hasCustom&&<span style={mmChipS(t.acc)}>Custom overrides</span>}
-                    </div>
-                  </div>
-                  <div style={{display:"flex",flexDirection:"column",gap:7,alignItems:"flex-end",flexShrink:0}}>
-                    <div style={{display:"flex",gap:6}}>
-                      <button onClick={()=>useModelFromManager(m)} style={{...btnS(t.acc),padding:"8px 16px",fontSize:"var(--hc-text-control)",fontWeight:700}}>Use Model</button>
-                      <button onClick={()=>deleteModel(m)} title="Delete model" style={mmIconBtnS(t.err)}><IC.Trash/></button>
-                    </div>
-                    <button onClick={e=>{e.stopPropagation();patchToolModel(m,"This model can now use tools.");}} disabled={!!makingToolModel} style={{background:makingToolModel===m?`${t.mut}15`:`${t.ok}18`,border:`1px solid ${makingToolModel===m?t.mut:t.ok}44`,color:makingToolModel===m?t.mut:t.ok,cursor:makingToolModel?"wait":"pointer",padding:"6px 12px",borderRadius:"var(--hc-radius)",fontSize:"var(--hc-text-control)",fontWeight:700,whiteSpace:"nowrap",letterSpacing:.2,transition:"all .15s"}}>{makingToolModel===m?"Patching...":"Enable Tool Calling"}</button>
-                  </div>
-                </div>
-                {(paramSz||diskSz||family||modifiedAt)&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:14}}>
-                  {paramSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Parameters</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{paramSz}</div></div>}
-                  {diskSz&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Disk Size</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{diskSz}</div></div>}
-                  {family&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Family</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,textTransform:"capitalize",marginTop:4}}>{family}</div></div>}
-                  {modifiedAt&&<div style={{...mmPanelS,padding:"10px 12px"}}><div style={mmKickerS}>Added</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:600,color:t.dim,marginTop:4}}>{modifiedAt}</div></div>}
-                </div>}
-                <div style={{...mmPanelS,marginBottom:14,padding:"12px 14px"}}>
-                  <button onClick={()=>setShowModelfile(p=>!p)} style={{background:"none",border:"none",color:t.dim,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,display:"flex",alignItems:"center",gap:6,marginBottom:showModelfile?8:0,fontWeight:600}}>
-                    <span style={{transition:"transform .2s",transform:showModelfile?"rotate(90deg)":"none",display:"inline-block"}}>›</span>
-                    {modelInfoLoading&&!info.modelfile?"Loading modelfile...":"View Modelfile"}
-                  </button>
-                  {showModelfile&&<pre style={{background:t.bgDeep,border:"1px solid var(--hc-line)",borderRadius:"var(--hc-radius)",padding:"10px 12px",fontSize:"var(--hc-text-secondary)",color:t.dim,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:200,overflowY:"auto",lineHeight:1.5}}>{info.modelfile||"No modelfile data."}</pre>}
-                </div>
-                <div style={{...mmSectionTitleS,marginTop:18}}>Generation overrides</div>
-                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginBottom:12}}>Leave blank to inherit global defaults.</div>
-                {[["temperature","Temperature","0","2","0.05","Precise","Balanced","Creative"],["top_p","Top-P","0.1","1","0.05","Focused","Balanced","Diverse"],["repeat_penalty","Repeat Penalty","1","2","0.05","None","Normal","Strong"]].map(([key,lbl,min,max,step,l1,l2,l3])=>{
-                  const raw=mp[key]||"";const isEmpty=raw===""||raw==="default";
-                  const numVal=isEmpty?parseFloat(key==="temperature"?defaultTemp:key==="top_p"?defaultTopP:"1.1"):parseFloat(raw);
-                  return <div key={key} style={{...mmPanelS,padding:"13px 14px",marginBottom:10}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                      <span style={{fontSize:"var(--hc-text-secondary)",color:isEmpty?t.mut:t.dim,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl}</span>
-                      <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0,opacity:.7}}>reset</button>}
-                        <span style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:isEmpty?t.mut:t.acc,fontVariantNumeric:"tabular-nums",minWidth:54,textAlign:"right"}}>{isEmpty?"global":numVal.toFixed(2)}</span>
-                      </div>
-                    </div>
-                    <input type="range" min={min} max={max} step={step} value={numVal} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} style={{width:"100%",accentColor:isEmpty?t.mut:t.acc,cursor:"pointer",opacity:isEmpty?0.6:1}}/>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:2}}><span>{l1}</span><span>{l2}</span><span>{l3}</span></div>
-                  </div>;
-                })}
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
-                  {[["top_k","Top-K","1","200","1","Integer sample pool"],["num_ctx","Context (tokens)","1",undefined,"1","Context window; blank inherits Settings"]].map(([key,lbl,min,max,step,desc])=>{
-                    const val=mp[key]||"";const isEmpty=val===""||val==="default";
-                    return <div key={key} style={{...mmPanelS,padding:"12px 14px",border:`1px solid ${isEmpty?t.brd:t.acc}22`}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
-                        <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:700}}>{lbl}</span>
-                        {!isEmpty&&<button onClick={()=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:""}}))} style={{background:"none",border:"none",color:t.mut,cursor:"pointer",fontSize:"var(--hc-text-control)",padding:0}}>reset</button>}
-                      </div>
-                      <input type="number" value={isEmpty?"":val} onChange={e=>setModelParams(p=>({...p,[m]:{...(p[m]||{}),[key]:e.target.value}}))} placeholder="Default" min={min} max={max} step={step} style={{...inputS,padding:"5px 8px",fontSize:"var(--hc-text-control)",color:isEmpty?t.mut:t.acc,width:"100%"}}/>
-                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>{desc}</div>
-                    </div>;
-                  })}
-                </div>
-                {hasCustom&&<button onClick={()=>setModelParams(p=>{const n={...p};delete n[m];return n;})} style={{...btnS(t.err),fontSize:"var(--hc-text-control)",width:"100%",justifyContent:"center"}}>Reset All to Defaults</button>}
-              </div>;
-            })()}
-          </div>
-        :!hfSelected?<div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
-          <div style={{...mmPanelS,padding:"28px 34px",textAlign:"center",maxWidth:380}}>
-            <span style={{fontSize:32}}>🤗</span>
-            <div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:10}}>Search HuggingFace</div>
-            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.5}}>Select a GGUF model to inspect files, compatibility, and README details.</div>
-          </div>
-        </div>:
-        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
-          {/* Model header */}
-          <div style={{padding:"16px 20px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)",display:"flex",alignItems:"center",gap:12,background:`${t.surface}F5`}}>
-            <span style={{fontSize:24,width:36,height:36,borderRadius:"var(--hc-radius)",display:"flex",alignItems:"center",justifyContent:"center",background:`${t.warm}10`,border:`1px solid ${t.warm}22`,flexShrink:0}}>🤗</span>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={mmKickerS}>{hfSelected.id.split("/")[0]}/</div>
-              <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.acc,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:3}}>{hfSelected.id.split("/")[1]||hfSelected.id}</div>
-            </div>
-            <div style={{display:"flex",gap:12,fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,alignItems:"center"}}>
-              {hfModelInfo?.gguf_files?.length>0&&(()=>{
-                const total=hfModelInfo.gguf_files.reduce((a,f)=>a+(f.size||0),0);
-                return total>0?<span style={{fontWeight:700,color:t.warm,fontSize:"var(--hc-text-secondary)"}}>{fmtSize(total)}</span>:null;
-              })()}
-              <span>⬇ {hfSelected.downloads>999?`${(hfSelected.downloads/1000).toFixed(1)}k`:hfSelected.downloads}</span>
-              <span>♥ {hfSelected.likes}</span>
-            </div>
-          </div>
-          {hfModelInfo&&(()=>{
-            const compat=hfReport;
-            const c=compat.level==="bad"?t.err:compat.level==="warn"?(t.warm||"#eab308"):t.ok;
-            const title=compat.level==="ok"?(hfSelectedFiles.length?"Looks good for this Ollama":"Pick a file to check it against this Ollama"):compat.level==="bad"?"Likely compatibility issue":"Possible compatibility issue";
-            return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:`1px solid ${c}22`,background:`${c}0C`,display:"flex",gap:10,alignItems:"flex-start"}}>
-              <span style={{color:c,display:"flex",lineHeight:"18px",flexShrink:0,paddingTop:1}}>{compat.level==="ok"?<IC.Check/>:<IC.Alert/>}</span>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:c,letterSpacing:.2}}>Ollama Compatibility · {title}</div>
-                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:5}}>
-                  {compat.issues.length?compat.issues.map(issue=>{
-                    const ic=issue.level==="bad"?t.err:issue.level==="warn"?(t.warm||"#eab308"):t.f1;
-                    return <span key={issue.label} title={issue.detail} style={{fontSize:"var(--hc-text-secondary)",color:ic,border:`1px solid ${ic}44`,background:`${ic}12`,borderRadius:"var(--hc-radius)",padding:"2px 6px",fontWeight:700}}>{issue.label}</span>;
-                  }):<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{hfCompatLoading?"Checking the file header and this Ollama's architectures…":"Metadata and README do not show common Ollama loader risks."}</span>}
-                </div>
-              </div>
-            </div>;
-          })()}
-          {/* Download bar — sticky top */}
-          {hfSelectedFiles.length>0&&(()=>{
-            const compat=hfReport;
-            const risky=compat.flagged;
-            const c=compat.level==="bad"?t.err:compat.level==="warn"?(t.warm||"#eab308"):t.ok;
-            const busyHere=hfDownloadRepo===hfSelected?.id, busyElsewhere=!!hfDownloadRepo&&!busyHere;
-            return <div style={{padding:"10px 16px",flexShrink:0,borderBottom:"1px solid var(--hc-line-subtle)",background:`${c}06`,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-              <input value={hfDownloadName} onChange={e=>setHfDownloadName(e.target.value)} placeholder="Model name, e.g. llama3-q5" style={{...inputS,fontSize:"var(--hc-text-control)",padding:"7px 10px",width:220,flex:"none",background:t.bgDeep}}/>
-              <span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>{hfSelectedFiles.length} file{hfSelectedFiles.length>1?"s":""} · {fmtSize((hfModelInfo?.gguf_files||[]).filter(f=>hfSelectedFiles.includes(f.name)).reduce((a,f)=>a+(f.size||0),0))}</span>
-              {hfCompatLoading?<span style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0,display:"inline-flex",alignItems:"center",gap:6}}><Dots/> Resolving pull…</span>
-              :compat.pull?.resolved?<span title={compat.pull.pullName} style={{fontSize:"var(--hc-text-secondary)",color:t.dim,flexShrink:0}}>Pulls {fmtPullBytes(compat.pull.modelBytes)} model{compat.pull.projectorBytes?` + ${fmtPullBytes(compat.pull.projectorBytes)} projector`:""} · tag {compat.pull.tag}</span>
-              :compat.pull?.tag?<span title={compat.pull.pullName} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,flexShrink:0}}>Pulls by tag {compat.pull.tag}</span>:null}
-              {risky&&<span style={{fontSize:"var(--hc-text-secondary)",color:c,fontWeight:600,flexShrink:0}}>compatibility flagged</span>}
-              <div style={{flex:1}}/>
-              <button onClick={hfDownload} disabled={!!hfDownloadRepo||!hfDownloadName.trim()} style={{...btnS(hfDownloadRepo?t.mut:c),padding:"6px 14px",fontSize:"var(--hc-text-control)",flexShrink:0,opacity:hfDownloadRepo?0.7:1}}>
-                {busyHere?<Spinner size={12}/>:<IC.Download/>}{busyHere?"Downloading…":busyElsewhere?"Another download is running":risky?"Download anyway":"Download"}
-              </button>
-            </div>;
-          })()}
-          {/* Body: files left, readme right */}
-          <div style={{flex:1,display:"flex",overflow:"hidden",...(isMobile?{flexDirection:"column"}:{})}}>
-            {/* Files + download */}
-            <div style={{width:isMobile?"100%":"clamp(280px,24vw,320px)",minWidth:isMobile?0:280,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",overflowY:"auto",padding:"16px 14px",background:`${t.bgDeep}F5`,...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
-              <div style={{...mmKickerS,marginBottom:10}}>GGUF Files</div>
-              {!hfModelInfo?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>Loading...</div>:
-              hfModelInfo.gguf_files.length===0?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>No GGUF files.</div>:
-              <>
-                {(()=>{
-                  const groups=getPartGroups(hfModelInfo.gguf_files);
-                  return Object.entries(groups).map(([groupKey,files])=>{
-                    const isGroup=files.length>1;
-                    const totalSize=files.reduce((a,f)=>a+f.size,0);
-                    const allSel=files.every(f=>hfSelectedFiles.includes(f.name));
-                    const toggle=()=>{if(allSel)setHfSelectedFiles(p=>p.filter(n=>!files.map(f=>f.name).includes(n)));else setHfSelectedFiles(p=>[...new Set([...p,...files.map(f=>f.name)])]);};
-                    const fname=isGroup?groupKey:files[0].name;
-                    const ql=quantLabel(fname);const qc=quantColor(ql);
-                    return <div key={groupKey} onClick={toggle} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 10px",borderRadius:"var(--hc-radius)",background:allSel?`${t.acc}14`:`${t.surface}40`,border:`1px solid ${allSel?t.acc:t.brd}${allSel?"55":"18"}`,marginBottom:5,cursor:"pointer",transition:"all .12s"}}>
-                      <input type="checkbox" checked={allSel} onChange={toggle} onClick={e=>e.stopPropagation()} style={{accentColor:t.acc,flexShrink:0,marginTop:2}}/>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:2,flexWrap:"wrap"}}>
-                          {ql&&<span style={{fontSize:"var(--hc-text-secondary)",padding:"1px 6px",borderRadius:"var(--hc-radius-sm)",background:`${qc}20`,color:qc,fontWeight:700,border:`1px solid ${qc}44`,letterSpacing:.3,flexShrink:0}}>{ql}</span>}
-                          <span style={{fontSize:"var(--hc-text-secondary)",fontWeight:600,color:allSel?t.acc:t.text,wordBreak:"break-all",lineHeight:1.3}}>{fname}</span>
-                        </div>
-                        <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut}}>{isGroup?`${files.length} parts · ${fmtSize(totalSize)}`:fmtSize(files[0].size)}</div>
-                      </div>
-                    </div>;
-                  });
-                })()}
-              </>}
-            </div>
-            {/* README */}
-            <div style={{flex:1,overflowY:"auto",padding:"18px 22px"}}>
-              <div style={{...mmKickerS,marginBottom:12}}>README</div>
-              {hfReadmeLoading?<div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>Loading README...</div>:
-              hfReadme?<div style={{fontSize:"var(--hc-text-secondary)",lineHeight:1.7,color:t.dim}}><MDWrap>{md(hfReadme)}</MDWrap></div>:
-              <div style={{color:t.mut,fontSize:"var(--hc-text-secondary)",fontStyle:"italic"}}>No README available.</div>}
-            </div>
-          </div>
-        </div>}
-      </div>
-    </div>}
-
-    {/* ── HYPRFIT TAB ── */}
-    {modelsTab==="hyprfit"&&<div style={{flex:1,display:"flex",overflow:"hidden",background:`${t.bg}22`,...(isMobile?{flexDirection:"column"}:{})}}>
-      <div style={{width:isMobile?"100%":"clamp(340px,28vw,440px)",minWidth:isMobile?0:320,borderRight:isMobile?"none":"1px solid var(--hc-line-subtle)",background:`${t.bgDeep}F5`,overflowY:"auto",padding:"18px 18px 28px",boxSizing:"border-box",...(isMobile?{maxHeight:"45%",borderBottom:"1px solid var(--hc-line-subtle)",flexShrink:0}:{})}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
-          <div>
-            <div style={mmKickerS}>HyprFit</div>
-            <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.text,marginTop:4}}>Hardware profile</div>
-            <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.45}}>Saved profile used for model fit and loadout estimates.</div>
-          </div>
-          <div style={{display:"flex",gap:6}}>
-            <button title="Refresh recommendations" onClick={()=>loadHyprfit(true)} disabled={hyprfitLoading} style={{...mmIconBtnS(t.acc),opacity:hyprfitLoading?0.6:1}}><IC.Refresh/></button>
-            <button title="Rescan hardware" onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...mmIconBtnS(t.warm),opacity:hyprfitRescanning?0.6:1}}><IC.Activity/></button>
-          </div>
-        </div>
-        {!hyprfitProfile?<div style={{...mmPanelS,padding:20,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Loading profile...</div>:<div style={{...mmPanelStrongS,padding:16}}>
-          {[
-            ["name","Profile name","text"],
-            ["gpu_name","GPU label","text"],
-          ].map(([key,label,type])=><label key={key} style={{display:"block",marginBottom:11}}>
-            <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>{label}</span>
-            <input type={type} value={hyprfitProfile[key]||""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:e.target.value}))} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",background:t.bgDeep}}/>
-          </label>)}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-            {[
-              ["gpu_count","GPUs",1,16,1],
-              ["total_vram_gb","VRAM GB",0,512,1],
-              ["system_ram_gb","RAM GB",1,2048,1],
-              ["max_loaded_models","Warm models",1,32,1],
-              ["num_parallel","Parallel slots",1,16,1],
-            ].map(([key,label,min,max,step])=><label key={key} style={{display:"block",marginBottom:10}}>
-              <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>{label}</span>
-              <input type="number" min={min} max={max} step={step} value={hyprfitProfile[key]??""} onChange={e=>setHyprfitProfile(p=>({...p,[key]:Number(e.target.value)}))} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",background:t.bgDeep}}/>
-            </label>)}
-            <label style={{display:"block",marginBottom:10}}>
-              <span style={{display:"block",fontSize:"var(--hc-text-secondary)",color:t.mut,textTransform:"none",letterSpacing:0,fontWeight:600,marginBottom:4}}>KV cache</span>
-              <select value={hyprfitProfile.kv_cache_type||"q8_0"} onChange={e=>setHyprfitProfile(p=>({...p,kv_cache_type:e.target.value}))} style={{...inputS,fontSize:"var(--hc-text-control)",padding:"8px 10px",background:t.bgDeep}}>
-                <option value="q8_0">q8_0</option>
-                <option value="f16">f16</option>
-                <option value="q4_0">q4_0</option>
-              </select>
-            </label>
-          </div>
-          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:"var(--hc-text-secondary)",color:t.dim,cursor:"pointer",margin:"2px 0 14px"}}>
-            <input type="checkbox" checked={!!hyprfitProfile.sched_spread} onChange={e=>setHyprfitProfile(p=>({...p,sched_spread:e.target.checked}))} style={{accentColor:t.acc}}/>
-            Spread model across visible GPUs
-          </label>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-            <button onClick={saveHyprfitProfile} disabled={hyprfitSaving} style={{...btnS(t.ok),justifyContent:"center",padding:"9px 10px",fontSize:"var(--hc-text-control)",opacity:hyprfitSaving?0.65:1}}>{hyprfitSaving?"Saving...":"Save Profile"}</button>
-            <button onClick={rescanHyprfitHardware} disabled={hyprfitRescanning} style={{...btnS(t.warm),justifyContent:"center",padding:"9px 10px",fontSize:"var(--hc-text-control)",opacity:hyprfitRescanning?0.65:1}}><IC.Activity/> {hyprfitRescanning?"Scanning":"Rescan Hardware"}</button>
-          </div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:12}}>
-            <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.backend||"unknown"}</span>
-            <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.unified_memory?"unified memory":"discrete memory"}</span>
-            <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfitProfile.source||"manual"}</span>
-            {hyprfitRescanStatus?.detection_mode&&(()=>{
-              const copy=hyprfitRescanCopy(hyprfitRescanStatus);
-              return <>
-                <span style={mmChipS(copy.color)}>{copy.chip}</span>
-                {hyprfitRescanStatus.detection_mode==="remote_ssh_detector"&&hyprfitRescanStatus.detected_profile?.backend&&<span style={mmChipS(t.ok)}>{hyprfitRescanStatus.detected_profile.backend}</span>}
-                {hyprfitRescanStatus.target==="ollama"&&<span style={mmChipS(hyprfitRescanStatus.ollama_reachable?t.ok:t.warm)}>{hyprfitRescanStatus.ollama_reachable?"Ollama reachable":"Ollama unreachable"}</span>}
-                {hyprfitRescanStatus.target==="ollama"&&hyprfitRescanStatus.ollama_url&&<span title={hyprfitRescanStatus.ollama_url} style={{...mmChipS(t.mut,`${t.surface}66`),maxWidth:180,overflow:"hidden",textOverflow:"ellipsis"}}>{hyprfitRescanStatus.ollama_url.replace(/^https?:\/\//,"")}</span>}
-              </>;
-            })()}
-          </div>
-        </div>}
-        {hyprfit?.assumptions?.length>0&&<div style={{...mmPanelS,padding:"12px 14px",marginTop:14}}>
-          <div style={{...mmKickerS,marginBottom:7}}>Estimate notes</div>
-          {hyprfit.assumptions.map((a,i)=><div key={i} style={{fontSize:"var(--hc-text-secondary)",color:t.mut,lineHeight:1.5,marginBottom:i===hyprfit.assumptions.length-1?0:5}}>{a}</div>)}
-        </div>}
-      </div>
-      <div style={{flex:1,overflowY:"auto",padding:"22px 28px 38px"}}>
-        {(()=>{
-          const fallbackCats=[
-            {id:"for_you",label:"For You",summary:"Best fit for this hardware",count:(hyprfit?.recommendations||[]).length},
-            {id:"popular",label:"Popular",count:0},
-            {id:"newest",label:"Newest",count:0},
-            {id:"coding",label:"Coding",count:0},
-            {id:"chat",label:"Chat",count:0},
-            {id:"tool_calling",label:"Tool Calling",count:0},
-            {id:"reasoning",label:"Reasoning",count:0},
-            {id:"moe",label:"MoE",count:0},
-            {id:"long_context",label:"Long Context",count:0},
-            {id:"small_fast",label:"Small/Fast",count:0},
-            {id:"vision",label:"Vision",count:0},
-            {id:"embeddings",label:"Embeddings",count:0},
-          ];
-          const cats=hyprfit?.categories?.length?hyprfit.categories:fallbackCats;
-          const activeCat=cats.some(c=>c.id===hyprfitCategory)?hyprfitCategory:"for_you";
-          const activeMeta=cats.find(c=>c.id===activeCat)||cats[0]||fallbackCats[0];
-          const grouped=hyprfit?.grouped_recommendations||{};
-          const recs=grouped[activeCat]||((activeCat==="for_you")?(hyprfit?.recommendations||[]):[]);
-          const compact=n=>{const v=Number(n||0);if(v>=1000000)return`${(v/1000000).toFixed(v>=10000000?0:1)}m`;if(v>=1000)return`${(v/1000).toFixed(v>=10000?0:1)}k`;return String(v);};
-          const fmtDate=v=>{if(!v)return"";try{return new Date(v).toLocaleDateString();}catch{return v;}};
-          return <div style={{maxWidth:1120}}>
-            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:14,marginBottom:14,flexWrap:"wrap"}}>
-              <div>
-                <div style={mmKickerS}>Model loadout</div>
-                <div style={{fontSize:"var(--hc-text-display)",fontWeight:700,color:t.text,marginTop:4}}>HyprFit recommendations</div>
-                <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:5,lineHeight:1.5,maxWidth:660}}>{activeMeta?.summary||"Ranked for the saved hardware profile, current Ollama inventory, warm-model budget, and estimated context memory."}</div>
-              </div>
-              <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                <span style={mmChipS(t.acc)}>{hyprfit?.profile?.total_vram_gb??0} GB VRAM</span>
-                <span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit?.system?.backend||hyprfit?.profile?.backend||"backend"}</span>
-                <span style={mmChipS(t.warm)}>{hyprfit?.profile?.kv_cache_type||"q8_0"} KV</span>
-                <span style={mmChipS(t.f1)}>{hyprfit?.profile?.max_loaded_models||1} warm</span>
-                {hyprfit?.system?.gguf_budget?.solo_gb!=null&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit.system.gguf_budget.solo_gb} GB solo GGUF</span>}
-                {hyprfit?.live_enabled&&<span style={mmChipS(t.mut,`${t.surface}66`)}>{hyprfit?.live_count||0} live</span>}
-              </div>
-            </div>
-            <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:16,alignItems:"center"}}>
-              <button role="switch" aria-checked={hyprfitLive} disabled={hyprfitLoading} title="Also list repos trending on Hugging Face right now. Off shows the curated catalog only." onClick={()=>{const next=!hyprfitLive;setHyprfitLive(next);loadHyprfit(false,next);}} style={{...btnS(hyprfitLive?t.acc:t.mut,hyprfitLive?`${t.acc}1A`:`${t.surface}44`),padding:"7px 10px",fontSize:"var(--hc-text-control)",borderColor:hyprfitLive?`${t.acc}66`:`${t.brd}22`,whiteSpace:"nowrap",order:99,marginLeft:"auto"}}>Hugging Face trending: {hyprfitLive?"On":"Off"}</button>
-              {cats.map(c=>{
-                const active=c.id===activeCat;
-                const count=c.count??(grouped[c.id]||[]).length;
-                return <button key={c.id} onClick={()=>setHyprfitCategory(c.id)} style={{...btnS(active?t.acc:t.mut,active?`${t.acc}1A`:`${t.surface}44`),padding:"7px 10px",fontSize:"var(--hc-text-control)",borderColor:active?`${t.acc}66`:`${t.brd}22`,whiteSpace:"nowrap"}}>
-                  <span>{c.label}</span>
-                  <span style={{...mmChipS(active?t.acc:t.mut,active?`${t.acc}12`:`${t.surface}66`),fontSize:"var(--hc-text-secondary)",padding:"1px 5px"}}>{count}</span>
-                </button>;
-              })}
-            </div>
-            {hyprfitLoading&&!hyprfit?<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"center"}}>Loading HyprFit recommendations...</div>:
-            hyprfit?.ollama_error?<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}44`,color:t.warm,fontSize:"var(--hc-text-secondary)"}}>Ollama inventory unavailable: {hyprfit.ollama_error}</div>:null}
-            {hyprfit?.hf_error&&<div style={{...mmPanelS,padding:"11px 13px",marginBottom:10,borderColor:`${t.warm}33`,color:t.mut,fontSize:"var(--hc-text-secondary)"}}>Hugging Face discovery unavailable: {hyprfit.hf_error}</div>}
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(292px,1fr))",gap:12}}>
-              {recs.map(rec=>{
-                const fitColor=rec.fit==="great"?t.ok:rec.fit==="fits"?t.acc:rec.fit==="tight"?t.warm:rec.fit==="too_large"?t.err:t.mut;
-                const sourceColor=rec.source==="Hugging Face"?t.warm:rec.source==="Curated + HF"?t.f1:t.acc;
-                const modified=fmtDate(rec.lastModified||rec.createdAt);
-                const paramsLabel=`${rec.params_estimated?"~":""}${rec.params_b}B`;
-                const scorePct=Math.round((rec.score||0)*100);
-                const requiredGb=rec.required_gb??rec.estimated_vram_gb;
-                return <div key={`${activeCat}-${rec.id}`} style={{...mmPanelStrongS,padding:16,display:"flex",flexDirection:"column",gap:12,minHeight:292,borderColor:`${fitColor}33`}}>
-                  <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10}}>
-                    <div style={{minWidth:0}}>
-                      <div style={mmKickerS}>{rec.purpose}</div>
-                      <div style={{fontSize:"var(--hc-text-title)",fontWeight:700,color:t.text,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.name}</div>
-                      <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{rec.pull_name}</div>
-                    </div>
-                    <span style={mmChipS(fitColor)}>{rec.fit_label}</span>
-                  </div>
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,lineHeight:1.5,minHeight:54}}>{rec.summary}</div>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,minmax(0,1fr))",gap:8}}>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Score</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{scorePct}</div></div>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Need</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:fitColor,marginTop:4}}>{requiredGb} GB</div></div>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Context</div><div style={{fontSize:"var(--hc-text-control)",fontWeight:700,color:t.text,marginTop:4}}>{formatModelCtx(rec.context_tokens)}</div></div>
-                    <div style={{...mmPanelS,padding:"9px 10px"}}><div style={mmKickerS}>Speed</div><div style={{fontSize:"var(--hc-text-secondary)",fontWeight:700,color:t.text,marginTop:5,lineHeight:1.2}}>{rec.estimated_speed}</div></div>
-                  </div>
-                  <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-                    <span style={mmChipS(sourceColor)}>{rec.source||"Curated"}</span>
-                    <span style={mmChipS(t.mut,`${t.surface}66`)}>{paramsLabel}</span>
-                    <span style={mmChipS(quantColor(rec.quant))}>{rec.quant}</span>
-                    <span style={mmChipS(t.mut,`${t.surface}66`)}>{rec.format||"gguf"}</span>
-                    <span style={mmChipS(t.mut,`${t.surface}66`)}>{(rec.run_mode||"runtime").replaceAll("_"," ")}</span>
-                    {rec.installed&&<span style={mmChipS(t.ok)}>Installed</span>}
-                    {(rec.badges||[]).slice(0,3).map(b=><span key={b} style={mmChipS(t.mut,`${t.surface}66`)}>{b}</span>)}
-                  </div>
-                  {(rec.downloads||rec.likes||modified)&&<div style={{display:"flex",gap:10,flexWrap:"wrap",fontSize:"var(--hc-text-secondary)",color:t.mut}}>
-                    {rec.downloads? <span>⬇ {compact(rec.downloads)}</span>:null}
-                    {rec.likes? <span>♥ {compact(rec.likes)}</span>:null}
-                    {modified? <span>{modified}</span>:null}
-                  </div>}
-                  <div style={{fontSize:"var(--hc-text-secondary)",color:fitColor,lineHeight:1.45,marginTop:"auto"}}>{rec.fit_note}</div>
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                    <button onClick={()=>fillPullFromHyprfit(rec.pull_name)} style={{...btnS(t.acc),padding:"7px 11px",fontSize:"var(--hc-text-control)"}}><IC.Download/> Fill Pull Field</button>
-                    {rec.installed&&<button onClick={()=>useModelFromManager(rec.installed_name)} style={{...btnS(t.ok),padding:"7px 11px",fontSize:"var(--hc-text-control)"}}>Use Installed</button>}
-                  </div>
-                </div>;
-              })}
-            </div>
-            {!hyprfitLoading&&!recs.length&&<div style={{...mmPanelS,padding:30,color:t.mut,fontSize:"var(--hc-text-secondary)",textAlign:"center"}}>No recommendations available in {activeMeta?.label||"this category"}.</div>}
-          </div>;
-        })()}
-      </div>
-    </div>}
-  </div>
-
+      :panel==="models"?<PanelBoundary key={panel}><ModelsPanel m={modelsCtx}/></PanelBoundary>
       :panel==="analytics"?<AnalyticsPanel font={font} t={t} btnS={btnS} cardS={cardS} analyticsDays={analyticsDays} setAnalyticsDays={setAnalyticsDays} analyticsGroup={analyticsGroup} setAnalyticsGroup={setAnalyticsGroup} loadAnalytics={loadAnalytics} analyticsData={analyticsData}/>
 
       :panel==="jobs"?<PanelBoundary key={panel}><JobsPanel focusId={workspaceJobFocus} workspaces={workspaces} t={t} btnS={btnS} inputS={inputS} onNavigate={(destination,id)=>{if(destination==='chat')loadConversation(id);else if(destination==='artifacts')openArtifact(id);else if(destination==='kb'){setPanel("kb");setTimeout(()=>document.getElementById(`knowledge-${id}`)?.scrollIntoView({block:"center"}),150);}else{setPanel('research');setResearchView('reports');loadResearchReport(id);}}}/></PanelBoundary>
@@ -8228,7 +7547,7 @@ function HyprChat(){
               </div>;
             })()}
             {retryRecording&&!transcribing&&<button onClick={()=>transcribeRecording(retryRecording.blob,retryRecording.origin)} title="Retry saved recording" style={{color:t.err,background:"none",border:`1px solid ${t.err}`,borderRadius:"var(--hc-radius)",cursor:"pointer"}}>Retry transcription</button>}
-            {sttUrl&&!streaming&&!councilRunning&&!preparingSend&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} className="hc-icon-btn is-lg" style={{color:recording?t.err:transcribing?t.warm:t.mut,background:recording?`${t.err}22`:undefined,cursor:transcribing?"default":"pointer",animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
+            {sttUrl&&(recording||(!streaming&&!councilRunning&&!preparingSend))&&<button onClick={toggleRecording} disabled={transcribing} title={recording?"Stop recording":transcribing?"Transcribing…":"Voice input (speech-to-text)"} className="hc-icon-btn is-lg" style={{color:recording?t.err:transcribing?t.warm:t.mut,background:recording?`${t.err}22`:undefined,cursor:transcribing?"default":"pointer",animation:recording?"pGlow 1.5s ease-in-out infinite":"none"}}>
               {transcribing?<Spinner size={13} style={{color:t.warm}}/>:<IC.Mic/>}
             </button>}
             {preparingSend?<button onClick={cancelSendPreparation} title="Cancel message preparation" aria-label="Cancel message preparation" style={{background:t.warm,border:"none",color:t.bg,padding:"10px 14px",borderRadius:"var(--hc-radius)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IC.Stop/></button>
@@ -8296,7 +7615,7 @@ function HyprChat(){
 
         {loginError&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.err,background:`${t.err}12`,border:`1px solid ${t.err}24`,borderRadius:"var(--hc-radius)",padding:"7px 9px",marginBottom:12}}>{loginError}</div>}
 
-        {settingSection("Create Profile",null,
+        {isMainUser&&settingSection("Create Profile",null,
           <div style={{display:"grid",gridTemplateColumns:isMobile?"minmax(0,1fr)":"minmax(180px,1fr) minmax(180px,1fr) 96px",gap:8,alignItems:"center"}}>
             <input value={newUserName} onChange={e=>setNewUserName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="New user name" style={{...inputS,fontSize:"var(--hc-text-control)"}}/>
             <input type="password" value={newUserPassword} onChange={e=>setNewUserPassword(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newUserName.trim())createManagedUser();}} placeholder="Optional password" style={{...inputS,fontSize:"var(--hc-text-control)"}}/>
@@ -8507,7 +7826,7 @@ function HyprChat(){
         <div>
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.dim,marginBottom:6,fontWeight:600}}>Default Context Window</div>
           {chipRow([4096,8192,16384,32768,65536,131072,262144].map(v=>({v,label:v===0?"Auto":v>=1024?`${(v/1024).toFixed(0)}K`:String(v)})),numCtx,setNumCtx)}
-          <input aria-label="Default context tokens" type="number" min="1" step="1" value={numCtx} onChange={e=>{if(Number(e.target.value)>0)setNumCtx(Number(e.target.value));}} style={{...inputS,marginTop:8}}/>
+          <CommitNumberInput aria-label="Default context tokens" min="1" step="1" value={numCtx} onCommit={setNumCtx} valid={n=>Number.isInteger(n)&&n>0} style={{...inputS,marginTop:8}}/>
           {numCtx>0&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.acc,marginTop:4,fontWeight:600}}>{numCtx>=1024?`${(numCtx/1024).toFixed(0)}K`:numCtx} tokens</div>}
           <div style={{fontSize:"var(--hc-text-secondary)",color:t.mut,marginTop:4}}>Sets num_ctx for all chats. Per-model overrides in Model Manager.</div>
         </div>
@@ -8838,7 +8157,8 @@ function HyprChat(){
         {ragSaveState&&<div style={{fontSize:"var(--hc-text-secondary)",color:ragSaveState==="failed"?t.err:ragSaveState==="saved"?t.ok:t.mut,marginTop:-8,marginBottom:10,textAlign:"right"}}>{ragSaveState==="saving"?"Saving...":ragSaveState==="saved"?"Saved":"Failed"}</div>}
 
         {settingSection(<>Embedding Model <Tip k="embed_model" t={t}/></>,null,
-          <input value={ragSettings.embed_model} onChange={e=>setRagSettings(p=>({...p,embed_model:e.target.value}))} placeholder="nomic-embed-text" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",width:"100%",padding:"8px 12px"}}/>
+          <input value={ragSettings.embed_model} onChange={e=>setRagSettings(p=>({...p,embed_model:e.target.value}))} placeholder="nomic-embed-text" style={{...inputS,fontFamily:codeFont,fontSize:"var(--hc-text-control)",width:"100%",padding:"8px 12px"}}/>,
+          "After changing this, open Knowledge Bases and use Reindex All. Existing knowledge bases were indexed with the old model, and searches made with a different one will not match them."
         )}
 
         {settingSection("📐 Chunking",null,<>
@@ -8980,7 +8300,7 @@ function HyprChat(){
 
 	      {/* TILE: Danger Zone */}
 	      <div className="hc-tab-pane" style={{display:settingsTab==="danger"?"block":"none"}}>
-	        {settingSection("Backup & Restore",null,
+	        {isMainUser&&settingSection("Backup & Restore",null,
 	        <div style={{display:"flex",flexDirection:"column",gap:10}}>
 	          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
 	            <a href={userScopedUrl("/api/backup/export")} download style={{...btnS(t.ok),textDecoration:"none"}}>⬇ Download Backup</a>
@@ -8995,7 +8315,8 @@ function HyprChat(){
 	                  const d=await r.json().catch(()=>({}));
 	                  if(!r.ok)throw new Error(d.detail||`HTTP ${r.status}`);
 	                  setBackupStatus(p=>({...(p||{}),restore_pending:true,staged_at:new Date().toISOString()}));
-	                  notify({type:"success",text:"Restore staged",detail:"Restart the HyprChat service to apply, then run Knowledge Bases → Reindex All.",duration:9000});
+	                  const warnings=[...(d.manifest?.warnings||[]),...(d.warnings||[])].filter(Boolean);
+	                  notify({type:warnings.length?"warning":"success",text:"Restore staged",detail:`Restart the HyprChat service to apply, then run Knowledge Bases → Reindex All.${warnings.length?` Note: ${warnings.join(" ")}`:""}`,duration:warnings.length?16000:9000});
 	                }catch(err){notify({type:"error",text:"Restore staging failed",detail:err.message||String(err)});}
 	              }}/>
 	            </label>
@@ -9003,7 +8324,7 @@ function HyprChat(){
 	          </div>
 	          {backupStatus?.restore_pending&&<div style={{fontSize:"var(--hc-text-secondary)",color:t.warm,fontWeight:700}}>⚠ A restore is staged — it will apply on the next service restart.</div>}
 	        </div>
-	        ,"Backup = database (provider API keys and connector secrets scrubbed) + uploads + knowledge bases + settings. RAG vectors are rebuilt after restore via Knowledge Bases → Reindex All.")}
+	        ,"Backup = database + uploads + knowledge bases + settings. Passwords and keys are left out of a backup, so after a restore: cloud API keys, connector secrets and mail / calendar passwords must be entered again, every scheduled task is switched off until you turn it back on, and Knowledge Bases → Reindex All rebuilds search.")}
 	        {settingSection("⚠️ Danger Zone",null,
 	        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(210px,1fr))",gap:10}}>
 	          {[
@@ -9011,8 +8332,8 @@ function HyprChat(){
 	            ["🧠","Clear All Memories","Current user's global and workspace memories",clearAllMemories,false],
 	            ["📦","Clear All Artifacts","Current user's artifact records and removable files",clearAllArtifacts,false],
 	            ["📊","Clear Statistics","Current user's token usage and analytics rows",clearStatistics,false],
-	            ["🧱","Delete All Models","Every local Ollama model",deleteAllModels,true],
 	            ...(currentUserId==="default"?[
+	            ["🧱","Delete All Models","Every local Ollama model",deleteAllModels,true],
 	              ["👥","Delete Other Users","All profiles except the current one",deleteOtherUsers,true],
 	              ["☢","Delete All / Fresh Install","Everything, including current user and local models",freshInstallReset,true],
 	            ]:[]),

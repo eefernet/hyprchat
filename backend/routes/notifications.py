@@ -21,6 +21,7 @@ class NtfyPrefs(BaseModel):
     url: str = ""
     topic: str = ""
     token: str = ""
+    clear_token: bool = False
     allow_private: bool = False
 
 
@@ -66,11 +67,15 @@ async def get_channels():
 async def set_ntfy(req: NtfyPrefs):
     existing = await db.get_user_pref("ntfy")
     existing = existing if isinstance(existing, dict) else {}
+    if req.allow_private:
+        import connector_privileges
+        if not connector_privileges.is_main():
+            raise HTTPException(403, connector_privileges.PRIVATE)
     value = {
         "url": req.url.strip(),
         "topic": req.topic.strip(),
-        # Empty token in the request keeps the stored one (masked round-trip).
-        "token": req.token.strip() or str(existing.get("token") or ""),
+        # Empty token in the request keeps the stored one (masked round-trip); `clear_token` removes it.
+        "token": "" if req.clear_token else (req.token.strip() or str(existing.get("token") or "")),
         "allow_private": bool(req.allow_private),
     }
     await db.set_user_pref("ntfy", value)

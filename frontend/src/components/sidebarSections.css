@@ -1,0 +1,27 @@
+/* Workspace sections in the left bar (WorkspaceSection.jsx) and the date-group headings beside them. */
+.hc-conv-group-head { padding: 8px 8px 2px; font-size: var(--hc-text-secondary); font-weight: 600; color: var(--hc-secondary); display: flex; gap: 6px; align-items: center; }
+.ws-sec { margin-bottom: 2px; }
+.ws-sec-head { display: flex; align-items: center; gap: 2px; padding-right: 7px; border-radius: var(--hc-radius); }
+.ws-sec-head:hover, .ws-sec-head:focus-within { background: color-mix(in srgb, var(--hc-text) 6%, transparent); }
+.ws-sec-toggle { flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; gap: 9px; padding: 0 6px 0 12px; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-text); font: inherit; font-size: var(--hc-text-control); font-weight: 600; text-align: left; cursor: pointer; }
+.ws-sec-toggle:focus-visible, .ws-sec-add:focus-visible, .ws-sec-more:focus-visible { outline: none; border-color: var(--hc-accent-ring, var(--hc-accent)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--hc-accent) 28%, transparent); }
+.ws-sec-icon { display: flex; flex-shrink: 0; color: var(--hc-secondary); }
+.ws-sec-toggle[aria-expanded="true"] .ws-sec-icon { color: var(--ws-sec-accent, var(--hc-accent)); }
+.ws-sec-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-sec-count { flex-shrink: 0; min-width: 18px; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--hc-text) 9%, transparent); color: var(--hc-secondary); font-size: var(--hc-text-secondary); font-weight: 600; line-height: 18px; text-align: center; }
+.ws-sec-add { flex-shrink: 0; width: 32px; height: 32px; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-muted); cursor: pointer; opacity: 0; }
+.ws-sec-head:hover .ws-sec-add, .ws-sec-head:focus-within .ws-sec-add { opacity: 1; }
+.ws-sec-add:hover { color: var(--hc-text); background: color-mix(in srgb, var(--hc-text) 8%, transparent); }
+.ws-sec-body { padding-left: 14px; margin-left: 20px; border-left: 1px solid var(--hc-line-subtle, var(--hc-line)); }
+.ws-sec-body .conv-row { min-height: 40px; }
+.ws-sec-empty { padding: 6px 12px 8px; color: var(--hc-muted); font-size: var(--hc-text-secondary); }
+.ws-sec-more, .hc-conv-older { display: block; min-height: 32px; padding: 4px 12px; border: 1px solid transparent; border-radius: var(--hc-radius); background: none; color: var(--hc-muted); font: inherit; font-size: var(--hc-text-secondary); text-align: left; cursor: pointer; }
+.ws-sec-more:hover, .hc-conv-older:hover { color: var(--hc-text); }
+.ws-sec-more:disabled, .hc-conv-older:disabled { cursor: default; opacity: .6; }
+.hc-conv-older { width: 100%; margin: 6px 0 10px; text-align: center; }
+/* Touch screens have no hover: the "+" is always there, and the small links get a full-size target. */
+@media (max-width: 768px), (pointer: coarse) {
+  .ws-sec-add { opacity: 1; width: 44px; height: 44px; }
+  .ws-sec-more, .hc-conv-older { min-height: 44px; }
+  .ws-sec-body { padding-left: 8px; margin-left: 16px; }
+}

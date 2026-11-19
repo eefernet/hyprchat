@@ -52,9 +52,7 @@ COMMON_IGNORES = [
 # Hephaestus service environment (systemd Environment=, pip.conf companions,
 # shell profiles) silently changes what a project build installs — or breaks
 # it outright, as PIP_CONSTRAINT pointing at a missing file did. Project
-# verification must see the project, not the host. Mirrored in
-# openhands_worker.py (_HERMETIC_UNSET_VARS) — keep both lists in sync; the
-# worker deploys standalone to Hephaestus and cannot import this module.
+# verification must see the project, not the host.
 HERMETIC_UNSET_VARS = [
     "PIP_CONSTRAINT",
     "PIP_CONFIG_FILE",

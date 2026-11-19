@@ -1,7 +1,7 @@
 <details open>
 <summary>Alpha v18.3.1 — Nov 18, 2026</summary>
 
-> Fixes for bugs found while taking the README screenshots.
+> Fixes for bugs found while taking the README screenshots, then a polishing round: workspaces in the chat list, a Models page in plain words, security fixes and a clean-up.
 
 ## Bug fixes
 
@@ -29,6 +29,50 @@
 - **Themes** — diff lines in code blocks, the warning colour and the model badges (quantization, capabilities) are readable on every theme; the two light themes were the worst. Diff lines no longer show their + or - twice, and nested list items render as list items.
 - **Backgrounds** — with "reduce motion" on, the background shows a still picture instead of going blank; small layout changes no longer restart the animation; moving the window to another display keeps it sharp.
 - **Smaller fixes** — settings saved at the same moment no longer overwrite each other, briefs give task times in your time zone, the "message too large" warning counts non-Latin text correctly, a renamed skill is not half-saved when the name is taken, and building a large bundle no longer stalls other requests.
+
+## Workspaces in the chat list
+
+- **Chats are grouped under their workspace** — the chat list has a Workspaces block between Pinned and the date groups. Each workspace is a row that opens and closes (it stays as you left it), with its five newest chats underneath, "Show N more" for the rest, and a "+" that starts a new chat in it. A workspace chat is listed there and no longer in Today / Yesterday; pinned chats stay in Pinned.
+- **Move a chat from its menu** — the "…" menu of a chat lists your workspaces; tick one to put the chat in it, untick to take it out.
+- **Older chats can be reached** — the list used to stop at the 50 newest for good. "Show older chats" at the end loads more.
+- **The list stays right without a reload** — adding or removing a chat, renaming or deleting a workspace and deleting a chat update the rows at once, and a chat you send a message in moves to the top of its group.
+- **Pinning or renaming a chat no longer counts as activity** — it used to jump to Today after a reload. A forked chat stays in the workspace of its original.
+- **One name** — the nav rail says Workspaces, like the page it opens (it said Projects).
+
+## Models page
+
+- **Tabs named for what you want to do** — Installed, Recommended for this server, Browse Hugging Face (they were Ollama, Hugging Face, HyprFit).
+- **Every model once** — a model installed from Hugging Face is one row with a "Hugging Face" mark, not a second entry on another tab with different controls. The download and the name you gave it are shown as one model.
+- **What a model can do, as Ollama reports it** — "Uses tools", "Shows its thinking", "Reads images" come from the model itself. They used to be guessed from the name by three different rules, which called every Llama 3 a tool user and missed image support on others. The model picker uses the same answer.
+- **Plain words** — size as "27.3 billion parameters · 17.7 GB on disk", the compression explained ("Q4_K_M: 4-bit, the usual balance of quality and size"), "How much it remembers (context window)" with the model's own limit, and a short list of the words used on the page. Creativity settings and the tool-calling fix are folded away under Response style and Advanced.
+- **Recommendations you can read** — each card says "Needs 6.6 GB of your 24 GB · about 120 tokens a second · 32K context" with a bar, and has one Install button (it used to fill a text box on another tab). The hardware numbers that only change these estimates are under Advanced, each with a line saying what it does.
+- **Hugging Face** — a failed search says so instead of looking empty, a failed file list no longer breaks the page, compatibility notes are written out instead of hidden in hover text, "only models Ollama can run" searches again when ticked, and Retry on a failed download really retries.
+- **Tool-calling fix** — one entry, offered only for a model Ollama says cannot use tools, and it asks before rewriting the model.
+- **Defaults** — the default creativity and word-choice settings are saved with your profile (they were kept in the browser only), and a deleted model's own settings go with it.
+- **Four more interface fonts** — Figtree, Hanken Grotesk, Instrument Sans and DM Sans in Settings → Appearance.
+
+## Security and profiles
+
+- **Other websites cannot send commands to HyprChat** — a page open in your browser could post to the server, and with a Main profile that has no password that included "delete everything" and staging a restore. Requests that change something are now refused when they come from another site. "Delete other users" and "Fresh install" also check the typed phrase on the server.
+- **Images from the web cannot run script** — a picture shown through HyprChat's image proxy, or a profile picture, is served so that it cannot act as you if its address is opened directly.
+- **Connectors** — only the Main profile can add a connector that runs a command on the server, uses the server's own secrets, or reaches private addresses. Other profiles can still add ordinary web connectors with their own key.
+- **Deleting a profile deletes all of it** — its scheduled tasks (which kept running), mail and calendar passwords, API keys, notes, notifications and calendar are removed, and so are its files. "Fresh install" no longer leaves these behind for the next Main profile.
+- **Switching profile** — a preference changed in the last second is saved first, a typed but unsaved API key does not stay in its box for the next profile, and the bell and statistics start empty. Creating a profile from Settings no longer signs Main out into it.
+- **The notification token** — is no longer returned to the browser, and can be removed.
+
+## More fixes
+
+- **Image Studio** — a job ComfyUI forgot (after a restart) ends with a message instead of saying "queued" for ever; "Delete all images" says what it could not remove.
+- **Settings** — the context size is saved when you leave the box, not on every keystroke, and the box can be cleared; changing the embedding model says that knowledge bases need Reindex All; a setting only Main may change says so; restoring a backup says what it switches off.
+- **Statistics** — "Today" counts today only (it included yesterday).
+- **Councils, agents, connectors** — deleting asks first and a refused delete or save is reported; debate rounds changed with the keyboard are saved; a failed picture upload keeps the old picture.
+- **Memory** — an empty memory cannot be saved, and a failed save is no longer shown as "Memory added".
+- **Voice** — the stop button stays while a reply is being written, and opening Settings keeps what you said.
+- **Keyboard shortcuts** — do nothing behind an open dialog or the sign-in screen.
+
+## Housekeeping
+
+- Removed code nothing used: a clean-up route for the retired sandbox, the placeholder left by the first Coder Bot, three evaluation scripts whose runner was gone, and one renamed script.
 
 </details>
 

@@ -7,7 +7,7 @@ from . import coder_promotion
 from . import coder_preview
 from . import documents
 from . import jobs, workspaces
-from . import artifacts, assistant, audio, backup, calendar, catalog, chat_files, chat_saves, context_actions, downloads, email, health, hf, loaded_models, model_configs, model_providers, notes, notifications, ollama_models, scheduler, settings, skills, tools_connectors, users
+from . import artifacts, assistant, audio, backup, calendar, catalog, chat_files, chat_saves, context_actions, downloads, email, health, hf, loaded_models, model_configs, model_facts, model_providers, notes, notifications, ollama_models, scheduler, settings, skills, tools_connectors, users
 
 
 def register_extracted_routes(
@@ -76,3 +76,4 @@ def register_extracted_routes(
     app.include_router(context_actions.router)
     app.include_router(chat_saves.router)
     app.include_router(loaded_models.router)
+    app.include_router(model_facts.router)

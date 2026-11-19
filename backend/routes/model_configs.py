@@ -12,6 +12,12 @@ import database as db
 
 router = APIRouter()
 
+AVATAR_MAX_BYTES = 5 * 1024 * 1024
+AVATAR_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+}
+
 
 class ModelConfigCreate(BaseModel):
     name: str
@@ -87,7 +93,11 @@ async def upload_persona_avatar(mc_id: str, file: UploadFile = File(...)):
     ext = raw_ext
     avatar_path = os.path.join(avatar_dir, f"{mc_id}.{ext}")
 
-    content = await file.read()
+    content = await file.read(AVATAR_MAX_BYTES + 1)
+    if len(content) > AVATAR_MAX_BYTES:
+        raise HTTPException(413, "That image is too large. The limit is 5 MB.")
+    if not content:
+        raise HTTPException(400, "That file is empty.")
     with open(avatar_path, "wb") as f:
         f.write(content)
 
@@ -110,4 +120,5 @@ async def get_avatar(filename: str):
         raise HTTPException(400, "Invalid filename")
     if not os.path.exists(filepath):
         raise HTTPException(404, "Avatar not found")
-    return FileResponse(filepath)
+    # Uploaded by a user and shown from this app's own address: an SVG must not be able to run script.
+    return FileResponse(filepath, headers=AVATAR_HEADERS)

@@ -4,7 +4,6 @@ from fastapi import APIRouter
 from agents.personas import (
     seed_all_defaults,
     seed_based_bot,
-    seed_coder_bot,
     seed_coder_bot_v2,
     seed_conspiracy_bot,
     seed_master_developer,
@@ -28,11 +27,6 @@ async def list_builtin_tools():
 @router.post("/api/seed/all-defaults")
 async def seed_all_defaults_ep():
     return await seed_all_defaults()
-
-
-@router.post("/api/seed/coder-bot")
-async def seed_coder_bot_ep():
-    return await seed_coder_bot()
 
 
 @router.post("/api/seed/master-developer")

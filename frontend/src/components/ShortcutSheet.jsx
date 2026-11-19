@@ -8,7 +8,7 @@ const isMac=typeof navigator!=='undefined'&&/Mac|iPhone|iPad/.test(navigator.pla
 export const MOD_KEY=isMac?'⌘':'Ctrl';
 export const SHORTCUTS=[
   [`${MOD_KEY} K`,'Search messages'],
-  [`${MOD_KEY} N`,'New chat'],
+  [`${MOD_KEY} N`,'New chat (in the installed app; a browser tab uses this key for a new window)'],
   [`${MOD_KEY} /`,'Show or hide the sidebar'],
   ['Enter','Send the message'],
   ['Shift Enter','New line in the composer'],

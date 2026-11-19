@@ -458,18 +458,6 @@ async def cleanup_preview(request: Request, target: Literal["local", "hephaestus
         print(f"[Storage] output summary failed: {error}")
     return preview
 
-@router.post("/api/settings/cleanup-codebox")
-async def cleanup_codebox():
-    """Delete all project files on the CodeBox sandbox."""
-    openhands_url = config.OPENHANDS_URL
-    try:
-        r = await route_context().http.post(f"{openhands_url}/clean", timeout=30)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"[Cleanup] Hephaestus cleanup failed: {e}")
-        return {"deleted": 0, "error": str(e)}
-
 @router.get("/api/changelog")
 async def get_changelog():
     """Return the CHANGELOG.md content."""
@@ -494,18 +482,36 @@ def _validate_pref_key(key: str) -> str:
         raise HTTPException(400, "Invalid pref key (lowercase alphanumerics, ., _, -; max 64 chars)")
     return key
 
+# Preferences that hold a credential. They have their own routes (the ntfy channel in
+# routes/notifications.py); the general preference routes never return or accept the secret part.
+_SECRET_PREF_FIELDS = {"ntfy": ("token",)}
+
+
+def _public_pref(key: str, value):
+    fields = _SECRET_PREF_FIELDS.get(key)
+    if not fields or not isinstance(value, dict):
+        return value
+    shown = dict(value)
+    for field in fields:
+        shown[f"{field}_set"] = bool(shown.pop(field, ""))
+    return shown
+
+
 @router.get("/api/prefs")
 async def get_prefs():
-    return {"prefs": await db.get_user_prefs()}
+    prefs = await db.get_user_prefs()
+    return {"prefs": {key: _public_pref(key, value) for key, value in (prefs or {}).items()}}
 
 @router.get("/api/prefs/{key}")
 async def get_pref(key: str):
     value = await db.get_user_pref(_validate_pref_key(key))
-    return {"key": key, "value": value}
+    return {"key": key, "value": _public_pref(key, value)}
 
 @router.put("/api/prefs/{key}")
 async def put_pref(key: str, value=Body(...)):
     _validate_pref_key(key)
+    if key in _SECRET_PREF_FIELDS:
+        raise HTTPException(400, "This setting has its own page and cannot be written here.")
     import json as _json
     if len(_json.dumps(value)) > _PREF_MAX_BYTES:
         raise HTTPException(413, f"Pref value exceeds {_PREF_MAX_BYTES // 1024}KB")
@@ -566,8 +572,13 @@ def _usage_cutoff_date(days: int) -> str:
     rolling window at date granularity (the boundary day counts in full)."""
     return (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-def _agg_by_day(rows: list[dict], days: int = 0) -> list[dict]:
-    cutoff = _usage_cutoff_date(days) if days > 0 else ""
+def _usage_today() -> str:
+    """Today's date as the usage rows are dated (UTC). "Today" used to be the 1-day window, whose
+    boundary day counts in full, so the card showed yesterday and today together."""
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+def _agg_by_day(rows: list[dict], days: int = 0, since: str = "") -> list[dict]:
+    cutoff = since or (_usage_cutoff_date(days) if days > 0 else "")
     out: dict[str, dict] = {}
     for r in rows:
         d = r.get("date") or ""
@@ -597,10 +608,10 @@ async def get_token_summary():
     day_model_all = _annotate_cost(await db.get_token_usage(0, "day_model"))
     by_persona_all = await db.get_token_usage(0, "persona")
     by_model_all = _annotate_cost(_agg_by_model(day_model_all))
-    cutoff_1 = _usage_cutoff_date(1)
+    cutoff_1 = _usage_today()
     cutoff_30 = _usage_cutoff_date(30)
     return {
-        "today": _agg_by_day(day_model_all, 1),
+        "today": _agg_by_day(day_model_all, since=cutoff_1),
         "by_model_7d": _annotate_cost(_agg_by_model(day_model_all, 7)),
         "daily_30d": _agg_by_day(day_model_all, 30),
         "all_time": _agg_by_day(day_model_all),

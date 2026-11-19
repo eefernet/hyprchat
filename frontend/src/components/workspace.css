@@ -62,5 +62,4 @@
 }
 
 /* Sidebar conversation groups and the streaming marker. */
-.hc-conv-group-head { padding: 8px 8px 2px; font-size: var(--hc-text-secondary); font-weight: 600; color: var(--hc-secondary); display: flex; gap: 6px; align-items: center; }
 .hc-stream-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hc-accent); flex-shrink: 0; animation: hc-breathe 1.4s ease-in-out infinite; }

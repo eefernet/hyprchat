@@ -263,7 +263,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
   const purgeAll=async()=>{
     const ok=await confirmAction({
       title:"Delete all generated images",
-      body:"This removes every trace: Image Studio AND chat-generated images, their files and records on HyprChat, references inside chat messages (replies that included a photo are edited to remove it), ComfyUI's job history and file copies, and the server logs. This cannot be undone.",
+      body:"This removes every trace: Image Studio AND chat-generated images, their files and records on HyprChat, references inside chat messages (replies that included a photo are edited to remove it), and ComfyUI's own copies and job history when no image is being made. Server logs are not touched. This cannot be undone.",
       confirmLabel:"Delete Everything",
       tone:"danger",
     });
@@ -277,7 +277,9 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
       if(d.scrubbed_messages)bits.push(`${d.scrubbed_messages} chat message(s) scrubbed`);
       if(d.comfyui_files_deleted!=null)bits.push(`${d.comfyui_files_deleted} ComfyUI file(s)`);
       if(d.journal_cleared)bits.push("server logs cleared");
-      notify&&notify({type:"success",text:"All image traces deleted",detail:bits.join(" · ")+(d.comfyui_files_deleted==null?" — install the ComfyUI cleanup node for instant remote file removal":""),duration:5000});
+      // The server says what it could not do (ComfyUI busy or unreachable, logs left alone): show it.
+      const partial=!!d.note||d.comfyui_files_deleted==null;
+      notify&&notify({type:partial?"warning":"success",text:partial?"Images deleted here; some copies remain":"All generated images deleted",detail:[bits.join(" · "),d.note,d.comfyui_files_deleted==null&&!d.note?"ComfyUI's own copies were not removed (install the ComfyUI cleanup node for that).":""].filter(Boolean).join(" "),duration:partial?12000:5000});
     }catch(e){notify&&notify({type:"error",text:"Purge failed",detail:String(e.message||e)});}
   };
   const restartComfyUI=async()=>{
@@ -668,7 +670,7 @@ function ImageStudioPanel({t,font,configured,onUseInChat,notify,confirmAction,in
           <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
             <button onClick={()=>wfUploadRef.current?.click()} title="Upload API JSON or workflow-bearing PNG" style={railBtn(t.acc)}><IC.Upload/>Upload</button>
             <input ref={wfUploadRef} type="file" accept=".json,.png,application/json,image/png" style={{display:"none"}} onChange={e=>{uploadWorkflow(e.target.files?.[0]);e.target.value="";}}/>
-            {workflow&&<button onClick={async()=>{const ok=await confirmAction({title:"Delete workflow",body:`Delete workflow "${workflow}"?`,confirmLabel:"Delete Workflow",tone:"danger"});if(!ok)return;await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"}).catch(()=>{});setWorkflow("");loadWorkflows();}} title="Delete this saved workflow" style={railBtn(t.err)}><IC.Trash/>Delete</button>}
+            {workflow&&<button onClick={async()=>{const ok=await confirmAction({title:"Delete workflow",body:`Delete workflow "${workflow}"?`,confirmLabel:"Delete Workflow",tone:"danger"});if(!ok)return;try{const r=await fetch(`${API}/api/images/workflows/${encodeURIComponent(workflow)}`,{method:"DELETE"});if(!r.ok)throw new Error(r.status===403?"Only the Main profile can delete a saved workflow.":((await r.json().catch(()=>({}))).detail||`HTTP ${r.status}`));setWorkflow("");}catch(error){notify&&notify({type:"error",text:"Workflow not deleted",detail:error.message||String(error)});}loadWorkflows();}} title="Delete this saved workflow" style={railBtn(t.err)}><IC.Trash/>Delete</button>}
             {activeWf?.model_sampling_builtin&&<span style={{fontSize:"var(--hc-text-secondary)",color:t.warm}}>{activeWf.model_sampling_builtin==="flow"?"flow-matching":activeWf.model_sampling_builtin==="flux-graph"?"Flux architecture":"v-pred"} sampling built in</span>}
           </div>
         </>)}

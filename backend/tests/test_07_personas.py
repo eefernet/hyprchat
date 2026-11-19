@@ -53,12 +53,6 @@ class TestPersonaCRUD:
 
 
 class TestSeedPersonas:
-    def test_seed_coder_bot(self, client):
-        r = client.post("/api/seed/coder-bot")
-        assert r.status_code == 200
-        data = r.json()
-        assert "id" in data or "name" in data or "message" in data
-
     def test_seed_conspiracy_bot(self, client):
         r = client.post("/api/seed/conspiracy-bot")
         assert r.status_code == 200

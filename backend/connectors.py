@@ -92,6 +92,9 @@ def resolve_placeholder(name: str, required: bool = True) -> str:
         if required:
             raise ConnectorError("Missing credential placeholder name")
         return ""
+    import connector_privileges
+    if not connector_privileges.is_main():
+        raise ConnectorError(connector_privileges.SECRETS)
     if key in os.environ:
         return os.environ[key]
     secrets = _load_secret_file()
@@ -157,6 +160,9 @@ async def assert_url_allowed(url: str, allow_private: bool = False) -> None:
     parsed = urllib.parse.urlparse(url or "")
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ConnectorError("Connector URL must be http(s)")
+    if allow_private:
+        import connector_privileges
+        allow_private = connector_privileges.is_main()
     if not allow_private and await _url_private(parsed.hostname or ""):
         raise ConnectorError("Private, loopback, or link-local URL blocked. Enable allow_private for trusted local connectors.")
 

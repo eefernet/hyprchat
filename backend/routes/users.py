@@ -170,10 +170,14 @@ async def delete_user_ep(user_id: str, request: Request):
     await _require_profile_access(request, user_id)
     if user_id == db.DEFAULT_USER_ID:
         raise HTTPException(400, "The Main user cannot be deleted")
+    if not await db.get_user_private(user_id):
+        raise HTTPException(404, "User not found")
+    # Files first, while the rows that name them still exist (the bulk delete does the same).
+    deleted_files = await _delete_artifact_files_for_user_ids([user_id])
     ok = await db.delete_user(user_id)
     if not ok:
         raise HTTPException(404, "User not found")
-    return {"ok": True}
+    return {"ok": True, "deleted_files": deleted_files}
 
 
 async def _user_ids(exclude_user_id: str | None = None) -> list[str]:
@@ -188,9 +192,20 @@ async def _user_ids(exclude_user_id: str | None = None) -> list[str]:
         await conn.close()
 
 
+async def _require_typed(request: Request, phrase: str):
+    """The typed confirmation is checked here too: the dialog alone is only a browser-side promise."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or str(body.get("confirm") or "").strip() != phrase:
+        raise HTTPException(400, f'Type {phrase} to confirm')
+
+
 @router.delete("/api/users")
 async def delete_other_users_ep(request: Request):
     current = await _require_main_user(request)
+    await _require_typed(request, "DELETE OTHER USERS")
     other_user_ids = await _user_ids(exclude_user_id=current["id"])
     deleted_files = await _delete_artifact_files_for_user_ids(other_user_ids)
     result = await db.delete_users_except(current["id"])
@@ -204,6 +219,7 @@ async def delete_other_users_ep(request: Request):
 @router.post("/api/danger-zone/fresh-install")
 async def fresh_install_reset_ep(request: Request):
     await _require_main_user(request)
+    await _require_typed(request, "DELETE EVERYTHING")
     user_ids = await _user_ids()
     deleted_files = await _delete_artifact_files_for_user_ids(user_ids)
     try:

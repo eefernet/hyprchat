@@ -54,6 +54,8 @@ class Connection:
                 if transport=='stdio':
                     command=self.server.get('command') or ''
                     if not command:raise ConnectorError('MCP stdio server requires command')
+                    import connector_privileges
+                    if not connector_privileges.is_main(self.server):raise ConnectorError(connector_privileges.STDIO)
                     env=expand_placeholders(self.server.get('env') or {},required=True,plain_names=True)
                     params=StdioServerParameters(command=sys.executable,args=[str(Path(__file__).with_name('mcp_stdio_guard.py')),command,*map(str,self.server.get('args') or [])],env=env)
                     errlog=stack.enter_context(open(os.devnull,'w'))

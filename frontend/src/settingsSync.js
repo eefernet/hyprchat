@@ -33,7 +33,7 @@ export function createPrefsSync({api,getContext=()=>({}),onError=()=>{}}){
   return {put,queue,flush,cancel,get waiting(){return timers.size;}};
 }
 
-export function createSettingsSync({api,settingsLoadedRef,seenSettingEffectRef,skipSettingPatchRef,flashSettingsPulse}){
+export function createSettingsSync({api,settingsLoadedRef,seenSettingEffectRef,skipSettingPatchRef,flashSettingsPulse,onRefused=()=>{}}){
   const hydrateServerSetting=(settingKey,setter,value,current)=>{
     if(value!==current)skipSettingPatchRef.current[settingKey]=true;
     setter(value);
@@ -45,7 +45,8 @@ export function createSettingsSync({api,settingsLoadedRef,seenSettingEffectRef,s
     if(skipSettingPatchRef.current[settingKey]){delete skipSettingPatchRef.current[settingKey];return;}
     if(!settingsLoadedRef.current&&!seen)return;
     fetch(`${api}/api/settings`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({[settingKey]:value})})
-      .then(r=>{flashSettingsPulse(r.ok?"Saved":"Failed",r.ok?"success":"error");})
+      // 403: a server-wide setting changed by a profile that is not Main. Say so; "Failed" alone read as a glitch.
+      .then(r=>{if(r.status===403){flashSettingsPulse("Main profile only","error");onRefused(settingKey);return;}flashSettingsPulse(r.ok?"Saved":"Failed",r.ok?"success":"error");})
       .catch(()=>flashSettingsPulse("Failed","error"));
   };
   return {hydrateServerSetting,persistServerSetting};

@@ -631,5 +631,4 @@ Keep secrets and generated state out of Git: deploy config, `.env` credentials, 
 | [SearXNG operations](scripts/searxng/README.md) | VPN recovery, access rules, verification, and configuration backups |
 | [Daedalus workflows](docs/daedalus-workflows.md) | Modern execution, settings, verification, recovery and release validation |
 | [Image generation setup](docs/image-generation-setup.md) | ComfyUI, companion media services, workflows, and cleanup |
-| [Feature roadmap](docs/hyprchat-feature-roadmap.md) | Ideas and planned features |
 | [Environment template](.env.example) | Server startup and optional-feature settings |

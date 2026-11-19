@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {abilities,factsStore} from './modelsPage.js';
 import { createPortal } from 'react-dom';
 
 import {
@@ -127,12 +128,15 @@ export default function ModelPicker({value,onChange,models,modelDetails,t,font,s
   const modelCaps=(m)=>{const b=(m||"").toLowerCase();const caps=[];
     if(b==="auto")return[{emoji:"🧭",color:"#5ad0ff",label:"Router"}];
     if(b.startsWith("openai:")||b.startsWith("anthropic:")||b.startsWith("custom:"))return[{emoji:"☁",color:"#4aa3ff",label:"Cloud"}];
-    if(b.match(/embed/))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
+    // What Ollama reports for the model (modelsPage.js), or a guess from its name until that is known.
+    // The same rule as the Models page; three separate name rules used to disagree with each other.
+    const able=new Set(abilities(m,factsStore.current[m]).list.map(a=>a.id));
+    if(able.has("embedding"))return[{emoji:"🔢",color:"#9b59b6",label:"Embed"}];
     if(isMoeModelName(m,modelDetails))caps.push({emoji:"MoE",color:"#66d9ef",label:"Expert"});
-    if(b.match(/llava|vision|[\-:]vl[\-:$]/)||b.match(/vl\b/))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
-    if(b.match(/qwen3|deepseek-r1|r1[\-:]|qwq/))caps.push({emoji:"💭",color:"#c792ea",label:"Thinking"});
+    if(able.has("vision"))caps.push({emoji:"👁",color:"#e67e22",label:"Vision"});
+    if(able.has("thinking"))caps.push({emoji:"💭",color:"#c792ea",label:"Thinking"});
     if(b.match(/coder|codestral|starcoder|deepseek-coder/))caps.push({emoji:"💻",color:"#2ecc71",label:"Code"});
-    if(!b.match(/embed/)&&b.match(/qwen|llama3|llama-3|mistral|mixtral|command|hermes|deepseek|phi3|phi-3|wizardlm|gemma|llama3\./))caps.push({emoji:"🔧",color:"#3498db",label:"Tools"});
+    if(able.has("tools"))caps.push({emoji:"🔧",color:"#3498db",label:"Tools"});
     return caps;};
   const curProvider=cloudModelProvider(value);
   const [name,tag="latest"]=curProvider?[curProvider,cloudModelName(value)]:(value||"").split(":");

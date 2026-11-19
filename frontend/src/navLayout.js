@@ -7,7 +7,7 @@ export const NAV_LAYOUT_VERSION = 2;
 // state value in main.jsx. Registry order IS the default order.
 export const NAV_REGISTRY = [
   { id: "chat", label: "Chat", short: "Chat", icon: "Chat" },
-  { id: "workspaces", label: "Workspaces", short: "Projects", icon: "Folder" },
+  { id: "workspaces", label: "Workspaces", short: "Workspaces", icon: "Folder" },
   { id: "library", label: "Library Search", short: "Search", icon: "Search" },
   { id: "research", label: "Deep Research", short: "Research", icon: "Research" },
   { id: "council", label: "Council of AI", short: "Council", icon: "Council" },

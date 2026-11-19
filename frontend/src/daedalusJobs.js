@@ -85,9 +85,6 @@ export function cancellableWorkflowIds(workflows=[],events=[],conversationId=nul
     .forEach(workflow=>ids.add(workflow.id));
   return [...ids];
 }
-export function stageIndex(job){
-  return ({queued:0,inspecting:0,planning:0,baselining:0,coding:1,checking:2,auditing:2,reviewing:3,accepting:3,visual_review:3,packaging:3,completed:4})[job.state]??-1;
-}
 export function elapsedLabel(seconds){
   seconds=Math.max(0,Math.floor(seconds));return seconds<60?`${seconds}s`:`${Math.floor(seconds/60)}m ${seconds%60}s`;
 }

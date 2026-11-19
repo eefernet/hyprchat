@@ -309,6 +309,9 @@ def test_research_report_routes_cancel_and_rerun_preserve_original_fields(tmp_pa
     monkeypatch.setattr(main, "run_research_report", fake_run_research_report)
 
     async def scenario():
+        # A rerun keeps only knowledge bases the caller owns (2026-11-18), so the two the report names must exist.
+        await db.create_kb("kb-a", "A")
+        await db.create_kb("kb-b", "B")
         rerun = await main.rerun_research_report("research-old")
         await asyncio.gather(*list(main._BG_TASKS))
         return rerun, await db.get_research_report(rerun["id"]), await db.get_research_report("research-old")

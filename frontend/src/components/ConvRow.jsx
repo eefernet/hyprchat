@@ -10,7 +10,10 @@ import './convRow.css';
 // whichever chat was open), a steady dot for a reply that finished while another chat was open, then the
 // workspace / council / persona / fork icons. After the title: a pencil for an unsent draft and the number
 // of messages waiting in the queue.
-export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,queued=0,council,persona,avatar,accent,pinned,tags=[],tagFilter,rename,tagEditor,inputS,btnS,on}){
+//
+// `nested`: the row sits under its workspace's header, so it does not repeat the folder icon.
+// `workspaces`: [{id,name,member}] for the menu's "In workspace" items (a chat can be in several).
+export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,queued=0,council,persona,avatar,accent,pinned,tags=[],tagFilter,rename,tagEditor,inputS,btnS,on,nested=false,workspaces=[]}){
   const measureTitle=e=>{
     const row=e.currentTarget,clip=row.querySelector('.conv-title-clip'),text=row.querySelector('.conv-title-text');
     if(!clip||!text)return;
@@ -24,7 +27,7 @@ export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,qu
   const rowBg=active?`${accent}14`:'transparent';
   const hoverBg=active?rowBg:`${t.sfBri}1f`;
   const state=[replying?'replying':'',unread?'new reply':'',hasDraft?'unsent draft':'',queued?`${queued} queued`:''].filter(Boolean).join(', ');
-  return <div className="conv-item" style={{'--conv-warm':t.warm}}>
+  return <div className={`conv-item${nested?' is-nested':''}`} style={{'--conv-warm':t.warm}}>
     <div className={`conv-row${active?' is-act':''}`} role="button" tabIndex={0} aria-current={active?'page':undefined}
       aria-label={state?`${title} (${state})`:title}
       onClick={on.open} onKeyDown={openByKey} onMouseEnter={measureTitle} onFocus={measureTitle} onMouseLeave={resetTitle} onBlur={resetTitle}
@@ -32,7 +35,7 @@ export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,qu
       <div className="conv-main" style={{color:active?t.text:t.dim,fontWeight:active?500:400}}>
         {replying&&<span className="hc-stream-dot" role="status" aria-label="Replying"/>}
         {!replying&&unread&&<span className="conv-unread" role="status" aria-label="New reply" title="A reply finished here while you were in another chat"/>}
-        {conv.effective_workspace?.name&&<span className="conv-mark" style={{color:t.mut,opacity:.7}} title={`Workspace: ${conv.effective_workspace.name}`}><IC.Folder/></span>}
+        {!nested&&conv.effective_workspace?.name&&<span className="conv-mark" style={{color:t.mut,opacity:.7}} title={`Workspace: ${conv.effective_workspace.name}`}><IC.Folder/></span>}
         {council&&<span className="conv-mark" style={{color:t.pink,opacity:active?1:.7}}><IC.Council/></span>}
         {persona&&(avatar?<img className="conv-avatar" src={avatar} style={{opacity:active?1:.85}} alt=""/>
           :<span className="conv-mark conv-mark-box" style={{color:accent,opacity:active?1:.75}}>{persona==='persona'?<IC.User/>:<IC.Bot/>}</span>)}
@@ -47,6 +50,7 @@ export default function ConvRow({conv,title,t,active,replying,unread,hasDraft,qu
           {label:'Rename',onClick:on.startRename},
           ...(on.generateTitle?[{label:'Generate title',onClick:on.generateTitle}]:[]),
           {label:'Edit tags',onClick:on.toggleTags},
+          ...(on.setWorkspace?workspaces.map(ws=>({key:`ws:${ws.id}`,label:`In workspace: ${ws.name}`,checked:!!ws.member,onClick:()=>on.setWorkspace(ws.id,!ws.member)})):[]),
           {label:'Delete conversation',destructive:true,onClick:on.remove},
         ]}/>
       </div>

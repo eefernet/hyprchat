@@ -581,7 +581,10 @@ async def user_context_middleware(request: Request, call_next):
     if os.environ.get('HYPRCHAT_DEPLOY_QUALIFICATION') == '1' and request.method not in {'GET','HEAD','OPTIONS'} and request.url.path != '/api/users/login':
         return JSONResponse({'detail':'Release qualification in progress; retry shortly'},status_code=503,headers={'Retry-After':'30'})
     from access_policy import request_policy, authorize
+    import request_origin
     policy = request_policy(app, request.scope)
+    if policy != 'webhook' and request_origin.cross_site(request.method, request.headers, ALLOWED_ORIGINS):
+        return JSONResponse({'detail': request_origin.REFUSAL}, status_code=403)
     user_id, error = await authorize(policy, _request_user_id(request), _request_session_token(request), db)
     if error:
         return JSONResponse({"detail": error[1]}, status_code=error[0])
@@ -1930,8 +1933,9 @@ async def create_conversation(req: ConversationCreate):
     return await db.get_conversation(id)
 
 @app.get("/api/conversations")
-async def list_conversations(limit: int = Query(50), offset: int = Query(0)):
-    return await db.get_conversations(limit, offset)
+async def list_conversations(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+                             workspace_id: str = Query("")):
+    return await db.get_conversations(limit, offset, workspace_id=workspace_id.strip() or None)
 
 @app.get("/api/conversations/{conv_id}")
 async def get_conversation(conv_id: str):
@@ -2701,7 +2705,17 @@ async def get_image_job(job_id: str):
     except Exception as e:
         raise HTTPException(502, f"ComfyUI unreachable: {str(e)[:200]}")
     if not history:
-        qpos = await comfyui.queue_position(prompt_id)
+        import image_job_lost
+        try:
+            qpos = await comfyui.queue_position(prompt_id, strict=True)
+            in_queue = qpos is not None
+        except Exception:
+            qpos, in_queue = None, None          # the queue could not be read: say nothing about the job
+        if image_job_lost.note(job, in_queue):
+            job.update(status="error", error=image_job_lost.LOST_MESSAGE)
+            await image_job_store.save(job)
+            comfyui.finish_job(prompt_id)
+            return {"status": "error", "error": job["error"], "params": job.get("params", {})}
         status = "cancelling" if job.get("status") == "cancelling" else "running" if qpos == 0 else "queued"
         out = {"status": status, "params": job.get("params", {})}
         if qpos and qpos > 0:
@@ -3217,6 +3231,8 @@ async def create_global_memory_ep(body: dict = Body(...)):
 
 @app.patch("/api/memory/memories/{memory_id}")
 async def update_global_memory_ep(memory_id: str, body: dict = Body(...)):
+    if "content" in body and not str(body.get("content") or "").strip():
+        raise HTTPException(400, "A memory cannot be empty. Delete it instead.")
     mem = await db.update_global_memory(memory_id, **body)
     if not mem:
         raise HTTPException(404, "Memory not found")
@@ -4182,6 +4198,12 @@ async def council_chat_stream_ep(req: CouncilChatRequest):
 # ============================================================
 # QUICK SEARCH
 # ============================================================
+UNTRUSTED_IMAGE_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+}
+
+
 @app.get("/api/img-proxy")
 async def img_proxy(u: str):
     """Proxy a remote image so the user's browser never hits the source.
@@ -4213,9 +4235,12 @@ async def img_proxy(u: str):
         raise HTTPException(status_code=404, detail="not found")
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="too large")
+    # A remote file is shown from this app's own address. An SVG can carry script, which would run as
+    # the signed-in user if the address were opened directly, so the browser is told to treat the
+    # response as an inert, sandboxed document. Inside an <img> none of this changes anything.
     return Response(
         content=content, media_type=ct,
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=86400", **UNTRUSTED_IMAGE_HEADERS},
     )
 
 @app.post("/api/quick-search")

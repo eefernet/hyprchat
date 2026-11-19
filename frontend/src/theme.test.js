@@ -57,3 +57,19 @@ test('fixed badge colours become readable text on every theme',async()=>{
   assert.equal(readableOn(UI_THEMES.nord,'var(--hc-accent)'),'var(--hc-accent)');
   assert.equal(readableOn(UI_THEMES.nord,'#888'),'#888');
 });
+
+// 2026-11-18: four interface fonts were added. The saved choice is a position in UI_FONTS, so the
+// first three must stay where they are or an existing user's font silently changes.
+test('interface fonts keep their positions and each one can be loaded', async () => {
+  const {UI_FONTS} = await import('./theme.js');
+  assert.deepEqual(UI_FONTS.slice(0, 3).map(f => f.name), ['Inter', 'Geist', 'System']);
+  assert.deepEqual(UI_FONTS.slice(3).map(f => f.name), ['Figtree', 'Hanken Grotesk', 'Instrument Sans', 'DM Sans']);
+  for (const font of UI_FONTS) {
+    assert.ok(font.name && /sans-serif$/.test(font.v), font.name);
+    if (font.i !== null) {
+      assert.match(font.i, /^[A-Za-z+]+:wght@400;500;600;700$/, font.name);      // a Google Fonts family spec, spaces as "+"
+      assert.equal(font.i.split(':')[0].replace(/\+/g, ' '), font.name);
+      assert.ok(font.v.includes(`'${font.name}'`), font.name);
+    }
+  }
+});
