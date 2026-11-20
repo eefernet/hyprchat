@@ -231,7 +231,7 @@
 +            pos = obj_end + 1
 +            continue
 +
-+        raise ValueError(f"unexpected token in data array at offset {pos}: {data_src[pos : pos + 40]!r}")
++        raise ValueError(f"unexpected token in data array at offset {pos}")
 +
 +    if not objects:
 +        raise ValueError("no data objects found inside Brave payload")

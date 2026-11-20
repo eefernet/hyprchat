@@ -60,6 +60,12 @@ class BraveSvelteTests(unittest.TestCase):
         with patch.object(brave, 'brave_category', 'search'):
             self.assertEqual(len(brave.response(SimpleNamespace(text=text))), 0)
 
+    def test_unknown_payload_error_omits_search_content(self):
+        with self.assertRaises(ValueError) as error:
+            brave.extract_json_data('data: [private_search_text(secret)],')
+        self.assertNotIn('private_search_text', str(error.exception))
+        self.assertNotIn('secret', str(error.exception))
+
 
 if __name__ == '__main__':
     unittest.main()

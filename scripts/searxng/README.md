@@ -158,7 +158,7 @@ review that identity/privacy decision separately. Do not invent contact details
 or silently lose those engines. Patch availability does not mean activation;
 inspect the running service's paths and patch checksums.
 
-The 2026-11-19 deployment retained the production Brave implementation. The
+The initial 2026-11-19 privacy deployment retained the production Brave implementation. The
 candidate passes its offline Svelte tests, but live results included relative
 `/go/v1/…` links that became malformed `http:///go/v1/…` URLs. Upstream
 [issue #6967](https://github.com/searxng/searxng/issues/6967) reports the same
@@ -168,6 +168,66 @@ describes encrypted destinations requiring a separate exchange. Result counts
 alone are therefore insufficient: acceptance must require usable destination
 URLs for both web and news. Do not reconstruct destinations from display
 breadcrumbs or send opaque redirects to clients as a privacy workaround.
+
+### Brave encrypted destination links
+
+The subsequent 2026-11-19 Brave release adds
+[`brave-link-resolution.patch`](patches/brave-link-resolution.patch),
+[`brave_urlcloak.py`](brave_urlcloak.py), and the offline Rust helper in
+[`brave_urlcloak/`](brave_urlcloak/). It passed live Brave web and news checks
+before activation. The service's current release path remains the authority.
+
+The adapter resolves `/go/v1/…` links on the server using Brave's published
+POPRF protocol. It obtains the public verification keys over HTTPS, verifies
+the signed token and its expiry, generates fresh blinded requests, verifies
+each returned proof, and decrypts the exact destination. The browser receives
+ordinary destination URLs. The key endpoint receives only the page SID and
+blinded element; private blinding state stays in local process pipes. No
+browser JavaScript, non-oblivious redirect, or breadcrumb reconstruction runs.
+
+Transport uses SearXNG's existing cookie-discarding network client as the
+`searxng` user, behind ProtonVPN. TLS verification and provider backoff remain
+enabled. At most four key exchanges run concurrently, within the engine's
+remaining timeout and a six-second resolver ceiling. Repeated links share one
+exchange per result page. Invalid signatures, proofs, destinations, unknown
+key versions, denial responses and timeouts fail explicitly; unresolved or
+partially validated URLs are never published. Public keys are cached in memory
+for five minutes; query results and private blinding state are not persisted
+by this adapter.
+
+Build and test the native helper in an isolated Linux build directory, using
+Rust 1.91.1 and the checked-in dependency lock:
+
+```bash
+cargo test --locked --release --manifest-path <repo>/scripts/searxng/brave_urlcloak/Cargo.toml
+cargo build --locked --release --manifest-path <repo>/scripts/searxng/brave_urlcloak/Cargo.toml
+```
+
+Use a fresh SearXNG release and virtual environment with the production
+dependency versions pinned. Preserve the logging patch and server-specific
+source differences. Restore the clean pinned `searx/engines/brave.py`, apply
+`brave-svelte-data.patch`, then `brave-link-resolution.patch`; do not stack them
+on the old HTML fallback. Install `brave_urlcloak.py` at
+`<release>/src/searx/brave_urlcloak.py` and the executable at
+`<release>/bin/hyprchat-brave-urlcloak` before starting the candidate.
+Keep the helper sources, Cargo.lock and binary checksum with the release.
+
+Run `test_brave_svelte.py`, `test_brave_urlcloak.py` and
+`test_search_log_privacy.py` with the candidate's settings and `PYTHONPATH`.
+Acceptance requires both live web and news results with usable destination
+URLs and no Brave errors, plus a known encrypted-page test and representative
+destination fetches through the VPN. Compare all enabled engines and the
+production settings checksum. Recheck after activation, preserve SQLite caches
+using their backup API, and retain the previous verified release for rollback.
+SearXNG's process-local suspension timers restart with the service; do not use
+restarts or VPN rotation to evade an active provider denial.
+
+The helper pins Brave's official
+[`poprf-ristretto` 0.2.0](https://github.com/brave/poprf-ristretto). Its upstream project
+describes the implementation as pending audit; successful interoperability and
+regression tests are not an independent cryptographic audit. Search providers
+can still block shared VPN exits, and unrelated engine failures can still make
+aggregate health degraded.
 
 This private deployment connects directly to uWSGI without a reverse proxy.
 The pinned upstream still logs a missing `limiter.toml` warning at worker startup

@@ -24,6 +24,24 @@
    background in the rest (2026-11-16); a frame that is not zoomed has no such gap. */
 .hp-stage{flex:1;min-height:0;display:flex;justify-content:center;align-items:stretch;background:var(--hc-sunken);overflow:auto;zoom:calc(1 / var(--hc-ui-scale,1))}
 .hp-frame{border:0;background:#fff;height:100%;display:block;transition:width var(--hc-dur-2) var(--hc-ease-out)}
+/* A line above the page: a link in it was stopped (PreviewFrame.jsx). */
+.hp-note{display:flex;align-items:center;gap:8px;flex-shrink:0;padding:5px 6px 5px 12px;border-bottom:1px solid var(--hc-line-subtle);background:var(--hc-accent-tint);color:var(--hc-text);font-size:var(--hc-text-secondary);line-height:1.35}
+.hp-note-text{flex:1 1 0;min-width:0}
+.hp-note a{flex-shrink:0;color:var(--hc-accent);font-weight:700;text-decoration:none;white-space:nowrap}
+.hp-note a:hover,.hp-note a:focus-visible{text-decoration:underline}
+.hp-note button{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:22px;height:22px;padding:0;border:0;border-radius:var(--hc-radius-sm);background:transparent;color:var(--hc-muted);cursor:pointer}
+.hp-note button:hover,.hp-note button:focus-visible{background:var(--hc-hover);color:var(--hc-text)}
+.hp-note svg{width:13px;height:13px}
+.hp-halt{flex:1;min-height:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;color:var(--hc-muted);font-size:var(--hc-text-secondary);background:var(--hc-sunken)}
+.hp-halt p{margin:0;max-width:34ch;line-height:1.5}
+.hp-halt button{padding:6px 12px;border:1px solid var(--hc-line);border-radius:var(--hc-radius-sm);background:transparent;color:var(--hc-text);font:inherit;cursor:pointer}
+.hp-halt button:hover,.hp-halt button:focus-visible{background:var(--hc-hover)}
+/* The pane's left edge is its resize handle (usePaneResize.js). While it is dragged the frames inside
+   let the pointer through: a framed page would otherwise take the movement for itself. */
+.hc-pane-handle{position:absolute;left:0;top:0;bottom:0;width:6px;z-index:10;cursor:col-resize;touch-action:none;background:transparent;transition:background var(--hc-dur-1,.12s)}
+.hc-pane-handle:hover,.hc-pane-handle:focus-visible,.hc-side-pane[data-resizing] .hc-pane-handle{background:var(--hc-accent-ring);outline:none}
+.hc-side-pane[data-resizing] iframe{pointer-events:none}
+.hc-side-pane[data-resizing] .hp-frame{transition:none}
 /* A pane dragged narrow: the title and Close keep the first row, the controls take a second one. */
 @container (max-width:400px){
   .hp-tools{order:3;flex-basis:100%}

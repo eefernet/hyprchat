@@ -28,6 +28,8 @@
 - **Chat** — Delete all stops replies/councils and clears history recall; council-chat deletion stops its council; councils run singly; project uploads block sending; history/memory retain complete tool-round replies; unsaved chats hide Continue and Pin.
 - **Themes** — readable diff lines, warnings and model badges across themes; removed duplicate diff signs and fixed nested lists.
 - **Backgrounds** — reduced motion shows a still image; minor layout changes don't restart effects; display changes retain sharpness.
+- **Page previews** — navigation links inside a previewed page stay in the page instead of loading HyprChat in the preview; links to other pages are stopped with a notice, and a web address is offered as “Open in new tab”. A page that navigates away by script is put back once, then stopped.
+- **Preview pane resize** — the edge follows the mouse while dragging, including over the previewed page (it used to move only on release); wide screens allow more than 900px, and the handle works with the arrow keys.
 - **Other fixes** — concurrent settings saves, brief timezones, non-Latin draft-size counts, atomic skill renames and non-blocking large-bundle creation.
 
 ## Interface refresh

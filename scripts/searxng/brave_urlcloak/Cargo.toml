@@ -1,0 +1,19 @@
+[package]
+name = "hyprchat-brave-urlcloak"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aes-gcm = "=0.10.3"
+base64 = "=0.22.1"
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
+poprf-ristretto = { version = "=0.2.0", default-features = false, features = ["std", "fast-dleq"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+serde_json = "=1.0.145"
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1

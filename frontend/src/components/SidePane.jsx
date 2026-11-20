@@ -10,9 +10,13 @@ import DocLivePreview,{Table} from './DocLivePreview.jsx';
 import PreviewBar from './PreviewBar.jsx';
 import {TEXT_PREVIEW_TYPES,prettyJson} from '../docPreview.js';
 import DaedalusWorkbench from './DaedalusWorkbench.jsx';
+import PreviewFrame from './PreviewFrame.jsx';
+import usePaneResize from '../usePaneResize.js';
+import {storedWidth} from '../paneResize.js';
 
 const IMAGE_TYPES=["png","jpg","jpeg","gif","webp","svg"];
-export function readPreviewWidth(){try{return parseInt(localStorage.getItem("hc-preview-w")||"420");}catch{return 420;}}
+export function readPreviewWidth(){try{return storedWidth(localStorage.getItem("hc-preview-w"));}catch{return storedWidth(null);}}
+const savePreviewWidth=width=>{try{localStorage.setItem("hc-preview-w",String(width));}catch{}};
 
 // The resizable right-hand pane beside the chat. One slot: the workbench store
 // (a Daedalus job, a live HTML preview, or a document / drawing / table from a reply) wins
@@ -24,20 +28,16 @@ export default function SidePane({previewFile,previewContent,previewError,previe
   const open=workbench.open||!!previewFile;
   const close=()=>{if(workbench.open)closeWorkbench();else onClosePreview();};
   const focus=useFocusScope(open&&isMobile,close);
-  const startDrag=e=>{
-    e.preventDefault();
-    const startX=e.clientX,startW=width;
-    let lastW=startW;  // the state value in onUp would be the pre-drag width
-    const onMove=ev=>{const next=Math.max(260,Math.min(900,startW+(startX-ev.clientX)));lastW=next;setWidth(next);};
-    const onUp=()=>{try{localStorage.setItem("hc-preview-w",String(lastW));}catch{}window.removeEventListener("mousemove",onMove);window.removeEventListener("mouseup",onUp);};
-    window.addEventListener("mousemove",onMove);window.addEventListener("mouseup",onUp);
-  };
+  // The handle on the left edge: pointer capture, so a drag across the previewed page still arrives.
+  const resize=usePaneResize(width,setWidth,savePreviewWidth);
   if(!open)return null;
   const bench=workbench.open;
   const label=bench?(workbench.kind==='daedalus'?"Workbench panel":"Preview panel"):"Preview panel";
-  return <div ref={focus} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label={label}
-    style={{width:isMobile?"auto":width,flexShrink:0,borderLeft:isMobile?"none":"1px solid var(--hc-line)",background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
-    {!isMobile&&<div onMouseDown={startDrag} style={{position:"absolute",left:0,top:0,bottom:0,width:5,cursor:"col-resize",zIndex:10,background:"transparent"}} onMouseEnter={e=>e.currentTarget.style.background=`${t.acc}44`} onMouseLeave={e=>e.currentTarget.style.background="transparent"}/>}
+  const setRefs=node=>{focus.current=node;resize.pane.current=node;};
+  return <div ref={setRefs} role={isMobile?"dialog":"complementary"} aria-modal={isMobile?true:undefined} aria-label={label}
+    className="hc-side-pane" data-resizing={resize.resizing?"":undefined}
+    style={{width:isMobile?"auto":width,flexShrink:0,borderLeft:isMobile?"none":"1px solid var(--hc-line)",background:t.bgDeep,display:"flex",flexDirection:"column",position:"relative",overflow:"hidden",transition:resize.resizing?"none":"width .15s",...(isMobile?{position:"absolute",inset:0,zIndex:30}:{})}}>
+    {!isMobile&&<div className="hc-pane-handle" role="separator" aria-orientation="vertical" aria-label="Resize the panel" aria-valuenow={width} tabIndex={0} title="Drag to resize" {...resize.handle}/>}
     {bench&&workbench.kind==='daedalus'
       ?<DaedalusWorkbench key={workbench.job?.id} job={workbench.job} tab={workbench.tab} t={t} font={font} md={md} onOpenArtifact={onOpenArtifact} onClose={close}/>
       :bench&&workbench.kind==='doc'
@@ -108,7 +108,10 @@ export function FilePreviewBody({previewFile,previewContent,previewError,preview
     </div>
   </div>;
   // The frame is drawn at real size whatever the UI scale (.hp-stage cancels the app's zoom; see htmlPreview.css).
-  if(previewFile.type==="html"&&previewContent)return <div className="hp-stage"><iframe className="hp-frame" sandbox={previewFile.isExternal?"":"allow-scripts"} srcDoc={previewContent} style={{width:"100%"}} title={previewFile.filename}/></div>;
+  // A file of the chat runs its scripts and gets the link guard (PreviewFrame.jsx); a web page is shown
+  // sanitized with scripts off, so there is nothing for a guard to run in.
+  if(previewFile.type==="html"&&previewContent&&!previewFile.isExternal)return <PreviewFrame doc={previewContent} title={previewFile.filename}/>;
+  if(previewFile.type==="html"&&previewContent)return <div className="hp-stage"><iframe className="hp-frame" sandbox="" srcDoc={previewContent} style={{width:"100%"}} title={previewFile.filename}/></div>;
   if(["csv","tsv"].includes(previewFile.type)&&previewContent)return <Table code={previewContent} label={previewFile.type} filename={previewFile.filename}/>;
   if(previewFile.type==="json"&&previewContent)return <pre style={{margin:0,whiteSpace:"pre-wrap",fontSize:"var(--hc-text-secondary)",color:t.dim,fontFamily:codeFont,lineHeight:1.6}}>{prettyJson(previewContent)}</pre>;
   if(["md","markdown","mdx"].includes(previewFile.type)&&previewContent)return <div style={{lineHeight:1.7,fontSize:"var(--hc-text-secondary)",color:t.dim}}><MDWrap>{md(previewContent)}</MDWrap></div>;

@@ -4,6 +4,7 @@ import {IC} from './icons.jsx';
 import PreviewBar,{SaveButton} from './PreviewBar.jsx';
 import {fileNameFor} from '../docPreview.js';
 import {downloadText} from '../previewSave.js';
+import PreviewFrame from './PreviewFrame.jsx';
 import './htmlPreview.css';
 
 const ISOLATION='Sandboxed: no access to HyprChat, no network requests, no form posts.';
@@ -12,6 +13,7 @@ const ISOLATION='Sandboxed: no access to HyprChat, no network requests, no form 
 // allow-same-origin gives the page an opaque origin: no cookies, storage, DOM or
 // /api access; the injected CSP keeps it off the network. Never open the code as
 // a blob URL (that would run it on HyprChat's own origin) — download only.
+// The frame itself, and what happens to links in the page, is PreviewFrame.jsx.
 //
 // It draws the whole pane: one header row (PreviewBar: status, title, width, libraries, reload,
 // save, download, close) and the page edge to edge under it. The controls used to sit in a
@@ -36,8 +38,6 @@ export default function HtmlLivePreview({html,font,conversationId,onClose,onOpen
       <SaveButton conversationId={conversationId} filename={filename} kind="html" content={code} onOpenArtifact={onOpenArtifact}/>
       <button type="button" className="hp-icon" onClick={()=>downloadText(filename,code,'text/html')} aria-label="Download HTML file" title="Download .html"><IC.Download/></button>
     </PreviewBar>
-    <div className="hp-stage">
-      <iframe key={reloads} className="hp-frame" sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={doc} title={title} style={{width:width?`${width}px`:'100%',maxWidth:'100%'}}/>
-    </div>
+    <PreviewFrame doc={doc} title={title} width={width} reloadKey={reloads}/>
   </div>;
 }
